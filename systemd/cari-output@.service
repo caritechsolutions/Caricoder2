@@ -1,0 +1,51 @@
+[Unit]
+Description=CariTranscoder Output Service - %i
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caritrans
+Group=caritrans
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+Environment="LOG_DIR=/var/log/caritrans"
+Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0"
+
+# Main process
+ExecStart=/usr/local/bin/cari-output --config ${CONFIG_DIR}/outputs/%i.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Watchdog
+WatchdogSec=30
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
+
+# Network capabilities for multicast
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-output-%i
+
+[Install]
+WantedBy=multi-user.target

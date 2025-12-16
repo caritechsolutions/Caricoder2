@@ -1,0 +1,57 @@
+[Unit]
+Description=CariTranscoder Transcoding Service - %i
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caritrans
+Group=caritrans
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+Environment="LOG_DIR=/var/log/caritrans"
+Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0"
+
+# GPU access (for hardware encoding)
+SupplementaryGroups=video render
+
+# Main process
+ExecStart=/usr/local/bin/cari-transcoder --config ${CONFIG_DIR}/transcoders/%i.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Watchdog
+WatchdogSec=30
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+# Allow more memory for transcoding
+LimitMEMLOCK=infinity
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
+
+# Allow access to GPU devices
+DeviceAllow=/dev/dri/renderD128 rw
+DeviceAllow=/dev/nvidia* rw
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-transcoder-%i
+
+[Install]
+WantedBy=multi-user.target

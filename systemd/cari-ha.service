@@ -1,0 +1,36 @@
+[Unit]
+Description=CariTranscoder High Availability Agent
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+
+# Main process
+ExecStart=/usr/local/bin/cari-ha --config ${CONFIG_DIR}/caritrans.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+
+# Needs root for VIP management
+# This service manages virtual IPs and needs elevated privileges
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-ha
+
+[Install]
+WantedBy=multi-user.target

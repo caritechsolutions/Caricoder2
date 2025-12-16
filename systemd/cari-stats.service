@@ -1,0 +1,39 @@
+[Unit]
+Description=CariTranscoder Statistics Daemon
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+
+[Service]
+Type=simple
+User=caritrans
+Group=caritrans
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+
+# Main process
+ExecStart=/usr/local/bin/cari-stats --config ${CONFIG_DIR}/caritrans.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/caritrans /dev/shm
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-stats
+
+[Install]
+WantedBy=multi-user.target

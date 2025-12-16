@@ -1,0 +1,50 @@
+[Unit]
+Description=CariTranscoder Mux Service - %i
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caritrans
+Group=caritrans
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+Environment="LOG_DIR=/var/log/caritrans"
+Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0"
+# TSDuck path
+Environment="PATH=/usr/bin:/usr/local/bin"
+
+# Main process
+ExecStart=/usr/local/bin/cari-mux --config ${CONFIG_DIR}/muxers/%i.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Watchdog
+WatchdogSec=30
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-mux-%i
+
+[Install]
+WantedBy=multi-user.target

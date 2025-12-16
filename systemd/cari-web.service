@@ -1,0 +1,36 @@
+[Unit]
+Description=CariTranscoder Web Interface
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+
+# PHP built-in server (for development/simple deployments)
+# For production, use nginx/apache with php-fpm
+ExecStart=/usr/bin/php -S 0.0.0.0:8080 -t /var/www/caritrans/public
+
+# Or use PHP-FPM (recommended for production)
+# ExecStart=/usr/sbin/php-fpm8.2 --nodaemonize --fpm-config /etc/php/8.2/fpm/php-fpm.conf
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Security
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-web
+
+[Install]
+WantedBy=multi-user.target

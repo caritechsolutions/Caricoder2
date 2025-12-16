@@ -1,0 +1,47 @@
+[Unit]
+Description=CariTranscoder Input Service - %i
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caritrans
+Group=caritrans
+
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
+Environment="RUN_DIR=/run/caritrans"
+Environment="LOG_DIR=/var/log/caritrans"
+
+# Main process
+ExecStart=/usr/local/bin/cari-input --config ${CONFIG_DIR}/inputs/%i.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Watchdog
+WatchdogSec=30
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-input-%i
+
+[Install]
+WantedBy=multi-user.target
