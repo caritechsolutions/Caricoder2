@@ -21,7 +21,7 @@ CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
-BRANCH="main"
+BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }

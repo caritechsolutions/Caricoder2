@@ -23,7 +23,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2.git"
-BRANCH="main"
+BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
