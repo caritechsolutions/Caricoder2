@@ -121,20 +121,10 @@ include __DIR__ . '/../templates/header.php';
                     <div class="wizard-step" id="step1">
                         <h5 class="mb-3">Basic Information</h5>
                         <div class="row">
-                            <div class="col-md-6 mb-3">
+                            <div class="col-md-12 mb-3">
                                 <label class="form-label">Input Name <span class="text-danger">*</span></label>
                                 <input type="text" class="form-control" name="name" id="inputName" required placeholder="e.g., ESPN HD">
                                 <div class="form-text" id="nameStatus"></div>
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Input Type</label>
-                                <select class="form-select" name="type" id="inputType">
-                                    <option value="udp">UDP Multicast</option>
-                                    <option value="srt">SRT</option>
-                                    <option value="rtmp">RTMP</option>
-                                    <option value="hls">HLS</option>
-                                    <option value="file">File</option>
-                                </select>
                             </div>
                         </div>
                         <div class="row">
@@ -159,49 +149,10 @@ include __DIR__ . '/../templates/header.php';
                                 <i class="bi bi-plus-lg"></i> Add Failover Source
                             </button>
                         </div>
-                        <p class="text-muted small">Add one or more sources. Higher weight = higher priority for failover.</p>
+                        <p class="text-muted small">Add one or more sources. Each source can be a different type. Higher weight = higher priority for failover.</p>
 
                         <div id="sourcesContainer">
                             <!-- Sources will be added here dynamically -->
-                        </div>
-
-                        <!-- Type-specific additional settings -->
-                        <div id="typeSpecificSettings" class="mt-4">
-                            <!-- SRT Settings -->
-                            <div id="srt-settings" style="display:none;">
-                                <h6 class="text-muted mb-3">SRT Settings</h6>
-                                <div class="row">
-                                    <div class="col-md-4 mb-3">
-                                        <label class="form-label">Mode</label>
-                                        <select class="form-select" name="srt_mode">
-                                            <option value="listener">Listener</option>
-                                            <option value="caller">Caller</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-4 mb-3">
-                                        <label class="form-label">Latency (ms)</label>
-                                        <input type="number" class="form-control" name="srt_latency" value="200">
-                                    </div>
-                                    <div class="col-md-4 mb-3">
-                                        <label class="form-label">Passphrase</label>
-                                        <input type="password" class="form-control" name="srt_passphrase" placeholder="Optional">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- File Settings -->
-                            <div id="file-settings" style="display:none;">
-                                <h6 class="text-muted mb-3">File Settings</h6>
-                                <div class="row">
-                                    <div class="col-md-6 mb-3">
-                                        <label class="form-label">Loop Playback</label>
-                                        <select class="form-select" name="file_loop">
-                                            <option value="1">Yes - Loop continuously</option>
-                                            <option value="0">No - Play once</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     </div>
 
@@ -212,7 +163,7 @@ include __DIR__ . '/../templates/header.php';
 
                         <div class="mb-4">
                             <button type="button" class="btn btn-info" id="scanSourceBtn" onclick="scanSource()">
-                                <i class="bi bi-search me-1"></i>Scan Source for PIDs
+                                <i class="bi bi-search me-1"></i>Scan Primary Source for PIDs
                             </button>
                             <span class="ms-2 text-muted small" id="scanStatus"></span>
                         </div>
@@ -315,6 +266,13 @@ include __DIR__ . '/../templates/header.php';
 #nameStatus.invalid {
     color: #dc3545;
 }
+.source-type-settings {
+    background: #fff;
+    border: 1px solid #e9ecef;
+    border-radius: 0.25rem;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+}
 </style>
 
 <script>
@@ -332,9 +290,6 @@ document.addEventListener('DOMContentLoaded', function() {
         clearTimeout(nameCheckTimeout);
         nameCheckTimeout = setTimeout(() => checkNameUnique(this.value), 300);
     });
-
-    // Type change handler
-    document.getElementById('inputType').addEventListener('change', updateTypeSettings);
 
     // Form submission
     document.getElementById('addInputForm').addEventListener('submit', handleFormSubmit);
@@ -372,8 +327,13 @@ async function checkNameUnique(name) {
             idEl.value = '';
         }
     } catch (e) {
-        statusEl.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Could not verify';
-        statusEl.className = 'form-text';
+        // If API fails (first time, no inputs exist), assume available
+        statusEl.innerHTML = '<i class="bi bi-check-circle"></i> Name available';
+        statusEl.className = 'form-text valid';
+        // Generate ID and buffer from name
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        bufferEl.value = 'buffer-input-' + id;
+        idEl.value = id;
     }
 }
 
@@ -382,37 +342,10 @@ function addSource() {
     sourcesCount++;
     const isPrimary = sourcesCount === 1;
     const container = document.getElementById('sourcesContainer');
-    const inputType = document.getElementById('inputType').value;
-
-    let urlPlaceholder = 'udp://239.1.1.1:5000';
-    let urlLabel = 'Source URL';
-
-    switch (inputType) {
-        case 'udp':
-            urlPlaceholder = '239.1.1.1:5000';
-            urlLabel = 'Multicast Address:Port';
-            break;
-        case 'srt':
-            urlPlaceholder = '0.0.0.0:9000';
-            urlLabel = 'Address:Port';
-            break;
-        case 'rtmp':
-            urlPlaceholder = 'rtmp://server/app/stream';
-            urlLabel = 'RTMP URL';
-            break;
-        case 'hls':
-            urlPlaceholder = 'https://example.com/stream.m3u8';
-            urlLabel = 'HLS URL';
-            break;
-        case 'file':
-            urlPlaceholder = '/path/to/file.ts';
-            urlLabel = 'File Path';
-            break;
-    }
 
     const sourceHtml = `
-        <div class="source-card ${isPrimary ? 'primary' : ''}" id="source-${sourcesCount}">
-            <div class="d-flex justify-content-between align-items-start mb-2">
+        <div class="source-card ${isPrimary ? 'primary' : ''}" id="source-${sourcesCount}" data-source-id="${sourcesCount}">
+            <div class="d-flex justify-content-between align-items-start mb-3">
                 <span class="badge ${isPrimary ? 'bg-primary' : 'bg-secondary'}">
                     ${isPrimary ? 'Primary Source' : 'Failover Source ' + (sourcesCount - 1)}
                 </span>
@@ -420,17 +353,64 @@ function addSource() {
                     <i class="bi bi-trash"></i>
                 </button>` : ''}
             </div>
+
             <div class="row">
-                <div class="col-md-8 mb-2">
-                    <label class="form-label">${urlLabel}</label>
-                    <input type="text" class="form-control source-url" name="sources[${sourcesCount - 1}][url]"
-                           placeholder="${urlPlaceholder}" ${isPrimary ? 'required' : ''}>
+                <div class="col-md-3 mb-2">
+                    <label class="form-label">Type</label>
+                    <select class="form-select source-type" name="sources[${sourcesCount - 1}][type]" onchange="updateSourceFields(${sourcesCount})">
+                        <option value="udp">UDP Multicast</option>
+                        <option value="srt">SRT</option>
+                        <option value="rtmp">RTMP</option>
+                        <option value="hls">HLS</option>
+                        <option value="file">File</option>
+                    </select>
                 </div>
-                <div class="col-md-4 mb-2">
-                    <label class="form-label">Priority Weight</label>
+                <div class="col-md-6 mb-2">
+                    <label class="form-label source-url-label">Multicast Address:Port</label>
+                    <input type="text" class="form-control source-url" name="sources[${sourcesCount - 1}][url]"
+                           placeholder="239.1.1.1:5000" ${isPrimary ? 'required' : ''}>
+                </div>
+                <div class="col-md-3 mb-2">
+                    <label class="form-label">Priority</label>
                     <input type="number" class="form-control source-weight" name="sources[${sourcesCount - 1}][weight]"
                            value="${isPrimary ? 100 : 50}" min="1" max="100">
-                    <div class="form-text">Higher = More priority</div>
+                </div>
+            </div>
+
+            <!-- Type-specific settings (shown inline) -->
+            <div class="source-type-settings" id="source-${sourcesCount}-settings" style="display:none;">
+                <!-- SRT Settings -->
+                <div class="srt-settings" style="display:none;">
+                    <div class="row">
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">SRT Mode</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][srt_mode]">
+                                <option value="caller">Caller</option>
+                                <option value="listener">Listener</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">Latency (ms)</label>
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][srt_latency]" value="200">
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">Passphrase</label>
+                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][srt_passphrase]" placeholder="Optional">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- File Settings -->
+                <div class="file-settings" style="display:none;">
+                    <div class="row">
+                        <div class="col-md-6 mb-2">
+                            <label class="form-label">Loop Playback</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][file_loop]">
+                                <option value="1">Yes - Loop continuously</option>
+                                <option value="0">No - Play once</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -439,47 +419,56 @@ function addSource() {
     container.insertAdjacentHTML('beforeend', sourceHtml);
 }
 
+// Update source fields based on type
+function updateSourceFields(sourceId) {
+    const card = document.getElementById(`source-${sourceId}`);
+    const typeSelect = card.querySelector('.source-type');
+    const urlInput = card.querySelector('.source-url');
+    const urlLabel = card.querySelector('.source-url-label');
+    const settingsDiv = card.querySelector(`#source-${sourceId}-settings`);
+    const srtSettings = card.querySelector('.srt-settings');
+    const fileSettings = card.querySelector('.file-settings');
+
+    const type = typeSelect.value;
+
+    // Update URL placeholder and label
+    switch (type) {
+        case 'udp':
+            urlLabel.textContent = 'Multicast Address:Port';
+            urlInput.placeholder = '239.1.1.1:5000';
+            settingsDiv.style.display = 'none';
+            break;
+        case 'srt':
+            urlLabel.textContent = 'SRT Address:Port';
+            urlInput.placeholder = 'srt.server.com:9000';
+            settingsDiv.style.display = 'block';
+            srtSettings.style.display = 'block';
+            fileSettings.style.display = 'none';
+            break;
+        case 'rtmp':
+            urlLabel.textContent = 'RTMP URL';
+            urlInput.placeholder = 'rtmp://server/app/stream';
+            settingsDiv.style.display = 'none';
+            break;
+        case 'hls':
+            urlLabel.textContent = 'HLS URL';
+            urlInput.placeholder = 'https://example.com/stream.m3u8';
+            settingsDiv.style.display = 'none';
+            break;
+        case 'file':
+            urlLabel.textContent = 'File Path';
+            urlInput.placeholder = '/path/to/file.ts';
+            settingsDiv.style.display = 'block';
+            srtSettings.style.display = 'none';
+            fileSettings.style.display = 'block';
+            break;
+    }
+}
+
 // Remove a source entry
 function removeSource(id) {
     const el = document.getElementById(`source-${id}`);
     if (el) el.remove();
-}
-
-// Update type-specific settings visibility
-function updateTypeSettings() {
-    const type = document.getElementById('inputType').value;
-
-    // Hide all type settings
-    document.querySelectorAll('#typeSpecificSettings > div').forEach(el => {
-        el.style.display = 'none';
-    });
-
-    // Show relevant settings
-    const settingsEl = document.getElementById(`${type}-settings`);
-    if (settingsEl) {
-        settingsEl.style.display = 'block';
-    }
-
-    // Update source placeholders
-    document.querySelectorAll('.source-url').forEach(input => {
-        switch (type) {
-            case 'udp':
-                input.placeholder = '239.1.1.1:5000';
-                break;
-            case 'srt':
-                input.placeholder = '0.0.0.0:9000';
-                break;
-            case 'rtmp':
-                input.placeholder = 'rtmp://server/app/stream';
-                break;
-            case 'hls':
-                input.placeholder = 'https://example.com/stream.m3u8';
-                break;
-            case 'file':
-                input.placeholder = '/path/to/file.ts';
-                break;
-        }
-    });
 }
 
 // Wizard navigation
@@ -557,10 +546,13 @@ async function scanSource() {
     const statusEl = document.getElementById('scanStatus');
     const resultsEl = document.getElementById('scanResults');
 
-    // Get first source URL
-    const sourceInput = document.querySelector('.source-url');
+    // Get first source URL and type
+    const firstSource = document.querySelector('.source-card');
+    const sourceInput = firstSource ? firstSource.querySelector('.source-url') : null;
+    const sourceType = firstSource ? firstSource.querySelector('.source-type') : null;
+
     const source = sourceInput ? sourceInput.value : '';
-    const type = document.getElementById('inputType').value;
+    const type = sourceType ? sourceType.value : 'udp';
 
     if (!source) {
         alert('Please enter a source URL first');
@@ -677,27 +669,41 @@ async function handleFormSubmit(e) {
     // Build the data object
     const data = {
         name: formData.get('name'),
-        type: formData.get('type'),
         buffer: formData.get('buffer'),
         sources: [],
         video_pid: formData.get('video_pid') || formData.get('video_pid_manual'),
         audio_pids: [],
-        program_pid: formData.get('program_pid') || formData.get('program_pid_manual'),
-        srt_mode: formData.get('srt_mode'),
-        srt_latency: formData.get('srt_latency'),
-        srt_passphrase: formData.get('srt_passphrase'),
-        file_loop: formData.get('file_loop')
+        program_pid: formData.get('program_pid') || formData.get('program_pid_manual')
     };
 
-    // Collect sources
-    document.querySelectorAll('.source-card').forEach((card, idx) => {
+    // Collect sources with their individual settings
+    document.querySelectorAll('.source-card').forEach((card) => {
         const urlInput = card.querySelector('.source-url');
+        const typeSelect = card.querySelector('.source-type');
         const weightInput = card.querySelector('.source-weight');
+
         if (urlInput && urlInput.value.trim()) {
-            data.sources.push({
+            const sourceData = {
                 url: urlInput.value.trim(),
+                type: typeSelect ? typeSelect.value : 'udp',
                 weight: parseInt(weightInput?.value || 10)
-            });
+            };
+
+            // Add type-specific settings
+            const type = sourceData.type;
+            if (type === 'srt') {
+                const modeSelect = card.querySelector('[name*="srt_mode"]');
+                const latencyInput = card.querySelector('[name*="srt_latency"]');
+                const passphraseInput = card.querySelector('[name*="srt_passphrase"]');
+                sourceData.srt_mode = modeSelect ? modeSelect.value : 'caller';
+                sourceData.srt_latency = latencyInput ? latencyInput.value : 200;
+                sourceData.srt_passphrase = passphraseInput ? passphraseInput.value : '';
+            } else if (type === 'file') {
+                const loopSelect = card.querySelector('[name*="file_loop"]');
+                sourceData.file_loop = loopSelect ? loopSelect.value : '1';
+            }
+
+            data.sources.push(sourceData);
         }
     });
 

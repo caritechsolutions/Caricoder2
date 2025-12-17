@@ -444,10 +444,16 @@ function create_input($data) {
     }
 
     // Build config
+    // Get primary type from first source
+    $primaryType = 'udp';
+    if (!empty($data['sources']) && isset($data['sources'][0]['type'])) {
+        $primaryType = $data['sources'][0]['type'];
+    }
+
     $config = [
         'general' => [
             'name' => $name,
-            'type' => $data['type'] ?? 'udp',
+            'type' => $primaryType,  // Primary type for display
             'enabled' => 1,
             'buffer' => $data['buffer'] ?? 'buffer-input-' . $id
         ],
@@ -459,43 +465,48 @@ function create_input($data) {
         ]
     ];
 
-    // Add sources
+    // Add sources with per-source type and settings
     $sources = $data['sources'] ?? [];
     if (!empty($sources)) {
         foreach ($sources as $idx => $source) {
             $url = $source['url'] ?? $source;
+            $type = $source['type'] ?? 'udp';
             $weight = $source['weight'] ?? 10;
-            $config['sources']['source_' . $idx] = $url . '|' . $weight;
+
+            // Build source string: type|url|weight|extra_settings
+            $sourceStr = "{$type}|{$url}|{$weight}";
+
+            // Add type-specific settings
+            if ($type === 'srt') {
+                $mode = $source['srt_mode'] ?? 'caller';
+                $latency = $source['srt_latency'] ?? 200;
+                $passphrase = $source['srt_passphrase'] ?? '';
+                $sourceStr .= "|mode={$mode},latency={$latency}";
+                if ($passphrase) {
+                    $sourceStr .= ",passphrase={$passphrase}";
+                }
+            } elseif ($type === 'file') {
+                $loop = $source['file_loop'] ?? '1';
+                $sourceStr .= "|loop={$loop}";
+            }
+
+            $config['sources']['source_' . $idx] = $sourceStr;
         }
     }
 
-    // Add type-specific settings
-    switch ($data['type'] ?? 'udp') {
+    // Legacy type-specific settings (for backwards compatibility)
+    switch ($primaryType) {
         case 'udp':
-            $config['udp'] = [
-                'address' => $data['udp_address'] ?? '',
-                'port' => $data['udp_port'] ?? 5000,
-                'interface' => $data['udp_interface'] ?? ''
-            ];
+            // UDP settings extracted from first source URL
             break;
         case 'srt':
-            $config['srt'] = [
-                'mode' => $data['srt_mode'] ?? 'listener',
-                'address' => $data['srt_address'] ?? '0.0.0.0',
-                'port' => $data['srt_port'] ?? 9000,
-                'latency' => $data['srt_latency'] ?? 200,
-                'passphrase' => $data['srt_passphrase'] ?? ''
-            ];
+            // SRT settings stored per-source
             break;
         case 'rtmp':
-            $config['rtmp'] = [
-                'url' => $data['rtmp_url'] ?? ''
-            ];
+            // RTMP settings stored in URL
             break;
         case 'hls':
-            $config['hls'] = [
-                'url' => $data['hls_url'] ?? ''
-            ];
+            // HLS settings stored in URL
             break;
         case 'file':
             $config['file'] = [
