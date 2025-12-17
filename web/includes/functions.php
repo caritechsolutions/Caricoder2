@@ -135,12 +135,45 @@ function get_service_list($type) {
         $config = parse_config($file);
         $section = rtrim($type, 's'); // inputs -> input
 
-        $id = config_get($config, $section, 'id', basename($file, '.conf'));
-        $name = config_get($config, $section, 'name', $id);
-        $enabled = config_bool(config_get($config, $section, 'enabled', 'true'));
+        // Try 'general' section first (new format), then fall back to singular section name
+        $id = basename($file, '.conf');
+        $name = config_get($config, 'general', 'name', null);
+        if ($name === null) {
+            $name = config_get($config, $section, 'name', $id);
+        }
+
+        $enabled_val = config_get($config, 'general', 'enabled', null);
+        if ($enabled_val === null) {
+            $enabled_val = config_get($config, $section, 'enabled', 'true');
+        }
+        $enabled = config_bool($enabled_val);
+
+        // Get type from config
+        $input_type = config_get($config, 'general', 'type', null);
+        if ($input_type === null) {
+            $input_type = config_get($config, $section, 'type', 'udp');
+        }
+
+        // Get source from sources section
+        $source = 'Not configured';
+        if (isset($config['sources'])) {
+            foreach ($config['sources'] as $key => $value) {
+                if (strpos($key, 'source_') === 0) {
+                    // Format: type|url|weight|extra
+                    $parts = explode('|', $value);
+                    if (count($parts) >= 2) {
+                        $source = $parts[1]; // URL is second part
+                    } else {
+                        $source = $parts[0]; // Fallback to first part
+                    }
+                    break; // Just show primary source
+                }
+            }
+        }
 
         // Get service status from systemd
         $status = 'stopped';
+        $output = [];
         $service_name = "cari-{$section}@{$id}";
         exec("systemctl is-active {$service_name} 2>/dev/null", $output, $ret);
         if ($ret === 0) {
@@ -150,6 +183,8 @@ function get_service_list($type) {
         $services[] = [
             'id' => $id,
             'name' => $name,
+            'type' => $input_type,
+            'source' => $source,
             'enabled' => $enabled,
             'status' => $status,
             'config' => $config,
