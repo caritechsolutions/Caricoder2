@@ -51,7 +51,7 @@ include __DIR__ . '/../templates/header.php';
                 <div class="card-body">
                     <div class="mb-3">
                         <small class="text-muted">Type</small>
-                        <div><span class="badge bg-primary"><?php echo htmlspecialchars($input['type'] ?? 'UDP'); ?></span></div>
+                        <div><span class="badge bg-primary"><?php echo htmlspecialchars(strtoupper($input['type'] ?? 'UDP')); ?></span></div>
                     </div>
                     <div class="mb-3">
                         <small class="text-muted">Source</small>
@@ -79,7 +79,7 @@ include __DIR__ . '/../templates/header.php';
                             <i class="bi bi-play-fill"></i> Start
                         </button>
                         <?php endif; ?>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="editService('inputs', '<?php echo $input['id']; ?>')">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="editInput('<?php echo $input['id']; ?>')">
                             <i class="bi bi-gear"></i> Edit
                         </button>
                         <button class="btn btn-outline-danger btn-sm" onclick="deleteService('inputs', '<?php echo $input['id']; ?>')">
@@ -96,139 +96,645 @@ include __DIR__ . '/../templates/header.php';
 
 <!-- Add Input Modal -->
 <div class="modal fade" id="addInputModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="bi bi-plus-lg me-2"></i>Add Input Source</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form id="addInputForm" action="api/inputs.php" method="POST">
+            <form id="addInputForm">
                 <div class="modal-body">
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Name</label>
-                            <input type="text" class="form-control" name="name" required placeholder="My Input">
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">ID</label>
-                            <input type="text" class="form-control" name="id" required placeholder="input-001" pattern="[a-z0-9-]+">
-                            <small class="text-muted">Lowercase letters, numbers, and hyphens only</small>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Input Type</label>
-                            <select class="form-select" name="type" id="inputType" onchange="updateInputFields()">
-                                <option value="udp">UDP Multicast</option>
-                                <option value="srt">SRT</option>
-                                <option value="rtmp">RTMP</option>
-                                <option value="hls">HLS</option>
-                                <option value="file">File</option>
-                            </select>
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Buffer Name</label>
-                            <input type="text" class="form-control" name="buffer" placeholder="buffer-input-001">
-                        </div>
-                    </div>
+                    <!-- Step indicator -->
+                    <ul class="nav nav-pills nav-fill mb-4" id="inputWizard">
+                        <li class="nav-item">
+                            <a class="nav-link active" data-step="1"><strong>1.</strong> Basic Info</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" data-step="2"><strong>2.</strong> Sources</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" data-step="3"><strong>3.</strong> PID Selection</a>
+                        </li>
+                    </ul>
 
-                    <!-- UDP Fields -->
-                    <div id="udp-fields">
+                    <!-- Step 1: Basic Info -->
+                    <div class="wizard-step" id="step1">
+                        <h5 class="mb-3">Basic Information</h5>
                         <div class="row">
-                            <div class="col-md-8 mb-3">
-                                <label class="form-label">Multicast Address</label>
-                                <input type="text" class="form-control" name="udp_address" placeholder="239.1.1.1">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Input Name <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" name="name" id="inputName" required placeholder="e.g., ESPN HD">
+                                <div class="form-text" id="nameStatus"></div>
                             </div>
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Port</label>
-                                <input type="number" class="form-control" name="udp_port" placeholder="5000">
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- SRT Fields -->
-                    <div id="srt-fields" style="display:none;">
-                        <div class="row">
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Mode</label>
-                                <select class="form-select" name="srt_mode">
-                                    <option value="listener">Listener</option>
-                                    <option value="caller">Caller</option>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Input Type</label>
+                                <select class="form-select" name="type" id="inputType">
+                                    <option value="udp">UDP Multicast</option>
+                                    <option value="srt">SRT</option>
+                                    <option value="rtmp">RTMP</option>
+                                    <option value="hls">HLS</option>
+                                    <option value="file">File</option>
                                 </select>
-                            </div>
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Address</label>
-                                <input type="text" class="form-control" name="srt_address" placeholder="0.0.0.0">
-                            </div>
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Port</label>
-                                <input type="number" class="form-control" name="srt_port" placeholder="9000">
                             </div>
                         </div>
                         <div class="row">
                             <div class="col-md-6 mb-3">
-                                <label class="form-label">Latency (ms)</label>
-                                <input type="number" class="form-control" name="srt_latency" value="200">
+                                <label class="form-label">Output Buffer</label>
+                                <input type="text" class="form-control" name="buffer" id="inputBuffer" readonly>
+                                <div class="form-text">Auto-generated from name</div>
                             </div>
                             <div class="col-md-6 mb-3">
-                                <label class="form-label">Passphrase (optional)</label>
-                                <input type="password" class="form-control" name="srt_passphrase" placeholder="Encryption key">
+                                <label class="form-label">Internal ID</label>
+                                <input type="text" class="form-control" name="id" id="inputId" readonly>
+                                <div class="form-text">Auto-generated from name</div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- RTMP Fields -->
-                    <div id="rtmp-fields" style="display:none;">
-                        <div class="mb-3">
-                            <label class="form-label">RTMP URL</label>
-                            <input type="text" class="form-control" name="rtmp_url" placeholder="rtmp://server/app/stream">
+                    <!-- Step 2: Sources -->
+                    <div class="wizard-step" id="step2" style="display:none;">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="mb-0">Source Configuration</h5>
+                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="addSource()">
+                                <i class="bi bi-plus-lg"></i> Add Failover Source
+                            </button>
+                        </div>
+                        <p class="text-muted small">Add one or more sources. Higher weight = higher priority for failover.</p>
+
+                        <div id="sourcesContainer">
+                            <!-- Sources will be added here dynamically -->
+                        </div>
+
+                        <!-- Type-specific additional settings -->
+                        <div id="typeSpecificSettings" class="mt-4">
+                            <!-- SRT Settings -->
+                            <div id="srt-settings" style="display:none;">
+                                <h6 class="text-muted mb-3">SRT Settings</h6>
+                                <div class="row">
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Mode</label>
+                                        <select class="form-select" name="srt_mode">
+                                            <option value="listener">Listener</option>
+                                            <option value="caller">Caller</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Latency (ms)</label>
+                                        <input type="number" class="form-control" name="srt_latency" value="200">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Passphrase</label>
+                                        <input type="password" class="form-control" name="srt_passphrase" placeholder="Optional">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- File Settings -->
+                            <div id="file-settings" style="display:none;">
+                                <h6 class="text-muted mb-3">File Settings</h6>
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label class="form-label">Loop Playback</label>
+                                        <select class="form-select" name="file_loop">
+                                            <option value="1">Yes - Loop continuously</option>
+                                            <option value="0">No - Play once</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    <!-- HLS Fields -->
-                    <div id="hls-fields" style="display:none;">
-                        <div class="mb-3">
-                            <label class="form-label">HLS URL</label>
-                            <input type="text" class="form-control" name="hls_url" placeholder="https://example.com/stream.m3u8">
-                        </div>
-                    </div>
+                    <!-- Step 3: PID Selection -->
+                    <div class="wizard-step" id="step3" style="display:none;">
+                        <h5 class="mb-3">PID Selection</h5>
+                        <p class="text-muted">Select which video, audio, and program PIDs to use from the source.</p>
 
-                    <!-- File Fields -->
-                    <div id="file-fields" style="display:none;">
+                        <div class="mb-4">
+                            <button type="button" class="btn btn-info" id="scanSourceBtn" onclick="scanSource()">
+                                <i class="bi bi-search me-1"></i>Scan Source for PIDs
+                            </button>
+                            <span class="ms-2 text-muted small" id="scanStatus"></span>
+                        </div>
+
                         <div class="row">
-                            <div class="col-md-8 mb-3">
-                                <label class="form-label">File Path</label>
-                                <input type="text" class="form-control" name="file_path" placeholder="/path/to/file.ts">
-                            </div>
+                            <!-- Program PID -->
                             <div class="col-md-4 mb-3">
-                                <label class="form-label">Loop</label>
-                                <select class="form-select" name="file_loop">
-                                    <option value="1">Yes</option>
-                                    <option value="0">No</option>
+                                <label class="form-label">Program</label>
+                                <select class="form-select" name="program_pid" id="programPidSelect">
+                                    <option value="">-- Select or enter manually --</option>
                                 </select>
+                                <input type="number" class="form-control mt-2" name="program_pid_manual"
+                                       id="programPidManual" placeholder="Or enter PID manually">
+                            </div>
+
+                            <!-- Video PID -->
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Video PID</label>
+                                <select class="form-select" name="video_pid" id="videoPidSelect">
+                                    <option value="">-- Select or enter manually --</option>
+                                </select>
+                                <input type="number" class="form-control mt-2" name="video_pid_manual"
+                                       id="videoPidManual" placeholder="Or enter PID manually">
+                            </div>
+
+                            <!-- Audio PIDs -->
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Audio PIDs <span class="text-muted small">(select multiple)</span></label>
+                                <select class="form-select" name="audio_pids[]" id="audioPidSelect" multiple size="4">
+                                    <option value="">-- Scan source first --</option>
+                                </select>
+                                <input type="text" class="form-control mt-2" name="audio_pids_manual"
+                                       id="audioPidManual" placeholder="Or enter PIDs: 257,258">
+                                <div class="form-text">Comma-separated for multiple audio tracks</div>
+                            </div>
+                        </div>
+
+                        <!-- Scanned info display -->
+                        <div id="scanResults" class="mt-3" style="display:none;">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <h6><i class="bi bi-info-circle me-1"></i>Detected Stream Info</h6>
+                                    <div id="scanResultsContent"></div>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
+
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Create Input</button>
+                    <button type="button" class="btn btn-outline-secondary" id="prevBtn" onclick="prevStep()" style="display:none;">
+                        <i class="bi bi-arrow-left"></i> Previous
+                    </button>
+                    <button type="button" class="btn btn-primary" id="nextBtn" onclick="nextStep()">
+                        Next <i class="bi bi-arrow-right"></i>
+                    </button>
+                    <button type="submit" class="btn btn-success" id="submitBtn" style="display:none;">
+                        <i class="bi bi-check-lg"></i> Create Input
+                    </button>
                 </div>
             </form>
         </div>
     </div>
 </div>
 
+<style>
+.wizard-step {
+    min-height: 300px;
+}
+.nav-pills .nav-link {
+    border-radius: 0;
+    border-bottom: 3px solid transparent;
+    background: none;
+    color: #6c757d;
+}
+.nav-pills .nav-link.active {
+    background: none;
+    color: #0d6efd;
+    border-bottom-color: #0d6efd;
+}
+.nav-pills .nav-link.completed {
+    color: #198754;
+    border-bottom-color: #198754;
+}
+.source-card {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+.source-card.primary {
+    border-color: #0d6efd;
+    background: #f0f7ff;
+}
+#nameStatus.valid {
+    color: #198754;
+}
+#nameStatus.invalid {
+    color: #dc3545;
+}
+</style>
+
 <script>
-function updateInputFields() {
-    const type = document.getElementById('inputType').value;
-    document.getElementById('udp-fields').style.display = type === 'udp' ? 'block' : 'none';
-    document.getElementById('srt-fields').style.display = type === 'srt' ? 'block' : 'none';
-    document.getElementById('rtmp-fields').style.display = type === 'rtmp' ? 'block' : 'none';
-    document.getElementById('hls-fields').style.display = type === 'hls' ? 'block' : 'none';
-    document.getElementById('file-fields').style.display = type === 'file' ? 'block' : 'none';
+let currentStep = 1;
+let nameCheckTimeout = null;
+let sourcesCount = 0;
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Add first source by default
+    addSource();
+
+    // Name validation on input
+    document.getElementById('inputName').addEventListener('input', function() {
+        clearTimeout(nameCheckTimeout);
+        nameCheckTimeout = setTimeout(() => checkNameUnique(this.value), 300);
+    });
+
+    // Type change handler
+    document.getElementById('inputType').addEventListener('change', updateTypeSettings);
+
+    // Form submission
+    document.getElementById('addInputForm').addEventListener('submit', handleFormSubmit);
+});
+
+// Check name uniqueness
+async function checkNameUnique(name) {
+    const statusEl = document.getElementById('nameStatus');
+    const bufferEl = document.getElementById('inputBuffer');
+    const idEl = document.getElementById('inputId');
+
+    if (!name || name.length < 2) {
+        statusEl.innerHTML = '';
+        bufferEl.value = '';
+        idEl.value = '';
+        return;
+    }
+
+    statusEl.innerHTML = '<i class="bi bi-hourglass-split"></i> Checking...';
+    statusEl.className = 'form-text';
+
+    try {
+        const response = await fetch(`api/inputs.php?action=check_name&name=${encodeURIComponent(name)}`);
+        const data = await response.json();
+
+        if (data.available) {
+            statusEl.innerHTML = '<i class="bi bi-check-circle"></i> Name available';
+            statusEl.className = 'form-text valid';
+            bufferEl.value = data.buffer_name;
+            idEl.value = data.suggested_id;
+        } else {
+            statusEl.innerHTML = '<i class="bi bi-x-circle"></i> Name already in use';
+            statusEl.className = 'form-text invalid';
+            bufferEl.value = '';
+            idEl.value = '';
+        }
+    } catch (e) {
+        statusEl.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Could not verify';
+        statusEl.className = 'form-text';
+    }
 }
 
+// Add a source entry
+function addSource() {
+    sourcesCount++;
+    const isPrimary = sourcesCount === 1;
+    const container = document.getElementById('sourcesContainer');
+    const inputType = document.getElementById('inputType').value;
+
+    let urlPlaceholder = 'udp://239.1.1.1:5000';
+    let urlLabel = 'Source URL';
+
+    switch (inputType) {
+        case 'udp':
+            urlPlaceholder = '239.1.1.1:5000';
+            urlLabel = 'Multicast Address:Port';
+            break;
+        case 'srt':
+            urlPlaceholder = '0.0.0.0:9000';
+            urlLabel = 'Address:Port';
+            break;
+        case 'rtmp':
+            urlPlaceholder = 'rtmp://server/app/stream';
+            urlLabel = 'RTMP URL';
+            break;
+        case 'hls':
+            urlPlaceholder = 'https://example.com/stream.m3u8';
+            urlLabel = 'HLS URL';
+            break;
+        case 'file':
+            urlPlaceholder = '/path/to/file.ts';
+            urlLabel = 'File Path';
+            break;
+    }
+
+    const sourceHtml = `
+        <div class="source-card ${isPrimary ? 'primary' : ''}" id="source-${sourcesCount}">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+                <span class="badge ${isPrimary ? 'bg-primary' : 'bg-secondary'}">
+                    ${isPrimary ? 'Primary Source' : 'Failover Source ' + (sourcesCount - 1)}
+                </span>
+                ${!isPrimary ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="removeSource(${sourcesCount})">
+                    <i class="bi bi-trash"></i>
+                </button>` : ''}
+            </div>
+            <div class="row">
+                <div class="col-md-8 mb-2">
+                    <label class="form-label">${urlLabel}</label>
+                    <input type="text" class="form-control source-url" name="sources[${sourcesCount - 1}][url]"
+                           placeholder="${urlPlaceholder}" ${isPrimary ? 'required' : ''}>
+                </div>
+                <div class="col-md-4 mb-2">
+                    <label class="form-label">Priority Weight</label>
+                    <input type="number" class="form-control source-weight" name="sources[${sourcesCount - 1}][weight]"
+                           value="${isPrimary ? 100 : 50}" min="1" max="100">
+                    <div class="form-text">Higher = More priority</div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    container.insertAdjacentHTML('beforeend', sourceHtml);
+}
+
+// Remove a source entry
+function removeSource(id) {
+    const el = document.getElementById(`source-${id}`);
+    if (el) el.remove();
+}
+
+// Update type-specific settings visibility
+function updateTypeSettings() {
+    const type = document.getElementById('inputType').value;
+
+    // Hide all type settings
+    document.querySelectorAll('#typeSpecificSettings > div').forEach(el => {
+        el.style.display = 'none';
+    });
+
+    // Show relevant settings
+    const settingsEl = document.getElementById(`${type}-settings`);
+    if (settingsEl) {
+        settingsEl.style.display = 'block';
+    }
+
+    // Update source placeholders
+    document.querySelectorAll('.source-url').forEach(input => {
+        switch (type) {
+            case 'udp':
+                input.placeholder = '239.1.1.1:5000';
+                break;
+            case 'srt':
+                input.placeholder = '0.0.0.0:9000';
+                break;
+            case 'rtmp':
+                input.placeholder = 'rtmp://server/app/stream';
+                break;
+            case 'hls':
+                input.placeholder = 'https://example.com/stream.m3u8';
+                break;
+            case 'file':
+                input.placeholder = '/path/to/file.ts';
+                break;
+        }
+    });
+}
+
+// Wizard navigation
+function nextStep() {
+    if (currentStep === 1) {
+        // Validate step 1
+        const name = document.getElementById('inputName').value;
+        const statusEl = document.getElementById('nameStatus');
+
+        if (!name) {
+            alert('Please enter an input name');
+            return;
+        }
+        if (statusEl.classList.contains('invalid')) {
+            alert('Please choose a unique name');
+            return;
+        }
+    }
+
+    if (currentStep === 2) {
+        // Validate step 2 - at least one source
+        const sources = document.querySelectorAll('.source-url');
+        let hasSource = false;
+        sources.forEach(input => {
+            if (input.value.trim()) hasSource = true;
+        });
+        if (!hasSource) {
+            alert('Please enter at least one source');
+            return;
+        }
+    }
+
+    if (currentStep < 3) {
+        document.getElementById(`step${currentStep}`).style.display = 'none';
+        currentStep++;
+        document.getElementById(`step${currentStep}`).style.display = 'block';
+
+        // Update nav
+        document.querySelector(`[data-step="${currentStep - 1}"]`).classList.remove('active');
+        document.querySelector(`[data-step="${currentStep - 1}"]`).classList.add('completed');
+        document.querySelector(`[data-step="${currentStep}"]`).classList.add('active');
+
+        // Update buttons
+        document.getElementById('prevBtn').style.display = 'inline-block';
+        if (currentStep === 3) {
+            document.getElementById('nextBtn').style.display = 'none';
+            document.getElementById('submitBtn').style.display = 'inline-block';
+        }
+    }
+}
+
+function prevStep() {
+    if (currentStep > 1) {
+        document.getElementById(`step${currentStep}`).style.display = 'none';
+        currentStep--;
+        document.getElementById(`step${currentStep}`).style.display = 'block';
+
+        // Update nav
+        document.querySelector(`[data-step="${currentStep + 1}"]`).classList.remove('active');
+        document.querySelector(`[data-step="${currentStep}"]`).classList.remove('completed');
+        document.querySelector(`[data-step="${currentStep}"]`).classList.add('active');
+
+        // Update buttons
+        if (currentStep === 1) {
+            document.getElementById('prevBtn').style.display = 'none';
+        }
+        document.getElementById('nextBtn').style.display = 'inline-block';
+        document.getElementById('submitBtn').style.display = 'none';
+    }
+}
+
+// Scan source for PIDs
+async function scanSource() {
+    const btn = document.getElementById('scanSourceBtn');
+    const statusEl = document.getElementById('scanStatus');
+    const resultsEl = document.getElementById('scanResults');
+
+    // Get first source URL
+    const sourceInput = document.querySelector('.source-url');
+    const source = sourceInput ? sourceInput.value : '';
+    const type = document.getElementById('inputType').value;
+
+    if (!source) {
+        alert('Please enter a source URL first');
+        return;
+    }
+
+    btn.disabled = true;
+    statusEl.innerHTML = '<i class="bi bi-hourglass-split"></i> Scanning source...';
+
+    try {
+        const formData = new FormData();
+        formData.append('source', source);
+        formData.append('type', type);
+
+        const response = await fetch('api/inputs.php?action=scan', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            statusEl.innerHTML = '<i class="bi bi-check-circle text-success"></i> Scan complete';
+            populatePidSelects(data);
+            resultsEl.style.display = 'block';
+        } else {
+            statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-warning"></i> ${data.error || 'Scan failed'}`;
+            resultsEl.style.display = 'none';
+        }
+    } catch (e) {
+        statusEl.innerHTML = '<i class="bi bi-x-circle text-danger"></i> Scan error';
+        console.error('Scan error:', e);
+    }
+
+    btn.disabled = false;
+}
+
+// Populate PID selects from scan results
+function populatePidSelects(data) {
+    const programSelect = document.getElementById('programPidSelect');
+    const videoSelect = document.getElementById('videoPidSelect');
+    const audioSelect = document.getElementById('audioPidSelect');
+    const resultsContent = document.getElementById('scanResultsContent');
+
+    // Clear existing options
+    programSelect.innerHTML = '<option value="">-- Select program --</option>';
+    videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
+    audioSelect.innerHTML = '';
+
+    // Populate programs
+    if (data.programs && data.programs.length > 0) {
+        data.programs.forEach(prog => {
+            const opt = document.createElement('option');
+            opt.value = prog.id || prog;
+            opt.textContent = prog.name || `Program ${prog.id || prog}`;
+            programSelect.appendChild(opt);
+        });
+    }
+
+    // Populate video PIDs
+    if (data.video_pids && data.video_pids.length > 0) {
+        data.video_pids.forEach(vid => {
+            const opt = document.createElement('option');
+            opt.value = vid.pid;
+            opt.textContent = `PID ${vid.pid} - ${vid.description || vid.codec || 'Video'}`;
+            videoSelect.appendChild(opt);
+        });
+        // Auto-select first video
+        if (data.video_pids.length === 1) {
+            videoSelect.value = data.video_pids[0].pid;
+        }
+    }
+
+    // Populate audio PIDs
+    if (data.audio_pids && data.audio_pids.length > 0) {
+        data.audio_pids.forEach(aud => {
+            const opt = document.createElement('option');
+            opt.value = aud.pid;
+            opt.textContent = `PID ${aud.pid} - ${aud.description || aud.codec || 'Audio'} (${aud.language || 'und'})`;
+            audioSelect.appendChild(opt);
+        });
+        // Auto-select all audio tracks
+        Array.from(audioSelect.options).forEach(opt => opt.selected = true);
+    }
+
+    // Show results summary
+    let html = '<div class="row">';
+    html += `<div class="col-md-4"><strong>Programs:</strong> ${data.programs?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Video tracks:</strong> ${data.video_pids?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Audio tracks:</strong> ${data.audio_pids?.length || 0}</div>`;
+    html += '</div>';
+
+    if (data.video_pids && data.video_pids.length > 0) {
+        html += '<div class="mt-2"><small class="text-muted">Video: ';
+        html += data.video_pids.map(v => `${v.description || 'PID ' + v.pid}`).join(', ');
+        html += '</small></div>';
+    }
+
+    if (data.audio_pids && data.audio_pids.length > 0) {
+        html += '<div class="mt-1"><small class="text-muted">Audio: ';
+        html += data.audio_pids.map(a => `${a.language || 'und'} (PID ${a.pid})`).join(', ');
+        html += '</small></div>';
+    }
+
+    resultsContent.innerHTML = html;
+}
+
+// Form submission
+async function handleFormSubmit(e) {
+    e.preventDefault();
+
+    const form = e.target;
+    const formData = new FormData(form);
+
+    // Build the data object
+    const data = {
+        name: formData.get('name'),
+        type: formData.get('type'),
+        buffer: formData.get('buffer'),
+        sources: [],
+        video_pid: formData.get('video_pid') || formData.get('video_pid_manual'),
+        audio_pids: [],
+        program_pid: formData.get('program_pid') || formData.get('program_pid_manual'),
+        srt_mode: formData.get('srt_mode'),
+        srt_latency: formData.get('srt_latency'),
+        srt_passphrase: formData.get('srt_passphrase'),
+        file_loop: formData.get('file_loop')
+    };
+
+    // Collect sources
+    document.querySelectorAll('.source-card').forEach((card, idx) => {
+        const urlInput = card.querySelector('.source-url');
+        const weightInput = card.querySelector('.source-weight');
+        if (urlInput && urlInput.value.trim()) {
+            data.sources.push({
+                url: urlInput.value.trim(),
+                weight: parseInt(weightInput?.value || 10)
+            });
+        }
+    });
+
+    // Collect audio PIDs (from select or manual)
+    const audioSelect = document.getElementById('audioPidSelect');
+    const selectedAudio = Array.from(audioSelect.selectedOptions).map(opt => opt.value).filter(v => v);
+    const manualAudio = formData.get('audio_pids_manual');
+
+    if (selectedAudio.length > 0) {
+        data.audio_pids = selectedAudio;
+    } else if (manualAudio) {
+        data.audio_pids = manualAudio.split(',').map(p => p.trim()).filter(p => p);
+    }
+
+    // Submit
+    try {
+        const response = await fetch('api/inputs.php?action=create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            alert('Input created successfully!');
+            location.reload();
+        } else {
+            alert('Error: ' + (result.error || 'Failed to create input'));
+        }
+    } catch (e) {
+        console.error('Submit error:', e);
+        alert('Error creating input. Please try again.');
+    }
+}
+
+// Service controls
 function startService(type, id) {
     fetch(`api/${type}.php?action=start&id=${id}`, { method: 'POST' })
         .then(r => r.json())
@@ -248,18 +754,18 @@ function stopService(type, id) {
 }
 
 function deleteService(type, id) {
-    if (confirm('Are you sure you want to delete this service?')) {
+    if (confirm('Are you sure you want to delete this input?')) {
         fetch(`api/${type}.php?action=delete&id=${id}`, { method: 'POST' })
             .then(r => r.json())
             .then(data => {
                 if (data.success) location.reload();
-                else alert(data.error || 'Failed to delete service');
+                else alert(data.error || 'Failed to delete');
             });
     }
 }
 
-function editService(type, id) {
-    window.location.href = `${type}-edit.php?id=${id}`;
+function editInput(id) {
+    window.location.href = `inputs-edit.php?id=${id}`;
 }
 </script>
 
