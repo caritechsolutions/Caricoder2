@@ -154,40 +154,40 @@ install_tsduck() {
         return 0
     fi
 
-    local TSDUCK_BUILD_DIR="/tmp/tsduck-build"
-
-    # Update CA certificates first
-    log_info "Updating CA certificates..."
-    apt-get install -y ca-certificates
-    update-ca-certificates
+    local TSDUCK_BUILD_DIR="/tmp/tsduck"
 
     # Ensure we have GCC with C++20 support
     install_gcc11
 
-    # Install TSDuck build dependencies (minimal, skip docs)
+    # Install TSDuck build dependencies
     log_info "Installing TSDuck build dependencies..."
     apt-get install -y \
-        cmake \
-        dos2unix \
-        graphviz \
+        g++ \
+        make \
+        python3 \
         libcurl4-openssl-dev \
+        libsrt-openssl-dev \
+        librist-dev \
         libpcsclite-dev \
-        dpkg-dev \
-        libedit-dev \
-        libsrt-openssl-dev || apt-get install -y libsrt-dev || true
+        dos2unix \
+        libssl-dev \
+        libpcre3-dev \
+        libdirectfb-dev \
+        liblzma-dev \
+        libedit-dev || true
 
     # Clone TSDuck
     rm -rf "$TSDUCK_BUILD_DIR"
     git clone https://github.com/tsduck/tsduck.git "$TSDUCK_BUILD_DIR"
     cd "$TSDUCK_BUILD_DIR"
 
-    # Build TSDuck (without docs and without treating warnings as errors)
+    # Build TSDuck (NOTEST=1 skips tests, NOERROR=1 ignores warnings-as-errors)
     log_info "Building TSDuck (this may take a while)..."
-    make -j$(nproc) NODOC=1 NOERROR=1
+    make -j$(nproc) NOTEST=1 NOERROR=1
 
     # Install TSDuck
     log_info "Installing TSDuck..."
-    make install NODOC=1 NOERROR=1
+    sudo make install
 
     # Cleanup
     cd /
