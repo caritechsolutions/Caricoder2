@@ -114,38 +114,7 @@ install_dependencies() {
     log_info "Dependencies installed successfully"
 }
 
-# Install newer GCC for C++20 support (required by TSDuck)
-install_gcc11() {
-    log_step "Checking GCC version for C++20 support..."
-
-    # Check current GCC version
-    local gcc_version=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
-
-    if [[ -n "$gcc_version" && "$gcc_version" -ge 10 ]]; then
-        log_info "GCC $gcc_version already supports C++20"
-        return 0
-    fi
-
-    log_info "Installing GCC 11 for C++20 support..."
-
-    # Add Ubuntu toolchain PPA
-    apt-get install -y software-properties-common
-    add-apt-repository -y ppa:ubuntu-toolchain-r/test
-    apt-get update
-
-    # Install GCC 11
-    apt-get install -y gcc-11 g++-11
-
-    # Set GCC 11 as default
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
-
-    # Verify
-    log_info "GCC version: $(gcc --version | head -1)"
-    log_info "G++ version: $(g++ --version | head -1)"
-}
-
-# Install TSDuck from source
+# Install TSDuck from pre-built package
 install_tsduck() {
     log_step "Installing TSDuck..."
 
@@ -154,50 +123,68 @@ install_tsduck() {
         return 0
     fi
 
-    local TSDUCK_BUILD_DIR="/tmp/tsduck"
+    # Detect architecture
+    local ARCH=$(dpkg --print-architecture)
+    log_info "Detected architecture: $ARCH"
 
-    # Ensure we have GCC with C++20 support
-    install_gcc11
+    # Get the latest release .deb URL from GitHub API
+    log_info "Fetching latest TSDuck release..."
+    local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
 
-    # Install TSDuck build dependencies
-    log_info "Installing TSDuck build dependencies..."
+    # Find the .deb file matching our architecture (exclude -dev packages)
+    local RELEASE_URL=""
+    if [[ "$ARCH" == "amd64" ]]; then
+        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | grep "amd64\|64" | head -1 | cut -d'"' -f4)
+    elif [[ "$ARCH" == "arm64" ]]; then
+        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | grep "arm64\|aarch64" | head -1 | cut -d'"' -f4)
+    fi
+
+    if [[ -z "$RELEASE_URL" ]]; then
+        # Fallback: try to get any .deb that's not a dev package
+        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | head -1 | cut -d'"' -f4)
+    fi
+
+    if [[ -z "$RELEASE_URL" ]]; then
+        log_warn "Could not find TSDuck .deb package for architecture: $ARCH"
+        log_warn "TSDuck will need to be installed manually."
+        log_warn "Visit: https://github.com/tsduck/tsduck/releases"
+        return 1
+    fi
+
+    log_info "Downloading TSDuck from: $RELEASE_URL"
+
+    # Download the .deb package
+    local DEB_FILE="/tmp/tsduck.deb"
+    curl -sSL -o "$DEB_FILE" "$RELEASE_URL"
+
+    if [[ ! -f "$DEB_FILE" || ! -s "$DEB_FILE" ]]; then
+        log_error "Failed to download TSDuck package"
+        return 1
+    fi
+
+    # Install dependencies that TSDuck might need
+    log_info "Installing TSDuck runtime dependencies..."
     apt-get install -y \
-        g++ \
-        make \
-        python3 \
-        libcurl4-openssl-dev \
-        libsrt-openssl-dev \
-        librist-dev \
-        libpcsclite-dev \
-        dos2unix \
-        libssl-dev \
-        libpcre3-dev \
-        libdirectfb-dev \
-        liblzma-dev \
-        libedit-dev || true
+        libcurl4 \
+        libsrt1.5-openssl || apt-get install -y libsrt1.4-openssl || apt-get install -y libsrt1-openssl || true
+    apt-get install -y libpcsclite1 libedit2 || true
 
-    # Clone TSDuck
-    rm -rf "$TSDUCK_BUILD_DIR"
-    git clone https://github.com/tsduck/tsduck.git "$TSDUCK_BUILD_DIR"
-    cd "$TSDUCK_BUILD_DIR"
+    # Install the package
+    log_info "Installing TSDuck package..."
+    dpkg -i "$DEB_FILE" || true
 
-    # Build TSDuck (NOTEST=1 skips tests, NOERROR=1 ignores warnings-as-errors)
-    log_info "Building TSDuck (this may take a while)..."
-    make -j$(nproc) NOTEST=1 NOERROR=1
-
-    # Install TSDuck
-    log_info "Installing TSDuck..."
-    sudo make install
+    # Fix any missing dependencies
+    apt-get install -f -y
 
     # Cleanup
-    cd /
-    rm -rf "$TSDUCK_BUILD_DIR"
+    rm -f "$DEB_FILE"
 
     # Verify installation
     if command -v tsp &> /dev/null; then
         log_info "TSDuck installed successfully: $(tsp --version 2>&1 | head -1)"
     else
         log_warn "TSDuck installation may have failed. Check manually."
+        log_warn "Visit: https://github.com/tsduck/tsduck/releases"
     fi
 }
 
