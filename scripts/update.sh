@@ -248,6 +248,13 @@ fix_permissions() {
         chmod 750 "$CONFIG_DIR"
     fi
 
+    # Users config needs www-data read access for PHP authentication
+    if [[ -f "$CONFIG_DIR/users.conf" ]]; then
+        log_info "Fixing: $CONFIG_DIR/users.conf -> $SERVICE_USER:$WEB_USER (640)"
+        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
+        chmod 640 "$CONFIG_DIR/users.conf"
+    fi
+
     # Config subdirectories need www-data write access for web GUI
     for subdir in inputs transcoders muxers outputs; do
         if [[ -d "$CONFIG_DIR/$subdir" ]]; then

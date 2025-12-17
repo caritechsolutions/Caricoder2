@@ -418,16 +418,18 @@ install_config() {
     # Users config
     if [[ ! -f "$CONFIG_DIR/users.conf" ]]; then
         cp config/users.conf "$CONFIG_DIR/"
-        chmod 600 "$CONFIG_DIR/users.conf"
+        # Needs to be readable by www-data for PHP authentication
+        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
+        chmod 640 "$CONFIG_DIR/users.conf"
     else
         log_info "Config exists, preserving: users.conf"
     fi
 
     # Note: We don't copy example configs - users create their own via the web GUI
 
-    # Set proper ownership on config files (but preserve directory permissions)
+    # Set proper ownership on main config file only
+    # Note: users.conf ownership is set above with www-data group for PHP access
     chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/caritrans.conf" 2>/dev/null || true
-    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/users.conf" 2>/dev/null || true
 
     log_info "Configuration files installed"
 }
