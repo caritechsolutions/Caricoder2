@@ -1,14 +1,19 @@
 #!/bin/bash
 #
 # CariTranscoder Update Script
+# This script updates only the code files (API, web interface)
+# It preserves: configs, services, and channel data
+#
+# Usage:
+#   Interactive:  ./update.sh
+#   Auto-confirm: ./update.sh -y
+#   Via curl:     curl -sSL "https://raw.githubusercontent.com/.../update.sh?$(date +%s)" | sudo bash -s -- -y
+#
 # Copyright (c) 2024 CariTech Solutions
-#
-# Usage: curl -sSL https://raw.githubusercontent.com/caritechsolutions/Caricoder2/main/scripts/update.sh | sudo bash
-#
 
 set -e
 
-# Colors
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,12 +26,29 @@ CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
+REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 
+# Parse arguments
+AUTO_CONFIRM=false
+while getopts "y" opt; do
+    case $opt in
+        y) AUTO_CONFIRM=true ;;
+        *) ;;
+    esac
+done
+
+# Logging functions
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+echo ""
+echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║     CariTranscoder Update Script       ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+echo ""
 
 # Check root
 check_root() {
@@ -38,102 +60,84 @@ check_root() {
 
 # Check installation exists
 check_installation() {
-    if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-        log_error "CariTranscoder not found at $INSTALL_DIR"
+    if [[ ! -d "$WEB_DIR" ]]; then
+        log_error "CariTranscoder not found at $WEB_DIR"
         log_error "Please run the install script first."
         exit 1
     fi
 }
 
-# Get current version
-get_current_version() {
-    cd "$INSTALL_DIR"
-    git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+# Show what will be updated
+show_plan() {
+    echo -e "${YELLOW}This script will update:${NC}"
+    echo -e "  - /var/www/caritrans/* (web interface)"
+    echo -e "  - /usr/local/bin/cari-* (binaries, if rebuilding)"
+    echo ""
+    echo -e "${GREEN}This script will NOT touch:${NC}"
+    echo -e "  - /etc/caritrans/* (your configurations)"
+    echo -e "  - /var/log/caritrans/* (log files)"
+    echo -e "  - /var/lib/caritrans/* (data files)"
+    echo -e "  - Running service states"
+    echo ""
 }
 
-# Stop running services
-stop_services() {
-    log_step "Stopping running services..."
+# Backup current code
+backup_current() {
+    log_step "Creating backup of current code..."
 
-    local stopped_services=()
+    BACKUP_DIR="/tmp/caritrans_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
 
-    # Find running cari-* services
-    for svc in $(systemctl list-units --type=service --state=running --no-legend | grep 'cari-' | awk '{print $1}'); do
-        log_info "Stopping $svc..."
-        systemctl stop "$svc" || true
-        stopped_services+=("$svc")
-    done
+    # Backup web files
+    if [[ -d "$WEB_DIR" ]]; then
+        cp -r "$WEB_DIR" "$BACKUP_DIR/web_backup"
+    fi
 
-    # Export for restart later
-    export STOPPED_SERVICES="${stopped_services[*]}"
+    log_info "Backup created at: $BACKUP_DIR"
 }
 
-# Pull latest changes
-pull_updates() {
-    log_step "Pulling latest updates..."
+# Download latest code
+download_latest() {
+    log_step "Downloading latest code from repository..."
 
-    cd "$INSTALL_DIR"
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
 
-    # Stash any local changes
-    git stash 2>/dev/null || true
+    # Download the repository as a tarball (no git needed)
+    log_info "Fetching from branch: $BRANCH"
+    curl -sSL "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz" -o repo.tar.gz
 
-    # Fetch and pull
-    git fetch origin
-    git checkout "$BRANCH"
-    git pull origin "$BRANCH"
+    if [[ ! -f repo.tar.gz || ! -s repo.tar.gz ]]; then
+        log_error "Failed to download repository"
+        exit 1
+    fi
 
-    # Get new version
-    NEW_VERSION=$(git rev-parse --short HEAD)
-    log_info "Updated to version: $NEW_VERSION"
-}
+    # Extract
+    tar -xzf repo.tar.gz
+    EXTRACTED_DIR=$(ls -d Caricoder2-* 2>/dev/null | head -1)
 
-# Rebuild applications
-rebuild_apps() {
-    log_step "Rebuilding applications..."
+    if [[ -z "$EXTRACTED_DIR" || ! -d "$EXTRACTED_DIR" ]]; then
+        log_error "Failed to extract repository"
+        exit 1
+    fi
 
-    cd "$INSTALL_DIR"
+    mv "$EXTRACTED_DIR" caritrans_latest
 
-    # Clean and rebuild
-    make clean 2>/dev/null || true
-    make all
-
-    log_info "Build completed"
-}
-
-# Update binaries
-update_binaries() {
-    log_step "Updating binaries..."
-
-    cd "$INSTALL_DIR"
-
-    for app in cari-input cari-transcoder cari-mux cari-output cari-stats cari-ha; do
-        if [[ -f "src/$app/$app" ]]; then
-            install -m 755 "src/$app/$app" /usr/local/bin/
-            log_info "Updated: $app"
-        fi
-    done
+    log_info "Download complete"
 }
 
 # Update web interface
 update_web() {
     log_step "Updating web interface..."
 
-    cd "$INSTALL_DIR"
-
-    # Backup custom files if any
-    if [[ -f "$WEB_DIR/includes/config.local.php" ]]; then
-        cp "$WEB_DIR/includes/config.local.php" /tmp/config.local.php.bak
+    # List of directories/files to update
+    if [[ -d "$TEMP_DIR/caritrans_latest/web" ]]; then
+        # Update all web files
+        cp -r "$TEMP_DIR/caritrans_latest/web/"* "$WEB_DIR/"
+        log_info "Updated web files"
     fi
 
-    # Update web files
-    rsync -av --exclude='*.local.php' web/ "$WEB_DIR/"
-
-    # Restore custom files
-    if [[ -f /tmp/config.local.php.bak ]]; then
-        mv /tmp/config.local.php.bak "$WEB_DIR/includes/config.local.php"
-    fi
-
-    # Fix permissions
+    # Set permissions
     chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
     find "$WEB_DIR" -type d -exec chmod 755 {} \;
     find "$WEB_DIR" -type f -exec chmod 644 {} \;
@@ -141,117 +145,143 @@ update_web() {
     log_info "Web interface updated"
 }
 
-# Update systemd services
-update_services() {
-    log_step "Updating systemd services..."
+# Update API files (if any separate API)
+update_api() {
+    log_step "Updating API files..."
 
-    cd "$INSTALL_DIR"
+    if [[ -d "$TEMP_DIR/caritrans_latest/web/api" ]]; then
+        cp -r "$TEMP_DIR/caritrans_latest/web/api/"* "$WEB_DIR/api/" 2>/dev/null || true
+        log_info "API files updated"
+    fi
+}
 
-    # Copy new service files
-    cp systemd/*.service /etc/systemd/system/
+# Optionally rebuild C applications
+rebuild_apps() {
+    log_step "Checking if rebuild is needed..."
 
-    # Update paths
-    for svc in /etc/systemd/system/cari-*.service; do
-        sed -i "s|CONFIG_DIR=/etc/caritrans|CONFIG_DIR=$CONFIG_DIR|g" "$svc"
-    done
+    # Check if user wants to rebuild
+    if [[ "$AUTO_CONFIRM" = true ]]; then
+        REBUILD="n"
+    else
+        if [[ -t 0 ]]; then
+            read -p "Do you want to rebuild the C applications? (y/N): " REBUILD
+        else
+            REBUILD="n"
+        fi
+    fi
 
-    # Reload systemd
-    systemctl daemon-reload
+    if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
+        log_info "Rebuilding applications..."
 
-    log_info "Services updated"
+        cd "$TEMP_DIR/caritrans_latest"
+
+        # Build
+        if make all; then
+            # Install binaries
+            for app in cari-input cari-transcoder cari-mux cari-output cari-stats cari-ha; do
+                if [[ -f "src/$app/$app" ]]; then
+                    install -m 755 "src/$app/$app" /usr/local/bin/
+                    log_info "Updated: $app"
+                fi
+            done
+            log_info "Build completed"
+        else
+            log_warn "Build failed, keeping existing binaries"
+        fi
+    else
+        log_info "Skipping rebuild (using existing binaries)"
+    fi
 }
 
 # Restart services
 restart_services() {
     log_step "Restarting services..."
 
-    if [[ -n "$STOPPED_SERVICES" ]]; then
-        for svc in $STOPPED_SERVICES; do
-            log_info "Starting $svc..."
-            systemctl start "$svc" || log_warn "Failed to start $svc"
-        done
-    fi
-
-    # Restart nginx if running
-    if systemctl is-active --quiet nginx; then
-        systemctl reload nginx || true
-    fi
-}
-
-# Check for config updates
-check_config_updates() {
-    log_step "Checking configuration changes..."
-
-    cd "$INSTALL_DIR"
-
-    # Compare example configs with installed
-    local changes=0
-    for conf in config/*.conf; do
-        basename=$(basename "$conf")
-        if [[ -f "$CONFIG_DIR/$basename" ]]; then
-            if ! diff -q "$conf" "$CONFIG_DIR/$basename" > /dev/null 2>&1; then
-                changes=$((changes + 1))
-            fi
+    # Restart PHP-FPM
+    for ver in 8.3 8.2 8.1 8.0 7.4; do
+        if systemctl is-active --quiet "php${ver}-fpm" 2>/dev/null; then
+            systemctl restart "php${ver}-fpm"
+            log_info "Restarted: php${ver}-fpm"
+            break
         fi
     done
 
-    if [[ $changes -gt 0 ]]; then
-        log_warn "Configuration templates have changed."
-        log_warn "Review changes in $INSTALL_DIR/config/ and update your configs if needed."
+    # Reload nginx
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx
+        log_info "Reloaded: nginx"
     fi
+
+    log_info "Services restarted"
 }
 
-# Run database migrations if any
-run_migrations() {
-    log_step "Running migrations..."
+# Cleanup temp files
+cleanup() {
+    log_step "Cleaning up..."
 
-    # Placeholder for future database migrations
-    # Currently using file-based config, no migrations needed
+    if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
+    fi
 
-    log_info "No migrations required"
+    log_info "Cleanup complete"
 }
 
 # Print completion
 print_completion() {
+    local SERVER_IP=$(hostname -I | awk '{print $1}')
+
     echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    CariTranscoder Update Complete      ${NC}"
-    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║         CariTranscoder Update Complete!                ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo "Version: $NEW_VERSION"
+    echo -e "Your configuration has been preserved."
     echo ""
-    echo "Services status:"
-    systemctl list-units --type=service --state=running --no-legend | grep 'cari-' || echo "  No services running"
+    echo -e "${BLUE}Web Interface:${NC}"
+    echo -e "  URL: ${GREEN}http://${SERVER_IP}:8080${NC}"
     echo ""
-    echo "Check logs:"
-    echo "  journalctl -u cari-input@input-001 -f"
+    echo -e "${BLUE}Check service status:${NC}"
+    echo "  systemctl status nginx"
+    echo "  systemctl status php*-fpm"
     echo ""
+    if [[ -n "$BACKUP_DIR" ]]; then
+        echo -e "${YELLOW}Backup location: $BACKUP_DIR${NC}"
+        echo ""
+    fi
 }
 
-# Main
+# Main update flow
 main() {
-    echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║     CariTranscoder Update Script       ║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
-    echo ""
-
     check_root
     check_installation
 
-    OLD_VERSION=$(get_current_version)
-    log_info "Current version: $OLD_VERSION"
+    show_plan
 
-    stop_services
-    pull_updates
-    rebuild_apps
-    update_binaries
+    # Prompt for confirmation
+    if [[ "$AUTO_CONFIRM" = false ]]; then
+        if [[ -t 0 ]]; then
+            read -p "Do you want to continue with the update? (y/N): " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}Update cancelled.${NC}"
+                exit 0
+            fi
+        else
+            echo -e "${YELLOW}Non-interactive mode detected. Use -y flag to auto-confirm.${NC}"
+            echo -e "Example: curl -sSL \"...update.sh?\$(date +%s)\" | sudo bash -s -- -y"
+            exit 0
+        fi
+    fi
+
+    echo ""
+    backup_current
+    download_latest
     update_web
-    update_services
-    check_config_updates
-    run_migrations
+    update_api
+    rebuild_apps
     restart_services
+    cleanup
     print_completion
 }
 
+# Run main function
 main "$@"
