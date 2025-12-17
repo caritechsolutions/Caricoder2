@@ -16,13 +16,14 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
+SCRIPT_VERSION="1.0.1"
 INSTALL_DIR="/opt/caritrans"
 CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
 LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
-REPO_URL="https://github.com/caritechsolutions/Caricoder2.git"
+REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
@@ -306,15 +307,24 @@ download_repo() {
 
     # Download as tarball (no git required, avoids ownership issues)
     log_info "Fetching from branch: $BRANCH"
-    # Strip .git suffix if present for tarball URL
-    local REPO_BASE="${REPO_URL%.git}"
-    local TARBALL_URL="${REPO_BASE}/archive/refs/heads/${BRANCH}.tar.gz"
+    local TARBALL_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
     log_info "Downloading from: $TARBALL_URL"
 
+    local DOWNLOAD_OK=false
     if command -v wget &> /dev/null; then
-        wget -q -O repo.tar.gz "$TARBALL_URL" 2>&1
+        if wget --no-check-certificate -q -O repo.tar.gz "$TARBALL_URL"; then
+            DOWNLOAD_OK=true
+        fi
     else
-        curl -L -f -o repo.tar.gz "$TARBALL_URL"
+        if curl -k -L -f -o repo.tar.gz "$TARBALL_URL" 2>/dev/null; then
+            DOWNLOAD_OK=true
+        fi
+    fi
+
+    if [[ "$DOWNLOAD_OK" = false ]]; then
+        log_error "wget/curl download failed"
+        rm -rf "$TEMP_DIR"
+        exit 1
     fi
 
     if [[ ! -f repo.tar.gz || ! -s repo.tar.gz ]]; then
@@ -667,6 +677,7 @@ main() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║   CariTranscoder Installation Script   ║${NC}"
+    echo -e "${BLUE}║            Version $SCRIPT_VERSION                 ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
     echo ""
 
