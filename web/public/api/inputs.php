@@ -249,7 +249,7 @@ function build_source_url($source, $type) {
 }
 
 /**
- * Scan using TSDuck
+ * Scan using TSDuck (capture + tsanalyze)
  */
 function scan_with_tsduck($url, $type) {
     $result = [
@@ -260,80 +260,143 @@ function scan_with_tsduck($url, $type) {
         'error' => null
     ];
 
-    // Use tsp to analyze the stream for 3 seconds
-    $cmd = '';
+    $capture_file = '/tmp/caritrans_scan_' . uniqid() . '.ts';
+    $capture_cmd = '';
 
+    // Build capture command based on input type
     if ($type === 'udp' || strpos($url, 'udp://') === 0) {
-        // Parse UDP URL
         $parsed = parse_url(str_replace('udp://', 'http://', $url));
         $address = $parsed['host'] ?? '';
         $port = $parsed['port'] ?? 5000;
 
-        $cmd = sprintf(
-            'timeout 5 tsp -I ip %s:%d -P analyze -o /dev/stdout --normalized 2>/dev/null | head -100',
+        $capture_cmd = sprintf(
+            'timeout 5 tsp -I ip %s:%d -O file %s 2>/dev/null',
             escapeshellarg($address),
-            (int)$port
+            (int)$port,
+            escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
-        // SRT input
-        $cmd = sprintf(
-            'timeout 5 tsp -I srt %s -P analyze -o /dev/stdout --normalized 2>/dev/null | head -100',
-            escapeshellarg($url)
+        $capture_cmd = sprintf(
+            'timeout 5 tsp -I srt %s -O file %s 2>/dev/null',
+            escapeshellarg($url),
+            escapeshellarg($capture_file)
         );
     } else {
         $result['error'] = 'Unsupported input type for TSDuck scanning';
         return $result;
     }
 
-    exec($cmd, $output, $code);
+    // Capture stream
+    exec($capture_cmd, $capture_output, $capture_code);
 
-    if ($code !== 0 && empty($output)) {
-        $result['error'] = 'Failed to scan source (timeout or no data)';
+    // Check if capture file was created
+    if (!file_exists($capture_file) || filesize($capture_file) < 1000) {
+        @unlink($capture_file);
+        $result['error'] = 'Failed to capture stream (no data received)';
         return $result;
     }
 
-    // Parse TSDuck analyze output
+    // Analyze captured file with tsanalyze
+    $analyze_cmd = sprintf('tsanalyze %s 2>/dev/null | cat', escapeshellarg($capture_file));
+    exec($analyze_cmd, $output, $code);
+
+    // Clean up capture file
+    @unlink($capture_file);
+
+    if (empty($output)) {
+        $result['error'] = 'Failed to analyze captured stream';
+        return $result;
+    }
+
     $output_text = implode("\n", $output);
 
-    // Extract PIDs - looking for patterns like "pid=256" or "PID: 256"
-    // Video PIDs typically have stream_type for video (0x1B for H.264, 0x24 for H.265)
-    // Audio PIDs have stream_type for audio (0x0F for AAC, 0x03/0x04 for MPEG audio)
-
-    // Simplified parsing - look for service/program info
-    preg_match_all('/service.*?id[=:\s]+(\d+)/i', $output_text, $prog_matches);
-    if (!empty($prog_matches[1])) {
-        $result['programs'] = array_unique($prog_matches[1]);
+    // Parse service info: "Service: 0x03E8 (1000)" and "Service name: BET"
+    if (preg_match('/Service:\s*0x([0-9A-Fa-f]+)\s*\((\d+)\)/', $output_text, $svc_match)) {
+        $program = [
+            'id' => (int)$svc_match[2],
+            'name' => 'Program ' . $svc_match[2]
+        ];
+        // Try to get service name
+        if (preg_match('/Service name:\s*([^,\n]+)/i', $output_text, $name_match)) {
+            $program['name'] = trim($name_match[1]);
+        }
+        $result['programs'][] = $program;
     }
 
-    // Look for video PIDs
-    preg_match_all('/video.*?pid[=:\s]+(\d+)|pid[=:\s]+(\d+).*?video/i', $output_text, $vid_matches);
-    $video_pids = array_filter(array_merge($vid_matches[1] ?? [], $vid_matches[2] ?? []));
-    if (!empty($video_pids)) {
-        foreach ($video_pids as $pid) {
+    // Parse PIDs from lines like:
+    // |  0x00D3  HEVC video (960x736, main profile, level 3.1,  C    1,391,690 b/s  |
+    // |  0x00DD  MPEG-2 AAC Audio (eng, Audio layer 0, @16,000  C      134,240 b/s  |
+    $lines = explode("\n", $output_text);
+    foreach ($lines as $line) {
+        // Match video PIDs - look for "video" in the line with hex PID
+        if (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+(.+?video.+?)\s+C/i', $line, $match)) {
+            $pid = hexdec($match[1]);
+            $desc = trim($match[2]);
+
+            // Extract codec (H.264, HEVC, MPEG-2, etc.)
+            $codec = 'Video';
+            if (stripos($desc, 'HEVC') !== false || stripos($desc, 'H.265') !== false) {
+                $codec = 'HEVC';
+            } elseif (stripos($desc, 'AVC') !== false || stripos($desc, 'H.264') !== false) {
+                $codec = 'H.264';
+            } elseif (stripos($desc, 'MPEG-2') !== false) {
+                $codec = 'MPEG-2';
+            }
+
+            // Extract resolution if present
+            $width = 0;
+            $height = 0;
+            if (preg_match('/(\d+)x(\d+)/', $desc, $res_match)) {
+                $width = (int)$res_match[1];
+                $height = (int)$res_match[2];
+            }
+
             $result['video_pids'][] = [
-                'pid' => (int)$pid,
-                'codec' => 'H.264',
-                'description' => 'Video PID ' . $pid
+                'pid' => $pid,
+                'codec' => $codec,
+                'width' => $width,
+                'height' => $height,
+                'description' => $desc
             ];
         }
-    }
 
-    // Look for audio PIDs
-    preg_match_all('/audio.*?pid[=:\s]+(\d+)|pid[=:\s]+(\d+).*?audio/i', $output_text, $aud_matches);
-    $audio_pids = array_filter(array_merge($aud_matches[1] ?? [], $aud_matches[2] ?? []));
-    if (!empty($audio_pids)) {
-        foreach ($audio_pids as $pid) {
+        // Match audio PIDs - look for "Audio" in the line with hex PID
+        if (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+(.+?Audio.+?)\s+C/i', $line, $match)) {
+            $pid = hexdec($match[1]);
+            $desc = trim($match[2]);
+
+            // Extract codec
+            $codec = 'Audio';
+            if (stripos($desc, 'AAC') !== false) {
+                $codec = 'AAC';
+            } elseif (stripos($desc, 'AC-3') !== false || stripos($desc, 'AC3') !== false) {
+                $codec = 'AC-3';
+            } elseif (stripos($desc, 'E-AC-3') !== false || stripos($desc, 'EAC3') !== false) {
+                $codec = 'E-AC-3';
+            } elseif (stripos($desc, 'MPEG') !== false) {
+                $codec = 'MPEG Audio';
+            }
+
+            // Extract language if present (e.g., "eng", "spa")
+            $language = 'und';
+            if (preg_match('/\(([a-z]{3}),/i', $desc, $lang_match)) {
+                $language = strtolower($lang_match[1]);
+            }
+
             $result['audio_pids'][] = [
-                'pid' => (int)$pid,
-                'codec' => 'AAC',
-                'language' => 'und',
-                'description' => 'Audio PID ' . $pid
+                'pid' => $pid,
+                'codec' => $codec,
+                'language' => $language,
+                'description' => $desc
             ];
         }
     }
 
-    $result['success'] = true;
-    $result['raw_output'] = $output_text;
+    $result['success'] = !empty($result['video_pids']) || !empty($result['audio_pids']);
+    if (!$result['success']) {
+        $result['error'] = 'No video or audio PIDs found in stream';
+        $result['raw_output'] = $output_text;
+    }
 
     return $result;
 }
