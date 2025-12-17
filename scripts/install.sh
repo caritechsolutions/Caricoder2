@@ -306,10 +306,13 @@ download_repo() {
 
     # Download as tarball (no git required, avoids ownership issues)
     log_info "Fetching from branch: $BRANCH"
-    local TARBALL_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+    # Strip .git suffix if present for tarball URL
+    local REPO_BASE="${REPO_URL%.git}"
+    local TARBALL_URL="${REPO_BASE}/archive/refs/heads/${BRANCH}.tar.gz"
+    log_info "Downloading from: $TARBALL_URL"
 
     if command -v wget &> /dev/null; then
-        wget -q --show-progress -O repo.tar.gz "$TARBALL_URL" 2>&1
+        wget -q -O repo.tar.gz "$TARBALL_URL" 2>&1
     else
         curl -L -f -o repo.tar.gz "$TARBALL_URL"
     fi
