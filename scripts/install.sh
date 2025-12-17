@@ -292,10 +292,10 @@ create_directories() {
     chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
 
     # Config directory permissions:
-    # - Main config owned by service user
+    # - Main config dir needs www-data group access so web can traverse into subdirs
     # - Subdirs (inputs, transcoders, muxers, outputs) need www-data write access for web GUI
     # - ssl dir should be secure (no web access)
-    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
+    chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR"
     chmod 750 "$CONFIG_DIR"
 
     # Web-writable config subdirectories (for web GUI to create/edit configs)
@@ -304,7 +304,7 @@ create_directories() {
         chmod 775 "$CONFIG_DIR/$subdir"
     done
 
-    # Secure ssl directory (no web access)
+    # Secure ssl directory (no web access) - only service user can access
     chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/ssl"
     chmod 700 "$CONFIG_DIR/ssl"
 

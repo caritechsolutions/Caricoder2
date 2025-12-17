@@ -241,6 +241,13 @@ restart_services() {
 fix_permissions() {
     log_step "Fixing permissions..."
 
+    # Parent config dir needs www-data group so web can traverse into subdirs
+    if [[ -d "$CONFIG_DIR" ]]; then
+        log_info "Fixing: $CONFIG_DIR -> $SERVICE_USER:$WEB_USER (750)"
+        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR"
+        chmod 750 "$CONFIG_DIR"
+    fi
+
     # Config subdirectories need www-data write access for web GUI
     for subdir in inputs transcoders muxers outputs; do
         if [[ -d "$CONFIG_DIR/$subdir" ]]; then
