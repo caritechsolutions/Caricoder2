@@ -114,6 +114,37 @@ install_dependencies() {
     log_info "Dependencies installed successfully"
 }
 
+# Install newer GCC for C++20 support (required by TSDuck)
+install_gcc11() {
+    log_step "Checking GCC version for C++20 support..."
+
+    # Check current GCC version
+    local gcc_version=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
+
+    if [[ -n "$gcc_version" && "$gcc_version" -ge 10 ]]; then
+        log_info "GCC $gcc_version already supports C++20"
+        return 0
+    fi
+
+    log_info "Installing GCC 11 for C++20 support..."
+
+    # Add Ubuntu toolchain PPA
+    apt-get install -y software-properties-common
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test
+    apt-get update
+
+    # Install GCC 11
+    apt-get install -y gcc-11 g++-11
+
+    # Set GCC 11 as default
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+
+    # Verify
+    log_info "GCC version: $(gcc --version | head -1)"
+    log_info "G++ version: $(g++ --version | head -1)"
+}
+
 # Install TSDuck from source
 install_tsduck() {
     log_step "Installing TSDuck..."
@@ -130,10 +161,12 @@ install_tsduck() {
     apt-get install -y ca-certificates
     update-ca-certificates
 
+    # Ensure we have GCC with C++20 support
+    install_gcc11
+
     # Install TSDuck build dependencies (minimal, skip docs)
     log_info "Installing TSDuck build dependencies..."
     apt-get install -y \
-        g++ \
         cmake \
         dos2unix \
         graphviz \
