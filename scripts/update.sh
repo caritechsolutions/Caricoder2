@@ -104,10 +104,22 @@ download_latest() {
     cd "$TEMP_DIR"
 
     # Download the repository as a tarball (no git needed)
+    local TARBALL_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
     log_info "Fetching from branch: $BRANCH"
-    curl -sSL "${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz" -o repo.tar.gz
+    log_info "URL: $TARBALL_URL"
 
-    if [[ ! -f repo.tar.gz || ! -s repo.tar.gz ]]; then
+    local DOWNLOAD_OK=false
+    if command -v wget &> /dev/null; then
+        if wget --no-check-certificate -q -O repo.tar.gz "$TARBALL_URL"; then
+            DOWNLOAD_OK=true
+        fi
+    else
+        if curl -k -L -f -o repo.tar.gz "$TARBALL_URL" 2>/dev/null; then
+            DOWNLOAD_OK=true
+        fi
+    fi
+
+    if [[ "$DOWNLOAD_OK" = false ]] || [[ ! -f repo.tar.gz ]] || [[ ! -s repo.tar.gz ]]; then
         log_error "Failed to download repository"
         exit 1
     fi
