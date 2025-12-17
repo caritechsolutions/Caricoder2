@@ -244,8 +244,12 @@ fix_permissions() {
     # Config subdirectories need www-data write access for web GUI
     for subdir in inputs transcoders muxers outputs; do
         if [[ -d "$CONFIG_DIR/$subdir" ]]; then
+            log_info "Fixing: $CONFIG_DIR/$subdir -> $SERVICE_USER:$WEB_USER (775)"
             chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/$subdir"
             chmod 775 "$CONFIG_DIR/$subdir"
+            # Also fix existing config files
+            find "$CONFIG_DIR/$subdir" -type f -name "*.ini" -exec chown "$SERVICE_USER:$WEB_USER" {} \; 2>/dev/null || true
+            find "$CONFIG_DIR/$subdir" -type f -name "*.conf" -exec chown "$SERVICE_USER:$WEB_USER" {} \; 2>/dev/null || true
         fi
     done
 
