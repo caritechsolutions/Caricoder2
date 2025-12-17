@@ -583,11 +583,20 @@ function create_input($data) {
     $config_file = $config_dir . '/' . $id . '.ini';
     $content = build_ini_content($config);
 
-    if (file_put_contents($config_file, $content)) {
+    // Check if directory is writable
+    if (!is_writable($config_dir)) {
+        return ['success' => false, 'error' => "Config directory not writable: $config_dir (check permissions)"];
+    }
+
+    $result = file_put_contents($config_file, $content);
+    if ($result !== false) {
         return ['success' => true, 'id' => $id, 'message' => "Input '{$name}' created successfully"];
     }
 
-    return ['success' => false, 'error' => 'Failed to save configuration'];
+    // Get more detailed error
+    $error = error_get_last();
+    $errorMsg = $error ? $error['message'] : 'Unknown error';
+    return ['success' => false, 'error' => "Failed to save configuration: $errorMsg"];
 }
 
 /**
