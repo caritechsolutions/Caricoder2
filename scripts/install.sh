@@ -423,19 +423,11 @@ install_config() {
         log_info "Config exists, preserving: users.conf"
     fi
 
-    # Example service configs (don't overwrite existing)
-    for dir in inputs transcoders muxers outputs; do
-        for conf in config/$dir/*.conf; do
-            if [[ -f "$conf" ]]; then
-                basename=$(basename "$conf")
-                if [[ ! -f "$CONFIG_DIR/$dir/$basename" ]]; then
-                    cp "$conf" "$CONFIG_DIR/$dir/"
-                fi
-            fi
-        done
-    done
+    # Note: We don't copy example configs - users create their own via the web GUI
 
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
+    # Set proper ownership on config files (but preserve directory permissions)
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/caritrans.conf" 2>/dev/null || true
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/users.conf" 2>/dev/null || true
 
     log_info "Configuration files installed"
 }
