@@ -181,13 +181,13 @@ install_tsduck() {
     git clone https://github.com/tsduck/tsduck.git "$TSDUCK_BUILD_DIR"
     cd "$TSDUCK_BUILD_DIR"
 
-    # Build TSDuck (without docs to avoid Ruby gem SSL issues)
+    # Build TSDuck (without docs and without treating warnings as errors)
     log_info "Building TSDuck (this may take a while)..."
-    make -j$(nproc) NODOC=1
+    make -j$(nproc) NODOC=1 NOERROR=1
 
     # Install TSDuck
     log_info "Installing TSDuck..."
-    make install NODOC=1
+    make install NODOC=1 NOERROR=1
 
     # Cleanup
     cd /
