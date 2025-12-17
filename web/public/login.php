@@ -40,75 +40,110 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - CariTranscoder</title>
-    <link href="css/bootstrap.min.css" rel="stylesheet">
-    <link href="css/caritrans.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
         body {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         .login-container {
             width: 100%;
-            max-width: 400px;
-            padding: 15px;
+            max-width: 420px;
+            padding: 20px;
         }
         .login-card {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 10px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+            background: rgba(255, 255, 255, 0.98);
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
         }
         .login-header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 30px;
-            border-radius: 10px 10px 0 0;
+            padding: 35px 30px;
             text-align: center;
         }
         .login-header h1 {
-            font-size: 1.8rem;
-            margin-bottom: 5px;
+            font-size: 1.9rem;
+            font-weight: 600;
+            margin-bottom: 8px;
         }
         .login-header p {
             opacity: 0.9;
-            margin: 0;
-            font-size: 0.9rem;
+            font-size: 0.95rem;
         }
         .login-body {
-            padding: 30px;
+            padding: 35px 30px;
         }
-        .form-control {
-            border-radius: 5px;
-            padding: 12px 15px;
-            border: 1px solid #ddd;
+        .form-group {
+            margin-bottom: 20px;
         }
-        .form-control:focus {
+        .form-group label {
+            display: block;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 0.95rem;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e1e1e1;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline: none;
+        }
+        .form-group input:focus {
             border-color: #667eea;
-            box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        }
+        .form-group input::placeholder {
+            color: #aaa;
         }
         .btn-login {
+            width: 100%;
+            padding: 14px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border: none;
-            padding: 12px;
+            border-radius: 8px;
+            color: white;
+            font-size: 1.05rem;
             font-weight: 600;
-            border-radius: 5px;
-            width: 100%;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 10px;
         }
         .btn-login:hover {
-            opacity: 0.9;
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
         }
-        .alert-danger {
-            border-radius: 5px;
+        .btn-login:active {
+            transform: translateY(0);
+        }
+        .alert-error {
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
             font-size: 0.9rem;
         }
         .login-footer {
             text-align: center;
-            padding: 15px;
+            padding: 20px;
             color: rgba(255, 255, 255, 0.6);
-            font-size: 0.8rem;
+            font-size: 0.85rem;
         }
     </style>
 </head>
@@ -121,24 +156,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
             <div class="login-body">
                 <?php if ($error): ?>
-                <div class="alert alert-danger" role="alert">
+                <div class="alert-error">
                     <?php echo htmlspecialchars($error); ?>
                 </div>
                 <?php endif; ?>
 
                 <form method="POST" action="">
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="username" name="username"
+                    <div class="form-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username"
                                value="<?php echo htmlspecialchars($username); ?>"
-                               placeholder="Enter username" required autofocus>
+                               placeholder="Enter your username" required autofocus>
                     </div>
-                    <div class="mb-4">
-                        <label for="password" class="form-label">Password</label>
-                        <input type="password" class="form-control" id="password" name="password"
-                               placeholder="Enter password" required>
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password"
+                               placeholder="Enter your password" required>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-login">
+                    <button type="submit" class="btn-login">
                         Sign In
                     </button>
                 </form>
@@ -148,7 +183,5 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             CariTranscoder v<?php echo CARITRANS_VERSION; ?> &copy; <?php echo date('Y'); ?> CariTech Solutions
         </div>
     </div>
-
-    <script src="js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

@@ -549,39 +549,55 @@ TMPFILES
 
 # Print completion message
 print_completion() {
+    # Get server IP
+    local SERVER_IP=$(hostname -I | awk '{print $1}')
+
     echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  CariTranscoder Installation Complete  ${NC}"
-    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║       CariTranscoder Installation Complete!            ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo "Installation Summary:"
-    echo "  - Binaries:    /usr/local/bin/cari-*"
-    echo "  - Config:      $CONFIG_DIR"
-    echo "  - Web:         $WEB_DIR"
-    echo "  - Logs:        $LOG_DIR"
-    echo "  - Data:        $DATA_DIR"
+    echo -e "${BLUE}Installation Summary:${NC}"
+    echo "  Binaries:    /usr/local/bin/cari-*"
+    echo "  Config:      $CONFIG_DIR"
+    echo "  Web:         $WEB_DIR"
+    echo "  Logs:        $LOG_DIR"
+    echo "  Data:        $DATA_DIR"
     echo ""
-    echo "Quick Start:"
-    echo "  1. Start web interface:"
-    echo "     systemctl start nginx php-fpm"
-    echo "     # Or use PHP built-in server:"
-    echo "     php -S 0.0.0.0:8080 -t $WEB_DIR/public"
+    echo -e "${BLUE}Services Status:${NC}"
+    if systemctl is-active --quiet nginx; then
+        echo -e "  Nginx:       ${GREEN}Running${NC}"
+    else
+        echo -e "  Nginx:       ${RED}Not Running${NC}"
+    fi
+    for ver in 8.3 8.2 8.1 8.0 7.4; do
+        if systemctl is-active --quiet "php${ver}-fpm" 2>/dev/null; then
+            echo -e "  PHP-FPM:     ${GREEN}Running (PHP $ver)${NC}"
+            break
+        fi
+    done
+    if command -v tsp &> /dev/null; then
+        echo -e "  TSDuck:      ${GREEN}Installed${NC}"
+    else
+        echo -e "  TSDuck:      ${YELLOW}Not Installed${NC}"
+    fi
     echo ""
-    echo "  2. Access web UI:"
-    echo "     http://YOUR_SERVER_IP:8080"
-    echo "     Default login: admin / admin"
-    echo "     (Change password immediately!)"
+    echo -e "${BLUE}Web Interface:${NC}"
+    echo -e "  URL:         ${GREEN}http://${SERVER_IP}:8080${NC}"
+    echo "  Username:    admin"
+    echo "  Password:    admin"
     echo ""
-    echo "  3. Start a service:"
-    echo "     systemctl start cari-input@input-001"
+    echo -e "${BLUE}Quick Commands:${NC}"
+    echo "  Start transcoder:  systemctl start cari-input@input-001"
+    echo "  View logs:         journalctl -u cari-input@input-001 -f"
+    echo "  Restart nginx:     systemctl restart nginx"
     echo ""
-    echo "  4. View logs:"
-    echo "     journalctl -u cari-input@input-001 -f"
+    echo -e "${BLUE}Update CariTranscoder:${NC}"
+    echo "  curl -sSL \"https://raw.githubusercontent.com/caritechsolutions/Caricoder2/$BRANCH/scripts/update.sh?\$(date +%s)\" | sudo bash"
     echo ""
-    echo "Update CariTranscoder:"
-    echo "  curl -sSL https://raw.githubusercontent.com/caritechsolutions/Caricoder2/main/scripts/update.sh | sudo bash"
-    echo ""
-    echo -e "${YELLOW}IMPORTANT: Change the default admin password!${NC}"
+    echo -e "${YELLOW}╔════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  IMPORTANT: Change the default admin password now!     ║${NC}"
+    echo -e "${YELLOW}╚════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
