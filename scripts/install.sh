@@ -201,12 +201,32 @@ install_tsduck() {
 
     # Download the .deb package
     local DEB_FILE="/tmp/tsduck.deb"
-    curl -sSL -o "$DEB_FILE" "$RELEASE_URL"
+    rm -f "$DEB_FILE"
 
+    # Use wget with explicit redirect following (more reliable for GitHub releases)
+    if command -v wget &> /dev/null; then
+        wget -q --show-progress -O "$DEB_FILE" "$RELEASE_URL" 2>&1 || true
+    else
+        curl -L -f -o "$DEB_FILE" "$RELEASE_URL" 2>&1 || true
+    fi
+
+    # Verify download
     if [[ ! -f "$DEB_FILE" || ! -s "$DEB_FILE" ]]; then
         log_error "Failed to download TSDuck package"
         return 1
     fi
+
+    # Verify it's actually a .deb file (should start with "!<arch>")
+    local FILE_TYPE=$(file "$DEB_FILE" 2>/dev/null || echo "unknown")
+    if ! echo "$FILE_TYPE" | grep -qi "debian\|archive"; then
+        log_error "Downloaded file is not a valid Debian package"
+        log_error "File type: $FILE_TYPE"
+        log_error "This may be a GitHub redirect issue. Try manual installation."
+        rm -f "$DEB_FILE"
+        return 1
+    fi
+
+    log_info "Download successful ($(du -h "$DEB_FILE" | cut -f1))"
 
     # Install dependencies that TSDuck might need
     log_info "Installing TSDuck runtime dependencies..."
@@ -214,7 +234,7 @@ install_tsduck() {
 
     # Install the package
     log_info "Installing TSDuck package..."
-    dpkg -i "$DEB_FILE" || true
+    dpkg -i "$DEB_FILE"
 
     # Fix any missing dependencies
     apt-get install -f -y
@@ -228,6 +248,7 @@ install_tsduck() {
     else
         log_warn "TSDuck installation may have failed. Check manually."
         log_warn "Visit: https://github.com/tsduck/tsduck/releases"
+        return 1
     fi
 }
 
@@ -272,20 +293,45 @@ create_directories() {
     log_info "Directories created"
 }
 
-# Clone or update repository
-clone_repo() {
+# Download repository (using tarball to avoid git ownership issues)
+download_repo() {
     log_step "Downloading CariTranscoder..."
 
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-        log_info "Repository exists, updating..."
-        cd "$INSTALL_DIR"
-        git fetch origin
-        git checkout "$BRANCH"
-        git pull origin "$BRANCH"
+    local TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+
+    # Download as tarball (no git required, avoids ownership issues)
+    log_info "Fetching from branch: $BRANCH"
+    local TARBALL_URL="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+
+    if command -v wget &> /dev/null; then
+        wget -q --show-progress -O repo.tar.gz "$TARBALL_URL" 2>&1
     else
-        rm -rf "$INSTALL_DIR"/*
-        git clone -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        curl -L -f -o repo.tar.gz "$TARBALL_URL"
     fi
+
+    if [[ ! -f repo.tar.gz || ! -s repo.tar.gz ]]; then
+        log_error "Failed to download repository"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    # Extract
+    tar -xzf repo.tar.gz
+    local EXTRACTED_DIR=$(ls -d Caricoder2-* 2>/dev/null | head -1)
+
+    if [[ -z "$EXTRACTED_DIR" || ! -d "$EXTRACTED_DIR" ]]; then
+        log_error "Failed to extract repository"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    # Clear and copy to install dir
+    rm -rf "$INSTALL_DIR"/*
+    cp -r "$EXTRACTED_DIR"/* "$INSTALL_DIR/"
+
+    # Cleanup temp
+    rm -rf "$TEMP_DIR"
 
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     log_info "Repository downloaded to $INSTALL_DIR"
@@ -623,7 +669,7 @@ main() {
     install_tsduck
     create_user
     create_directories
-    clone_repo
+    download_repo
     build_apps
     install_binaries
     install_config
