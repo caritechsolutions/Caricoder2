@@ -146,7 +146,7 @@ function sanitize_name_to_id($name) {
  * Check if input exists
  */
 function input_exists($id, $exclude_id = '') {
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.ini';
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
     if ($exclude_id && $id === $exclude_id) {
         return false;
     }
@@ -158,7 +158,7 @@ function input_exists($id, $exclude_id = '') {
  */
 function get_input_config($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.ini';
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
         return null;
@@ -580,7 +580,7 @@ function create_input($data) {
     }
 
     // Write config file
-    $config_file = $config_dir . '/' . $id . '.ini';
+    $config_file = $config_dir . '/' . $id . '.conf';
     $content = build_ini_content($config);
 
     // Check if directory is writable
@@ -604,7 +604,7 @@ function create_input($data) {
  */
 function update_input($id, $data) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.ini';
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
         return ['success' => false, 'error' => 'Input not found'];
@@ -668,7 +668,7 @@ function delete_input($id) {
     stop_input_service($id);
 
     // Remove config file
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.ini';
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
 
     if (file_exists($config_file)) {
         unlink($config_file);
