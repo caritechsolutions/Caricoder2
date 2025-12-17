@@ -126,19 +126,49 @@ install_tsduck() {
         return 0
     fi
 
-    # Detect architecture
+    # Detect architecture and OS version
     local ARCH=$(dpkg --print-architecture)
     source /etc/os-release
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
+    # Determine TSDuck version and package name based on Ubuntu version
+    local TSDUCK_VERSION=""
+    local UBUNTU_TAG=""
+
+    case "$VERSION_CODENAME" in
+        noble|plucky|oracular)
+            # Ubuntu 24.04+ - use latest TSDuck
+            TSDUCK_VERSION="3.42-4421"
+            UBUNTU_TAG="ubuntu24"
+            ;;
+        jammy)
+            # Ubuntu 22.04 - use older version compatible with this release
+            TSDUCK_VERSION="3.37-3520"
+            UBUNTU_TAG="ubuntu22"
+            ;;
+        focal)
+            # Ubuntu 20.04 - use version that supports focal
+            TSDUCK_VERSION="3.26-2349"
+            UBUNTU_TAG="ubuntu20"
+            ;;
+        *)
+            # Unknown - try ubuntu24 package
+            log_warn "Unknown Ubuntu version, trying ubuntu24 package"
+            TSDUCK_VERSION="3.42-4421"
+            UBUNTU_TAG="ubuntu24"
+            ;;
+    esac
+
+    local PACKAGE_NAME="tsduck_${TSDUCK_VERSION}.${UBUNTU_TAG}_${ARCH}.deb"
+    log_info "Looking for TSDuck package: $PACKAGE_NAME"
+
     local DEB_FILE=""
     local FOUND_LOCAL=false
 
-    # STEP 1: Check for local package in the installed repo (preferred method)
-    # The packages directory should contain pre-downloaded .deb files
+    # STEP 1: Check for local package matching the OS version (preferred method)
     if [[ -d "$INSTALL_DIR/packages" ]]; then
-        # Look for TSDuck .deb matching architecture
-        local LOCAL_DEB=$(find "$INSTALL_DIR/packages" -name "tsduck*${ARCH}.deb" 2>/dev/null | head -1)
+        # First try exact match for this Ubuntu version
+        local LOCAL_DEB=$(find "$INSTALL_DIR/packages" -name "tsduck*${UBUNTU_TAG}*${ARCH}.deb" 2>/dev/null | head -1)
         if [[ -f "$LOCAL_DEB" ]]; then
             log_info "Found local TSDuck package: $(basename "$LOCAL_DEB")"
             DEB_FILE="$LOCAL_DEB"
@@ -150,14 +180,12 @@ install_tsduck() {
     if [[ "$FOUND_LOCAL" = false ]]; then
         log_info "No local package found, attempting download..."
 
-        # TSDuck version and download URLs
-        local TSDUCK_VERSION="3.42-4421"
-        local GITHUB_URL="https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
+        local GITHUB_URL="https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/${PACKAGE_NAME}"
 
         DEB_FILE="/tmp/tsduck.deb"
         rm -f "$DEB_FILE"
 
-        log_info "Downloading TSDuck from GitHub..."
+        log_info "Downloading TSDuck v${TSDUCK_VERSION} from GitHub..."
 
         # Try download (with retries)
         local DOWNLOAD_SUCCESS=false
@@ -181,8 +209,7 @@ install_tsduck() {
             log_error "Failed to download TSDuck package"
             log_error ""
             log_error "Please download TSDuck manually and place it in packages/ directory:"
-            log_error "  1. Download from: https://github.com/tsduck/tsduck/releases"
-            log_error "     File: tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
+            log_error "  1. Download from: https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/${PACKAGE_NAME}"
             log_error "  2. Place in: $INSTALL_DIR/packages/"
             log_error "  3. Re-run installer"
             log_error ""
