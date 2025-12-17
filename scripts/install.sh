@@ -126,103 +126,105 @@ install_tsduck() {
         return 0
     fi
 
-    # Detect architecture and Ubuntu version
+    # Detect architecture
     local ARCH=$(dpkg --print-architecture)
-    local RELEASE_URL=""
-
-    # Get Ubuntu version codename
     source /etc/os-release
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
-    # TSDuck packages are hosted at tsduck.io/installers
-    # Latest versions only support Ubuntu 24+, but we'll try Ubuntu 24 package on older systems
-    # The runtime package is: tsduck_VERSION.ubuntuXX_ARCH.deb
-    local TSDUCK_VERSION="3.43-4524"
-    local TSDUCK_BASE="https://tsduck.io/installers"
+    local DEB_FILE=""
+    local FOUND_LOCAL=false
 
-    case "$VERSION_CODENAME" in
-        noble|plucky)
-            # Ubuntu 24.04+ - use native ubuntu24 package
-            log_info "Using TSDuck $TSDUCK_VERSION for Ubuntu 24+"
-            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
-            ;;
-        jammy)
-            # Ubuntu 22.04 - try ubuntu24 package (may work with compatible libs)
-            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build) for Ubuntu 22.04"
-            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
-            ;;
-        focal)
-            # Ubuntu 20.04 - try ubuntu24 package (may need manual lib install)
-            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build) for Ubuntu 20.04"
-            log_warn "Note: May require additional dependencies"
-            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
-            ;;
-        *)
-            # Other/unknown - try ubuntu24 package
-            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build)"
-            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
-            ;;
-    esac
-
-    if [[ -z "$RELEASE_URL" ]]; then
-        log_warn "Could not find compatible TSDuck package for $PRETTY_NAME $ARCH"
-        log_warn "TSDuck will need to be installed manually."
-        log_warn "Visit: https://github.com/tsduck/tsduck/releases"
-        return 1
+    # STEP 1: Check for local package in the installed repo (preferred method)
+    # The packages directory should contain pre-downloaded .deb files
+    if [[ -d "$INSTALL_DIR/packages" ]]; then
+        # Look for TSDuck .deb matching architecture
+        local LOCAL_DEB=$(find "$INSTALL_DIR/packages" -name "tsduck*${ARCH}.deb" 2>/dev/null | head -1)
+        if [[ -f "$LOCAL_DEB" ]]; then
+            log_info "Found local TSDuck package: $(basename "$LOCAL_DEB")"
+            DEB_FILE="$LOCAL_DEB"
+            FOUND_LOCAL=true
+        fi
     fi
 
-    log_info "Downloading TSDuck from: $RELEASE_URL"
+    # STEP 2: If no local package, try to download from GitHub releases
+    if [[ "$FOUND_LOCAL" = false ]]; then
+        log_info "No local package found, attempting download..."
 
-    # Download the .deb package
-    local DEB_FILE="/tmp/tsduck.deb"
-    rm -f "$DEB_FILE"
+        # TSDuck version and download URLs
+        local TSDUCK_VERSION="3.42-4421"
+        local GITHUB_URL="https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
 
-    # Download with wget or curl
-    # Use --no-check-certificate / -k for systems with outdated CA certificates
-    if command -v wget &> /dev/null; then
-        wget --no-check-certificate -q -O "$DEB_FILE" "$RELEASE_URL" 2>&1
-    else
-        curl -k -L -f -o "$DEB_FILE" "$RELEASE_URL" 2>&1
-    fi
-
-    # Verify download
-    if [[ ! -f "$DEB_FILE" || ! -s "$DEB_FILE" ]]; then
-        log_error "Failed to download TSDuck package"
-        return 1
-    fi
-
-    # Verify it's actually a .deb file (should start with "!<arch>")
-    local FILE_TYPE=$(file "$DEB_FILE" 2>/dev/null || echo "unknown")
-    if ! echo "$FILE_TYPE" | grep -qi "debian\|archive"; then
-        log_error "Downloaded file is not a valid Debian package"
-        log_error "File type: $FILE_TYPE"
-        log_error "This may be a GitHub redirect issue. Try manual installation."
+        DEB_FILE="/tmp/tsduck.deb"
         rm -f "$DEB_FILE"
-        return 1
+
+        log_info "Downloading TSDuck from GitHub..."
+
+        # Try download (with retries)
+        local DOWNLOAD_SUCCESS=false
+        for attempt in 1 2 3; do
+            if command -v wget &> /dev/null; then
+                if wget --no-check-certificate -q -O "$DEB_FILE" "$GITHUB_URL" 2>/dev/null; then
+                    DOWNLOAD_SUCCESS=true
+                    break
+                fi
+            else
+                if curl -k -L -f -o "$DEB_FILE" "$GITHUB_URL" 2>/dev/null; then
+                    DOWNLOAD_SUCCESS=true
+                    break
+                fi
+            fi
+            log_warn "Download attempt $attempt failed, retrying..."
+            sleep 2
+        done
+
+        if [[ "$DOWNLOAD_SUCCESS" = false ]] || [[ ! -f "$DEB_FILE" ]] || [[ ! -s "$DEB_FILE" ]]; then
+            log_error "Failed to download TSDuck package"
+            log_error ""
+            log_error "Please download TSDuck manually and place it in packages/ directory:"
+            log_error "  1. Download from: https://github.com/tsduck/tsduck/releases"
+            log_error "     File: tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
+            log_error "  2. Place in: $INSTALL_DIR/packages/"
+            log_error "  3. Re-run installer"
+            log_error ""
+            return 1
+        fi
+
+        # Verify it's actually a .deb file
+        local FILE_TYPE=$(file "$DEB_FILE" 2>/dev/null || echo "unknown")
+        if ! echo "$FILE_TYPE" | grep -qi "debian\|archive"; then
+            log_error "Downloaded file is not a valid Debian package"
+            rm -f "$DEB_FILE"
+            return 1
+        fi
+
+        log_info "Download successful ($(du -h "$DEB_FILE" | cut -f1))"
     fi
 
-    log_info "Download successful ($(du -h "$DEB_FILE" | cut -f1))"
-
-    # Install dependencies that TSDuck might need
+    # STEP 3: Install the package
     log_info "Installing TSDuck runtime dependencies..."
     apt-get install -y libcurl4 libpcsclite1 libedit2 || true
 
-    # Install the package
     log_info "Installing TSDuck package..."
-    dpkg -i "$DEB_FILE"
+    if dpkg -i "$DEB_FILE"; then
+        log_info "TSDuck package installed"
+    else
+        log_warn "dpkg install had issues, attempting to fix dependencies..."
+    fi
 
     # Fix any missing dependencies
     apt-get install -f -y
 
-    # Cleanup
-    rm -f "$DEB_FILE"
+    # Cleanup temp file (but not local package)
+    if [[ "$FOUND_LOCAL" = false ]] && [[ -f "/tmp/tsduck.deb" ]]; then
+        rm -f "/tmp/tsduck.deb"
+    fi
 
     # Verify installation
     if command -v tsp &> /dev/null; then
         log_info "TSDuck installed successfully: $(tsp --version 2>&1 | head -1)"
     else
-        log_warn "TSDuck installation may have failed. Check manually."
-        log_warn "Visit: https://github.com/tsduck/tsduck/releases"
+        log_warn "TSDuck installation may have failed."
+        log_warn "Stream scanning will use ffprobe as fallback."
         return 1
     fi
 }

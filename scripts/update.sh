@@ -137,6 +137,13 @@ update_web() {
         log_info "Updated web files"
     fi
 
+    # Update packages directory (contains TSDuck .deb files)
+    if [[ -d "$TEMP_DIR/caritrans_latest/packages" ]]; then
+        mkdir -p "$INSTALL_DIR/packages"
+        cp -r "$TEMP_DIR/caritrans_latest/packages/"* "$INSTALL_DIR/packages/" 2>/dev/null || true
+        log_info "Updated packages directory"
+    fi
+
     # Set permissions
     chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
     find "$WEB_DIR" -type d -exec chmod 755 {} \;
