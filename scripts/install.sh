@@ -134,47 +134,33 @@ install_tsduck() {
     source /etc/os-release
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
-    # Use specific TSDuck versions known to work with each Ubuntu version
-    # Check https://github.com/tsduck/tsduck/releases for available packages
+    # TSDuck packages are hosted at tsduck.io/installers
+    # Latest versions only support Ubuntu 24+, but we'll try Ubuntu 24 package on older systems
+    # The runtime package is: tsduck_VERSION.ubuntuXX_ARCH.deb
+    local TSDUCK_VERSION="3.43-4524"
+    local TSDUCK_BASE="https://tsduck.io/installers"
+
     case "$VERSION_CODENAME" in
-        focal)
-            # Ubuntu 20.04 - use TSDuck 3.26-2349 (last version with focal packages)
-            log_info "Using TSDuck 3.26 for Ubuntu 20.04 (focal)"
-            if [[ "$ARCH" == "amd64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.26-2349/tsduck_3.26-2349.ubuntu20_amd64.deb"
-            elif [[ "$ARCH" == "arm64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.26-2349/tsduck_3.26-2349.ubuntu20_arm64.deb"
-            fi
+        noble|plucky)
+            # Ubuntu 24.04+ - use native ubuntu24 package
+            log_info "Using TSDuck $TSDUCK_VERSION for Ubuntu 24+"
+            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
             ;;
         jammy)
-            # Ubuntu 22.04 - use TSDuck 3.32-2983 (last version with jammy packages)
-            log_info "Using TSDuck 3.32 for Ubuntu 22.04 (jammy)"
-            if [[ "$ARCH" == "amd64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.32-2983/tsduck_3.32-2983.ubuntu22_amd64.deb"
-            elif [[ "$ARCH" == "arm64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.32-2983/tsduck_3.32-2983.ubuntu22_arm64.deb"
-            fi
+            # Ubuntu 22.04 - try ubuntu24 package (may work with compatible libs)
+            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build) for Ubuntu 22.04"
+            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
             ;;
-        noble)
-            # Ubuntu 24.04 - use latest TSDuck
-            log_info "Using TSDuck 3.42 for Ubuntu 24.04 (noble)"
-            if [[ "$ARCH" == "amd64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.42-4421/tsduck_3.42-4421.ubuntu24_amd64.deb"
-            elif [[ "$ARCH" == "arm64" ]]; then
-                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.42-4421/tsduck_3.42-4421.ubuntu24_arm64.deb"
-            fi
+        focal)
+            # Ubuntu 20.04 - try ubuntu24 package (may need manual lib install)
+            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build) for Ubuntu 20.04"
+            log_warn "Note: May require additional dependencies"
+            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
             ;;
         *)
-            # Other/unknown - try latest Ubuntu package
-            log_info "Unknown Ubuntu version, trying latest TSDuck release"
-            local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
-            local ALL_DEBS=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | cut -d'"' -f4)
-            for url in $ALL_DEBS; do
-                if echo "$url" | grep -iq "ubuntu" && echo "$url" | grep -iq "$ARCH"; then
-                    RELEASE_URL="$url"
-                    break
-                fi
-            done
+            # Other/unknown - try ubuntu24 package
+            log_info "Using TSDuck $TSDUCK_VERSION (ubuntu24 build)"
+            RELEASE_URL="${TSDUCK_BASE}/tsduck_${TSDUCK_VERSION}.ubuntu24_${ARCH}.deb"
             ;;
     esac
 
