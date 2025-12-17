@@ -286,14 +286,27 @@ create_directories() {
 
     # Set permissions
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
-    chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
     chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
     chown -R "$SERVICE_USER:$SERVICE_USER" "$RUN_DIR"
     chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
+    chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
 
-    # Secure config directory
+    # Config directory permissions:
+    # - Main config owned by service user
+    # - Subdirs (inputs, transcoders, muxers, outputs) need www-data write access for web GUI
+    # - ssl dir should be secure (no web access)
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
     chmod 750 "$CONFIG_DIR"
+
+    # Web-writable config subdirectories (for web GUI to create/edit configs)
+    for subdir in inputs transcoders muxers outputs; do
+        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/$subdir"
+        chmod 775 "$CONFIG_DIR/$subdir"
+    done
+
+    # Secure ssl directory (no web access)
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/ssl"
+    chmod 700 "$CONFIG_DIR/ssl"
 
     log_info "Directories created"
 }

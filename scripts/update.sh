@@ -237,6 +237,26 @@ restart_services() {
     log_info "Services restarted"
 }
 
+# Fix permissions (ensure web GUI can write to config dirs)
+fix_permissions() {
+    log_step "Fixing permissions..."
+
+    # Config subdirectories need www-data write access for web GUI
+    for subdir in inputs transcoders muxers outputs; do
+        if [[ -d "$CONFIG_DIR/$subdir" ]]; then
+            chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/$subdir"
+            chmod 775 "$CONFIG_DIR/$subdir"
+        fi
+    done
+
+    # Web directory
+    chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR"
+    find "$WEB_DIR" -type d -exec chmod 755 {} \;
+    find "$WEB_DIR" -type f -exec chmod 644 {} \;
+
+    log_info "Permissions fixed"
+}
+
 # Cleanup temp files
 cleanup() {
     log_step "Cleaning up..."
@@ -300,6 +320,7 @@ main() {
     update_web
     update_api
     rebuild_apps
+    fix_permissions
     restart_services
     cleanup
     print_completion
