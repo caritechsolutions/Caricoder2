@@ -418,12 +418,13 @@ install_config() {
     # Users config
     if [[ ! -f "$CONFIG_DIR/users.conf" ]]; then
         cp config/users.conf "$CONFIG_DIR/"
-        # Needs to be readable by www-data for PHP authentication
-        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
-        chmod 640 "$CONFIG_DIR/users.conf"
+        log_info "Created: users.conf"
     else
         log_info "Config exists, preserving: users.conf"
     fi
+    # Always fix users.conf permissions (needs to be readable by www-data for PHP authentication)
+    chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
+    chmod 640 "$CONFIG_DIR/users.conf"
 
     # Note: We don't copy example configs - users create their own via the web GUI
 
