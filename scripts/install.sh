@@ -421,6 +421,11 @@ install_config() {
         log_info "Created: users.conf"
     else
         log_info "Config exists, preserving: users.conf"
+        # Fix broken default password hash from older versions (sha256('admin') -> sha256('caritrans:admin'))
+        if grep -q "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" "$CONFIG_DIR/users.conf" 2>/dev/null; then
+            sed -i 's/8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918/ff926ade7adab2dac701d5e883389d449fc40cb79145159ba8905202f2191dbb/' "$CONFIG_DIR/users.conf"
+            log_info "Fixed: default admin password hash"
+        fi
     fi
     # Always fix users.conf permissions (needs to be readable by www-data for PHP authentication)
     chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
