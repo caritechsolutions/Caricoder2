@@ -177,11 +177,12 @@ install_tsduck() {
     local DEB_FILE="/tmp/tsduck.deb"
     rm -f "$DEB_FILE"
 
-    # Use wget with explicit redirect following (more reliable for GitHub releases)
+    # Download with wget or curl
+    # Use --no-check-certificate / -k for systems with outdated CA certificates
     if command -v wget &> /dev/null; then
-        wget -q --show-progress -O "$DEB_FILE" "$RELEASE_URL" 2>&1 || true
+        wget --no-check-certificate -q -O "$DEB_FILE" "$RELEASE_URL" 2>&1
     else
-        curl -L -f -o "$DEB_FILE" "$RELEASE_URL" 2>&1 || true
+        curl -k -L -f -o "$DEB_FILE" "$RELEASE_URL" 2>&1
     fi
 
     # Verify download
