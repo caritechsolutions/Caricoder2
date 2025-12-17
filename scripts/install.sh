@@ -95,6 +95,9 @@ install_dependencies() {
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-tools
 
+    # FFmpeg (for stream analysis and fallback transcoding)
+    apt-get install -y ffmpeg
+
     # SRT support
     apt-get install -y libsrt-dev libsrt1.5-openssl || apt-get install -y libsrt-dev || true
 
@@ -580,6 +583,11 @@ print_completion() {
         echo -e "  TSDuck:      ${GREEN}Installed${NC}"
     else
         echo -e "  TSDuck:      ${YELLOW}Not Installed${NC}"
+    fi
+    if command -v ffprobe &> /dev/null; then
+        echo -e "  FFmpeg:      ${GREEN}Installed${NC}"
+    else
+        echo -e "  FFmpeg:      ${YELLOW}Not Installed${NC}"
     fi
     echo ""
     echo -e "${BLUE}Web Interface:${NC}"
