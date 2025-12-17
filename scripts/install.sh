@@ -111,16 +111,47 @@ install_dependencies() {
     # Nginx (optional, for production)
     apt-get install -y nginx || true
 
-    # TSDuck (optional)
-    if ! command -v tsp &> /dev/null; then
-        log_info "Installing TSDuck..."
-        # Try to install from package or skip
-        apt-get install -y tsduck || {
-            log_warn "TSDuck not available in repos. Install manually if needed."
-        }
+    log_info "Dependencies installed successfully"
+}
+
+# Install TSDuck from source
+install_tsduck() {
+    log_step "Installing TSDuck..."
+
+    if command -v tsp &> /dev/null; then
+        log_info "TSDuck already installed: $(tsp --version 2>&1 | head -1)"
+        return 0
     fi
 
-    log_info "Dependencies installed successfully"
+    local TSDUCK_BUILD_DIR="/tmp/tsduck-build"
+
+    # Clone TSDuck
+    rm -rf "$TSDUCK_BUILD_DIR"
+    git clone https://github.com/tsduck/tsduck.git "$TSDUCK_BUILD_DIR"
+    cd "$TSDUCK_BUILD_DIR"
+
+    # Install TSDuck prerequisites
+    log_info "Installing TSDuck prerequisites..."
+    scripts/install-prerequisites.sh
+
+    # Build TSDuck
+    log_info "Building TSDuck (this may take a while)..."
+    make -j$(nproc) default
+
+    # Install TSDuck
+    log_info "Installing TSDuck..."
+    make install
+
+    # Cleanup
+    cd /
+    rm -rf "$TSDUCK_BUILD_DIR"
+
+    # Verify installation
+    if command -v tsp &> /dev/null; then
+        log_info "TSDuck installed successfully: $(tsp --version 2>&1 | head -1)"
+    else
+        log_warn "TSDuck installation may have failed. Check manually."
+    fi
 }
 
 # Create system user
@@ -415,6 +446,7 @@ main() {
     check_root
     check_os
     install_dependencies
+    install_tsduck
     create_user
     create_directories
     clone_repo
