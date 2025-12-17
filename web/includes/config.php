@@ -10,7 +10,7 @@ if (!defined('CARITRANS')) {
 }
 
 // Version
-define('CARITRANS_VERSION', '1.0.0');
+define('CARITRANS_VERSION', '1.0.1');
 
 // Paths
 define('CONFIG_DIR', '/etc/caritrans');
