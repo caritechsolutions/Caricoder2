@@ -57,7 +57,7 @@ ring_buffer_t* ring_buffer_open(const char *name,
     /* Allocate handle */
     rb = calloc(1, sizeof(ring_buffer_t));
     if (!rb) {
-        LOG_ERROR("Failed to allocate ring buffer handle");
+        CARI_LOG_ERROR("Failed to allocate ring buffer handle");
         return NULL;
     }
 
@@ -79,11 +79,11 @@ ring_buffer_t* ring_buffer_open(const char *name,
     shm_fd = shm_open(rb->shm_name, flags, opts.mode);
     if (shm_fd < 0) {
         if (errno == EEXIST && opts.exclusive) {
-            LOG_ERROR("Ring buffer '%s' already exists", name);
+            CARI_LOG_ERROR("Ring buffer '%s' already exists", name);
         } else if (errno == ENOENT && !opts.create) {
-            LOG_ERROR("Ring buffer '%s' does not exist", name);
+            CARI_LOG_ERROR("Ring buffer '%s' does not exist", name);
         } else {
-            LOG_ERROR("Failed to open shared memory '%s': %s",
+            CARI_LOG_ERROR("Failed to open shared memory '%s': %s",
                       rb->shm_name, strerror(errno));
         }
         goto error;
@@ -95,7 +95,7 @@ ring_buffer_t* ring_buffer_open(const char *name,
         created = true;
         /* Set size */
         if (ftruncate(shm_fd, rb->shm_size) < 0) {
-            LOG_ERROR("Failed to set shared memory size: %s", strerror(errno));
+            CARI_LOG_ERROR("Failed to set shared memory size: %s", strerror(errno));
             goto error;
         }
     }
@@ -104,7 +104,7 @@ ring_buffer_t* ring_buffer_open(const char *name,
     shm_ptr = mmap(NULL, rb->shm_size, PROT_READ | PROT_WRITE,
                    MAP_SHARED, shm_fd, 0);
     if (shm_ptr == MAP_FAILED) {
-        LOG_ERROR("Failed to map shared memory: %s", strerror(errno));
+        CARI_LOG_ERROR("Failed to map shared memory: %s", strerror(errno));
         goto error;
     }
 
@@ -127,21 +127,21 @@ ring_buffer_t* ring_buffer_open(const char *name,
         atomic_store(&rb->header->write_idx, 0);
         atomic_store(&rb->header->read_idx, 0);
         atomic_store(&rb->header->flags, RING_BUFFER_FLAG_ACTIVE);
-        LOG_INFO("Created ring buffer '%s' with capacity %u packets (%.1f MB)",
+        CARI_LOG_INFO("Created ring buffer '%s' with capacity %u packets (%.1f MB)",
                  name, opts.capacity,
                  (double)rb->shm_size / (1024 * 1024));
     } else {
         /* Validate existing buffer */
         if (rb->header->magic != RING_BUFFER_MAGIC) {
-            LOG_ERROR("Invalid ring buffer magic number");
+            CARI_LOG_ERROR("Invalid ring buffer magic number");
             goto error;
         }
         if (rb->header->version != RING_BUFFER_VERSION) {
-            LOG_ERROR("Ring buffer version mismatch (expected %u, got %u)",
+            CARI_LOG_ERROR("Ring buffer version mismatch (expected %u, got %u)",
                       RING_BUFFER_VERSION, rb->header->version);
             goto error;
         }
-        LOG_INFO("Opened existing ring buffer '%s'", name);
+        CARI_LOG_INFO("Opened existing ring buffer '%s'", name);
     }
 
     /* Register as writer or reader */
@@ -197,7 +197,7 @@ void ring_buffer_close(ring_buffer_t *rb, bool unlink) {
     /* Unlink if requested */
     if (unlink) {
         shm_unlink(rb->shm_name);
-        LOG_INFO("Unlinked ring buffer '%s'", rb->shm_name);
+        CARI_LOG_INFO("Unlinked ring buffer '%s'", rb->shm_name);
     }
 
     free(rb);

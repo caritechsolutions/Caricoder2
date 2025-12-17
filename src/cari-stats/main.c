@@ -31,7 +31,7 @@ int main(int argc, char *argv[]) {
     strncpy(log_cfg.ident, "cari-stats", sizeof(log_cfg.ident));
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder Stats Daemon starting...");
+    CARI_LOG_INFO("CariTranscoder Stats Daemon starting...");
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
         sleep(1);
     }
 
-    LOG_INFO("Stats daemon shutting down...");
+    CARI_LOG_INFO("Stats daemon shutting down...");
     log_shutdown();
 
     return 0;

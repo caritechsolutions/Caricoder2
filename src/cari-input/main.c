@@ -65,14 +65,14 @@ static void signal_handler(int signum) {
     switch (signum) {
         case SIGINT:
         case SIGTERM:
-            LOG_INFO("Received signal %d, shutting down...", signum);
+            CARI_LOG_INFO("Received signal %d, shutting down...", signum);
             g_state.running = 0;
             if (g_state.main_loop) {
                 g_main_loop_quit(g_state.main_loop);
             }
             break;
         case SIGHUP:
-            LOG_INFO("Received SIGHUP, reloading configuration...");
+            CARI_LOG_INFO("Received SIGHUP, reloading configuration...");
             g_state.reload_config = 1;
             break;
     }
@@ -95,7 +95,7 @@ static void setup_signals(void) {
 /* Load configuration */
 static int load_config(app_state_t *state) {
     if (config_load(&state->config, state->config_file) != 0) {
-        LOG_ERROR("Failed to load configuration from %s", state->config_file);
+        CARI_LOG_ERROR("Failed to load configuration from %s", state->config_file);
         return -1;
     }
 
@@ -144,7 +144,7 @@ static int load_config(app_state_t *state) {
                  config_get_string(&state->config, "source", "path", ""));
     }
 
-    LOG_INFO("Configured: %s (%s) - Type: %s, Source: %s",
+    CARI_LOG_INFO("Configured: %s (%s) - Type: %s, Source: %s",
              state->name, state->id, state->input_type, state->source_uri);
 
     return 0;
@@ -222,16 +222,16 @@ static int build_pipeline(app_state_t *state) {
                  "filesrc location=\"%s\" ! tsparse ! appsink name=sink",
                  state->source_uri + 7); /* Skip "file://" */
     } else {
-        LOG_ERROR("Unsupported input type: %s", state->input_type);
+        CARI_LOG_ERROR("Unsupported input type: %s", state->input_type);
         return -1;
     }
 
-    LOG_DEBUG("Pipeline: %s", pipeline_str);
+    CARI_LOG_DEBUG("Pipeline: %s", pipeline_str);
 
     /* Parse pipeline */
     state->pipeline = gst_parse_launch(pipeline_str, &error);
     if (!state->pipeline) {
-        LOG_ERROR("Failed to create pipeline: %s", error ? error->message : "unknown");
+        CARI_LOG_ERROR("Failed to create pipeline: %s", error ? error->message : "unknown");
         if (error) g_error_free(error);
         return -1;
     }
@@ -239,7 +239,7 @@ static int build_pipeline(app_state_t *state) {
     /* Get appsink */
     state->appsink = gst_bin_get_by_name(GST_BIN(state->pipeline), "sink");
     if (!state->appsink) {
-        LOG_ERROR("Failed to get appsink element");
+        CARI_LOG_ERROR("Failed to get appsink element");
         return -1;
     }
 
@@ -317,7 +317,7 @@ int main(int argc, char *argv[]) {
     }
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder Input starting...");
+    CARI_LOG_INFO("CariTranscoder Input starting...");
 
     /* Copy config file path */
     strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
@@ -333,7 +333,7 @@ int main(int argc, char *argv[]) {
     license_load(license_file, &g_state.license);
 
     if (!license_can_add(&g_state.license, "inputs", 0)) {
-        LOG_ERROR("License limit reached for inputs");
+        CARI_LOG_ERROR("License limit reached for inputs");
         return 1;
     }
 
@@ -350,11 +350,11 @@ int main(int argc, char *argv[]) {
 
     g_state.output_buffer = ring_buffer_open(g_state.buffer_name, &rb_opts, true);
     if (!g_state.output_buffer) {
-        LOG_ERROR("Failed to create output buffer: %s", g_state.buffer_name);
+        CARI_LOG_ERROR("Failed to create output buffer: %s", g_state.buffer_name);
         return 1;
     }
 
-    LOG_INFO("Created output buffer: %s", g_state.buffer_name);
+    CARI_LOG_INFO("Created output buffer: %s", g_state.buffer_name);
 
     /* Initialize statistics */
     ts_stats_init(&g_state.stats);
@@ -371,21 +371,21 @@ int main(int argc, char *argv[]) {
     /* Start pipeline */
     GstStateChangeReturn ret = gst_element_set_state(g_state.pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
-        LOG_ERROR("Failed to start pipeline");
+        CARI_LOG_ERROR("Failed to start pipeline");
         gst_object_unref(g_state.pipeline);
         ring_buffer_close(g_state.output_buffer, true);
         return 1;
     }
 
     g_state.running = 1;
-    LOG_INFO("Input %s (%s) started, listening on %s",
+    CARI_LOG_INFO("Input %s (%s) started, listening on %s",
              g_state.name, g_state.id, g_state.source_uri);
 
     /* Run main loop */
     g_main_loop_run(g_state.main_loop);
 
     /* Cleanup */
-    LOG_INFO("Shutting down...");
+    CARI_LOG_INFO("Shutting down...");
 
     gst_element_set_state(g_state.pipeline, GST_STATE_NULL);
     gst_object_unref(g_state.pipeline);
@@ -393,7 +393,7 @@ int main(int argc, char *argv[]) {
 
     /* Calculate final stats */
     ts_stats_calculate_bitrate(&g_state.stats);
-    LOG_INFO("Final stats: %lu packets, %lu bytes, %lu CC errors, bitrate: %u bps",
+    CARI_LOG_INFO("Final stats: %lu packets, %lu bytes, %lu CC errors, bitrate: %u bps",
              g_state.stats.total_packets, g_state.stats.total_bytes,
              g_state.stats.cc_errors, g_state.stats.bitrate);
 

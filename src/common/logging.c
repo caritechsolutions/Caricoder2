@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <stdint.h>
+#include <syslog.h>
 
 #include "logging.h"
 

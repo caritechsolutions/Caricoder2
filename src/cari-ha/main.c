@@ -31,7 +31,7 @@ int main(int argc, char *argv[]) {
     strncpy(log_cfg.ident, "cari-ha", sizeof(log_cfg.ident));
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder HA Agent starting...");
+    CARI_LOG_INFO("CariTranscoder HA Agent starting...");
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -49,7 +49,7 @@ int main(int argc, char *argv[]) {
         sleep(1);
     }
 
-    LOG_INFO("HA Agent shutting down...");
+    CARI_LOG_INFO("HA Agent shutting down...");
     log_shutdown();
 
     return 0;

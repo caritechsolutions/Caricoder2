@@ -76,7 +76,7 @@ static mux_state_t g_state = {0};
 
 static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        LOG_INFO("Received signal %d, shutting down...", signum);
+        CARI_LOG_INFO("Received signal %d, shutting down...", signum);
         g_state.running = 0;
         for (int i = 0; i < g_state.input_count; i++) {
             g_state.inputs[i].running = 0;
@@ -136,12 +136,12 @@ static int load_config(mux_state_t *state) {
 
         if (input->buffer_name[0]) {
             state->input_count++;
-            LOG_INFO("Input %d: %s (program %d)", state->input_count,
+            CARI_LOG_INFO("Input %d: %s (program %d)", state->input_count,
                      input->buffer_name, input->program_number);
         }
     }
 
-    LOG_INFO("Configured: %s (%s) - Mode: %s, Inputs: %d",
+    CARI_LOG_INFO("Configured: %s (%s) - Mode: %s, Inputs: %d",
              state->name, state->id, state->mode, state->input_count);
 
     return 0;
@@ -228,7 +228,7 @@ int main(int argc, char *argv[]) {
     if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder Mux starting...");
+    CARI_LOG_INFO("CariTranscoder Mux starting...");
 
     strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
     if (load_config(&g_state) != 0) return 1;
@@ -243,7 +243,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < g_state.input_count; i++) {
         g_state.inputs[i].buffer = ring_buffer_open(g_state.inputs[i].buffer_name, NULL, false);
         if (!g_state.inputs[i].buffer) {
-            LOG_ERROR("Failed to open input buffer: %s", g_state.inputs[i].buffer_name);
+            CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.inputs[i].buffer_name);
             return 1;
         }
     }
@@ -252,7 +252,7 @@ int main(int argc, char *argv[]) {
     ring_buffer_options_t rb_opts = RING_BUFFER_OPTIONS_DEFAULT;
     g_state.output_buffer = ring_buffer_open(g_state.output_buffer_name, &rb_opts, true);
     if (!g_state.output_buffer) {
-        LOG_ERROR("Failed to create output buffer");
+        CARI_LOG_ERROR("Failed to create output buffer");
         return 1;
     }
 
@@ -263,16 +263,16 @@ int main(int argc, char *argv[]) {
         pthread_create(&g_state.inputs[i].thread, NULL, input_reader_func, &g_state.inputs[i]);
     }
 
-    LOG_INFO("Mux %s started with %d inputs", g_state.id, g_state.input_count);
+    CARI_LOG_INFO("Mux %s started with %d inputs", g_state.id, g_state.input_count);
 
     /* Simple loop - in real implementation, use GStreamer pipeline */
     while (g_state.running) {
         sleep(1);
-        LOG_DEBUG("Stats: %lu in, %lu out", g_state.packets_in, g_state.packets_out);
+        CARI_LOG_DEBUG("Stats: %lu in, %lu out", g_state.packets_in, g_state.packets_out);
     }
 
     /* Cleanup */
-    LOG_INFO("Shutting down...");
+    CARI_LOG_INFO("Shutting down...");
 
     for (int i = 0; i < g_state.input_count; i++) {
         g_state.inputs[i].running = 0;

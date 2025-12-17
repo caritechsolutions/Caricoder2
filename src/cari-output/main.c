@@ -63,7 +63,7 @@ static output_state_t g_state = {0};
 
 static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        LOG_INFO("Received signal %d, shutting down...", signum);
+        CARI_LOG_INFO("Received signal %d, shutting down...", signum);
         g_state.running = 0;
         g_state.reader_running = 0;
         if (g_state.main_loop) {
@@ -93,7 +93,7 @@ static int load_config(output_state_t *state) {
             config_get_string(&state->config, "input", "buffer_name", ""),
             sizeof(state->input_buffer_name) - 1);
 
-    LOG_INFO("Configured: %s (%s) - Type: %s", state->name, state->id, state->output_type);
+    CARI_LOG_INFO("Configured: %s (%s) - Type: %s", state->name, state->id, state->output_type);
 
     return 0;
 }
@@ -106,7 +106,7 @@ static int init_udp_output(output_state_t *state) {
 
     state->udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (state->udp_socket < 0) {
-        LOG_ERROR("Failed to create UDP socket: %s", strerror(errno));
+        CARI_LOG_ERROR("Failed to create UDP socket: %s", strerror(errno));
         return -1;
     }
 
@@ -125,7 +125,7 @@ static int init_udp_output(output_state_t *state) {
     state->udp_dest.sin_addr.s_addr = inet_addr(address);
     state->udp_dest.sin_port = htons(port);
 
-    LOG_INFO("UDP output configured: %s:%d (TTL=%d)", address, port, ttl);
+    CARI_LOG_INFO("UDP output configured: %s:%d (TTL=%d)", address, port, ttl);
 
     return 0;
 }
@@ -159,7 +159,7 @@ static void* reader_thread_func(void *arg) {
     output_state_t *state = (output_state_t *)arg;
     ts_packet_raw_t packets[7];
 
-    LOG_DEBUG("Reader thread started");
+    CARI_LOG_DEBUG("Reader thread started");
 
     while (state->reader_running) {
         int count = ring_buffer_read_batch(state->input_buffer, packets, 7);
@@ -177,7 +177,7 @@ static void* reader_thread_func(void *arg) {
         }
     }
 
-    LOG_DEBUG("Reader thread stopped");
+    CARI_LOG_DEBUG("Reader thread stopped");
     return NULL;
 }
 
@@ -216,7 +216,7 @@ int main(int argc, char *argv[]) {
     if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder Output starting...");
+    CARI_LOG_INFO("CariTranscoder Output starting...");
 
     strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
     if (load_config(&g_state) != 0) return 1;
@@ -230,7 +230,7 @@ int main(int argc, char *argv[]) {
     /* Open input buffer */
     g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, NULL, false);
     if (!g_state.input_buffer) {
-        LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
+        CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
         return 1;
     }
 
@@ -248,20 +248,20 @@ int main(int argc, char *argv[]) {
     g_state.reader_running = 1;
     pthread_create(&g_state.reader_thread, NULL, reader_thread_func, &g_state);
 
-    LOG_INFO("Output %s started, sending to %s", g_state.id, g_state.output_type);
+    CARI_LOG_INFO("Output %s started, sending to %s", g_state.id, g_state.output_type);
 
     /* Main loop - periodically log stats */
     while (g_state.running) {
         sleep(5);
         ts_stats_calculate_bitrate((ts_stream_stats_t *)NULL); /* Placeholder */
-        LOG_INFO("Stats: %lu packets, %.2f Mbps",
+        CARI_LOG_INFO("Stats: %lu packets, %.2f Mbps",
                  g_state.packets_sent,
                  (g_state.bytes_sent * 8.0) / 5000000.0);
         g_state.bytes_sent = 0;
     }
 
     /* Cleanup */
-    LOG_INFO("Shutting down...");
+    CARI_LOG_INFO("Shutting down...");
 
     g_state.reader_running = 0;
     pthread_join(g_state.reader_thread, NULL);

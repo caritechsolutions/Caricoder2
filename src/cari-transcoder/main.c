@@ -76,7 +76,7 @@ static transcoder_state_t g_state = {0};
 /* Signal handler */
 static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        LOG_INFO("Received signal %d, shutting down...", signum);
+        CARI_LOG_INFO("Received signal %d, shutting down...", signum);
         g_state.running = 0;
         g_state.reader_running = 0;
         if (g_state.main_loop) {
@@ -88,7 +88,7 @@ static void signal_handler(int signum) {
 /* Load configuration */
 static int load_config(transcoder_state_t *state) {
     if (config_load(&state->config, state->config_file) != 0) {
-        LOG_ERROR("Failed to load configuration");
+        CARI_LOG_ERROR("Failed to load configuration");
         return -1;
     }
 
@@ -137,9 +137,9 @@ static int load_config(transcoder_state_t *state) {
             config_get_string(&state->config, "output", "buffer_name", state->id),
             sizeof(state->output_buffer_name) - 1);
 
-    LOG_INFO("Configured: %s (%s)", state->name, state->id);
-    LOG_INFO("Video: %s -> %s @ %d bps", state->video_mode, state->video_codec, state->video_bitrate);
-    LOG_INFO("Audio: %s -> %s @ %d bps", state->audio_mode, state->audio_codec, state->audio_bitrate);
+    CARI_LOG_INFO("Configured: %s (%s)", state->name, state->id);
+    CARI_LOG_INFO("Video: %s -> %s @ %d bps", state->video_mode, state->video_codec, state->video_bitrate);
+    CARI_LOG_INFO("Audio: %s -> %s @ %d bps", state->audio_mode, state->audio_codec, state->audio_bitrate);
 
     return 0;
 }
@@ -167,7 +167,7 @@ static void* reader_thread_func(void *arg) {
     transcoder_state_t *state = (transcoder_state_t *)arg;
     ts_packet_raw_t packets[7]; /* Read 7 packets at a time (1316 bytes) */
 
-    LOG_DEBUG("Reader thread started");
+    CARI_LOG_DEBUG("Reader thread started");
 
     while (state->reader_running) {
         int count = ring_buffer_read_batch(state->input_buffer, packets, 7);
@@ -183,7 +183,7 @@ static void* reader_thread_func(void *arg) {
 
                 GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(state->appsrc), buffer);
                 if (ret != GST_FLOW_OK) {
-                    LOG_WARNING("Failed to push buffer to appsrc");
+                    CARI_LOG_WARNING("Failed to push buffer to appsrc");
                 }
                 state->packets_in += count;
             } else {
@@ -197,7 +197,7 @@ static void* reader_thread_func(void *arg) {
         }
     }
 
-    LOG_DEBUG("Reader thread stopped");
+    CARI_LOG_DEBUG("Reader thread stopped");
     return NULL;
 }
 
@@ -286,11 +286,11 @@ static int build_pipeline(transcoder_state_t *state) {
                  video_branch, audio_branch);
     }
 
-    LOG_DEBUG("Pipeline: %s", pipeline_str);
+    CARI_LOG_DEBUG("Pipeline: %s", pipeline_str);
 
     state->pipeline = gst_parse_launch(pipeline_str, &error);
     if (!state->pipeline) {
-        LOG_ERROR("Failed to create pipeline: %s", error ? error->message : "unknown");
+        CARI_LOG_ERROR("Failed to create pipeline: %s", error ? error->message : "unknown");
         if (error) g_error_free(error);
         return -1;
     }
@@ -299,7 +299,7 @@ static int build_pipeline(transcoder_state_t *state) {
     state->appsink = gst_bin_get_by_name(GST_BIN(state->pipeline), "sink");
 
     if (!state->appsrc || !state->appsink) {
-        LOG_ERROR("Failed to get appsrc/appsink");
+        CARI_LOG_ERROR("Failed to get appsrc/appsink");
         return -1;
     }
 
@@ -361,7 +361,7 @@ int main(int argc, char *argv[]) {
     if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
     log_init(&log_cfg);
 
-    LOG_INFO("CariTranscoder Transcoder starting...");
+    CARI_LOG_INFO("CariTranscoder Transcoder starting...");
 
     strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
 
@@ -378,7 +378,7 @@ int main(int argc, char *argv[]) {
     /* Open input buffer */
     g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, NULL, false);
     if (!g_state.input_buffer) {
-        LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
+        CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
         return 1;
     }
 
@@ -386,7 +386,7 @@ int main(int argc, char *argv[]) {
     ring_buffer_options_t rb_opts = RING_BUFFER_OPTIONS_DEFAULT;
     g_state.output_buffer = ring_buffer_open(g_state.output_buffer_name, &rb_opts, true);
     if (!g_state.output_buffer) {
-        LOG_ERROR("Failed to create output buffer");
+        CARI_LOG_ERROR("Failed to create output buffer");
         ring_buffer_close(g_state.input_buffer, false);
         return 1;
     }
@@ -406,19 +406,19 @@ int main(int argc, char *argv[]) {
     g_state.main_loop = g_main_loop_new(NULL, FALSE);
 
     if (gst_element_set_state(g_state.pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        LOG_ERROR("Failed to start pipeline");
+        CARI_LOG_ERROR("Failed to start pipeline");
         g_state.reader_running = 0;
         pthread_join(g_state.reader_thread, NULL);
         return 1;
     }
 
     g_state.running = 1;
-    LOG_INFO("Transcoder %s started", g_state.id);
+    CARI_LOG_INFO("Transcoder %s started", g_state.id);
 
     g_main_loop_run(g_state.main_loop);
 
     /* Cleanup */
-    LOG_INFO("Shutting down...");
+    CARI_LOG_INFO("Shutting down...");
 
     g_state.reader_running = 0;
     pthread_join(g_state.reader_thread, NULL);
@@ -427,7 +427,7 @@ int main(int argc, char *argv[]) {
     gst_object_unref(g_state.pipeline);
     g_main_loop_unref(g_state.main_loop);
 
-    LOG_INFO("Stats: %lu packets in, %lu packets out, %lu frames",
+    CARI_LOG_INFO("Stats: %lu packets in, %lu packets out, %lu frames",
              g_state.packets_in, g_state.packets_out, g_state.frames_out);
 
     ring_buffer_close(g_state.input_buffer, false);

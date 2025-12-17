@@ -123,29 +123,64 @@ install_tsduck() {
         return 0
     fi
 
-    # Detect architecture
+    # Detect architecture and Ubuntu version
     local ARCH=$(dpkg --print-architecture)
-    log_info "Detected architecture: $ARCH"
+    local UBUNTU_VERSION=""
+    local DISTRO_PATTERN=""
+
+    # Get Ubuntu version codename
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        case "$VERSION_CODENAME" in
+            focal)   UBUNTU_VERSION="20"; DISTRO_PATTERN="ubuntu20\|ubuntu2004\|focal" ;;
+            jammy)   UBUNTU_VERSION="22"; DISTRO_PATTERN="ubuntu22\|ubuntu2204\|jammy" ;;
+            noble)   UBUNTU_VERSION="24"; DISTRO_PATTERN="ubuntu24\|ubuntu2404\|noble" ;;
+            *)       UBUNTU_VERSION="22"; DISTRO_PATTERN="ubuntu" ;;
+        esac
+    fi
+
+    log_info "Detected: $ARCH on Ubuntu $UBUNTU_VERSION ($VERSION_CODENAME)"
 
     # Get the latest release .deb URL from GitHub API
     log_info "Fetching latest TSDuck release..."
     local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
 
-    # Find the .deb file matching our architecture (exclude -dev packages)
+    # Find the .deb file matching our Ubuntu version and architecture
     local RELEASE_URL=""
-    if [[ "$ARCH" == "amd64" ]]; then
-        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | grep "amd64\|64" | head -1 | cut -d'"' -f4)
-    elif [[ "$ARCH" == "arm64" ]]; then
-        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | grep "arm64\|aarch64" | head -1 | cut -d'"' -f4)
+
+    # Extract all .deb download URLs
+    local ALL_DEBS=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | cut -d'"' -f4)
+
+    # First try: find exact match for Ubuntu version and architecture
+    for url in $ALL_DEBS; do
+        if echo "$url" | grep -iqE "$DISTRO_PATTERN" && echo "$url" | grep -iq "$ARCH"; then
+            RELEASE_URL="$url"
+            break
+        fi
+    done
+
+    # Second try: find any Ubuntu package for this architecture
+    if [[ -z "$RELEASE_URL" ]]; then
+        for url in $ALL_DEBS; do
+            if echo "$url" | grep -iq "ubuntu" && echo "$url" | grep -iq "$ARCH"; then
+                RELEASE_URL="$url"
+                break
+            fi
+        done
+    fi
+
+    # Third try: find any package for this architecture (avoid debian13 on older systems)
+    if [[ -z "$RELEASE_URL" ]]; then
+        for url in $ALL_DEBS; do
+            if echo "$url" | grep -iq "$ARCH" && ! echo "$url" | grep -iq "debian13"; then
+                RELEASE_URL="$url"
+                break
+            fi
+        done
     fi
 
     if [[ -z "$RELEASE_URL" ]]; then
-        # Fallback: try to get any .deb that's not a dev package
-        RELEASE_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | head -1 | cut -d'"' -f4)
-    fi
-
-    if [[ -z "$RELEASE_URL" ]]; then
-        log_warn "Could not find TSDuck .deb package for architecture: $ARCH"
+        log_warn "Could not find compatible TSDuck package for Ubuntu $UBUNTU_VERSION $ARCH"
         log_warn "TSDuck will need to be installed manually."
         log_warn "Visit: https://github.com/tsduck/tsduck/releases"
         return 1
@@ -164,10 +199,8 @@ install_tsduck() {
 
     # Install dependencies that TSDuck might need
     log_info "Installing TSDuck runtime dependencies..."
-    apt-get install -y \
-        libcurl4 \
-        libsrt1.5-openssl || apt-get install -y libsrt1.4-openssl || apt-get install -y libsrt1-openssl || true
-    apt-get install -y libpcsclite1 libedit2 || true
+    apt-get install -y libcurl4 libpcsclite1 libedit2 || true
+    apt-get install -y libsrt1.4-gnutls || apt-get install -y libsrt1-gnutls || apt-get install -y libsrt-openssl1.4 || true
 
     # Install the package
     log_info "Installing TSDuck package..."

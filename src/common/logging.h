@@ -8,7 +8,7 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
-#include <syslog.h>
+#include <stddef.h>
 
 /* Log levels */
 typedef enum {
@@ -106,25 +106,25 @@ void log_message(log_level_t level, const char *file, int line,
 void log_message_v(log_level_t level, const char *file, int line,
                    const char *func, const char *fmt, va_list args);
 
-/* Convenience macros */
-#define LOG_DEBUG(fmt, ...) \
+/* Convenience macros - use CARI_ prefix to avoid conflicts with syslog.h */
+#define CARI_LOG_DEBUG(fmt, ...) \
     log_message(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
-#define LOG_INFO(fmt, ...) \
+#define CARI_LOG_INFO(fmt, ...) \
     log_message(LOG_LEVEL_INFO, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
-#define LOG_WARNING(fmt, ...) \
+#define CARI_LOG_WARNING(fmt, ...) \
     log_message(LOG_LEVEL_WARNING, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
-#define LOG_ERROR(fmt, ...) \
+#define CARI_LOG_ERROR(fmt, ...) \
     log_message(LOG_LEVEL_ERROR, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
-#define LOG_FATAL(fmt, ...) \
+#define CARI_LOG_FATAL(fmt, ...) \
     log_message(LOG_LEVEL_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 
 /* Conditional logging */
-#define LOG_DEBUG_IF(cond, fmt, ...) \
-    do { if (cond) LOG_DEBUG(fmt, ##__VA_ARGS__); } while(0)
+#define CARI_LOG_DEBUG_IF(cond, fmt, ...) \
+    do { if (cond) CARI_LOG_DEBUG(fmt, ##__VA_ARGS__); } while(0)
 
 /* Hex dump for debugging */
 void log_hexdump(log_level_t level, const char *prefix,

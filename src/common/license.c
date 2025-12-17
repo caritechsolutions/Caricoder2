@@ -144,7 +144,7 @@ int license_get_hardware_fingerprint(hardware_fingerprint_t *fp) {
 
     sha256_string(combined, fp->fingerprint, sizeof(fp->fingerprint));
 
-    LOG_DEBUG("Hardware fingerprint: %s", fp->fingerprint);
+    CARI_LOG_DEBUG("Hardware fingerprint: %s", fp->fingerprint);
     return 0;
 }
 
@@ -158,7 +158,7 @@ license_status_t license_load(const char *filename, license_info_t *info) {
     /* Check if file exists */
     struct stat st;
     if (stat(filename, &st) != 0) {
-        LOG_WARNING("License file not found: %s", filename);
+        CARI_LOG_WARNING("License file not found: %s", filename);
         license_init_free(info);
         return LICENSE_STATUS_NOT_FOUND;
     }
@@ -166,7 +166,7 @@ license_status_t license_load(const char *filename, license_info_t *info) {
     /* Load as config file */
     config_t cfg;
     if (config_load(&cfg, filename) != 0) {
-        LOG_ERROR("Failed to parse license file");
+        CARI_LOG_ERROR("Failed to parse license file");
         license_init_free(info);
         return LICENSE_STATUS_INVALID;
     }
@@ -261,7 +261,7 @@ license_status_t license_validate(license_info_t *info) {
         time_t now = time(NULL);
         if (now > info->expiry_date) {
             info->status = LICENSE_STATUS_EXPIRED;
-            LOG_WARNING("License expired");
+            CARI_LOG_WARNING("License expired");
             return LICENSE_STATUS_EXPIRED;
         }
     }
@@ -273,7 +273,7 @@ license_status_t license_validate(license_info_t *info) {
 
         if (strcmp(info->hardware_fingerprint, current_fp.fingerprint) != 0) {
             info->status = LICENSE_STATUS_HARDWARE_MISMATCH;
-            LOG_ERROR("License hardware mismatch");
+            CARI_LOG_ERROR("License hardware mismatch");
             return LICENSE_STATUS_HARDWARE_MISMATCH;
         }
     }
@@ -282,7 +282,7 @@ license_status_t license_validate(license_info_t *info) {
     /* For now, we'll do a basic check */
     if (info->type != LICENSE_TYPE_FREE && info->signature[0] == '\0') {
         info->status = LICENSE_STATUS_TAMPERED;
-        LOG_ERROR("License signature missing");
+        CARI_LOG_ERROR("License signature missing");
         return LICENSE_STATUS_TAMPERED;
     }
 
@@ -293,7 +293,7 @@ license_status_t license_validate(license_info_t *info) {
      */
 
     info->status = LICENSE_STATUS_VALID;
-    LOG_INFO("License validated: %s (%s)", info->license_id,
+    CARI_LOG_INFO("License validated: %s (%s)", info->license_id,
              license_type_str(info->type));
     return LICENSE_STATUS_VALID;
 }
@@ -398,7 +398,7 @@ int license_generate_request(const char *filename,
 
     FILE *f = fopen(filename, "w");
     if (!f) {
-        LOG_ERROR("Failed to create license request file");
+        CARI_LOG_ERROR("Failed to create license request file");
         return -1;
     }
 
@@ -414,7 +414,7 @@ int license_generate_request(const char *filename,
     fprintf(f, "mac_address = %s\n", fp.mac_address);
 
     fclose(f);
-    LOG_INFO("License request generated: %s", filename);
+    CARI_LOG_INFO("License request generated: %s", filename);
     return 0;
 }
 

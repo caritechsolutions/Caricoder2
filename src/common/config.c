@@ -51,7 +51,7 @@ int config_load(config_t *cfg, const char *filename) {
 
     FILE *fp = fopen(filename, "r");
     if (!fp) {
-        LOG_ERROR("Failed to open config file '%s': %s", filename, strerror(errno));
+        CARI_LOG_ERROR("Failed to open config file '%s': %s", filename, strerror(errno));
         return -1;
     }
 
@@ -75,7 +75,7 @@ int config_load(config_t *cfg, const char *filename) {
         if (*p == '[') {
             char *end = strchr(p, ']');
             if (!end) {
-                LOG_WARNING("Config %s:%d: Invalid section header", filename, line_num);
+                CARI_LOG_WARNING("Config %s:%d: Invalid section header", filename, line_num);
                 continue;
             }
             *end = '\0';
@@ -86,7 +86,7 @@ int config_load(config_t *cfg, const char *filename) {
         /* Key = value */
         char *eq = strchr(p, '=');
         if (!eq) {
-            LOG_WARNING("Config %s:%d: Invalid line (no '=')", filename, line_num);
+            CARI_LOG_WARNING("Config %s:%d: Invalid line (no '=')", filename, line_num);
             continue;
         }
 
@@ -104,7 +104,7 @@ int config_load(config_t *cfg, const char *filename) {
 
         /* Add entry */
         if (cfg->entry_count >= CONFIG_MAX_ENTRIES) {
-            LOG_WARNING("Config %s: Maximum entries reached", filename);
+            CARI_LOG_WARNING("Config %s: Maximum entries reached", filename);
             break;
         }
 
@@ -115,7 +115,7 @@ int config_load(config_t *cfg, const char *filename) {
     }
 
     fclose(fp);
-    LOG_DEBUG("Loaded %d config entries from '%s'", cfg->entry_count, filename);
+    CARI_LOG_DEBUG("Loaded %d config entries from '%s'", cfg->entry_count, filename);
     return 0;
 }
 
@@ -127,7 +127,7 @@ int config_save(config_t *cfg, const char *filename) {
 
     FILE *fp = fopen(fname, "w");
     if (!fp) {
-        LOG_ERROR("Failed to open config file '%s' for writing: %s",
+        CARI_LOG_ERROR("Failed to open config file '%s' for writing: %s",
                   fname, strerror(errno));
         return -1;
     }
@@ -155,7 +155,7 @@ int config_save(config_t *cfg, const char *filename) {
 
     fclose(fp);
     cfg->modified = false;
-    LOG_DEBUG("Saved %d config entries to '%s'", cfg->entry_count, fname);
+    CARI_LOG_DEBUG("Saved %d config entries to '%s'", cfg->entry_count, fname);
     return 0;
 }
 
@@ -231,7 +231,7 @@ int config_set_string(config_t *cfg, const char *section,
         strncpy(entry->value, value, sizeof(entry->value) - 1);
     } else {
         if (cfg->entry_count >= CONFIG_MAX_ENTRIES) {
-            LOG_ERROR("Config: Maximum entries reached");
+            CARI_LOG_ERROR("Config: Maximum entries reached");
             return -1;
         }
         entry = &cfg->entries[cfg->entry_count++];
@@ -309,9 +309,9 @@ bool config_has_section(const config_t *cfg, const char *section) {
 void config_dump(const config_t *cfg) {
     if (!cfg) return;
 
-    LOG_DEBUG("Config dump (%d entries):", cfg->entry_count);
+    CARI_LOG_DEBUG("Config dump (%d entries):", cfg->entry_count);
     for (int i = 0; i < cfg->entry_count; i++) {
-        LOG_DEBUG("  [%s] %s = %s",
+        CARI_LOG_DEBUG("  [%s] %s = %s",
                   cfg->entries[i].section,
                   cfg->entries[i].key,
                   cfg->entries[i].value);
