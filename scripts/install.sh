@@ -125,22 +125,36 @@ install_tsduck() {
 
     local TSDUCK_BUILD_DIR="/tmp/tsduck-build"
 
+    # Update CA certificates first
+    log_info "Updating CA certificates..."
+    apt-get install -y ca-certificates
+    update-ca-certificates
+
+    # Install TSDuck build dependencies (minimal, skip docs)
+    log_info "Installing TSDuck build dependencies..."
+    apt-get install -y \
+        g++ \
+        cmake \
+        dos2unix \
+        graphviz \
+        libcurl4-openssl-dev \
+        libpcsclite-dev \
+        dpkg-dev \
+        libedit-dev \
+        libsrt-openssl-dev || apt-get install -y libsrt-dev || true
+
     # Clone TSDuck
     rm -rf "$TSDUCK_BUILD_DIR"
     git clone https://github.com/tsduck/tsduck.git "$TSDUCK_BUILD_DIR"
     cd "$TSDUCK_BUILD_DIR"
 
-    # Install TSDuck prerequisites
-    log_info "Installing TSDuck prerequisites..."
-    scripts/install-prerequisites.sh
-
-    # Build TSDuck
+    # Build TSDuck (without docs to avoid Ruby gem SSL issues)
     log_info "Building TSDuck (this may take a while)..."
-    make -j$(nproc) default
+    make -j$(nproc) NODOC=1
 
     # Install TSDuck
     log_info "Installing TSDuck..."
-    make install
+    make install NODOC=1
 
     # Cleanup
     cd /
