@@ -150,7 +150,10 @@ update_api() {
     log_step "Updating API files..."
 
     if [[ -d "$TEMP_DIR/caritrans_latest/web/api" ]]; then
-        cp -r "$TEMP_DIR/caritrans_latest/web/api/"* "$WEB_DIR/api/" 2>/dev/null || true
+        # Create api directory if it doesn't exist
+        mkdir -p "$WEB_DIR/api"
+        cp -r "$TEMP_DIR/caritrans_latest/web/api/"* "$WEB_DIR/api/"
+        chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR/api"
         log_info "API files updated"
     fi
 }
