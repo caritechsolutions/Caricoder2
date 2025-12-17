@@ -125,62 +125,70 @@ install_tsduck() {
 
     # Detect architecture and Ubuntu version
     local ARCH=$(dpkg --print-architecture)
-    local UBUNTU_VERSION=""
-    local DISTRO_PATTERN=""
-
-    # Get Ubuntu version codename
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        case "$VERSION_CODENAME" in
-            focal)   UBUNTU_VERSION="20"; DISTRO_PATTERN="ubuntu20\|ubuntu2004\|focal" ;;
-            jammy)   UBUNTU_VERSION="22"; DISTRO_PATTERN="ubuntu22\|ubuntu2204\|jammy" ;;
-            noble)   UBUNTU_VERSION="24"; DISTRO_PATTERN="ubuntu24\|ubuntu2404\|noble" ;;
-            *)       UBUNTU_VERSION="22"; DISTRO_PATTERN="ubuntu" ;;
-        esac
-    fi
-
-    log_info "Detected: $ARCH on Ubuntu $UBUNTU_VERSION ($VERSION_CODENAME)"
-
-    # Get the latest release .deb URL from GitHub API
-    log_info "Fetching latest TSDuck release..."
-    local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
-
-    # Find the .deb file matching our Ubuntu version and architecture
     local RELEASE_URL=""
 
-    # Extract all .deb download URLs
-    local ALL_DEBS=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | cut -d'"' -f4)
+    # Get Ubuntu version codename
+    source /etc/os-release
+    log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
-    # First try: find exact match for Ubuntu version and architecture
-    for url in $ALL_DEBS; do
-        if echo "$url" | grep -iqE "$DISTRO_PATTERN" && echo "$url" | grep -iq "$ARCH"; then
-            RELEASE_URL="$url"
-            break
-        fi
-    done
-
-    # Second try: find any Ubuntu package for this architecture
-    if [[ -z "$RELEASE_URL" ]]; then
-        for url in $ALL_DEBS; do
-            if echo "$url" | grep -iq "ubuntu" && echo "$url" | grep -iq "$ARCH"; then
-                RELEASE_URL="$url"
-                break
+    # Use specific TSDuck versions known to work with each Ubuntu version
+    # Latest TSDuck doesn't have Ubuntu 20.04 packages, so we use older releases
+    case "$VERSION_CODENAME" in
+        focal)
+            # Ubuntu 20.04 - use TSDuck 3.37 which has focal packages
+            log_info "Using TSDuck 3.37 for Ubuntu 20.04 (focal)"
+            if [[ "$ARCH" == "amd64" ]]; then
+                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.37-3670/tsduck_3.37-3670.ubuntu20_amd64.deb"
+            elif [[ "$ARCH" == "arm64" ]]; then
+                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.37-3670/tsduck_3.37-3670.ubuntu20_arm64.deb"
             fi
-        done
-    fi
-
-    # Third try: find any package for this architecture (avoid debian13 on older systems)
-    if [[ -z "$RELEASE_URL" ]]; then
-        for url in $ALL_DEBS; do
-            if echo "$url" | grep -iq "$ARCH" && ! echo "$url" | grep -iq "debian13"; then
-                RELEASE_URL="$url"
-                break
+            ;;
+        jammy)
+            # Ubuntu 22.04 - use TSDuck 3.37 which has jammy packages
+            log_info "Using TSDuck 3.37 for Ubuntu 22.04 (jammy)"
+            if [[ "$ARCH" == "amd64" ]]; then
+                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.37-3670/tsduck_3.37-3670.ubuntu22_amd64.deb"
+            elif [[ "$ARCH" == "arm64" ]]; then
+                RELEASE_URL="https://github.com/tsduck/tsduck/releases/download/v3.37-3670/tsduck_3.37-3670.ubuntu22_arm64.deb"
             fi
-        done
-    fi
+            ;;
+        noble)
+            # Ubuntu 24.04 - try latest release
+            log_info "Using latest TSDuck for Ubuntu 24.04 (noble)"
+            local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
+            local ALL_DEBS=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | cut -d'"' -f4)
+            for url in $ALL_DEBS; do
+                if echo "$url" | grep -iq "ubuntu24\|noble" && echo "$url" | grep -iq "$ARCH"; then
+                    RELEASE_URL="$url"
+                    break
+                fi
+            done
+            # Fallback to ubuntu22 package
+            if [[ -z "$RELEASE_URL" ]]; then
+                for url in $ALL_DEBS; do
+                    if echo "$url" | grep -iq "ubuntu" && echo "$url" | grep -iq "$ARCH"; then
+                        RELEASE_URL="$url"
+                        break
+                    fi
+                done
+            fi
+            ;;
+        *)
+            # Other/unknown - try latest Ubuntu package
+            log_info "Unknown Ubuntu version, trying latest TSDuck release"
+            local RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/tsduck/tsduck/releases/latest")
+            local ALL_DEBS=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url": *"[^"]*\.deb"' | grep -v "\-dev" | cut -d'"' -f4)
+            for url in $ALL_DEBS; do
+                if echo "$url" | grep -iq "ubuntu" && echo "$url" | grep -iq "$ARCH"; then
+                    RELEASE_URL="$url"
+                    break
+                fi
+            done
+            ;;
+    esac
 
     if [[ -z "$RELEASE_URL" ]]; then
-        log_warn "Could not find compatible TSDuck package for Ubuntu $UBUNTU_VERSION $ARCH"
+        log_warn "Could not find compatible TSDuck package for $PRETTY_NAME $ARCH"
         log_warn "TSDuck will need to be installed manually."
         log_warn "Visit: https://github.com/tsduck/tsduck/releases"
         return 1
@@ -200,7 +208,6 @@ install_tsduck() {
     # Install dependencies that TSDuck might need
     log_info "Installing TSDuck runtime dependencies..."
     apt-get install -y libcurl4 libpcsclite1 libedit2 || true
-    apt-get install -y libsrt1.4-gnutls || apt-get install -y libsrt1-gnutls || apt-get install -y libsrt-openssl1.4 || true
 
     # Install the package
     log_info "Installing TSDuck package..."
@@ -406,8 +413,26 @@ configure_nginx() {
         return
     fi
 
+    # Detect PHP-FPM socket path
+    local PHP_FPM_SOCK=""
+    if [[ -S /var/run/php/php8.1-fpm.sock ]]; then
+        PHP_FPM_SOCK="/var/run/php/php8.1-fpm.sock"
+    elif [[ -S /var/run/php/php8.0-fpm.sock ]]; then
+        PHP_FPM_SOCK="/var/run/php/php8.0-fpm.sock"
+    elif [[ -S /var/run/php/php7.4-fpm.sock ]]; then
+        PHP_FPM_SOCK="/var/run/php/php7.4-fpm.sock"
+    else
+        # Try to find any php-fpm socket
+        PHP_FPM_SOCK=$(find /var/run/php -name "php*-fpm.sock" 2>/dev/null | head -1)
+        if [[ -z "$PHP_FPM_SOCK" ]]; then
+            PHP_FPM_SOCK="/var/run/php/php-fpm.sock"
+        fi
+    fi
+
+    log_info "Using PHP-FPM socket: $PHP_FPM_SOCK"
+
     # Create Nginx config
-    cat > /etc/nginx/sites-available/caritrans << 'NGINX'
+    cat > /etc/nginx/sites-available/caritrans << NGINX
 server {
     listen 8080;
     server_name _;
@@ -416,17 +441,17 @@ server {
     index index.php index.html;
 
     location / {
-        try_files $uri $uri/ /index.php?$query_string;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php$ {
+    location ~ \\.php\$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:$PHP_FPM_SOCK;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
     }
 
-    location ~ /\.(ht|git) {
+    location ~ /\\.(ht|git) {
         deny all;
     }
 
@@ -434,20 +459,78 @@ server {
     location /ws {
         proxy_pass http://127.0.0.1:8081;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host \$host;
     }
 }
 NGINX
 
+    # Remove default site if it conflicts
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+
     # Enable site
     ln -sf /etc/nginx/sites-available/caritrans /etc/nginx/sites-enabled/
 
-    # Test and reload
-    nginx -t && systemctl reload nginx
+    # Test config
+    if nginx -t; then
+        log_info "Nginx configuration valid"
+    else
+        log_error "Nginx configuration invalid"
+        return 1
+    fi
 
     log_info "Nginx configured on port 8080"
+}
+
+# Start web services
+start_services() {
+    log_step "Starting web services..."
+
+    # Detect and start PHP-FPM
+    local PHP_FPM_SERVICE=""
+    for ver in 8.3 8.2 8.1 8.0 7.4; do
+        if systemctl list-unit-files | grep -q "php${ver}-fpm"; then
+            PHP_FPM_SERVICE="php${ver}-fpm"
+            break
+        fi
+    done
+
+    if [[ -z "$PHP_FPM_SERVICE" ]]; then
+        # Try generic php-fpm
+        if systemctl list-unit-files | grep -q "php-fpm"; then
+            PHP_FPM_SERVICE="php-fpm"
+        fi
+    fi
+
+    if [[ -n "$PHP_FPM_SERVICE" ]]; then
+        log_info "Starting $PHP_FPM_SERVICE..."
+        systemctl enable "$PHP_FPM_SERVICE" 2>/dev/null || true
+        systemctl start "$PHP_FPM_SERVICE" || systemctl restart "$PHP_FPM_SERVICE"
+    else
+        log_warn "PHP-FPM service not found"
+    fi
+
+    # Start Nginx
+    if command -v nginx &> /dev/null; then
+        log_info "Starting nginx..."
+        systemctl enable nginx 2>/dev/null || true
+        systemctl start nginx || systemctl restart nginx
+    fi
+
+    # Verify services are running
+    sleep 2
+    if systemctl is-active --quiet nginx; then
+        log_info "Nginx is running"
+    else
+        log_warn "Nginx may not be running properly"
+    fi
+
+    if [[ -n "$PHP_FPM_SERVICE" ]] && systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
+        log_info "$PHP_FPM_SERVICE is running"
+    else
+        log_warn "PHP-FPM may not be running properly"
+    fi
 }
 
 # Create tmpfiles.d entry for /run directory
@@ -524,6 +607,7 @@ main() {
     install_services
     configure_nginx
     create_tmpfiles
+    start_services
     print_completion
 }
 
