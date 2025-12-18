@@ -87,8 +87,8 @@ include __DIR__ . '/../templates/header.php';
                         </td>
                     </tr>
                     <?php else: ?>
-                    <?php foreach ($inputs as $input): ?>
-                    <tr class="input-row"
+                    <?php $rowNum = 0; foreach ($inputs as $input): $rowNum++; ?>
+                    <tr class="input-row <?php echo ($rowNum % 2 == 0) ? 'row-even' : 'row-odd'; ?>"
                         data-id="<?php echo htmlspecialchars($input['id']); ?>"
                         data-name="<?php echo htmlspecialchars(strtolower($input['name'])); ?>"
                         data-type="<?php echo htmlspecialchars(strtolower($input['type'] ?? 'udp')); ?>"
@@ -361,14 +361,18 @@ function getTypeBadgeColor($type) {
 }
 
 /* Alternating row colors */
-.input-row:nth-child(odd) {
-    background: #ffffff !important;
+tr.row-odd {
+    background-color: #ffffff !important;
 }
-.input-row:nth-child(even) {
-    background: #f0f4f8 !important;
+tr.row-even {
+    background-color: #f0f4f8 !important;
 }
-.input-row:hover {
-    background: #e0e7ff !important;
+tr.input-row:hover {
+    background-color: #dbeafe !important;
+}
+tr.row-odd:hover,
+tr.row-even:hover {
+    background-color: #dbeafe !important;
 }
 
 #inputsTable tbody td {
