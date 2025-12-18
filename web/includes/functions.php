@@ -174,7 +174,12 @@ function get_service_list($type) {
         // Get service status from systemd
         $status = 'stopped';
         $output = [];
-        $service_name = "cari-{$section}@{$id}";
+        // UDP inputs use cari-udp-{id} format, others use cari-{section}@{id}
+        if ($section === 'input' && $input_type === 'udp') {
+            $service_name = "cari-udp-{$id}";
+        } else {
+            $service_name = "cari-{$section}@{$id}";
+        }
         exec("systemctl is-active {$service_name} 2>/dev/null", $output, $ret);
         if ($ret === 0) {
             $status = 'running';
