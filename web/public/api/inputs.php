@@ -326,28 +326,66 @@ function scan_with_tsduck($url, $type) {
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
-        // Parse SRT URL to get address and port
-        // Format: srt://address:port or just address:port
-        $srt_url = preg_replace('/^srt:\/\//', '', $url);
-        $parts = explode(':', $srt_url);
-        $address = $parts[0] ?? '';
-        $port = $parts[1] ?? 9000;
+        // SRT input - prefer srt-live-transmit if available
+        $srt_transmit = shell_exec('which srt-live-transmit 2>/dev/null');
 
-        // TSDuck SRT uses --caller for connecting to a sender
-        $capture_cmd = sprintf(
-            'timeout 8 tsp -I srt --caller %s:%d -O file %s 2>&1',
-            escapeshellarg($address),
-            (int)$port,
-            escapeshellarg($capture_file)
-        );
+        // Ensure URL has srt:// prefix
+        $srt_url = $url;
+        if (strpos($url, 'srt://') !== 0) {
+            $srt_url = 'srt://' . $url;
+        }
+
+        if ($srt_transmit) {
+            // Use srt-live-transmit to receive SRT and output to file
+            // srt-live-transmit source destination
+            // file://con outputs to stdout, but we want a file
+            $capture_cmd = sprintf(
+                'timeout 8 srt-live-transmit %s file://%s 2>&1',
+                escapeshellarg($srt_url . '?mode=caller'),
+                escapeshellarg($capture_file)
+            );
+        } else {
+            // Fallback to TSDuck SRT plugin
+            $srt_addr = preg_replace('/^srt:\/\//', '', $url);
+            $parts = explode(':', $srt_addr);
+            $address = $parts[0] ?? '';
+            $port = $parts[1] ?? 9000;
+
+            $capture_cmd = sprintf(
+                'timeout 8 tsp -I srt --caller %s:%d -O file %s 2>&1',
+                escapeshellarg($address),
+                (int)$port,
+                escapeshellarg($capture_file)
+            );
+        }
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
-        // RIST input using TSDuck
-        // TSDuck RIST plugin uses URL format: rist://address:port
-        $capture_cmd = sprintf(
-            'timeout 8 tsp -I rist %s -O file %s 2>&1',
-            escapeshellarg($url),
-            escapeshellarg($capture_file)
-        );
+        // RIST input - prefer ristreceiver if available
+        $rist_receiver = shell_exec('which ristreceiver 2>/dev/null') ?:
+                         (file_exists('/usr/local/bin/ristreceiver') ? '/usr/local/bin/ristreceiver' : null);
+
+        // Ensure URL has rist:// prefix
+        $rist_url = $url;
+        if (strpos($url, 'rist://') !== 0) {
+            $rist_url = 'rist://' . $url;
+        }
+
+        if ($rist_receiver) {
+            // Use ristreceiver to receive RIST and pipe to file
+            // ristreceiver outputs TS to stdout by default
+            $capture_cmd = sprintf(
+                'timeout 8 %s %s 2>/dev/null > %s',
+                trim($rist_receiver),
+                escapeshellarg($rist_url),
+                escapeshellarg($capture_file)
+            );
+        } else {
+            // Fallback to TSDuck RIST plugin
+            $capture_cmd = sprintf(
+                'timeout 8 tsp -I rist %s -O file %s 2>&1',
+                escapeshellarg($rist_url),
+                escapeshellarg($capture_file)
+            );
+        }
     } elseif ($type === 'file') {
         // For file input, just analyze directly without capture
         if (!file_exists($url)) {

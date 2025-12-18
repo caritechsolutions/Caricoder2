@@ -16,7 +16,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 INSTALL_DIR="/opt/caritrans"
 CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
@@ -101,6 +101,12 @@ install_dependencies() {
 
     # SRT support
     apt-get install -y libsrt-dev libsrt1.5-openssl || apt-get install -y libsrt-dev || true
+
+    # SRT tools (srt-live-transmit for stream reception)
+    apt-get install -y srt-tools || true
+
+    # Build tools for librist
+    apt-get install -y meson ninja-build cmake || true
 
     # SSL/Crypto
     apt-get install -y libssl-dev
@@ -254,6 +260,84 @@ install_tsduck() {
         log_warn "TSDuck installation may have failed."
         log_warn "Stream scanning will use ffprobe as fallback."
         return 1
+    fi
+}
+
+# Install librist from source (for ristreceiver)
+install_librist() {
+    log_step "Installing librist (RIST library)..."
+
+    if command -v ristreceiver &> /dev/null; then
+        log_info "librist already installed: $(ristreceiver --help 2>&1 | head -1 || echo 'installed')"
+        return 0
+    fi
+
+    local TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+
+    log_info "Cloning librist from VideoLAN..."
+
+    # Clone librist repository
+    local CLONE_SUCCESS=false
+    for attempt in 1 2 3; do
+        if git clone --depth 1 https://code.videolan.org/rist/librist.git 2>/dev/null; then
+            CLONE_SUCCESS=true
+            break
+        fi
+        log_warn "Clone attempt $attempt failed, retrying..."
+        sleep 2
+    done
+
+    if [[ "$CLONE_SUCCESS" = false ]]; then
+        log_warn "Failed to clone librist repository"
+        log_warn "RIST scanning will not be available"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
+    cd librist
+
+    log_info "Building librist with meson/ninja..."
+
+    # Configure with meson
+    if ! meson setup build --buildtype=release -Dbuiltin_cjson=true; then
+        log_warn "Meson setup failed"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
+    # Build
+    if ! ninja -C build; then
+        log_warn "Ninja build failed"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
+    # Install
+    if ! ninja -C build install; then
+        log_warn "Ninja install failed"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
+    # Update library cache
+    ldconfig
+
+    # Cleanup
+    cd /
+    rm -rf "$TEMP_DIR"
+
+    # Verify installation
+    if command -v ristreceiver &> /dev/null; then
+        log_info "librist installed successfully"
+    else
+        # Check if installed to /usr/local/bin
+        if [[ -f /usr/local/bin/ristreceiver ]]; then
+            log_info "librist installed to /usr/local/bin"
+        else
+            log_warn "ristreceiver not found in PATH after install"
+            log_warn "RIST scanning may not work"
+        fi
     fi
 }
 
@@ -665,6 +749,16 @@ print_completion() {
     else
         echo -e "  FFmpeg:      ${YELLOW}Not Installed${NC}"
     fi
+    if command -v srt-live-transmit &> /dev/null; then
+        echo -e "  SRT Tools:   ${GREEN}Installed${NC}"
+    else
+        echo -e "  SRT Tools:   ${YELLOW}Not Installed${NC}"
+    fi
+    if command -v ristreceiver &> /dev/null || [[ -f /usr/local/bin/ristreceiver ]]; then
+        echo -e "  librist:     ${GREEN}Installed${NC}"
+    else
+        echo -e "  librist:     ${YELLOW}Not Installed${NC}"
+    fi
     echo ""
     echo -e "${BLUE}Web Interface:${NC}"
     echo -e "  URL:         ${GREEN}http://${SERVER_IP}:8080${NC}"
@@ -698,6 +792,7 @@ main() {
     check_os
     install_dependencies
     install_tsduck
+    install_librist
     create_user
     create_directories
     download_repo
