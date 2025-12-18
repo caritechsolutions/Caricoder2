@@ -313,14 +313,14 @@ function getTypeBadgeColor($type) {
 /* Status dots */
 .status-dot {
     display: inline-block;
-    width: 12px;
-    height: 12px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
-    background-color: #6c757d;
+    background-color: #9ca3af;
 }
 .status-dot.status-running {
     background-color: #10b981;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
     animation: pulse 2s infinite;
 }
 .status-dot.status-stopped {
@@ -328,97 +328,140 @@ function getTypeBadgeColor($type) {
 }
 .status-dot.status-error {
     background-color: #ef4444;
-    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25);
 }
 
 @keyframes pulse {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
+    50% { opacity: 0.5; }
 }
 
-/* Modern table styling */
+/* Modern card styling */
 .card {
     border: none;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
-    border-radius: 0.5rem;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    border-radius: 0.75rem;
+    overflow: hidden;
+}
+
+/* Table container */
+.table-responsive {
+    border-radius: 0 0 0.75rem 0.75rem;
 }
 
 #inputsTable {
     border-collapse: separate;
     border-spacing: 0;
+    margin-bottom: 0;
 }
 
+/* Table header - gradient blue */
 #inputsTable thead th {
     font-weight: 600;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #64748b;
-    background: #f8fafc;
-    border-bottom: 2px solid #e2e8f0;
-    padding: 0.875rem 1rem;
+    letter-spacing: 0.08em;
+    color: #ffffff;
+    background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%);
+    border-bottom: none;
+    padding: 1rem 1rem;
     white-space: nowrap;
 }
 
-/* Alternating row colors - target cells directly */
+#inputsTable thead th:first-child {
+    border-radius: 0;
+}
+#inputsTable thead th:last-child {
+    border-radius: 0;
+}
+
+/* Alternating row colors */
 .table > tbody > tr.row-odd > td {
     background-color: #ffffff !important;
 }
 .table > tbody > tr.row-even > td {
-    background-color: #e3f2fd !important;  /* Light blue - more visible */
+    background-color: #f0f7ff !important;
 }
 .table > tbody > tr.input-row:hover > td {
-    background-color: #bbdefb !important;  /* Hover blue */
+    background-color: #dbeafe !important;
 }
 
 #inputsTable tbody td {
     padding: 0.875rem 1rem;
-    border-bottom: 1px solid #f1f5f9;
+    border-bottom: 1px solid #e5e7eb;
     vertical-align: middle;
+    transition: background-color 0.15s ease;
 }
 
 #inputsTable tbody tr:last-child td {
     border-bottom: none;
 }
 
-/* Name column styling */
+/* Name column - bold and prominent */
 #inputsTable tbody td:nth-child(2) strong {
     color: #1e293b;
     font-weight: 600;
+    font-size: 0.95rem;
 }
 
-/* Source column styling */
+/* Source column - monospace with better color */
 #inputsTable tbody td small.text-muted {
-    color: #64748b !important;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    color: #475569 !important;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 0.8rem;
+    background: rgba(0,0,0,0.04);
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.25rem;
 }
 
-/* Badge styling */
+/* Type badges - colorful and modern */
 .badge {
-    font-weight: 500;
-    font-size: 0.7rem;
-    padding: 0.35em 0.65em;
-    letter-spacing: 0.025em;
-}
-
-/* Action buttons */
-.btn-group-sm .btn {
-    padding: 0.35rem 0.5rem;
+    font-weight: 600;
+    font-size: 0.65rem;
+    padding: 0.4em 0.7em;
+    letter-spacing: 0.05em;
     border-radius: 0.375rem;
+    text-shadow: 0 1px 1px rgba(0,0,0,0.1);
+}
+.badge.bg-primary { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%) !important; }
+.badge.bg-success { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%) !important; }
+.badge.bg-info { background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%) !important; }
+.badge.bg-warning { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; color: #fff !important; }
+.badge.bg-secondary { background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%) !important; }
+.badge.bg-dark { background: linear-gradient(135deg, #374151 0%, #1f2937 100%) !important; }
+
+/* Action buttons - cleaner look */
+.btn-group-sm .btn {
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.375rem;
+    font-size: 0.8rem;
+    border-width: 1.5px;
 }
 .btn-group-sm .btn:not(:last-child) {
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
+    margin-right: -1px;
 }
 .btn-group-sm .btn:not(:first-child) {
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
 }
+.btn-group-sm .btn i {
+    font-size: 0.85rem;
+}
 
-/* Search bar styling */
+/* Bitrate/Packets columns - monospace numbers */
+#inputsTable tbody td:nth-child(5),
+#inputsTable tbody td:nth-child(6) {
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+    font-size: 0.85rem;
+    color: #374151;
+}
+
+/* Search/filter bar */
 .card.mb-3 {
-    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    background: linear-gradient(135deg, #f8fafc 0%, #eef2f7 100%);
+    border: 1px solid #e2e8f0;
 }
 
 /* Wizard styles */
