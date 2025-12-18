@@ -108,6 +108,9 @@ install_dependencies() {
     # Build tools for librist
     apt-get install -y meson ninja-build cmake || true
 
+    # libmicrohttpd (HTTP server library, required by librist)
+    apt-get install -y libmicrohttpd-dev || true
+
     # SSL/Crypto
     apt-get install -y libssl-dev
 
