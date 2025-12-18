@@ -327,7 +327,7 @@ function scan_with_tsduck($url, $type) {
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
         // SRT input - prefer srt-live-transmit if available
-        $srt_transmit = shell_exec('which srt-live-transmit 2>/dev/null');
+        $srt_transmit = trim(shell_exec('which srt-live-transmit 2>/dev/null'));
 
         // Ensure URL has srt:// prefix
         $srt_url = $url;
@@ -336,12 +336,11 @@ function scan_with_tsduck($url, $type) {
         }
 
         if ($srt_transmit) {
-            // Use srt-live-transmit to receive SRT and output to file
-            // srt-live-transmit source destination
-            // file://con outputs to stdout, but we want a file
+            // Use srt-live-transmit to receive SRT and output to stdout, redirect to file
+            // file://con outputs to stdout which we redirect to the capture file
             $capture_cmd = sprintf(
-                'timeout 8 srt-live-transmit %s file://%s 2>&1',
-                escapeshellarg($srt_url . '?mode=caller'),
+                'timeout 8 srt-live-transmit %s file://con > %s 2>&1',
+                escapeshellarg($srt_url),
                 escapeshellarg($capture_file)
             );
         } else {
