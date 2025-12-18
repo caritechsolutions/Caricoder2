@@ -119,7 +119,14 @@ install_dependencies() {
         php-cli \
         php-fpm \
         php-json \
-        php-mbstring
+        php-mbstring \
+        php-curl
+
+    # Python for privileged API service
+    apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-venv
 
     # Nginx (optional, for production)
     apt-get install -y nginx || true
@@ -586,29 +593,52 @@ install_services() {
     log_info "Systemd services installed"
 }
 
-# Configure sudoers for web user to manage services
-configure_sudoers() {
-    log_step "Configuring sudo permissions for web interface..."
+# Install and configure the privileged API service
+install_api() {
+    log_step "Installing CariTranscoder API service..."
 
-    # Create sudoers file for CariTranscoder
-    cat > /etc/sudoers.d/caritrans << 'SUDOERS'
-# CariTranscoder - Allow www-data to manage services and systemd files
+    # Create API directory
+    mkdir -p "$INSTALL_DIR/api"
 
-# Systemctl commands for cari-* services (template and regular)
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl start cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl stop cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl status cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
+    # Copy API files
+    if [[ -d "$INSTALL_DIR/api" ]] && [[ -f "$INSTALL_DIR/api/main.py" ]]; then
+        log_info "API files already in place"
+    else
+        # Copy from source if available
+        if [[ -f "/tmp/caritrans_src/api/main.py" ]]; then
+            cp -r /tmp/caritrans_src/api/* "$INSTALL_DIR/api/"
+        fi
+    fi
 
-# Allow copying/removing service files to systemd directory
-www-data ALL=(ALL) NOPASSWD: /bin/cp /tmp/cari-*.service /etc/systemd/system/
-www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-udp-*.service
-www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-input@*.service
-SUDOERS
+    # Install Python dependencies
+    log_info "Installing Python dependencies for API..."
+    pip3 install --break-system-packages fastapi uvicorn pydantic 2>/dev/null || \
+    pip3 install fastapi uvicorn pydantic
 
-    chmod 440 /etc/sudoers.d/caritrans
-    log_info "Sudo permissions configured"
+    # Copy systemd service for API
+    cp "$INSTALL_DIR/systemd/cari-api.service" /etc/systemd/system/
+
+    # Reload systemd and enable service
+    systemctl daemon-reload
+    systemctl enable cari-api
+    systemctl start cari-api || systemctl restart cari-api
+
+    # Verify API is running
+    sleep 2
+    if systemctl is-active --quiet cari-api; then
+        log_info "CariTranscoder API service is running"
+    else
+        log_warn "CariTranscoder API service may not be running properly"
+        log_warn "Check with: journalctl -u cari-api -f"
+    fi
+
+    # Remove old sudoers file if it exists (no longer needed with API)
+    if [[ -f /etc/sudoers.d/caritrans ]]; then
+        rm -f /etc/sudoers.d/caritrans
+        log_info "Removed old sudoers file (API replaces sudo approach)"
+    fi
+
+    log_info "API service installed"
 }
 
 # Configure Nginx (optional)
@@ -780,6 +810,11 @@ print_completion() {
             break
         fi
     done
+    if systemctl is-active --quiet cari-api; then
+        echo -e "  Cari-API:    ${GREEN}Running${NC}"
+    else
+        echo -e "  Cari-API:    ${RED}Not Running${NC}"
+    fi
     if command -v tsp &> /dev/null; then
         echo -e "  TSDuck:      ${GREEN}Installed${NC}"
     else
@@ -843,7 +878,7 @@ main() {
     install_config
     install_web
     install_services
-    configure_sudoers
+    install_api
     configure_nginx
     create_tmpfiles
     start_services

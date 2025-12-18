@@ -358,7 +358,46 @@ function allocate_output_address() {
 }
 
 /**
- * Generate systemd service file for udp_input
+ * CariTranscoder API URL
+ */
+define('CARI_API_URL', 'http://127.0.0.1:8081');
+
+/**
+ * Call the privileged CariTranscoder API
+ */
+function call_cari_api($endpoint, $method = 'GET', $data = null) {
+    $url = CARI_API_URL . $endpoint;
+
+    $options = [
+        'http' => [
+            'method' => $method,
+            'timeout' => 10,
+            'ignore_errors' => true,
+            'header' => "Content-Type: application/json\r\n"
+        ]
+    ];
+
+    if ($data !== null && in_array($method, ['POST', 'PUT', 'PATCH'])) {
+        $options['http']['content'] = json_encode($data);
+    }
+
+    $context = stream_context_create($options);
+    $response = @file_get_contents($url, false, $context);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Failed to connect to CariTranscoder API'];
+    }
+
+    $result = json_decode($response, true);
+    if ($result === null) {
+        return ['success' => false, 'error' => 'Invalid response from API'];
+    }
+
+    return $result;
+}
+
+/**
+ * Generate systemd service file for udp_input via API
  */
 function generate_udp_input_service($id, $config) {
     // Get source info
@@ -384,12 +423,12 @@ function generate_udp_input_service($id, $config) {
     // Parse source URL (format: address:port or just address)
     $source_parts = explode(':', $source_url);
     $input_addr = $source_parts[0];
-    $input_port = $source_parts[1] ?? 5000;
+    $input_port = (int)($source_parts[1] ?? 5000);
 
     // Get output address
     $output_addr = $config['output']['address'] ?? '';
-    $output_port = $config['output']['port'] ?? 10000;
-    $api_port = $config['output']['api_port'] ?? 9100;
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
 
     if (!$output_addr) {
         return ['success' => false, 'error' => 'No output address configured'];
@@ -397,83 +436,26 @@ function generate_udp_input_service($id, $config) {
 
     // Get PIDs
     $program_pid = $config['pids']['program'] ?? '';
-    $video_pid = $config['pids']['video'] ?? '';
-    $audio_pids = $config['pids']['audio'] ?? '';
 
-    // Build PIDs list for --pids (video and audio only for monitoring)
-    $monitor_pids = [];
-    if ($video_pid) $monitor_pids[] = $video_pid;
-    if ($audio_pids) {
-        foreach (explode(',', $audio_pids) as $pid) {
-            $pid = trim($pid);
-            if ($pid) $monitor_pids[] = $pid;
-        }
-    }
-
-    if (empty($monitor_pids) || empty($program_pid)) {
-        return ['success' => false, 'error' => 'PIDs not configured (need program, video, and audio PIDs)'];
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
     }
 
     $name = $config['general']['name'] ?? $id;
-    $log_file = "/var/log/caritrans/input-{$id}.log";
 
-    // Build systemd service content
-    $service_content = <<<EOF
-# CariTranscoder UDP Input Service
-# Generated: DATE_PLACEHOLDER
-# Input: {$name}
+    // Call the API to create the service
+    $result = call_cari_api('/input/udp/create', 'POST', [
+        'id' => $id,
+        'source_address' => $input_addr,
+        'source_port' => $input_port,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder UDP Input - {$name}"
+    ]);
 
-[Unit]
-Description=CariTranscoder UDP Input - {$name}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/udp_input \\
-    --input {$input_addr}:{$input_port} \\
-    --output {$output_addr}:{$output_port} \\
-    --program {$program_pid} \\
-    --pids PID_LIST_PLACEHOLDER \\
-    --api-port {$api_port} \\
-    --log-file {$log_file} \\
-    --stall-timeout 30
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=cari-input-{$id}
-
-[Install]
-WantedBy=multi-user.target
-EOF;
-
-    // Replace placeholders
-    $service_content = str_replace('DATE_PLACEHOLDER', date('Y-m-d H:i:s'), $service_content);
-    $service_content = str_replace('PID_LIST_PLACEHOLDER', implode(',', $monitor_pids), $service_content);
-
-    // Write service file via sudo (www-data has sudoers permission)
-    // Use cari-udp-{id}.service naming to avoid conflict with cari-input@ template
-    $service_file = "/etc/systemd/system/cari-udp-{$id}.service";
-    $temp_file = "/tmp/cari-udp-{$id}.service";
-
-    // Write to temp file first
-    $result = file_put_contents($temp_file, $service_content);
-    if ($result === false) {
-        return ['success' => false, 'error' => 'Failed to write temporary service file'];
-    }
-
-    // Copy to systemd directory via sudo
-    exec("sudo /bin/cp {$temp_file} {$service_file} 2>&1", $output, $code);
-    unlink($temp_file);
-
-    if ($code !== 0) {
-        return ['success' => false, 'error' => 'Failed to install systemd service: ' . implode(' ', $output)];
-    }
-
-    // Reload systemd via sudo
-    exec("sudo /bin/systemctl daemon-reload 2>&1", $output2, $code2);
-
-    return ['success' => true, 'service_file' => $service_file];
+    return $result;
 }
 
 /**
@@ -1341,12 +1323,21 @@ function delete_input($id) {
         return ['success' => false, 'error' => 'Invalid input ID'];
     }
 
-    // Stop service first
-    stop_input_service($id);
+    // Get config to check type before deleting
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    $config = file_exists($config_file) ? parse_config($config_file) : [];
+    $type = $config['general']['type'] ?? 'udp';
+
+    // Stop and delete the systemd service via API
+    if ($type === 'udp') {
+        // Delete UDP input service (stops and removes service file)
+        call_cari_api("/input/udp/{$id}", 'DELETE');
+    } else {
+        // Stop other service types
+        stop_input_service($id);
+    }
 
     // Remove config file
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
-
     if (!file_exists($config_file)) {
         return ['success' => false, 'error' => 'Input config file not found'];
     }
@@ -1367,7 +1358,7 @@ function delete_input($id) {
 }
 
 /**
- * Start input service
+ * Start input service via API
  */
 function start_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -1377,25 +1368,31 @@ function start_input_service($id) {
     $config = file_exists($config_file) ? parse_config($config_file) : [];
     $type = $config['general']['type'] ?? 'udp';
 
-    // UDP inputs use cari-udp-{id} service (udp_input tool)
-    // Other types use cari-input@{id} service (GStreamer-based)
+    // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
-        $service = "cari-udp-{$id}";
-    } else {
-        $service = "cari-input@{$id}";
+        $result = call_cari_api("/input/udp/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
     }
 
-    exec("sudo /bin/systemctl start {$service} 2>&1", $output, $code);
+    // Other types use generic service control
+    $service = "cari-input@{$id}";
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'start',
+        'service_name' => $service
+    ]);
 
-    if ($code === 0) {
+    if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => "Input service started"];
     }
 
-    return ['success' => false, 'error' => implode("\n", $output)];
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
 }
 
 /**
- * Stop input service
+ * Stop input service via API
  */
 function stop_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -1405,21 +1402,27 @@ function stop_input_service($id) {
     $config = file_exists($config_file) ? parse_config($config_file) : [];
     $type = $config['general']['type'] ?? 'udp';
 
-    // UDP inputs use cari-udp-{id} service (udp_input tool)
-    // Other types use cari-input@{id} service (GStreamer-based)
+    // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
-        $service = "cari-udp-{$id}";
-    } else {
-        $service = "cari-input@{$id}";
+        $result = call_cari_api("/input/udp/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
     }
 
-    exec("sudo /bin/systemctl stop {$service} 2>&1", $output, $code);
+    // Other types use generic service control
+    $service = "cari-input@{$id}";
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'stop',
+        'service_name' => $service
+    ]);
 
-    if ($code === 0) {
+    if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => "Input service stopped"];
     }
 
-    return ['success' => false, 'error' => implode("\n", $output)];
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
 }
 
 /**

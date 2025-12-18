@@ -164,16 +164,16 @@ update_web() {
     log_info "Web interface updated"
 }
 
-# Update API files (if any separate API)
-update_api() {
-    log_step "Updating API files..."
+# Update PHP API files (if any separate API)
+update_php_api() {
+    log_step "Updating PHP API files..."
 
     if [[ -d "$TEMP_DIR/caritrans_latest/web/api" ]]; then
         # Create api directory if it doesn't exist
         mkdir -p "$WEB_DIR/api"
         cp -r "$TEMP_DIR/caritrans_latest/web/api/"* "$WEB_DIR/api/"
         chown -R "$WEB_USER:$WEB_USER" "$WEB_DIR/api"
-        log_info "API files updated"
+        log_info "PHP API files updated"
     fi
 }
 
@@ -235,29 +235,46 @@ build_tools() {
     log_info "Tools build completed"
 }
 
-# Configure sudoers for web user to manage services
-configure_sudoers() {
-    log_step "Configuring sudo permissions for web interface..."
+# Update and restart the API service
+update_api() {
+    log_step "Updating CariTranscoder API service..."
 
-    # Always create/update sudoers file for CariTranscoder
-    cat > /etc/sudoers.d/caritrans << 'SUDOERS'
-# CariTranscoder - Allow www-data to manage services and systemd files
+    # Update API files
+    if [[ -d "$TEMP_DIR/caritrans_latest/api" ]]; then
+        mkdir -p "$INSTALL_DIR/api"
+        cp -r "$TEMP_DIR/caritrans_latest/api/"* "$INSTALL_DIR/api/"
+        log_info "Updated API files"
+    fi
 
-# Systemctl commands for cari-* services (template and regular)
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl start cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl stop cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl status cari-*
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
+    # Update systemd service file
+    if [[ -f "$TEMP_DIR/caritrans_latest/systemd/cari-api.service" ]]; then
+        cp "$TEMP_DIR/caritrans_latest/systemd/cari-api.service" /etc/systemd/system/
+        log_info "Updated cari-api.service"
+    fi
 
-# Allow copying/removing service files to systemd directory
-www-data ALL=(ALL) NOPASSWD: /bin/cp /tmp/cari-*.service /etc/systemd/system/
-www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-udp-*.service
-www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-input@*.service
-SUDOERS
+    # Ensure Python dependencies are installed
+    pip3 install --break-system-packages fastapi uvicorn pydantic 2>/dev/null || \
+    pip3 install fastapi uvicorn pydantic 2>/dev/null || true
 
-    chmod 440 /etc/sudoers.d/caritrans
-    log_info "Sudo permissions configured"
+    # Reload systemd and restart API
+    systemctl daemon-reload
+    systemctl enable cari-api 2>/dev/null || true
+
+    if systemctl is-active --quiet cari-api; then
+        systemctl restart cari-api
+        log_info "Restarted cari-api service"
+    else
+        systemctl start cari-api
+        log_info "Started cari-api service"
+    fi
+
+    # Remove old sudoers file if it exists (API replaces sudo approach)
+    if [[ -f /etc/sudoers.d/caritrans ]]; then
+        rm -f /etc/sudoers.d/caritrans
+        log_info "Removed old sudoers file (API replaces sudo approach)"
+    fi
+
+    log_info "API service updated"
 }
 
 # Restart services
@@ -381,10 +398,10 @@ main() {
     backup_current
     download_latest
     update_web
-    update_api
+    update_php_api
     rebuild_apps
     build_tools
-    configure_sudoers
+    update_api
     fix_permissions
     restart_services
     cleanup

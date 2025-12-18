@@ -1,0 +1,36 @@
+[Unit]
+Description=CariTranscoder Privileged API Service
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/caritrans/api
+
+# Environment
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Main process - run with uvicorn
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 127.0.0.1 --port 8081
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-api
+
+[Install]
+WantedBy=multi-user.target
