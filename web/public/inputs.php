@@ -17,82 +17,142 @@ include __DIR__ . '/../templates/header.php';
 ?>
 
 <div class="container-fluid py-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2><i class="bi bi-download me-2"></i>Input Sources</h2>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="mb-0"><i class="bi bi-download me-2"></i>Input Sources</h2>
         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addInputModal">
             <i class="bi bi-plus-lg me-1"></i>Add Input
         </button>
     </div>
 
-    <div class="row" id="inputs-grid">
-        <?php if (empty($inputs)): ?>
-        <div class="col-12">
-            <div class="card">
-                <div class="card-body text-center py-5">
-                    <i class="bi bi-download text-muted" style="font-size: 3rem;"></i>
-                    <h5 class="mt-3">No Input Sources</h5>
-                    <p class="text-muted">Create your first input source to start receiving streams.</p>
-                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addInputModal">
-                        <i class="bi bi-plus-lg me-1"></i>Add Input
-                    </button>
+    <!-- Search and Filter Bar -->
+    <div class="card mb-3">
+        <div class="card-body py-2">
+            <div class="row align-items-center">
+                <div class="col-md-4">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-search"></i></span>
+                        <input type="text" class="form-control border-start-0" id="searchInput" placeholder="Search inputs..." onkeyup="filterInputs()">
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select" id="typeFilter" onchange="filterInputs()">
+                        <option value="">All Types</option>
+                        <option value="udp">UDP</option>
+                        <option value="srt">SRT</option>
+                        <option value="rist">RIST</option>
+                        <option value="rtmp">RTMP</option>
+                        <option value="hls">HLS</option>
+                        <option value="file">File</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select" id="statusFilter" onchange="filterInputs()">
+                        <option value="">All Status</option>
+                        <option value="running">Running</option>
+                        <option value="stopped">Stopped</option>
+                        <option value="error">Error</option>
+                    </select>
+                </div>
+                <div class="col-md-2 text-end">
+                    <span class="text-muted" id="inputCount"><?php echo count($inputs); ?> inputs</span>
                 </div>
             </div>
         </div>
-        <?php else: ?>
-        <?php foreach ($inputs as $input): ?>
-        <div class="col-xl-4 col-md-6 mb-4">
-            <div class="card service-card h-100" data-id="<?php echo htmlspecialchars($input['id']); ?>">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0"><?php echo htmlspecialchars($input['name']); ?></h6>
-                    <span class="badge bg-<?php echo $input['status'] === 'running' ? 'success' : ($input['status'] === 'error' ? 'danger' : 'secondary'); ?>">
-                        <?php echo ucfirst($input['status']); ?>
-                    </span>
-                </div>
-                <div class="card-body">
-                    <div class="mb-3">
-                        <small class="text-muted">Type</small>
-                        <div><span class="badge bg-primary"><?php echo htmlspecialchars(strtoupper($input['type'] ?? 'UDP')); ?></span></div>
-                    </div>
-                    <div class="mb-3">
-                        <small class="text-muted">Source</small>
-                        <div class="text-truncate"><?php echo htmlspecialchars($input['source'] ?? 'Not configured'); ?></div>
-                    </div>
-                    <div class="row">
-                        <div class="col-6">
-                            <small class="text-muted">Bitrate</small>
-                            <div class="fw-bold"><?php echo format_bitrate($input['bitrate'] ?? 0); ?></div>
-                        </div>
-                        <div class="col-6">
-                            <small class="text-muted">Packets</small>
-                            <div class="fw-bold"><?php echo number_format($input['packets'] ?? 0); ?></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="card-footer bg-transparent">
-                    <div class="btn-group w-100">
-                        <?php if ($input['status'] === 'running'): ?>
-                        <button class="btn btn-outline-warning btn-sm" onclick="stopService('inputs', '<?php echo $input['id']; ?>')">
-                            <i class="bi bi-stop-fill"></i> Stop
-                        </button>
-                        <?php else: ?>
-                        <button class="btn btn-outline-success btn-sm" onclick="startService('inputs', '<?php echo $input['id']; ?>')">
-                            <i class="bi bi-play-fill"></i> Start
-                        </button>
-                        <?php endif; ?>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="editInput('<?php echo $input['id']; ?>')">
-                            <i class="bi bi-gear"></i> Edit
-                        </button>
-                        <button class="btn btn-outline-danger btn-sm" onclick="deleteService('inputs', '<?php echo $input['id']; ?>')">
-                            <i class="bi bi-trash"></i>
-                        </button>
-                    </div>
-                </div>
-            </div>
+    </div>
+
+    <!-- Inputs Table -->
+    <div class="card">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0" id="inputsTable">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 40px;"></th>
+                        <th>Name</th>
+                        <th style="width: 80px;">Type</th>
+                        <th>Source</th>
+                        <th style="width: 100px;">Bitrate</th>
+                        <th style="width: 100px;">Packets</th>
+                        <th style="width: 150px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if (empty($inputs)): ?>
+                    <tr id="emptyRow">
+                        <td colspan="7" class="text-center py-5">
+                            <i class="bi bi-download text-muted" style="font-size: 2rem;"></i>
+                            <p class="mt-2 mb-0 text-muted">No input sources configured</p>
+                            <button class="btn btn-primary btn-sm mt-2" data-bs-toggle="modal" data-bs-target="#addInputModal">
+                                <i class="bi bi-plus-lg me-1"></i>Add Input
+                            </button>
+                        </td>
+                    </tr>
+                    <?php else: ?>
+                    <?php foreach ($inputs as $input): ?>
+                    <tr class="input-row"
+                        data-id="<?php echo htmlspecialchars($input['id']); ?>"
+                        data-name="<?php echo htmlspecialchars(strtolower($input['name'])); ?>"
+                        data-type="<?php echo htmlspecialchars(strtolower($input['type'] ?? 'udp')); ?>"
+                        data-status="<?php echo htmlspecialchars($input['status']); ?>"
+                        data-source="<?php echo htmlspecialchars(strtolower($input['source'] ?? '')); ?>">
+                        <td>
+                            <span class="status-dot status-<?php echo $input['status']; ?>" title="<?php echo ucfirst($input['status']); ?>"></span>
+                        </td>
+                        <td>
+                            <strong><?php echo htmlspecialchars($input['name']); ?></strong>
+                        </td>
+                        <td>
+                            <span class="badge bg-<?php echo getTypeBadgeColor($input['type'] ?? 'udp'); ?>"><?php echo htmlspecialchars(strtoupper($input['type'] ?? 'UDP')); ?></span>
+                        </td>
+                        <td class="text-truncate" style="max-width: 300px;" title="<?php echo htmlspecialchars($input['source'] ?? ''); ?>">
+                            <small class="text-muted"><?php echo htmlspecialchars($input['source'] ?? 'Not configured'); ?></small>
+                        </td>
+                        <td>
+                            <span class="fw-semibold"><?php echo format_bitrate($input['bitrate'] ?? 0); ?></span>
+                        </td>
+                        <td>
+                            <?php echo number_format($input['packets'] ?? 0); ?>
+                        </td>
+                        <td>
+                            <div class="btn-group btn-group-sm">
+                                <?php if ($input['status'] === 'running'): ?>
+                                <button class="btn btn-outline-warning" onclick="stopService('inputs', '<?php echo $input['id']; ?>')" title="Stop">
+                                    <i class="bi bi-stop-fill"></i>
+                                </button>
+                                <?php else: ?>
+                                <button class="btn btn-outline-success" onclick="startService('inputs', '<?php echo $input['id']; ?>')" title="Start">
+                                    <i class="bi bi-play-fill"></i>
+                                </button>
+                                <?php endif; ?>
+                                <button class="btn btn-outline-secondary" onclick="editInput('<?php echo $input['id']; ?>')" title="Edit">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                                <button class="btn btn-outline-danger" onclick="deleteService('inputs', '<?php echo $input['id']; ?>')" title="Delete">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
         </div>
-        <?php endforeach; ?>
-        <?php endif; ?>
     </div>
 </div>
+
+<?php
+function getTypeBadgeColor($type) {
+    $colors = [
+        'udp' => 'primary',
+        'srt' => 'success',
+        'rist' => 'info',
+        'rtmp' => 'warning',
+        'hls' => 'secondary',
+        'file' => 'dark'
+    ];
+    return $colors[strtolower($type)] ?? 'primary';
+}
+?>
 
 <!-- Add Input Modal -->
 <div class="modal fade" id="addInputModal" tabindex="-1">
@@ -250,6 +310,43 @@ include __DIR__ . '/../templates/header.php';
 </div>
 
 <style>
+/* Status dots */
+.status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #6c757d;
+}
+.status-dot.status-running {
+    background-color: #198754;
+    box-shadow: 0 0 0 3px rgba(25, 135, 84, 0.2);
+}
+.status-dot.status-stopped {
+    background-color: #6c757d;
+}
+.status-dot.status-error {
+    background-color: #dc3545;
+    box-shadow: 0 0 0 3px rgba(220, 53, 69, 0.2);
+}
+
+/* Table styling */
+#inputsTable tbody tr {
+    transition: background-color 0.15s ease;
+}
+#inputsTable tbody tr:hover {
+    background-color: #f8f9fa;
+}
+#inputsTable th {
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    color: #6c757d;
+    border-bottom: 2px solid #dee2e6;
+}
+
+/* Wizard styles */
 .wizard-step {
     min-height: 300px;
 }
@@ -298,6 +395,39 @@ include __DIR__ . '/../templates/header.php';
 let currentStep = 1;
 let nameCheckTimeout = null;
 let sourcesCount = 0;
+
+// Filter inputs based on search and dropdowns
+function filterInputs() {
+    const searchText = document.getElementById('searchInput').value.toLowerCase();
+    const typeFilter = document.getElementById('typeFilter').value.toLowerCase();
+    const statusFilter = document.getElementById('statusFilter').value.toLowerCase();
+
+    const rows = document.querySelectorAll('.input-row');
+    let visibleCount = 0;
+
+    rows.forEach(row => {
+        const name = row.dataset.name || '';
+        const type = row.dataset.type || '';
+        const status = row.dataset.status || '';
+        const source = row.dataset.source || '';
+
+        const matchesSearch = !searchText ||
+            name.includes(searchText) ||
+            source.includes(searchText);
+        const matchesType = !typeFilter || type === typeFilter;
+        const matchesStatus = !statusFilter || status === statusFilter;
+
+        if (matchesSearch && matchesType && matchesStatus) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+
+    // Update count
+    document.getElementById('inputCount').textContent = visibleCount + ' input' + (visibleCount !== 1 ? 's' : '');
+}
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
