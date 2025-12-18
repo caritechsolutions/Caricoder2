@@ -338,8 +338,9 @@ function scan_with_tsduck($url, $type) {
         if ($srt_transmit) {
             // Use srt-live-transmit to receive SRT and output to stdout, redirect to file
             // file://con outputs to stdout which we redirect to the capture file
+            // stderr must go to /dev/null to avoid corrupting the TS capture
             $capture_cmd = sprintf(
-                'timeout 8 srt-live-transmit %s file://con > %s 2>&1',
+                'timeout 8 srt-live-transmit %s file://con 2>/dev/null > %s',
                 escapeshellarg($srt_url),
                 escapeshellarg($capture_file)
             );
