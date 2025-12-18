@@ -149,25 +149,72 @@ include __DIR__ . '/../templates/header.php';
         </div>
 
         <div class="card mb-4">
-            <div class="card-header d-flex justify-content-between align-items-center">
+            <div class="card-header">
                 <h5 class="mb-0">PID Selection</h5>
-                <button type="button" class="btn btn-info btn-sm" onclick="scanSource()">
-                    <i class="bi bi-search me-1"></i>Scan Source
-                </button>
             </div>
             <div class="card-body">
+                <p class="text-muted">Select which video, audio, and program PIDs to use from the source.</p>
+
+                <div class="mb-4">
+                    <button type="button" class="btn btn-info" id="scanSourceBtn" onclick="scanSource()">
+                        <i class="bi bi-search me-1"></i>Scan Primary Source for PIDs
+                    </button>
+                    <span class="ms-2 text-muted small" id="scanStatus"></span>
+                </div>
+
                 <div class="row">
+                    <!-- Program PID -->
                     <div class="col-md-4 mb-3">
-                        <label class="form-label">Program PID</label>
-                        <input type="text" class="form-control" name="program_pid" value="<?php echo htmlspecialchars($program_pid); ?>">
+                        <label class="form-label">Program</label>
+                        <select class="form-select" name="program_pid" id="programPidSelect">
+                            <option value="">-- Select or enter manually --</option>
+                            <?php if ($program_pid): ?>
+                            <option value="<?php echo htmlspecialchars($program_pid); ?>" selected>Program <?php echo htmlspecialchars($program_pid); ?> (current)</option>
+                            <?php endif; ?>
+                        </select>
+                        <input type="number" class="form-control mt-2" name="program_pid_manual"
+                               id="programPidManual" placeholder="Or enter PID manually" value="<?php echo htmlspecialchars($program_pid); ?>">
                     </div>
+
+                    <!-- Video PID -->
                     <div class="col-md-4 mb-3">
                         <label class="form-label">Video PID</label>
-                        <input type="text" class="form-control" name="video_pid" value="<?php echo htmlspecialchars($video_pid); ?>">
+                        <select class="form-select" name="video_pid" id="videoPidSelect">
+                            <option value="">-- Select or enter manually --</option>
+                            <?php if ($video_pid): ?>
+                            <option value="<?php echo htmlspecialchars($video_pid); ?>" selected>PID <?php echo htmlspecialchars($video_pid); ?> (current)</option>
+                            <?php endif; ?>
+                        </select>
+                        <input type="number" class="form-control mt-2" name="video_pid_manual"
+                               id="videoPidManual" placeholder="Or enter PID manually" value="<?php echo htmlspecialchars($video_pid); ?>">
                     </div>
+
+                    <!-- Audio PIDs -->
                     <div class="col-md-4 mb-3">
-                        <label class="form-label">Audio PIDs</label>
-                        <input type="text" class="form-control" name="audio_pids" value="<?php echo htmlspecialchars($audio_pids); ?>" placeholder="Comma-separated: 257,258">
+                        <label class="form-label">Audio PIDs <span class="text-muted small">(select multiple)</span></label>
+                        <select class="form-select" name="audio_pids[]" id="audioPidSelect" multiple size="4">
+                            <?php
+                            $audio_arr = $audio_pids ? explode(',', $audio_pids) : [];
+                            foreach ($audio_arr as $apid):
+                                $apid = trim($apid);
+                                if ($apid):
+                            ?>
+                            <option value="<?php echo htmlspecialchars($apid); ?>" selected>PID <?php echo htmlspecialchars($apid); ?> (current)</option>
+                            <?php endif; endforeach; ?>
+                        </select>
+                        <input type="text" class="form-control mt-2" name="audio_pids_manual"
+                               id="audioPidManual" placeholder="Or enter PIDs: 257,258" value="<?php echo htmlspecialchars($audio_pids); ?>">
+                        <div class="form-text">Comma-separated for multiple audio tracks</div>
+                    </div>
+                </div>
+
+                <!-- Scanned info display -->
+                <div id="scanResults" class="mt-3" style="display:none;">
+                    <div class="card bg-light">
+                        <div class="card-body">
+                            <h6><i class="bi bi-info-circle me-1"></i>Detected Stream Info</h6>
+                            <div id="scanResultsContent"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -260,6 +307,10 @@ function removeSource(id) {
 }
 
 async function scanSource() {
+    const btn = document.getElementById('scanSourceBtn');
+    const statusEl = document.getElementById('scanStatus');
+    const resultsEl = document.getElementById('scanResults');
+
     const firstSource = document.querySelector('.source-card');
     const sourceInput = firstSource ? firstSource.querySelector('.source-url') : null;
     const sourceType = firstSource ? firstSource.querySelector('.source-type') : null;
@@ -271,6 +322,9 @@ async function scanSource() {
         alert('Please enter a source URL first');
         return;
     }
+
+    btn.disabled = true;
+    statusEl.innerHTML = '<i class="bi bi-hourglass-split"></i> Scanning source...';
 
     try {
         const formData = new FormData();
@@ -284,24 +338,97 @@ async function scanSource() {
         const data = await response.json();
 
         if (data.success) {
-            // Populate PID fields
-            if (data.video_pids && data.video_pids.length > 0) {
-                document.querySelector('[name="video_pid"]').value = data.video_pids[0].pid;
-            }
-            if (data.audio_pids && data.audio_pids.length > 0) {
-                document.querySelector('[name="audio_pids"]').value = data.audio_pids.map(a => a.pid).join(',');
-            }
-            if (data.programs && data.programs.length > 0) {
-                document.querySelector('[name="program_pid"]').value = data.programs[0].id;
-            }
-            alert('Scan complete! PID fields updated.');
+            statusEl.innerHTML = '<i class="bi bi-check-circle text-success"></i> Scan complete';
+            populatePidSelects(data);
+            resultsEl.style.display = 'block';
         } else {
-            alert('Scan failed: ' + (data.error || 'Unknown error'));
+            statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-warning"></i> ${data.error || 'Scan failed'}`;
+            resultsEl.style.display = 'none';
         }
     } catch (e) {
+        statusEl.innerHTML = '<i class="bi bi-x-circle text-danger"></i> Scan error';
         console.error('Scan error:', e);
-        alert('Scan error');
     }
+
+    btn.disabled = false;
+}
+
+// Populate PID selects from scan results
+function populatePidSelects(data) {
+    const programSelect = document.getElementById('programPidSelect');
+    const videoSelect = document.getElementById('videoPidSelect');
+    const audioSelect = document.getElementById('audioPidSelect');
+    const resultsContent = document.getElementById('scanResultsContent');
+
+    // Clear existing options (keep first placeholder)
+    programSelect.innerHTML = '<option value="">-- Select program --</option>';
+    videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
+    audioSelect.innerHTML = '';
+
+    // Populate programs
+    if (data.programs && data.programs.length > 0) {
+        data.programs.forEach(prog => {
+            const opt = document.createElement('option');
+            opt.value = prog.id || prog;
+            opt.textContent = prog.name || `Program ${prog.id || prog}`;
+            programSelect.appendChild(opt);
+        });
+        // Auto-select first program
+        if (data.programs.length === 1) {
+            programSelect.value = data.programs[0].id;
+            document.getElementById('programPidManual').value = data.programs[0].id;
+        }
+    }
+
+    // Populate video PIDs
+    if (data.video_pids && data.video_pids.length > 0) {
+        data.video_pids.forEach(vid => {
+            const opt = document.createElement('option');
+            opt.value = vid.pid;
+            opt.textContent = `PID ${vid.pid} - ${vid.description || vid.codec || 'Video'}`;
+            videoSelect.appendChild(opt);
+        });
+        // Auto-select first video
+        if (data.video_pids.length === 1) {
+            videoSelect.value = data.video_pids[0].pid;
+            document.getElementById('videoPidManual').value = data.video_pids[0].pid;
+        }
+    }
+
+    // Populate audio PIDs
+    if (data.audio_pids && data.audio_pids.length > 0) {
+        data.audio_pids.forEach(aud => {
+            const opt = document.createElement('option');
+            opt.value = aud.pid;
+            opt.textContent = `PID ${aud.pid} - ${aud.description || aud.codec || 'Audio'} (${aud.language || 'und'})`;
+            audioSelect.appendChild(opt);
+        });
+        // Auto-select all audio tracks
+        Array.from(audioSelect.options).forEach(opt => opt.selected = true);
+        // Update manual field too
+        document.getElementById('audioPidManual').value = data.audio_pids.map(a => a.pid).join(',');
+    }
+
+    // Show results summary
+    let html = '<div class="row">';
+    html += `<div class="col-md-4"><strong>Programs:</strong> ${data.programs?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Video tracks:</strong> ${data.video_pids?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Audio tracks:</strong> ${data.audio_pids?.length || 0}</div>`;
+    html += '</div>';
+
+    if (data.video_pids && data.video_pids.length > 0) {
+        html += '<div class="mt-2"><small class="text-muted">Video: ';
+        html += data.video_pids.map(v => `${v.description || 'PID ' + v.pid}`).join(', ');
+        html += '</small></div>';
+    }
+
+    if (data.audio_pids && data.audio_pids.length > 0) {
+        html += '<div class="mt-1"><small class="text-muted">Audio: ';
+        html += data.audio_pids.map(a => `${a.language || 'und'} (PID ${a.pid})`).join(', ');
+        html += '</small></div>';
+    }
+
+    resultsContent.innerHTML = html;
 }
 
 async function handleSubmit(e) {
@@ -310,14 +437,32 @@ async function handleSubmit(e) {
     const form = e.target;
     const formData = new FormData(form);
 
+    // Get PIDs - prefer select value, fall back to manual input
+    const videoPidSelect = document.getElementById('videoPidSelect').value;
+    const videoPidManual = document.getElementById('videoPidManual').value;
+    const programPidSelect = document.getElementById('programPidSelect').value;
+    const programPidManual = document.getElementById('programPidManual').value;
+
+    // Get audio PIDs from select or manual
+    const audioSelect = document.getElementById('audioPidSelect');
+    const selectedAudio = Array.from(audioSelect.selectedOptions).map(opt => opt.value).filter(v => v);
+    const manualAudio = document.getElementById('audioPidManual').value;
+
+    let audioPids = [];
+    if (selectedAudio.length > 0) {
+        audioPids = selectedAudio;
+    } else if (manualAudio) {
+        audioPids = manualAudio.split(',').map(p => p.trim()).filter(p => p);
+    }
+
     const data = {
         id: inputId,
         name: formData.get('name'),
         buffer: formData.get('buffer'),
         sources: [],
-        video_pid: formData.get('video_pid'),
-        audio_pids: formData.get('audio_pids'),
-        program_pid: formData.get('program_pid')
+        video_pid: videoPidSelect || videoPidManual,
+        audio_pids: audioPids,
+        program_pid: programPidSelect || programPidManual
     };
 
     // Collect sources
