@@ -1151,7 +1151,7 @@ function create_input($data) {
 
         // Generate systemd service for UDP inputs
         $service_result = null;
-        if ($primaryType === 'udp' && $output_alloc) {
+        if ($primaryType === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
         }
 
@@ -1165,8 +1165,12 @@ function create_input($data) {
             $response['output'] = $output_alloc;
         }
 
-        if ($service_result && !$service_result['success']) {
-            $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+        if ($service_result) {
+            if (!$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            } else {
+                $response['service_file'] = $service_result['service_file'] ?? null;
+            }
         }
 
         return $response;
@@ -1307,7 +1311,18 @@ function update_input($id, $data) {
 
     $result = file_put_contents($config_file, $content);
     if ($result !== false) {
-        return ['success' => true, 'message' => "Input updated successfully"];
+        $response = ['success' => true, 'message' => "Input updated successfully"];
+
+        // Regenerate systemd service for UDP inputs
+        $type = $config['general']['type'] ?? 'udp';
+        if ($type === 'udp') {
+            $service_result = generate_udp_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
+        }
+
+        return $response;
     }
 
     // Get detailed error
