@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 
 #define MAX_PIDS 32
 #define HISTORY_SIZE 17280  // 24 hours * 60 min * 60 sec / 5 sec per sample
@@ -43,7 +44,8 @@ typedef struct {
     PIDMonitor monitors[MAX_PIDS];
     int monitor_count;
     time_t last_data_received;
-    int running;
+    volatile int running;
+    pid_t tsp_child;
     pthread_mutex_t lock;
 } AppContext;
 
@@ -104,6 +106,23 @@ void init_monitors() {
         m->current_bitrate = 0;
         m->last_update = time(NULL);
     }
+}
+
+void kill_tsp_child() {
+    if (g_ctx.tsp_child > 0) {
+        fprintf(stderr, "Killing tsp child process %d\n", g_ctx.tsp_child);
+        kill(g_ctx.tsp_child, SIGTERM);
+        usleep(100000);  // 100ms grace period
+        kill(g_ctx.tsp_child, SIGKILL);
+        waitpid(g_ctx.tsp_child, NULL, WNOHANG);
+        g_ctx.tsp_child = 0;
+    }
+}
+
+void signal_handler(int sig) {
+    fprintf(stderr, "Received signal %d, shutting down...\n", sig);
+    g_ctx.running = 0;
+    kill_tsp_child();
 }
 
 PIDMonitor* find_monitor(uint16_t pid) {
@@ -214,52 +233,113 @@ void* log_monitor_thread(void *arg) {
 
 void* tsp_manager_thread(void *arg) {
     (void)arg;
-    char cmd[2048];
 
     while (g_ctx.running) {
-        // Build PID filter string: 0, 17, program, then video/audio pids
-        char pids_filter[512] = "-p 0 -p 17";
-        char pid_str[32];
+        // Build argument array for execvp
+        // Max args: tsp -I ip addr:port -P filter -p X ... -P bitrate_monitor --pid X --periodic-bitrate 5 ... -O ip addr:port
+        char *argv[128];
+        int argc = 0;
 
-        // Add program PID
-        snprintf(pid_str, sizeof(pid_str), " -p %u", g_ctx.program_pid);
-        strcat(pids_filter, pid_str);
+        char input_arg[128], output_arg[128];
+        snprintf(input_arg, sizeof(input_arg), "%s:%d", g_ctx.input_addr, g_ctx.input_port);
+        snprintf(output_arg, sizeof(output_arg), "%s:%d", g_ctx.output_addr, g_ctx.output_port);
 
-        // Add video/audio PIDs
+        argv[argc++] = "tsp";
+        argv[argc++] = "-I";
+        argv[argc++] = "ip";
+        argv[argc++] = input_arg;
+
+        // Filter plugin
+        argv[argc++] = "-P";
+        argv[argc++] = "filter";
+
+        // Static PID strings (need to persist during exec)
+        static char pid_args[MAX_PIDS + 4][16];
+        int pid_idx = 0;
+
+        // Add PIDs 0, 17, program
+        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "0");
+        argv[argc++] = "-p";
+        argv[argc++] = pid_args[pid_idx++];
+
+        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "17");
+        argv[argc++] = "-p";
+        argv[argc++] = pid_args[pid_idx++];
+
+        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.program_pid);
+        argv[argc++] = "-p";
+        argv[argc++] = pid_args[pid_idx++];
+
+        // Add video/audio PIDs to filter
         for (int i = 0; i < g_ctx.pid_count; i++) {
-            snprintf(pid_str, sizeof(pid_str), " -p %u", g_ctx.pids[i]);
-            strcat(pids_filter, pid_str);
+            snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.pids[i]);
+            argv[argc++] = "-p";
+            argv[argc++] = pid_args[pid_idx++];
         }
 
-        // Build bitrate monitor plugins for video/audio PIDs only
-        char bitrate_plugins[512] = "";
+        // Add bitrate_monitor plugins for video/audio PIDs
+        static char monitor_pids[MAX_PIDS][16];
         for (int i = 0; i < g_ctx.pid_count; i++) {
-            char plugin[128];
-            snprintf(plugin, sizeof(plugin),
-                     "-P bitrate_monitor --pid %u --periodic-bitrate 5 ",
-                     g_ctx.pids[i]);
-            strcat(bitrate_plugins, plugin);
+            snprintf(monitor_pids[i], sizeof(monitor_pids[i]), "%u", g_ctx.pids[i]);
+            argv[argc++] = "-P";
+            argv[argc++] = "bitrate_monitor";
+            argv[argc++] = "--pid";
+            argv[argc++] = monitor_pids[i];
+            argv[argc++] = "--periodic-bitrate";
+            argv[argc++] = "5";
         }
 
-        // Build full tsp command - stderr goes to log file
-        snprintf(cmd, sizeof(cmd),
-                 "tsp -I ip %s:%d "
-                 "-P filter %s "
-                 "%s"
-                 "-O ip %s:%d "
-                 "2>> %s",
-                 g_ctx.input_addr, g_ctx.input_port,
-                 pids_filter,
-                 bitrate_plugins,
-                 g_ctx.output_addr, g_ctx.output_port,
-                 g_ctx.log_file);
+        // Output plugin
+        argv[argc++] = "-O";
+        argv[argc++] = "ip";
+        argv[argc++] = output_arg;
+        argv[argc] = NULL;
 
-        fprintf(stderr, "Starting tsp: %s\n", cmd);
+        // Log the command
+        fprintf(stderr, "Starting tsp:");
+        for (int i = 0; argv[i]; i++) {
+            fprintf(stderr, " %s", argv[i]);
+        }
+        fprintf(stderr, "\n");
 
-        int ret = system(cmd);
+        // Fork and exec
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child process
+            // Set up to die when parent dies
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
 
-        if (g_ctx.running) {
-            fprintf(stderr, "tsp process exited with code %d, restarting...\n", ret);
+            // Redirect stderr to log file
+            FILE *log = fopen(g_ctx.log_file, "a");
+            if (log) {
+                dup2(fileno(log), STDERR_FILENO);
+                fclose(log);
+            }
+
+            execvp("tsp", argv);
+            // If exec fails
+            perror("execvp tsp failed");
+            _exit(1);
+        } else if (pid > 0) {
+            // Parent process
+            g_ctx.tsp_child = pid;
+            fprintf(stderr, "tsp started with PID %d\n", pid);
+
+            // Wait for child to exit
+            int status;
+            waitpid(pid, &status, 0);
+            g_ctx.tsp_child = 0;
+
+            if (g_ctx.running) {
+                if (WIFEXITED(status)) {
+                    fprintf(stderr, "tsp exited with code %d, restarting...\n", WEXITSTATUS(status));
+                } else if (WIFSIGNALED(status)) {
+                    fprintf(stderr, "tsp killed by signal %d, restarting...\n", WTERMSIG(status));
+                }
+                sleep(2);
+            }
+        } else {
+            perror("fork failed");
             sleep(2);
         }
     }
@@ -385,6 +465,10 @@ int main(int argc, char *argv[]) {
     // Initialize monitors from PIDs
     init_monitors();
 
+    // Set up signal handlers
+    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signal_handler);
+
     // Clear/create log file
     FILE *lf = fopen(g_ctx.log_file, "w");
     if (lf) fclose(lf);
@@ -444,11 +528,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Cleanup
+    fprintf(stderr, "Shutting down...\n");
+    kill_tsp_child();
     MHD_stop_daemon(daemon);
-    pthread_cancel(tsp_thread);
     pthread_cancel(log_thread);
     pthread_join(tsp_thread, NULL);
     pthread_join(log_thread, NULL);
 
+    fprintf(stderr, "Cleanup complete\n");
     return 0;
 }
