@@ -360,19 +360,15 @@ function getTypeBadgeColor($type) {
     white-space: nowrap;
 }
 
-/* Alternating row colors */
-tr.row-odd {
+/* Alternating row colors - target cells directly */
+.table > tbody > tr.row-odd > td {
     background-color: #ffffff !important;
 }
-tr.row-even {
-    background-color: #f0f4f8 !important;
+.table > tbody > tr.row-even > td {
+    background-color: #e3f2fd !important;  /* Light blue - more visible */
 }
-tr.input-row:hover {
-    background-color: #dbeafe !important;
-}
-tr.row-odd:hover,
-tr.row-even:hover {
-    background-color: #dbeafe !important;
+.table > tbody > tr.input-row:hover > td {
+    background-color: #bbdefb !important;  /* Hover blue */
 }
 
 #inputsTable tbody td {
