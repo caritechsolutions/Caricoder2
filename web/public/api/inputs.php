@@ -451,26 +451,18 @@ EOF;
     $service_content = str_replace('DATE_PLACEHOLDER', date('Y-m-d H:i:s'), $service_content);
     $service_content = str_replace('PID_LIST_PLACEHOLDER', implode(',', $monitor_pids), $service_content);
 
-    // Write service file
+    // Write service file (PHP runs as root in appliance mode)
     $service_file = "/etc/systemd/system/cari-input@{$id}.service";
 
-    // Try to write (may need sudo in production)
     $result = @file_put_contents($service_file, $service_content);
 
     if ($result === false) {
-        // Try with sudo
-        $temp_file = "/tmp/cari-input-{$id}.service";
-        file_put_contents($temp_file, $service_content);
-        exec("sudo cp {$temp_file} {$service_file} && sudo systemctl daemon-reload 2>&1", $output, $code);
-        unlink($temp_file);
-
-        if ($code !== 0) {
-            return ['success' => false, 'error' => 'Failed to install systemd service: ' . implode(' ', $output)];
-        }
-    } else {
-        // Reload systemd
-        exec("sudo systemctl daemon-reload 2>&1", $output, $code);
+        $error = error_get_last();
+        return ['success' => false, 'error' => 'Failed to write systemd service: ' . ($error['message'] ?? 'Permission denied')];
     }
+
+    // Reload systemd
+    exec("systemctl daemon-reload 2>&1", $output, $code);
 
     return ['success' => true, 'service_file' => $service_file];
 }

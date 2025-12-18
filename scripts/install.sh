@@ -26,7 +26,7 @@ DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 SERVICE_USER="caritrans"
-WEB_USER="www-data"
+WEB_USER="root"  # Run PHP-FPM as root for full system access
 
 # Logging functions
 log_info() {
@@ -586,6 +586,70 @@ install_services() {
     log_info "Systemd services installed"
 }
 
+# Configure PHP-FPM to run as root
+configure_php_fpm() {
+    log_step "Configuring PHP-FPM to run as root..."
+
+    # Find PHP version
+    local PHP_VERSION=""
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        if [[ -d "/etc/php/${ver}/fpm" ]]; then
+            PHP_VERSION="$ver"
+            break
+        fi
+    done
+
+    if [[ -z "$PHP_VERSION" ]]; then
+        log_warn "PHP-FPM not found, skipping configuration"
+        return 1
+    fi
+
+    log_info "Configuring PHP $PHP_VERSION FPM..."
+
+    local FPM_POOL_DIR="/etc/php/${PHP_VERSION}/fpm/pool.d"
+    local FPM_SOCKET="/var/run/php/caritrans-fpm.sock"
+
+    # Create CariTranscoder-specific pool running as root
+    cat > "${FPM_POOL_DIR}/caritrans.conf" << PHPFPM
+[caritrans]
+; Pool running as root for full system access (appliance mode)
+user = root
+group = root
+
+listen = ${FPM_SOCKET}
+listen.owner = root
+listen.group = root
+listen.mode = 0660
+
+pm = dynamic
+pm.max_children = 10
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 4
+
+; Security - only allow local connections
+listen.allowed_clients = 127.0.0.1
+
+; Logging
+php_admin_value[error_log] = /var/log/caritrans/php-errors.log
+php_admin_flag[log_errors] = on
+
+; Paths
+chdir = /var/www/caritrans
+PHPFPM
+
+    # Disable www pool if it's the default (we'll use caritrans pool)
+    if [[ -f "${FPM_POOL_DIR}/www.conf" ]]; then
+        mv "${FPM_POOL_DIR}/www.conf" "${FPM_POOL_DIR}/www.conf.disabled" 2>/dev/null || true
+        log_info "Disabled default www pool"
+    fi
+
+    # Store the socket path for nginx config
+    PHP_FPM_SOCK="$FPM_SOCKET"
+
+    log_info "PHP-FPM configured to run as root"
+}
+
 # Configure Nginx (optional)
 configure_nginx() {
     log_step "Configuring Nginx..."
@@ -595,21 +659,8 @@ configure_nginx() {
         return
     fi
 
-    # Detect PHP-FPM socket path
-    local PHP_FPM_SOCK=""
-    if [[ -S /var/run/php/php8.1-fpm.sock ]]; then
-        PHP_FPM_SOCK="/var/run/php/php8.1-fpm.sock"
-    elif [[ -S /var/run/php/php8.0-fpm.sock ]]; then
-        PHP_FPM_SOCK="/var/run/php/php8.0-fpm.sock"
-    elif [[ -S /var/run/php/php7.4-fpm.sock ]]; then
-        PHP_FPM_SOCK="/var/run/php/php7.4-fpm.sock"
-    else
-        # Try to find any php-fpm socket
-        PHP_FPM_SOCK=$(find /var/run/php -name "php*-fpm.sock" 2>/dev/null | head -1)
-        if [[ -z "$PHP_FPM_SOCK" ]]; then
-            PHP_FPM_SOCK="/var/run/php/php-fpm.sock"
-        fi
-    fi
+    # Use caritrans FPM socket (runs as root)
+    local PHP_FPM_SOCK="/var/run/php/caritrans-fpm.sock"
 
     log_info "Using PHP-FPM socket: $PHP_FPM_SOCK"
 
@@ -671,7 +722,7 @@ start_services() {
 
     # Detect and start PHP-FPM
     local PHP_FPM_SERVICE=""
-    for ver in 8.3 8.2 8.1 8.0 7.4; do
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
         if systemctl list-unit-files | grep -q "php${ver}-fpm"; then
             PHP_FPM_SERVICE="php${ver}-fpm"
             break
@@ -752,7 +803,7 @@ print_completion() {
     else
         echo -e "  Nginx:       ${RED}Not Running${NC}"
     fi
-    for ver in 8.3 8.2 8.1 8.0 7.4; do
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
         if systemctl is-active --quiet "php${ver}-fpm" 2>/dev/null; then
             echo -e "  PHP-FPM:     ${GREEN}Running (PHP $ver)${NC}"
             break
@@ -821,6 +872,7 @@ main() {
     install_config
     install_web
     install_services
+    configure_php_fpm
     configure_nginx
     create_tmpfiles
     start_services
