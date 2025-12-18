@@ -360,8 +360,8 @@ function scan_with_tsduck($url, $type) {
         }
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
         // RIST input - prefer ristreceiver if available
-        $rist_receiver = shell_exec('which ristreceiver 2>/dev/null') ?:
-                         (file_exists('/usr/local/bin/ristreceiver') ? '/usr/local/bin/ristreceiver' : null);
+        $rist_receiver = trim(shell_exec('which ristreceiver 2>/dev/null') ?:
+                         (file_exists('/usr/local/bin/ristreceiver') ? '/usr/local/bin/ristreceiver' : ''));
 
         // Ensure URL has rist:// prefix
         $rist_url = $url;
@@ -370,14 +370,33 @@ function scan_with_tsduck($url, $type) {
         }
 
         if ($rist_receiver) {
-            // Use ristreceiver to receive RIST and pipe to file
-            // ristreceiver outputs TS to stdout by default
-            $capture_cmd = sprintf(
-                'timeout 8 %s %s 2>/dev/null > %s',
-                trim($rist_receiver),
+            // Use ristreceiver to receive RIST and output to local UDP
+            // ristreceiver requires -i (input) and -o (output) parameters
+            // We output to a local UDP port and capture with tsp
+            $local_port = rand(15000, 15999);
+            $local_udp = "udp://127.0.0.1:{$local_port}";
+
+            // Start ristreceiver in background
+            $rist_cmd = sprintf(
+                '%s -i %s -o %s -S 0 -v -1 > /dev/null 2>&1 &',
+                $rist_receiver,
                 escapeshellarg($rist_url),
+                escapeshellarg($local_udp)
+            );
+            exec($rist_cmd);
+
+            // Give ristreceiver a moment to start
+            usleep(500000); // 500ms
+
+            // Capture from local UDP with tsp
+            $capture_cmd = sprintf(
+                'timeout 8 tsp -I ip 127.0.0.1:%d -O file %s 2>&1',
+                $local_port,
                 escapeshellarg($capture_file)
             );
+
+            // We'll need to kill ristreceiver after capture
+            $result['_cleanup_rist'] = true;
         } else {
             // Fallback to TSDuck RIST plugin
             $capture_cmd = sprintf(
@@ -410,6 +429,12 @@ function scan_with_tsduck($url, $type) {
 
     // Capture stream
     exec($capture_cmd, $capture_output, $capture_code);
+
+    // Clean up any background ristreceiver processes
+    if (isset($result['_cleanup_rist']) && $result['_cleanup_rist']) {
+        exec('pkill -f "ristreceiver.*127.0.0.1" 2>/dev/null');
+        unset($result['_cleanup_rist']);
+    }
 
     // Check if capture file was created
     if (!file_exists($capture_file) || filesize($capture_file) < 1000) {
