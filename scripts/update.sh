@@ -237,13 +237,10 @@ build_tools() {
 
 # Configure sudoers for web user to manage services
 configure_sudoers() {
-    log_step "Ensuring sudo permissions for web interface..."
+    log_step "Configuring sudo permissions for web interface..."
 
-    # Create/update sudoers file for CariTranscoder
-    if [[ ! -f /etc/sudoers.d/caritrans ]]; then
-        log_info "Creating sudoers configuration..."
-
-        cat > /etc/sudoers.d/caritrans << 'SUDOERS'
+    # Always create/update sudoers file for CariTranscoder
+    cat > /etc/sudoers.d/caritrans << 'SUDOERS'
 # CariTranscoder - Allow www-data to manage services and systemd files
 
 # Systemctl commands for cari-* services (template and regular)
@@ -259,11 +256,8 @@ www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-udp-*.service
 www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-input@*.service
 SUDOERS
 
-        chmod 440 /etc/sudoers.d/caritrans
-        log_info "Sudo permissions configured"
-    else
-        log_info "Sudoers already configured"
-    fi
+    chmod 440 /etc/sudoers.d/caritrans
+    log_info "Sudo permissions configured"
 }
 
 # Restart services
