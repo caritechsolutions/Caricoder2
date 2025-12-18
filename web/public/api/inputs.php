@@ -692,17 +692,33 @@ function update_input($id, $data) {
 function delete_input($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
+    if (empty($id)) {
+        return ['success' => false, 'error' => 'Invalid input ID'];
+    }
+
     // Stop service first
     stop_input_service($id);
 
     // Remove config file
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
 
-    if (file_exists($config_file)) {
-        unlink($config_file);
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Input config file not found'];
     }
 
-    return ['success' => true, 'message' => "Input deleted successfully"];
+    // Check if directory is writable (needed for unlink)
+    $config_dir = dirname($config_file);
+    if (!is_writable($config_dir)) {
+        return ['success' => false, 'error' => 'Config directory not writable'];
+    }
+
+    if (@unlink($config_file)) {
+        return ['success' => true, 'message' => "Input deleted successfully"];
+    }
+
+    $error = error_get_last();
+    $errorMsg = $error ? $error['message'] : 'Unknown error';
+    return ['success' => false, 'error' => "Failed to delete: $errorMsg"];
 }
 
 /**

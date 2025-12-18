@@ -762,10 +762,19 @@ function stopService(type, id) {
 function deleteService(type, id) {
     if (confirm('Are you sure you want to delete this input?')) {
         fetch(`api/${type}.php?action=delete&id=${id}`, { method: 'POST' })
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) {
+                    throw new Error(`HTTP ${r.status}`);
+                }
+                return r.json();
+            })
             .then(data => {
                 if (data.success) location.reload();
                 else alert(data.error || 'Failed to delete');
+            })
+            .catch(e => {
+                console.error('Delete error:', e);
+                alert('Delete failed: ' + e.message);
             });
     }
 }
