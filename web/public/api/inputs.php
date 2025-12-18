@@ -320,21 +320,31 @@ function scan_with_tsduck($url, $type) {
         $port = $parsed['port'] ?? 5000;
 
         $capture_cmd = sprintf(
-            'timeout 5 tsp -I ip %s:%d -O file %s 2>/dev/null',
+            'timeout 5 tsp -I ip %s:%d -O file %s 2>&1',
             escapeshellarg($address),
             (int)$port,
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
+        // Parse SRT URL to get address and port
+        // Format: srt://address:port or just address:port
+        $srt_url = preg_replace('/^srt:\/\//', '', $url);
+        $parts = explode(':', $srt_url);
+        $address = $parts[0] ?? '';
+        $port = $parts[1] ?? 9000;
+
+        // TSDuck SRT uses --caller for connecting to a sender
         $capture_cmd = sprintf(
-            'timeout 5 tsp -I srt %s -O file %s 2>/dev/null',
-            escapeshellarg($url),
+            'timeout 8 tsp -I srt --caller %s:%d -O file %s 2>&1',
+            escapeshellarg($address),
+            (int)$port,
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
         // RIST input using TSDuck
+        // TSDuck RIST plugin uses URL format: rist://address:port
         $capture_cmd = sprintf(
-            'timeout 5 tsp -I rist %s -O file %s 2>/dev/null',
+            'timeout 8 tsp -I rist %s -O file %s 2>&1',
             escapeshellarg($url),
             escapeshellarg($capture_file)
         );
@@ -368,7 +378,16 @@ function scan_with_tsduck($url, $type) {
         if (file_exists($capture_file)) {
             unlink($capture_file);
         }
-        $result['error'] = 'Failed to capture stream (no data received). Check that the source is active and accessible.';
+        $error_msg = 'Failed to capture stream (no data received).';
+        if (!empty($capture_output)) {
+            $error_msg .= ' TSDuck output: ' . implode(' ', array_slice($capture_output, 0, 3));
+        }
+        $result['error'] = $error_msg;
+        $result['debug'] = [
+            'command' => $capture_cmd,
+            'exit_code' => $capture_code,
+            'output' => $capture_output
+        ];
         return $result;
     }
 
