@@ -313,37 +313,119 @@ function getTypeBadgeColor($type) {
 /* Status dots */
 .status-dot {
     display: inline-block;
-    width: 10px;
-    height: 10px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
     background-color: #6c757d;
 }
 .status-dot.status-running {
-    background-color: #198754;
-    box-shadow: 0 0 0 3px rgba(25, 135, 84, 0.2);
+    background-color: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+    animation: pulse 2s infinite;
 }
 .status-dot.status-stopped {
-    background-color: #6c757d;
+    background-color: #9ca3af;
 }
 .status-dot.status-error {
-    background-color: #dc3545;
-    box-shadow: 0 0 0 3px rgba(220, 53, 69, 0.2);
+    background-color: #ef4444;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
 }
 
-/* Table styling */
-#inputsTable tbody tr {
-    transition: background-color 0.15s ease;
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
 }
-#inputsTable tbody tr:hover {
-    background-color: #f8f9fa;
+
+/* Modern table styling */
+.card {
+    border: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+    border-radius: 0.5rem;
 }
-#inputsTable th {
+
+#inputsTable {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+#inputsTable thead th {
     font-weight: 600;
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+    background: #f8fafc;
+    border-bottom: 2px solid #e2e8f0;
+    padding: 0.875rem 1rem;
+    white-space: nowrap;
+}
+
+#inputsTable tbody tr {
+    transition: all 0.15s ease;
+}
+
+/* Alternating row colors */
+#inputsTable tbody tr:nth-child(odd) {
+    background-color: #ffffff;
+}
+#inputsTable tbody tr:nth-child(even) {
+    background-color: #f8fafc;
+}
+
+#inputsTable tbody tr:hover {
+    background-color: #f0f9ff !important;
+    transform: scale(1.001);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#inputsTable tbody td {
+    padding: 0.875rem 1rem;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+
+#inputsTable tbody tr:last-child td {
+    border-bottom: none;
+}
+
+/* Name column styling */
+#inputsTable tbody td:nth-child(2) strong {
+    color: #1e293b;
+    font-weight: 600;
+}
+
+/* Source column styling */
+#inputsTable tbody td small.text-muted {
+    color: #64748b !important;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.8rem;
+}
+
+/* Badge styling */
+.badge {
+    font-weight: 500;
+    font-size: 0.7rem;
+    padding: 0.35em 0.65em;
     letter-spacing: 0.025em;
-    color: #6c757d;
-    border-bottom: 2px solid #dee2e6;
+}
+
+/* Action buttons */
+.btn-group-sm .btn {
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.375rem;
+}
+.btn-group-sm .btn:not(:last-child) {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+.btn-group-sm .btn:not(:first-child) {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+
+/* Search bar styling */
+.card.mb-3 {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
 }
 
 /* Wizard styles */
