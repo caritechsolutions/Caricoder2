@@ -35,7 +35,8 @@ typedef struct {
     int output_port;
     char log_file[256];
     int api_port;
-    uint16_t pids[MAX_PIDS];
+    uint16_t program_pid;
+    uint16_t pids[MAX_PIDS];  // Video/audio PIDs to monitor
     int pid_count;
     int stall_timeout;
     int history_hours;
@@ -53,9 +54,10 @@ void print_help(const char *prog) {
     printf("Options:\n");
     printf("  --input ADDRESS:PORT         Input UDP address (required)\n");
     printf("  --output ADDRESS:PORT        Output UDP address (required)\n");
+    printf("  --program PID                Program/PMT PID (required)\n");
+    printf("  --pids PID1,PID2,...         Video/audio PIDs to monitor (required)\n");
     printf("  --log-file FILE              Log file path (default: /tmp/ts_monitor.log)\n");
     printf("  --api-port PORT              REST API port (default: 8080)\n");
-    printf("  --pids PID1,PID2,...         PIDs to filter/monitor (comma-separated, required)\n");
     printf("  --stall-timeout SECONDS      Stall timeout (default: 30)\n");
     printf("  --history-hours HOURS        History retention (default: 24)\n");
     printf("  --help                       Show this help\n");
@@ -64,7 +66,7 @@ void print_help(const char *prog) {
 int parse_pids(const char *pids_str) {
     char *copy = strdup(pids_str);
     char *token = strtok(copy, ",");
-    int count = 2;  // Start at 2 for hardcoded PIDs 0 and 17
+    int count = 0;
 
     while (token && count < MAX_PIDS) {
         int pid = atoi(token);
@@ -88,11 +90,6 @@ void init_context() {
     g_ctx.last_data_received = time(NULL);
     g_ctx.running = 1;
     pthread_mutex_init(&g_ctx.lock, NULL);
-
-    // Hardcode PIDs 0 and 17
-    g_ctx.pids[0] = 0;
-    g_ctx.pids[1] = 17;
-    g_ctx.pid_count = 2;
 }
 
 void init_monitors() {
@@ -220,18 +217,23 @@ void* tsp_manager_thread(void *arg) {
     char cmd[2048];
 
     while (g_ctx.running) {
-        // Build PID filter string
-        char pids_filter[512] = "";
+        // Build PID filter string: 0, 17, program, then video/audio pids
+        char pids_filter[512] = "-p 0 -p 17";
+        char pid_str[32];
+
+        // Add program PID
+        snprintf(pid_str, sizeof(pid_str), " -p %u", g_ctx.program_pid);
+        strcat(pids_filter, pid_str);
+
+        // Add video/audio PIDs
         for (int i = 0; i < g_ctx.pid_count; i++) {
-            char pid_str[32];
-            snprintf(pid_str, sizeof(pid_str), "%s-p %u",
-                     (i > 0) ? " " : "", g_ctx.pids[i]);
+            snprintf(pid_str, sizeof(pid_str), " -p %u", g_ctx.pids[i]);
             strcat(pids_filter, pid_str);
         }
 
-        // Build bitrate monitor plugins for user PIDs (skip 0 and 17)
+        // Build bitrate monitor plugins for video/audio PIDs only
         char bitrate_plugins[512] = "";
-        for (int i = 2; i < g_ctx.pid_count; i++) {
+        for (int i = 0; i < g_ctx.pid_count; i++) {
             char plugin[128];
             snprintf(plugin, sizeof(plugin),
                      "-P bitrate_monitor --pid %u --periodic-bitrate 5 ",
@@ -327,7 +329,7 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
 int main(int argc, char *argv[]) {
     init_context();
 
-    int has_input = 0, has_output = 0, has_pids = 0;
+    int has_input = 0, has_output = 0, has_program = 0, has_pids = 0;
 
     // Parse command line
     for (int i = 1; i < argc; i++) {
@@ -349,6 +351,9 @@ int main(int argc, char *argv[]) {
                 g_ctx.output_port = atoi(colon + 1);
                 has_output = 1;
             }
+        } else if (strcmp(argv[i], "--program") == 0 && i + 1 < argc) {
+            g_ctx.program_pid = atoi(argv[++i]);
+            has_program = 1;
         } else if (strcmp(argv[i], "--log-file") == 0 && i + 1 < argc) {
             strncpy(g_ctx.log_file, argv[++i], sizeof(g_ctx.log_file) - 1);
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
@@ -367,10 +372,11 @@ int main(int argc, char *argv[]) {
     }
 
     // Validate required arguments
-    if (!has_input || !has_output || !has_pids) {
+    if (!has_input || !has_output || !has_program || !has_pids) {
         fprintf(stderr, "ERROR: Missing required arguments\n");
         fprintf(stderr, "  --input ADDRESS:PORT (required)\n");
         fprintf(stderr, "  --output ADDRESS:PORT (required)\n");
+        fprintf(stderr, "  --program PID (required)\n");
         fprintf(stderr, "  --pids PID1,PID2,... (required)\n\n");
         print_help(argv[0]);
         return 1;
@@ -386,13 +392,20 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "UDP Input Monitor Starting\n");
     fprintf(stderr, "Input:  %s:%d\n", g_ctx.input_addr, g_ctx.input_port);
     fprintf(stderr, "Output: %s:%d\n", g_ctx.output_addr, g_ctx.output_port);
-    fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
-    fprintf(stderr, "Log File: %s\n", g_ctx.log_file);
-    fprintf(stderr, "PIDs: ");
+    fprintf(stderr, "Program PID: %u\n", g_ctx.program_pid);
+    fprintf(stderr, "Monitoring PIDs: ");
     for (int i = 0; i < g_ctx.pid_count; i++) {
         fprintf(stderr, "%u ", g_ctx.pids[i]);
     }
-    fprintf(stderr, "(%d total)\n", g_ctx.pid_count);
+    fprintf(stderr, "(%d PIDs)\n", g_ctx.pid_count);
+    fprintf(stderr, "Filter PIDs: 0, 17, %u", g_ctx.program_pid);
+    for (int i = 0; i < g_ctx.pid_count; i++) {
+        fprintf(stderr, ", %u", g_ctx.pids[i]);
+    }
+    fprintf(stderr, "\n");
+    fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
+    fprintf(stderr, "Log File: %s\n", g_ctx.log_file);
+    fprintf(stderr, "Stall Timeout: %d seconds\n", g_ctx.stall_timeout);
 
     // Start tsp manager thread
     pthread_t tsp_thread;
