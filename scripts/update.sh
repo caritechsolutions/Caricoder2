@@ -261,9 +261,9 @@ fix_permissions() {
             log_info "Fixing: $CONFIG_DIR/$subdir -> $SERVICE_USER:$WEB_USER (775)"
             chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/$subdir"
             chmod 775 "$CONFIG_DIR/$subdir"
-            # Also fix existing config files
-            find "$CONFIG_DIR/$subdir" -type f -name "*.ini" -exec chown "$SERVICE_USER:$WEB_USER" {} \; 2>/dev/null || true
-            find "$CONFIG_DIR/$subdir" -type f -name "*.conf" -exec chown "$SERVICE_USER:$WEB_USER" {} \; 2>/dev/null || true
+            # Also fix existing config files - set ownership AND permissions (664 = group writable)
+            find "$CONFIG_DIR/$subdir" -type f \( -name "*.ini" -o -name "*.conf" \) -exec chown "$SERVICE_USER:$WEB_USER" {} \; 2>/dev/null || true
+            find "$CONFIG_DIR/$subdir" -type f \( -name "*.ini" -o -name "*.conf" \) -exec chmod 664 {} \; 2>/dev/null || true
         fi
     done
 

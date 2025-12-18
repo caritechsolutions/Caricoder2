@@ -590,6 +590,8 @@ function create_input($data) {
 
     $result = file_put_contents($config_file, $content);
     if ($result !== false) {
+        // Set permissions to 664 so both owner and group (www-data) can read/write
+        chmod($config_file, 0664);
         return ['success' => true, 'id' => $id, 'message' => "Input '{$name}' created successfully"];
     }
 
