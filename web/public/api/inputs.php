@@ -452,8 +452,9 @@ EOF;
     $service_content = str_replace('PID_LIST_PLACEHOLDER', implode(',', $monitor_pids), $service_content);
 
     // Write service file via sudo (www-data has sudoers permission)
-    $service_file = "/etc/systemd/system/cari-input@{$id}.service";
-    $temp_file = "/tmp/cari-input@{$id}.service";
+    // Use cari-udp-{id}.service naming to avoid conflict with cari-input@ template
+    $service_file = "/etc/systemd/system/cari-udp-{$id}.service";
+    $temp_file = "/tmp/cari-udp-{$id}.service";
 
     // Write to temp file first
     $result = file_put_contents($temp_file, $service_content);
@@ -1356,7 +1357,20 @@ function delete_input($id) {
 function start_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
-    exec("sudo /bin/systemctl start cari-input@{$id} 2>&1", $output, $code);
+    // Check input type to determine which service to use
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    $config = file_exists($config_file) ? parse_config($config_file) : [];
+    $type = $config['general']['type'] ?? 'udp';
+
+    // UDP inputs use cari-udp-{id} service (udp_input tool)
+    // Other types use cari-input@{id} service (GStreamer-based)
+    if ($type === 'udp') {
+        $service = "cari-udp-{$id}";
+    } else {
+        $service = "cari-input@{$id}";
+    }
+
+    exec("sudo /bin/systemctl start {$service} 2>&1", $output, $code);
 
     if ($code === 0) {
         return ['success' => true, 'message' => "Input service started"];
@@ -1371,7 +1385,20 @@ function start_input_service($id) {
 function stop_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
-    exec("sudo /bin/systemctl stop cari-input@{$id} 2>&1", $output, $code);
+    // Check input type to determine which service to use
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    $config = file_exists($config_file) ? parse_config($config_file) : [];
+    $type = $config['general']['type'] ?? 'udp';
+
+    // UDP inputs use cari-udp-{id} service (udp_input tool)
+    // Other types use cari-input@{id} service (GStreamer-based)
+    if ($type === 'udp') {
+        $service = "cari-udp-{$id}";
+    } else {
+        $service = "cari-input@{$id}";
+    }
+
+    exec("sudo /bin/systemctl stop {$service} 2>&1", $output, $code);
 
     if ($code === 0) {
         return ['success' => true, 'message' => "Input service stopped"];

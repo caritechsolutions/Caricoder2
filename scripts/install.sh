@@ -593,15 +593,17 @@ configure_sudoers() {
     # Create sudoers file for CariTranscoder
     cat > /etc/sudoers.d/caritrans << 'SUDOERS'
 # CariTranscoder - Allow www-data to manage services and systemd files
-# Systemctl commands for cari-* services
+
+# Systemctl commands for cari-* services (template and regular)
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl start cari-*
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl stop cari-*
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart cari-*
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl status cari-*
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
 
-# Allow copying service files to systemd directory
+# Allow copying/removing service files to systemd directory
 www-data ALL=(ALL) NOPASSWD: /bin/cp /tmp/cari-*.service /etc/systemd/system/
+www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-udp-*.service
 www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-input@*.service
 SUDOERS
 
