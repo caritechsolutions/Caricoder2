@@ -365,8 +365,10 @@ function scan_with_tsduck($url, $type) {
 
     // Check if capture file was created
     if (!file_exists($capture_file) || filesize($capture_file) < 1000) {
-        @unlink($capture_file);
-        $result['error'] = 'Failed to capture stream (no data received)';
+        if (file_exists($capture_file)) {
+            unlink($capture_file);
+        }
+        $result['error'] = 'Failed to capture stream (no data received). Check that the source is active and accessible.';
         return $result;
     }
 
@@ -375,7 +377,9 @@ function scan_with_tsduck($url, $type) {
     exec($analyze_cmd, $output, $code);
 
     // Clean up capture file
-    @unlink($capture_file);
+    if (file_exists($capture_file)) {
+        unlink($capture_file);
+    }
 
     if (empty($output)) {
         $result['error'] = 'Failed to analyze captured stream';
