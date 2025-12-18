@@ -364,18 +364,18 @@ function getTypeBadgeColor($type) {
     transition: all 0.15s ease;
 }
 
-/* Alternating row colors */
-#inputsTable tbody tr:nth-child(odd) {
-    background-color: #ffffff;
+/* Alternating row colors - override Bootstrap */
+#inputsTable > tbody > tr.input-row:nth-child(odd) {
+    background-color: #ffffff !important;
 }
-#inputsTable tbody tr:nth-child(even) {
-    background-color: #f8fafc;
+#inputsTable > tbody > tr.input-row:nth-child(even) {
+    background-color: #f1f5f9 !important;
 }
 
-#inputsTable tbody tr:hover {
-    background-color: #f0f9ff !important;
-    transform: scale(1.001);
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+#inputsTable > tbody > tr.input-row:hover {
+    background-color: #dbeafe !important;
+    transform: scale(1.002);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
 
 #inputsTable tbody td {
