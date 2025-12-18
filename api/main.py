@@ -210,12 +210,16 @@ def get_service_status(service: str) -> Dict[str, Any]:
 def generate_udp_input_service_file(service_data: UDPInputService) -> str:
     """Generate systemd service file content for UDP input"""
 
+    # Unique log file for this input
+    log_file = f"/var/log/caritrans/udp-input-{service_data.id}.log"
+
     # Build the command
     cmd_parts = [
         "/usr/local/bin/udp_input",
         f"--input {service_data.source_address}:{service_data.source_port}",
         f"--output {service_data.output_address}:{service_data.output_port}",
-        f"--api-port {service_data.api_port}"
+        f"--api-port {service_data.api_port}",
+        f"--log-file {log_file}"
     ]
 
     if service_data.program is not None:
@@ -389,8 +393,8 @@ async def create_udp_input_service(service: UDPInputService):
 async def delete_udp_input_service(input_id: str):
     """Delete a UDP input service"""
 
-    service_name = f"cari-udp-{input_id}"
-    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+    service_name = f"cari-udp-{input_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
 
     try:
         # Stop the service first
@@ -417,12 +421,25 @@ async def delete_udp_input_service(input_id: str):
 @app.post("/input/udp/{input_id}/start")
 async def start_udp_input(input_id: str):
     """Start a UDP input service"""
-    service_name = f"cari-udp-{input_id}"
+    service_name = f"cari-udp-{input_id}.service"
+
+    # Check if service file exists
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        logger.error(f"Service file not found: {service_file}")
+        return {
+            "success": False,
+            "service": service_name,
+            "error": f"Service file not found: {service_file}"
+        }
 
     # Enable and start
-    run_systemctl("enable", service_name)
+    enable_result = run_systemctl("enable", service_name)
+    if not enable_result.get("success", False):
+        logger.error(f"Failed to enable service: {enable_result}")
+
     result = run_systemctl("start", service_name)
-    logger.info(f"Started service: {service_name}")
+    logger.info(f"Started service: {service_name}, result: {result}")
 
     return {
         "success": result.get("success", False),
@@ -434,10 +451,10 @@ async def start_udp_input(input_id: str):
 @app.post("/input/udp/{input_id}/stop")
 async def stop_udp_input(input_id: str):
     """Stop a UDP input service"""
-    service_name = f"cari-udp-{input_id}"
+    service_name = f"cari-udp-{input_id}.service"
 
     result = run_systemctl("stop", service_name)
-    logger.info(f"Stopped service: {service_name}")
+    logger.info(f"Stopped service: {service_name}, result: {result}")
 
     return {
         "success": result.get("success", False),
@@ -449,10 +466,10 @@ async def stop_udp_input(input_id: str):
 @app.post("/input/udp/{input_id}/restart")
 async def restart_udp_input(input_id: str):
     """Restart a UDP input service"""
-    service_name = f"cari-udp-{input_id}"
+    service_name = f"cari-udp-{input_id}.service"
 
     result = run_systemctl("restart", service_name)
-    logger.info(f"Restarted service: {service_name}")
+    logger.info(f"Restarted service: {service_name}, result: {result}")
 
     return {
         "success": result.get("success", False),
@@ -464,7 +481,7 @@ async def restart_udp_input(input_id: str):
 @app.get("/input/udp/{input_id}/status")
 async def udp_input_status(input_id: str):
     """Get status of a UDP input service"""
-    service_name = f"cari-udp-{input_id}"
+    service_name = f"cari-udp-{input_id}.service"
     return get_service_status(service_name)
 
 
