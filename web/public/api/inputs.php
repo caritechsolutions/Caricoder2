@@ -212,6 +212,8 @@ function get_input_config($id) {
 
 /**
  * Scan source for PIDs using TSDuck or ffprobe
+ * TSDuck works best for: UDP, SRT, RIST, File
+ * FFprobe works best for: RTMP, HLS, HTTP streams
  */
 function scan_source_pids($source, $type = 'udp') {
     $result = [
@@ -225,14 +227,30 @@ function scan_source_pids($source, $type = 'udp') {
     // Build the source URL based on type
     $scan_url = build_source_url($source, $type);
 
-    // Try using tsp (TSDuck) first
-    $tsduck_available = shell_exec('which tsp 2>/dev/null');
+    // Choose scanning method based on input type
+    // TSDuck is preferred for transport stream protocols
+    $tsduck_types = ['udp', 'srt', 'rist', 'file'];
+    // FFprobe is preferred for HTTP-based and RTMP protocols
+    $ffprobe_types = ['rtmp', 'hls', 'http', 'https'];
 
-    if ($tsduck_available) {
+    $tsduck_available = shell_exec('which tsp 2>/dev/null');
+    $ffprobe_available = shell_exec('which ffprobe 2>/dev/null');
+
+    if (in_array($type, $tsduck_types) && $tsduck_available) {
         $result = scan_with_tsduck($scan_url, $type);
+    } elseif ($ffprobe_available) {
+        // Use ffprobe for HTTP-based protocols or as fallback
+        $result = scan_with_ffprobe($scan_url, $type);
     } else {
-        // Fallback to ffprobe
-        $result = scan_with_ffprobe($scan_url);
+        $result['error'] = 'No scanning tools available (install TSDuck or FFmpeg)';
+    }
+
+    // If TSDuck failed, try ffprobe as fallback
+    if (!$result['success'] && $ffprobe_available && in_array($type, $tsduck_types)) {
+        $ffprobe_result = scan_with_ffprobe($scan_url, $type);
+        if ($ffprobe_result['success']) {
+            $result = $ffprobe_result;
+        }
     }
 
     return $result;
@@ -243,7 +261,7 @@ function scan_source_pids($source, $type = 'udp') {
  */
 function build_source_url($source, $type) {
     // If source is already a full URL, return it
-    if (preg_match('/^(udp|srt|rtmp|http|https):\/\//', $source)) {
+    if (preg_match('/^(udp|srt|rist|rtmp|http|https):\/\//', $source)) {
         return $source;
     }
 
@@ -260,6 +278,21 @@ function build_source_url($source, $type) {
                 $source .= ':9000';
             }
             return 'srt://' . $source;
+        case 'rist':
+            // RIST URL format: rist://address:port
+            if (strpos($source, ':') === false) {
+                $source .= ':5000';
+            }
+            return 'rist://' . $source;
+        case 'file':
+            // File path - return as-is
+            return $source;
+        case 'rtmp':
+            // RTMP should already have full URL
+            return $source;
+        case 'hls':
+            // HLS should already have full URL
+            return $source;
         default:
             return $source;
     }
@@ -298,8 +331,32 @@ function scan_with_tsduck($url, $type) {
             escapeshellarg($url),
             escapeshellarg($capture_file)
         );
+    } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
+        // RIST input using TSDuck
+        $capture_cmd = sprintf(
+            'timeout 5 tsp -I rist %s -O file %s 2>/dev/null',
+            escapeshellarg($url),
+            escapeshellarg($capture_file)
+        );
+    } elseif ($type === 'file') {
+        // For file input, just analyze directly without capture
+        if (!file_exists($url)) {
+            $result['error'] = 'File not found: ' . $url;
+            return $result;
+        }
+        // Analyze file directly
+        $analyze_cmd = sprintf('tsanalyze %s 2>/dev/null | cat', escapeshellarg($url));
+        exec($analyze_cmd, $output, $code);
+
+        if (empty($output)) {
+            $result['error'] = 'Failed to analyze file';
+            return $result;
+        }
+
+        // Parse the output (shared with capture flow below)
+        return parse_tsduck_output($output, $result);
     } else {
-        $result['error'] = 'Unsupported input type for TSDuck scanning';
+        $result['error'] = 'Unsupported input type for TSDuck scanning: ' . $type;
         return $result;
     }
 
@@ -325,7 +382,24 @@ function scan_with_tsduck($url, $type) {
         return $result;
     }
 
-    $output_text = implode("\n", $output);
+    return parse_tsduck_output($output, $result);
+}
+
+/**
+ * Parse TSDuck tsanalyze output
+ */
+function parse_tsduck_output($output, $result = null) {
+    if ($result === null) {
+        $result = [
+            'success' => false,
+            'programs' => [],
+            'video_pids' => [],
+            'audio_pids' => [],
+            'error' => null
+        ];
+    }
+
+    $output_text = is_array($output) ? implode("\n", $output) : $output;
 
     // Parse service info: "Service: 0x03E8 (1000)" and "Service name: BET"
     if (preg_match('/Service:\s*0x([0-9A-Fa-f]+)\s*\((\d+)\)/', $output_text, $svc_match)) {
@@ -419,9 +493,9 @@ function scan_with_tsduck($url, $type) {
 }
 
 /**
- * Scan using ffprobe
+ * Scan using ffprobe (works well for RTMP, HLS, HTTP streams, and as fallback for others)
  */
-function scan_with_ffprobe($url) {
+function scan_with_ffprobe($url, $type = null) {
     $result = [
         'success' => false,
         'programs' => [],
@@ -430,8 +504,12 @@ function scan_with_ffprobe($url) {
         'error' => null
     ];
 
+    // Adjust timeout based on type - HLS may need longer
+    $timeout = ($type === 'hls') ? 15 : 10;
+
     $cmd = sprintf(
-        'timeout 10 ffprobe -v quiet -show_programs -show_streams -print_format json %s 2>/dev/null',
+        'timeout %d ffprobe -v quiet -show_programs -show_streams -print_format json %s 2>/dev/null',
+        $timeout,
         escapeshellarg($url)
     );
 
@@ -582,6 +660,15 @@ function create_input($data) {
                 $extraSettings[] = "latency={$latency}";
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                }
+            } elseif ($type === 'rist') {
+                $profile = $source['rist_profile'] ?? 'main';
+                $buffer = $source['rist_buffer'] ?? 1000;
+                $secret = $source['rist_secret'] ?? '';
+                $extraSettings[] = "profile={$profile}";
+                $extraSettings[] = "buffer={$buffer}";
+                if ($secret) {
+                    $extraSettings[] = "secret={$secret}";
                 }
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
@@ -739,6 +826,15 @@ function update_input($id, $data) {
                 $extraSettings[] = "latency={$latency}";
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                }
+            } elseif ($type === 'rist') {
+                $profile = $source['rist_profile'] ?? 'main';
+                $buffer = $source['rist_buffer'] ?? 1000;
+                $secret = $source['rist_secret'] ?? '';
+                $extraSettings[] = "profile={$profile}";
+                $extraSettings[] = "buffer={$buffer}";
+                if ($secret) {
+                    $extraSettings[] = "secret={$secret}";
                 }
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';

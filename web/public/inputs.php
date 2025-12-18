@@ -394,6 +394,7 @@ function addSource() {
                     <select class="form-select source-type" name="sources[${sourcesCount - 1}][type]" onchange="updateSourceFields(${sourcesCount})">
                         <option value="udp">UDP Multicast</option>
                         <option value="srt">SRT</option>
+                        <option value="rist">RIST</option>
                         <option value="rtmp">RTMP</option>
                         <option value="hls">HLS</option>
                         <option value="file">File</option>
@@ -434,6 +435,28 @@ function addSource() {
                     </div>
                 </div>
 
+                <!-- RIST Settings -->
+                <div class="rist-settings" style="display:none;">
+                    <div class="row">
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">RIST Profile</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][rist_profile]">
+                                <option value="simple">Simple</option>
+                                <option value="main" selected>Main</option>
+                                <option value="advanced">Advanced</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">Buffer (ms)</label>
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="1000">
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <label class="form-label">Secret (optional)</label>
+                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][rist_secret]" placeholder="Encryption key">
+                        </div>
+                    </div>
+                </div>
+
                 <!-- File Settings -->
                 <div class="file-settings" style="display:none;">
                     <div class="row">
@@ -468,9 +491,15 @@ function updateSourceFields(sourceId) {
     const urlLabel = card.querySelector('.source-url-label');
     const settingsDiv = card.querySelector(`#source-${sourceId}-settings`);
     const srtSettings = card.querySelector('.srt-settings');
+    const ristSettings = card.querySelector('.rist-settings');
     const fileSettings = card.querySelector('.file-settings');
 
     const type = typeSelect.value;
+
+    // Hide all settings first
+    srtSettings.style.display = 'none';
+    ristSettings.style.display = 'none';
+    fileSettings.style.display = 'none';
 
     // Update URL placeholder and label
     switch (type) {
@@ -484,7 +513,12 @@ function updateSourceFields(sourceId) {
             urlInput.placeholder = 'srt.server.com:9000';
             settingsDiv.style.display = 'block';
             srtSettings.style.display = 'block';
-            fileSettings.style.display = 'none';
+            break;
+        case 'rist':
+            urlLabel.textContent = 'RIST URL';
+            urlInput.placeholder = 'rist://sender.example.com:5000';
+            settingsDiv.style.display = 'block';
+            ristSettings.style.display = 'block';
             break;
         case 'rtmp':
             urlLabel.textContent = 'RTMP URL';
@@ -500,7 +534,6 @@ function updateSourceFields(sourceId) {
             urlLabel.textContent = 'File Path';
             urlInput.placeholder = '/path/to/file.ts';
             settingsDiv.style.display = 'block';
-            srtSettings.style.display = 'none';
             fileSettings.style.display = 'block';
             break;
     }
@@ -826,6 +859,13 @@ async function handleFormSubmit(e) {
                 sourceData.srt_mode = modeSelect ? modeSelect.value : 'caller';
                 sourceData.srt_latency = latencyInput ? latencyInput.value : 200;
                 sourceData.srt_passphrase = passphraseInput ? passphraseInput.value : '';
+            } else if (type === 'rist') {
+                const profileSelect = card.querySelector('[name*="rist_profile"]');
+                const bufferInput = card.querySelector('[name*="rist_buffer"]');
+                const secretInput = card.querySelector('[name*="rist_secret"]');
+                sourceData.rist_profile = profileSelect ? profileSelect.value : 'main';
+                sourceData.rist_buffer = bufferInput ? bufferInput.value : 1000;
+                sourceData.rist_secret = secretInput ? secretInput.value : '';
             } else if (type === 'file') {
                 const loopSelect = card.querySelector('[name*="file_loop"]');
                 sourceData.file_loop = loopSelect ? loopSelect.value : '1';
