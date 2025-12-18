@@ -112,6 +112,7 @@ class UDPInputService(BaseModel):
     output_port: int
     api_port: int
     program: Optional[int] = None
+    pids: Optional[str] = None  # Comma-separated list of PIDs to monitor (video,audio)
     description: Optional[str] = None
 
 
@@ -224,6 +225,9 @@ def generate_udp_input_service_file(service_data: UDPInputService) -> str:
 
     if service_data.program is not None:
         cmd_parts.append(f"--program {service_data.program}")
+
+    if service_data.pids:
+        cmd_parts.append(f"--pids {service_data.pids}")
 
     exec_start = " ".join(cmd_parts)
     description = service_data.description or f"CariTranscoder UDP Input - {service_data.id}"

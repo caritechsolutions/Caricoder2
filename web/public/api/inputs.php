@@ -434,15 +434,31 @@ function generate_udp_input_service($id, $config) {
 
     // Get PIDs
     $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
 
     if (empty($program_pid)) {
         return ['success' => false, 'error' => 'Program PID not configured'];
     }
 
+    // Build PIDs list for monitoring (video and audio)
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
     $name = $config['general']['name'] ?? $id;
 
     // Call the API to create the service
-    $result = call_cari_api('/input/udp/create', 'POST', [
+    $api_data = [
         'id' => $id,
         'source_address' => $input_addr,
         'source_port' => $input_port,
@@ -451,7 +467,14 @@ function generate_udp_input_service($id, $config) {
         'api_port' => $api_port,
         'program' => (int)$program_pid,
         'description' => "CariTranscoder UDP Input - {$name}"
-    ]);
+    ];
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/udp/create', 'POST', $api_data);
 
     return $result;
 }
