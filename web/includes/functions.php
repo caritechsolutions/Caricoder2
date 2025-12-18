@@ -348,7 +348,7 @@ function service_start($type, $id) {
     }
 
     $service = "cari-{$type}@{$id}";
-    exec("sudo systemctl start {$service} 2>&1", $output, $ret);
+    exec("sudo /bin/systemctl start {$service} 2>&1", $output, $ret);
 
     return [
         'success' => $ret === 0,
@@ -365,7 +365,7 @@ function service_stop($type, $id) {
     }
 
     $service = "cari-{$type}@{$id}";
-    exec("sudo systemctl stop {$service} 2>&1", $output, $ret);
+    exec("sudo /bin/systemctl stop {$service} 2>&1", $output, $ret);
 
     return [
         'success' => $ret === 0,
@@ -382,7 +382,7 @@ function service_restart($type, $id) {
     }
 
     $service = "cari-{$type}@{$id}";
-    exec("sudo systemctl restart {$service} 2>&1", $output, $ret);
+    exec("sudo /bin/systemctl restart {$service} 2>&1", $output, $ret);
 
     return [
         'success' => $ret === 0,

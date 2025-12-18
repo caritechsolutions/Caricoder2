@@ -25,7 +25,7 @@ INSTALL_DIR="/opt/caritrans"
 CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
-WEB_USER="root"  # PHP-FPM runs as root for full system access
+WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 BRANCH="claude/video-transcoder-gstreamer-YnBIH"
 
@@ -235,85 +235,32 @@ build_tools() {
     log_info "Tools build completed"
 }
 
-# Configure PHP-FPM to run as root (if not already configured)
-configure_php_fpm() {
-    log_step "Ensuring PHP-FPM runs as root..."
+# Configure sudoers for web user to manage services
+configure_sudoers() {
+    log_step "Ensuring sudo permissions for web interface..."
 
-    # Find PHP version
-    local PHP_VERSION=""
-    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
-        if [[ -d "/etc/php/${ver}/fpm" ]]; then
-            PHP_VERSION="$ver"
-            break
-        fi
-    done
+    # Create/update sudoers file for CariTranscoder
+    if [[ ! -f /etc/sudoers.d/caritrans ]]; then
+        log_info "Creating sudoers configuration..."
 
-    if [[ -z "$PHP_VERSION" ]]; then
-        log_warn "PHP-FPM not found"
-        return 1
-    fi
+        cat > /etc/sudoers.d/caritrans << 'SUDOERS'
+# CariTranscoder - Allow www-data to manage services and systemd files
+# Systemctl commands for cari-* services
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl start cari-*
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl stop cari-*
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart cari-*
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl status cari-*
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
 
-    local FPM_POOL_DIR="/etc/php/${PHP_VERSION}/fpm/pool.d"
-    local FPM_SOCKET="/var/run/php/caritrans-fpm.sock"
+# Allow copying service files to systemd directory
+www-data ALL=(ALL) NOPASSWD: /bin/cp /tmp/cari-*.service /etc/systemd/system/
+www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/systemd/system/cari-input@*.service
+SUDOERS
 
-    # Ensure log directory exists
-    mkdir -p /var/log/caritrans
-
-    # Create/update CariTranscoder pool if it doesn't exist
-    if [[ ! -f "${FPM_POOL_DIR}/caritrans.conf" ]]; then
-        log_info "Creating PHP-FPM pool running as root..."
-
-        cat > "${FPM_POOL_DIR}/caritrans.conf" << PHPFPM
-[caritrans]
-; Pool running as root for full system access (appliance mode)
-user = root
-group = root
-
-listen = ${FPM_SOCKET}
-listen.owner = root
-listen.group = root
-listen.mode = 0660
-
-pm = dynamic
-pm.max_children = 10
-pm.start_servers = 2
-pm.min_spare_servers = 1
-pm.max_spare_servers = 4
-
-; Security - only allow local connections
-listen.allowed_clients = 127.0.0.1
-
-; Logging
-php_admin_value[error_log] = /var/log/caritrans/php-errors.log
-php_admin_flag[log_errors] = on
-
-; Paths
-chdir = /var/www/caritrans
-PHPFPM
-
-        # Disable www pool
-        if [[ -f "${FPM_POOL_DIR}/www.conf" ]]; then
-            mv "${FPM_POOL_DIR}/www.conf" "${FPM_POOL_DIR}/www.conf.disabled" 2>/dev/null || true
-        fi
-
-        # Update nginx to use caritrans socket
-        if [[ -f /etc/nginx/sites-available/caritrans ]]; then
-            sed -i 's|unix:/var/run/php/php.*-fpm.sock|unix:/var/run/php/caritrans-fpm.sock|' /etc/nginx/sites-available/caritrans
-        fi
-
-        # Create systemd override to allow PHP-FPM to run as root
-        local OVERRIDE_DIR="/etc/systemd/system/php${PHP_VERSION}-fpm.service.d"
-        mkdir -p "$OVERRIDE_DIR"
-        cat > "$OVERRIDE_DIR/allow-root.conf" << OVERRIDE
-[Service]
-ExecStart=
-ExecStart=/usr/sbin/php-fpm${PHP_VERSION} --nodaemonize --fpm-config /etc/php/${PHP_VERSION}/fpm/php-fpm.conf --allow-to-run-as-root
-OVERRIDE
-
-        systemctl daemon-reload
-        log_info "PHP-FPM pool created"
+        chmod 440 /etc/sudoers.d/caritrans
+        log_info "Sudo permissions configured"
     else
-        log_info "PHP-FPM caritrans pool already configured"
+        log_info "Sudoers already configured"
     fi
 }
 
@@ -441,7 +388,7 @@ main() {
     update_api
     rebuild_apps
     build_tools
-    configure_php_fpm
+    configure_sudoers
     fix_permissions
     restart_services
     cleanup

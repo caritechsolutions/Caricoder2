@@ -451,18 +451,26 @@ EOF;
     $service_content = str_replace('DATE_PLACEHOLDER', date('Y-m-d H:i:s'), $service_content);
     $service_content = str_replace('PID_LIST_PLACEHOLDER', implode(',', $monitor_pids), $service_content);
 
-    // Write service file (PHP runs as root in appliance mode)
+    // Write service file via sudo (www-data has sudoers permission)
     $service_file = "/etc/systemd/system/cari-input@{$id}.service";
+    $temp_file = "/tmp/cari-input@{$id}.service";
 
-    $result = @file_put_contents($service_file, $service_content);
-
+    // Write to temp file first
+    $result = file_put_contents($temp_file, $service_content);
     if ($result === false) {
-        $error = error_get_last();
-        return ['success' => false, 'error' => 'Failed to write systemd service: ' . ($error['message'] ?? 'Permission denied')];
+        return ['success' => false, 'error' => 'Failed to write temporary service file'];
     }
 
-    // Reload systemd
-    exec("systemctl daemon-reload 2>&1", $output, $code);
+    // Copy to systemd directory via sudo
+    exec("sudo /bin/cp {$temp_file} {$service_file} 2>&1", $output, $code);
+    unlink($temp_file);
+
+    if ($code !== 0) {
+        return ['success' => false, 'error' => 'Failed to install systemd service: ' . implode(' ', $output)];
+    }
+
+    // Reload systemd via sudo
+    exec("sudo /bin/systemctl daemon-reload 2>&1", $output2, $code2);
 
     return ['success' => true, 'service_file' => $service_file];
 }
@@ -1348,7 +1356,7 @@ function delete_input($id) {
 function start_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
-    exec("systemctl start cari-input@{$id} 2>&1", $output, $code);
+    exec("sudo /bin/systemctl start cari-input@{$id} 2>&1", $output, $code);
 
     if ($code === 0) {
         return ['success' => true, 'message' => "Input service started"];
@@ -1363,7 +1371,7 @@ function start_input_service($id) {
 function stop_input_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
-    exec("systemctl stop cari-input@{$id} 2>&1", $output, $code);
+    exec("sudo /bin/systemctl stop cari-input@{$id} 2>&1", $output, $code);
 
     if ($code === 0) {
         return ['success' => true, 'message' => "Input service stopped"];
