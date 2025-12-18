@@ -63,7 +63,7 @@ include __DIR__ . '/../templates/header.php';
     <!-- Inputs Table -->
     <div class="card">
         <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0" id="inputsTable">
+            <table class="table align-middle mb-0" id="inputsTable">
                 <thead class="table-light">
                     <tr>
                         <th style="width: 40px;"></th>
@@ -360,22 +360,15 @@ function getTypeBadgeColor($type) {
     white-space: nowrap;
 }
 
-#inputsTable tbody tr {
-    transition: all 0.15s ease;
+/* Alternating row colors */
+.input-row:nth-child(odd) {
+    background: #ffffff !important;
 }
-
-/* Alternating row colors - override Bootstrap */
-#inputsTable > tbody > tr.input-row:nth-child(odd) {
-    background-color: #ffffff !important;
+.input-row:nth-child(even) {
+    background: #f0f4f8 !important;
 }
-#inputsTable > tbody > tr.input-row:nth-child(even) {
-    background-color: #f1f5f9 !important;
-}
-
-#inputsTable > tbody > tr.input-row:hover {
-    background-color: #dbeafe !important;
-    transform: scale(1.002);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+.input-row:hover {
+    background: #e0e7ff !important;
 }
 
 #inputsTable tbody td {
