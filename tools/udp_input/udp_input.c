@@ -12,7 +12,6 @@
 #define MAX_PIDS 32
 #define HISTORY_SIZE 17280  // 24 hours * 60 min * 60 sec / 5 sec per sample
 #define MAX_LOG_LINE 512
-#define MAX_PIDS_STR 256
 
 typedef struct {
     time_t timestamp;
@@ -41,8 +40,7 @@ typedef struct {
     int stall_timeout;
     int history_hours;
     PIDMonitor monitors[MAX_PIDS];
-    pid_t tsp_pid;
-    FILE *tsp_stderr;
+    int monitor_count;
     time_t last_data_received;
     int running;
     pthread_mutex_t lock;
@@ -57,8 +55,8 @@ void print_help(const char *prog) {
     printf("  --output ADDRESS:PORT        Output UDP address (required)\n");
     printf("  --log-file FILE              Log file path (default: /tmp/ts_monitor.log)\n");
     printf("  --api-port PORT              REST API port (default: 8080)\n");
-    printf("  --pids PID1,PID2,...         PIDs to monitor (comma-separated, required)\n");
-    printf("  --stall-timeout SECONDS      Stall timeout (default: 10)\n");
+    printf("  --pids PID1,PID2,...         PIDs to filter/monitor (comma-separated, required)\n");
+    printf("  --stall-timeout SECONDS      Stall timeout (default: 30)\n");
     printf("  --history-hours HOURS        History retention (default: 24)\n");
     printf("  --help                       Show this help\n");
 }
@@ -82,15 +80,11 @@ int parse_pids(const char *pids_str) {
 }
 
 void init_context() {
-    g_ctx.input_port = 0;
-    g_ctx.output_port = 0;
+    memset(&g_ctx, 0, sizeof(g_ctx));
     strcpy(g_ctx.log_file, "/tmp/ts_monitor.log");
     g_ctx.api_port = 8080;
-    g_ctx.stall_timeout = 10;
+    g_ctx.stall_timeout = 30;
     g_ctx.history_hours = 24;
-    g_ctx.pid_count = 0;
-    g_ctx.tsp_pid = -1;
-    g_ctx.tsp_stderr = NULL;
     g_ctx.last_data_received = time(NULL);
     g_ctx.running = 1;
     pthread_mutex_init(&g_ctx.lock, NULL);
@@ -101,27 +95,22 @@ void init_context() {
     g_ctx.pid_count = 2;
 }
 
-void add_monitor(uint16_t pid, const char *name) {
+void init_monitors() {
+    // Initialize monitors array from pids array
+    g_ctx.monitor_count = g_ctx.pid_count;
     for (int i = 0; i < g_ctx.pid_count; i++) {
-        if (g_ctx.monitors[i].pid == pid) {
-            return;
-        }
-    }
-
-    if (g_ctx.pid_count < MAX_PIDS) {
-        PIDMonitor *m = &g_ctx.monitors[g_ctx.pid_count];
-        m->pid = pid;
-        strncpy(m->name, name, sizeof(m->name) - 1);
+        PIDMonitor *m = &g_ctx.monitors[i];
+        m->pid = g_ctx.pids[i];
+        snprintf(m->name, sizeof(m->name), "PID %u", g_ctx.pids[i]);
         m->history_index = 0;
         m->history_count = 0;
         m->current_bitrate = 0;
         m->last_update = time(NULL);
-        g_ctx.pid_count++;
     }
 }
 
 PIDMonitor* find_monitor(uint16_t pid) {
-    for (int i = 0; i < g_ctx.pid_count; i++) {
+    for (int i = 0; i < g_ctx.monitor_count; i++) {
         if (g_ctx.monitors[i].pid == pid) {
             return &g_ctx.monitors[i];
         }
@@ -149,6 +138,8 @@ void parse_bitrate_line(const char *line) {
         return;
     }
 
+    // Parse timestamp and PID/bitrate from line like:
+    // * bitrate_monitor: 2025/12/18 14:45:44, PID 0x00D3 (211) bitrate: 1,408,646 bits/s
     struct tm tm_info = {0};
     int year, month, day, hour, min, sec;
     if (sscanf(line, "* bitrate_monitor: %d/%d/%d %d:%d:%d",
@@ -164,71 +155,109 @@ void parse_bitrate_line(const char *line) {
     tm_info.tm_sec = sec;
     time_t timestamp = mktime(&tm_info);
 
-    unsigned int pid;
-    unsigned long bitrate;
-    if (sscanf(line, "* bitrate_monitor: %*s PID 0x%x (%u) bitrate: %lu bits/s",
-               &pid, &pid, &bitrate) != 3) {
+    // Extract PID - look for "PID 0x" pattern
+    const char *pid_pos = strstr(line, "PID 0x");
+    if (!pid_pos) return;
+
+    unsigned int pid_hex;
+    if (sscanf(pid_pos, "PID 0x%x", &pid_hex) != 1) {
         return;
     }
 
-    pthread_mutex_lock(&g_ctx.lock);
-    PIDMonitor *m = find_monitor(pid);
-    if (m) {
-        add_bitrate_sample(m, timestamp, (uint32_t)bitrate);
+    // Extract bitrate - look for "bitrate:" pattern
+    const char *bitrate_pos = strstr(line, "bitrate:");
+    if (!bitrate_pos) return;
+
+    // Parse bitrate, handling commas in number
+    unsigned long bitrate = 0;
+    const char *p = bitrate_pos + 8;  // Skip "bitrate:"
+    while (*p && *p != 'b') {  // Stop at "bits/s"
+        if (*p >= '0' && *p <= '9') {
+            bitrate = bitrate * 10 + (*p - '0');
+        }
+        p++;
     }
-    pthread_mutex_unlock(&g_ctx.lock);
+
+    if (bitrate > 0) {
+        pthread_mutex_lock(&g_ctx.lock);
+        PIDMonitor *m = find_monitor(pid_hex);
+        if (m) {
+            add_bitrate_sample(m, timestamp, (uint32_t)bitrate);
+        }
+        pthread_mutex_unlock(&g_ctx.lock);
+    }
 }
 
-void build_tsp_command(char *cmd, size_t len) {
-    char pids_filter[256] = "";
+void* log_monitor_thread(void *arg) {
+    (void)arg;
+    long last_pos = 0;
 
-    // Build PID filter string
-    for (int i = 0; i < g_ctx.pid_count; i++) {
-        if (i > 0) strcat(pids_filter, " -p ");
-        else strcat(pids_filter, "-p ");
-        sprintf(pids_filter + strlen(pids_filter), "%u", g_ctx.pids[i]);
+    while (g_ctx.running) {
+        FILE *fp = fopen(g_ctx.log_file, "r");
+        if (!fp) {
+            usleep(500000);  // 500ms
+            continue;
+        }
+
+        fseek(fp, last_pos, SEEK_SET);
+
+        char line[MAX_LOG_LINE];
+        while (fgets(line, sizeof(line), fp)) {
+            parse_bitrate_line(line);
+        }
+
+        last_pos = ftell(fp);
+        fclose(fp);
+
+        usleep(500000);  // 500ms poll interval
     }
 
-    // Build full tsp command
-    snprintf(cmd, len,
-             "tsp -I ip %s:%d "
-             "-P filter %s "
-             "-P bitrate_monitor --pid 211 --periodic-bitrate 5 "
-             "-P bitrate_monitor --pid 221 --periodic-bitrate 5 "
-             "-O ip %s:%d "
-             "2> %s",
-             g_ctx.input_addr, g_ctx.input_port,
-             pids_filter,
-             g_ctx.output_addr, g_ctx.output_port,
-             g_ctx.log_file);
+    return NULL;
 }
 
 void* tsp_manager_thread(void *arg) {
     (void)arg;
-    char cmd[1024];
+    char cmd[2048];
 
     while (g_ctx.running) {
-        build_tsp_command(cmd, sizeof(cmd));
+        // Build PID filter string
+        char pids_filter[512] = "";
+        for (int i = 0; i < g_ctx.pid_count; i++) {
+            char pid_str[32];
+            snprintf(pid_str, sizeof(pid_str), "%s-p %u",
+                     (i > 0) ? " " : "", g_ctx.pids[i]);
+            strcat(pids_filter, pid_str);
+        }
+
+        // Build bitrate monitor plugins for user PIDs (skip 0 and 17)
+        char bitrate_plugins[512] = "";
+        for (int i = 2; i < g_ctx.pid_count; i++) {
+            char plugin[128];
+            snprintf(plugin, sizeof(plugin),
+                     "-P bitrate_monitor --pid %u --periodic-bitrate 5 ",
+                     g_ctx.pids[i]);
+            strcat(bitrate_plugins, plugin);
+        }
+
+        // Build full tsp command - stderr goes to log file
+        snprintf(cmd, sizeof(cmd),
+                 "tsp -I ip %s:%d "
+                 "-P filter %s "
+                 "%s"
+                 "-O ip %s:%d "
+                 "2>> %s",
+                 g_ctx.input_addr, g_ctx.input_port,
+                 pids_filter,
+                 bitrate_plugins,
+                 g_ctx.output_addr, g_ctx.output_port,
+                 g_ctx.log_file);
 
         fprintf(stderr, "Starting tsp: %s\n", cmd);
 
-        FILE *fp = popen(cmd, "r");
-        if (!fp) {
-            fprintf(stderr, "ERROR: Failed to start tsp\n");
-            sleep(2);
-            continue;
-        }
-
-        // Read from tsp stderr output
-        char line[MAX_LOG_LINE];
-        while (fgets(line, sizeof(line), fp) && g_ctx.running) {
-            parse_bitrate_line(line);
-        }
-
-        pclose(fp);
+        int ret = system(cmd);
 
         if (g_ctx.running) {
-            fprintf(stderr, "tsp process ended, restarting...\n");
+            fprintf(stderr, "tsp process exited with code %d, restarting...\n", ret);
             sleep(2);
         }
     }
@@ -255,7 +284,7 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
 
         char response[16384] = "{\"status\":\"running\",\"pids\":{";
 
-        for (int i = 0; i < g_ctx.pid_count; i++) {
+        for (int i = 0; i < g_ctx.monitor_count; i++) {
             PIDMonitor *m = &g_ctx.monitors[i];
 
             if (i > 0) strcat(response, ",");
@@ -307,6 +336,7 @@ int main(int argc, char *argv[]) {
             char *colon = strchr(addr_port, ':');
             if (colon) {
                 strncpy(g_ctx.input_addr, addr_port, colon - addr_port);
+                g_ctx.input_addr[colon - addr_port] = '\0';
                 g_ctx.input_port = atoi(colon + 1);
                 has_input = 1;
             }
@@ -315,6 +345,7 @@ int main(int argc, char *argv[]) {
             char *colon = strchr(addr_port, ':');
             if (colon) {
                 strncpy(g_ctx.output_addr, addr_port, colon - addr_port);
+                g_ctx.output_addr[colon - addr_port] = '\0';
                 g_ctx.output_port = atoi(colon + 1);
                 has_output = 1;
             }
@@ -323,8 +354,7 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
             g_ctx.api_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--pids") == 0 && i + 1 < argc) {
-            int count = parse_pids(argv[++i]);
-            g_ctx.pid_count = count;
+            g_ctx.pid_count = parse_pids(argv[++i]);
             has_pids = 1;
         } else if (strcmp(argv[i], "--stall-timeout") == 0 && i + 1 < argc) {
             g_ctx.stall_timeout = atoi(argv[++i]);
@@ -346,23 +376,31 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Initialize monitors for all PIDs
-    for (int i = 0; i < g_ctx.pid_count; i++) {
-        char name[64];
-        snprintf(name, sizeof(name), "PID %u", g_ctx.pids[i]);
-        add_monitor(g_ctx.pids[i], name);
-    }
+    // Initialize monitors from PIDs
+    init_monitors();
+
+    // Clear/create log file
+    FILE *lf = fopen(g_ctx.log_file, "w");
+    if (lf) fclose(lf);
 
     fprintf(stderr, "UDP Input Monitor Starting\n");
     fprintf(stderr, "Input:  %s:%d\n", g_ctx.input_addr, g_ctx.input_port);
     fprintf(stderr, "Output: %s:%d\n", g_ctx.output_addr, g_ctx.output_port);
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
     fprintf(stderr, "Log File: %s\n", g_ctx.log_file);
-    fprintf(stderr, "Monitoring %d PIDs\n", g_ctx.pid_count);
+    fprintf(stderr, "PIDs: ");
+    for (int i = 0; i < g_ctx.pid_count; i++) {
+        fprintf(stderr, "%u ", g_ctx.pids[i]);
+    }
+    fprintf(stderr, "(%d total)\n", g_ctx.pid_count);
 
     // Start tsp manager thread
     pthread_t tsp_thread;
     pthread_create(&tsp_thread, NULL, tsp_manager_thread, NULL);
+
+    // Start log monitor thread
+    pthread_t log_thread;
+    pthread_create(&log_thread, NULL, log_monitor_thread, NULL);
 
     // Start HTTP server
     struct MHD_Daemon *daemon = MHD_start_daemon(
@@ -387,14 +425,17 @@ int main(int argc, char *argv[]) {
         // Check for stall
         time_t now = time(NULL);
         if (now - g_ctx.last_data_received > g_ctx.stall_timeout) {
-            fprintf(stderr, "ERROR: Data stall detected. Exiting for systemd restart.\n");
+            fprintf(stderr, "ERROR: Data stall detected (%ld seconds). Exiting for systemd restart.\n",
+                    now - g_ctx.last_data_received);
             g_ctx.running = 0;
         }
     }
 
     MHD_stop_daemon(daemon);
     pthread_cancel(tsp_thread);
+    pthread_cancel(log_thread);
     pthread_join(tsp_thread, NULL);
+    pthread_join(log_thread, NULL);
 
     return 0;
 }
