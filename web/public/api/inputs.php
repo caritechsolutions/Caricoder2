@@ -610,10 +610,20 @@ function update_input($id, $data) {
         return ['success' => false, 'error' => 'Input not found'];
     }
 
-    // Load existing config
-    $config = parse_ini_file($config_file, true);
+    // Check if file is writable
+    if (!is_writable($config_file)) {
+        return ['success' => false, 'error' => 'Config file not writable (check permissions)'];
+    }
 
-    // Update fields
+    // Load existing config using our custom parser
+    $config = parse_config($config_file);
+
+    // Ensure sections exist
+    if (!isset($config['general'])) $config['general'] = [];
+    if (!isset($config['sources'])) $config['sources'] = [];
+    if (!isset($config['pids'])) $config['pids'] = [];
+
+    // Update general fields
     if (isset($data['name'])) {
         $config['general']['name'] = $data['name'];
     }
@@ -638,24 +648,40 @@ function update_input($id, $data) {
         $config['pids']['program'] = $data['program_pid'];
     }
 
-    // Update sources
-    if (isset($data['sources'])) {
+    // Update sources (with proper type|url|weight format)
+    if (isset($data['sources']) && is_array($data['sources'])) {
         $config['sources'] = [];
+        $primaryType = 'udp';
         foreach ($data['sources'] as $idx => $source) {
+            $type = $source['type'] ?? 'udp';
             $url = $source['url'] ?? $source;
             $weight = $source['weight'] ?? 10;
-            $config['sources']['source_' . $idx] = $url . '|' . $weight;
+
+            // Store first source type as primary type
+            if ($idx == 0) {
+                $primaryType = $type;
+            }
+
+            // Build source string: type|url|weight
+            $sourceStr = "{$type}|{$url}|{$weight}";
+            $config['sources']['source_' . $idx] = $sourceStr;
         }
+        // Update primary type
+        $config['general']['type'] = $primaryType;
     }
 
     // Write updated config
     $content = build_ini_content($config);
 
-    if (file_put_contents($config_file, $content)) {
+    $result = file_put_contents($config_file, $content);
+    if ($result !== false) {
         return ['success' => true, 'message' => "Input updated successfully"];
     }
 
-    return ['success' => false, 'error' => 'Failed to save configuration'];
+    // Get detailed error
+    $error = error_get_last();
+    $errorMsg = $error ? $error['message'] : 'Unknown error';
+    return ['success' => false, 'error' => "Failed to save configuration: $errorMsg"];
 }
 
 /**
