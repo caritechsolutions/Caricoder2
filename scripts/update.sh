@@ -215,6 +215,26 @@ rebuild_apps() {
     fi
 }
 
+# Build and install tools (always runs)
+build_tools() {
+    log_step "Building tools..."
+
+    # Build udp_input
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/udp_input" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/udp_input"
+        log_info "Building udp_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "udp_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build udp_input"
+        fi
+    fi
+
+    log_info "Tools build completed"
+}
+
 # Restart services
 restart_services() {
     log_step "Restarting services..."
@@ -338,6 +358,7 @@ main() {
     update_web
     update_api
     rebuild_apps
+    build_tools
     fix_permissions
     restart_services
     cleanup

@@ -465,6 +465,26 @@ build_apps() {
     log_info "Build completed successfully"
 }
 
+# Build tools (udp_input, etc.)
+build_tools() {
+    log_step "Building CariTranscoder tools..."
+
+    # Build udp_input
+    if [[ -d "$INSTALL_DIR/tools/udp_input" ]]; then
+        cd "$INSTALL_DIR/tools/udp_input"
+        log_info "Building udp_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "udp_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build udp_input"
+        fi
+    fi
+
+    log_info "Tools build completed"
+}
+
 # Install binaries
 install_binaries() {
     log_step "Installing binaries..."
@@ -796,6 +816,7 @@ main() {
     create_directories
     download_repo
     build_apps
+    build_tools
     install_binaries
     install_config
     install_web
