@@ -530,6 +530,23 @@ function create_input($data) {
         $primaryType = $data['sources'][0]['type'];
     }
 
+    // Get PIDs from primary source for backwards compatibility
+    $primaryVideo = '';
+    $primaryAudio = '';
+    $primaryProgram = '';
+
+    $sources = $data['sources'] ?? [];
+    if (!empty($sources) && isset($sources[0])) {
+        $primaryVideo = $sources[0]['video_pid'] ?? '';
+        $primaryAudio = is_array($sources[0]['audio_pids'] ?? null) ? implode(',', $sources[0]['audio_pids']) : ($sources[0]['audio_pids'] ?? '');
+        $primaryProgram = $sources[0]['program_pid'] ?? '';
+    }
+
+    // Fall back to global PIDs if per-source not set
+    if (empty($primaryVideo)) $primaryVideo = $data['video_pid'] ?? '';
+    if (empty($primaryAudio)) $primaryAudio = is_array($data['audio_pids'] ?? null) ? implode(',', $data['audio_pids']) : ($data['audio_pids'] ?? '');
+    if (empty($primaryProgram)) $primaryProgram = $data['program_pid'] ?? '';
+
     $config = [
         'general' => [
             'name' => $name,
@@ -539,14 +556,13 @@ function create_input($data) {
         ],
         'sources' => [],
         'pids' => [
-            'video' => $data['video_pid'] ?? '',
-            'audio' => is_array($data['audio_pids'] ?? null) ? implode(',', $data['audio_pids']) : ($data['audio_pids'] ?? ''),
-            'program' => $data['program_pid'] ?? ''
+            'video' => $primaryVideo,
+            'audio' => $primaryAudio,
+            'program' => $primaryProgram
         ]
     ];
 
-    // Add sources with per-source type and settings
-    $sources = $data['sources'] ?? [];
+    // Add sources with per-source type, settings, and PIDs
     if (!empty($sources)) {
         foreach ($sources as $idx => $source) {
             $url = $source['url'] ?? $source;
@@ -557,17 +573,35 @@ function create_input($data) {
             $sourceStr = "{$type}|{$url}|{$weight}";
 
             // Add type-specific settings
+            $extraSettings = [];
             if ($type === 'srt') {
                 $mode = $source['srt_mode'] ?? 'caller';
                 $latency = $source['srt_latency'] ?? 200;
                 $passphrase = $source['srt_passphrase'] ?? '';
-                $sourceStr .= "|mode={$mode},latency={$latency}";
+                $extraSettings[] = "mode={$mode}";
+                $extraSettings[] = "latency={$latency}";
                 if ($passphrase) {
-                    $sourceStr .= ",passphrase={$passphrase}";
+                    $extraSettings[] = "passphrase={$passphrase}";
                 }
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
-                $sourceStr .= "|loop={$loop}";
+                $extraSettings[] = "loop={$loop}";
+            }
+
+            // Add per-source PIDs
+            if (!empty($source['video_pid'])) {
+                $extraSettings[] = "video_pid={$source['video_pid']}";
+            }
+            if (!empty($source['audio_pids'])) {
+                $audioPids = is_array($source['audio_pids']) ? implode(';', $source['audio_pids']) : $source['audio_pids'];
+                $extraSettings[] = "audio_pids={$audioPids}";
+            }
+            if (!empty($source['program_pid'])) {
+                $extraSettings[] = "program_pid={$source['program_pid']}";
+            }
+
+            if (!empty($extraSettings)) {
+                $sourceStr .= '|' . implode(',', $extraSettings);
             }
 
             $config['sources']['source_' . $idx] = $sourceStr;
@@ -667,7 +701,7 @@ function update_input($id, $data) {
         $config['pids']['program'] = $data['program_pid'];
     }
 
-    // Update sources (with proper type|url|weight format)
+    // Update sources (with proper type|url|weight|settings format including PIDs)
     if (isset($data['sources']) && is_array($data['sources'])) {
         $config['sources'] = [];
         $primaryType = 'udp';
@@ -679,10 +713,54 @@ function update_input($id, $data) {
             // Store first source type as primary type
             if ($idx == 0) {
                 $primaryType = $type;
+
+                // Also update global PIDs from primary source for backwards compatibility
+                if (!empty($source['video_pid'])) {
+                    $config['pids']['video'] = $source['video_pid'];
+                }
+                if (!empty($source['audio_pids'])) {
+                    $config['pids']['audio'] = is_array($source['audio_pids']) ? implode(',', $source['audio_pids']) : $source['audio_pids'];
+                }
+                if (!empty($source['program_pid'])) {
+                    $config['pids']['program'] = $source['program_pid'];
+                }
             }
 
-            // Build source string: type|url|weight
+            // Build source string: type|url|weight|extra_settings
             $sourceStr = "{$type}|{$url}|{$weight}";
+
+            // Add type-specific settings and per-source PIDs
+            $extraSettings = [];
+            if ($type === 'srt') {
+                $mode = $source['srt_mode'] ?? 'caller';
+                $latency = $source['srt_latency'] ?? 200;
+                $passphrase = $source['srt_passphrase'] ?? '';
+                $extraSettings[] = "mode={$mode}";
+                $extraSettings[] = "latency={$latency}";
+                if ($passphrase) {
+                    $extraSettings[] = "passphrase={$passphrase}";
+                }
+            } elseif ($type === 'file') {
+                $loop = $source['file_loop'] ?? '1';
+                $extraSettings[] = "loop={$loop}";
+            }
+
+            // Add per-source PIDs
+            if (!empty($source['video_pid'])) {
+                $extraSettings[] = "video_pid={$source['video_pid']}";
+            }
+            if (!empty($source['audio_pids'])) {
+                $audioPids = is_array($source['audio_pids']) ? implode(';', $source['audio_pids']) : $source['audio_pids'];
+                $extraSettings[] = "audio_pids={$audioPids}";
+            }
+            if (!empty($source['program_pid'])) {
+                $extraSettings[] = "program_pid={$source['program_pid']}";
+            }
+
+            if (!empty($extraSettings)) {
+                $sourceStr .= '|' . implode(',', $extraSettings);
+            }
+
             $config['sources']['source_' . $idx] = $sourceStr;
         }
         // Update primary type

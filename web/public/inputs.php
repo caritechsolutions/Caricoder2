@@ -112,9 +112,6 @@ include __DIR__ . '/../templates/header.php';
                         <li class="nav-item">
                             <a class="nav-link" data-step="2"><strong>2.</strong> Sources</a>
                         </li>
-                        <li class="nav-item">
-                            <a class="nav-link" data-step="3"><strong>3.</strong> PID Selection</a>
-                        </li>
                     </ul>
 
                     <!-- Step 1: Basic Info -->
@@ -149,66 +146,10 @@ include __DIR__ . '/../templates/header.php';
                                 <i class="bi bi-plus-lg"></i> Add Failover Source
                             </button>
                         </div>
-                        <p class="text-muted small">Add one or more sources. Each source can be a different type. Higher weight = higher priority for failover.</p>
+                        <p class="text-muted small">Add sources and click <strong>Configure</strong> to scan and select PIDs. Higher weight = higher priority for failover.</p>
 
                         <div id="sourcesContainer">
                             <!-- Sources will be added here dynamically -->
-                        </div>
-                    </div>
-
-                    <!-- Step 3: PID Selection -->
-                    <div class="wizard-step" id="step3" style="display:none;">
-                        <h5 class="mb-3">PID Selection</h5>
-                        <p class="text-muted">Select which video, audio, and program PIDs to use from the source.</p>
-
-                        <div class="mb-4">
-                            <button type="button" class="btn btn-info" id="scanSourceBtn" onclick="scanSource()">
-                                <i class="bi bi-search me-1"></i>Scan Primary Source for PIDs
-                            </button>
-                            <span class="ms-2 text-muted small" id="scanStatus"></span>
-                        </div>
-
-                        <div class="row">
-                            <!-- Program PID -->
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Program</label>
-                                <select class="form-select" name="program_pid" id="programPidSelect">
-                                    <option value="">-- Select or enter manually --</option>
-                                </select>
-                                <input type="number" class="form-control mt-2" name="program_pid_manual"
-                                       id="programPidManual" placeholder="Or enter PID manually">
-                            </div>
-
-                            <!-- Video PID -->
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Video PID</label>
-                                <select class="form-select" name="video_pid" id="videoPidSelect">
-                                    <option value="">-- Select or enter manually --</option>
-                                </select>
-                                <input type="number" class="form-control mt-2" name="video_pid_manual"
-                                       id="videoPidManual" placeholder="Or enter PID manually">
-                            </div>
-
-                            <!-- Audio PIDs -->
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Audio PIDs <span class="text-muted small">(select multiple)</span></label>
-                                <select class="form-select" name="audio_pids[]" id="audioPidSelect" multiple size="4">
-                                    <option value="">-- Scan source first --</option>
-                                </select>
-                                <input type="text" class="form-control mt-2" name="audio_pids_manual"
-                                       id="audioPidManual" placeholder="Or enter PIDs: 257,258">
-                                <div class="form-text">Comma-separated for multiple audio tracks</div>
-                            </div>
-                        </div>
-
-                        <!-- Scanned info display -->
-                        <div id="scanResults" class="mt-3" style="display:none;">
-                            <div class="card bg-light">
-                                <div class="card-body">
-                                    <h6><i class="bi bi-info-circle me-1"></i>Detected Stream Info</h6>
-                                    <div id="scanResultsContent"></div>
-                                </div>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -226,6 +167,84 @@ include __DIR__ . '/../templates/header.php';
                     </button>
                 </div>
             </form>
+        </div>
+    </div>
+</div>
+
+<!-- Configure Source Modal -->
+<div class="modal fade" id="configureSourceModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-gear me-2"></i>Configure Source</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="configSourceId">
+
+                <!-- Source Info -->
+                <div class="mb-3">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <label class="form-label">Type</label>
+                            <input type="text" class="form-control" id="configSourceType" readonly>
+                        </div>
+                        <div class="col-md-9">
+                            <label class="form-label">URL</label>
+                            <input type="text" class="form-control" id="configSourceUrl" readonly>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Scan Button -->
+                <div class="mb-4">
+                    <button type="button" class="btn btn-info" id="configScanBtn" onclick="scanConfiguredSource()">
+                        <i class="bi bi-search me-1"></i>Scan Source for PIDs
+                    </button>
+                    <span class="ms-2 text-muted small" id="configScanStatus"></span>
+                </div>
+
+                <!-- PID Selection -->
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Program</label>
+                        <select class="form-select" id="configProgramSelect">
+                            <option value="">-- Select or enter manually --</option>
+                        </select>
+                        <input type="number" class="form-control mt-2" id="configProgramManual" placeholder="Or enter PID manually">
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Video PID</label>
+                        <select class="form-select" id="configVideoSelect">
+                            <option value="">-- Select or enter manually --</option>
+                        </select>
+                        <input type="number" class="form-control mt-2" id="configVideoManual" placeholder="Or enter PID manually">
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Audio PIDs</label>
+                        <select class="form-select" id="configAudioSelect" multiple size="4">
+                        </select>
+                        <input type="text" class="form-control mt-2" id="configAudioManual" placeholder="Or enter PIDs: 257,258">
+                        <div class="form-text">Comma-separated for multiple</div>
+                    </div>
+                </div>
+
+                <!-- Scan Results -->
+                <div id="configScanResults" class="mt-3" style="display:none;">
+                    <div class="card bg-light">
+                        <div class="card-body">
+                            <h6><i class="bi bi-info-circle me-1"></i>Detected Stream Info</h6>
+                            <div id="configScanResultsContent"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveSourceConfig()">
+                    <i class="bi bi-check-lg"></i> Apply Configuration
+                </button>
+            </div>
         </div>
     </div>
 </div>
@@ -337,11 +356,21 @@ async function checkNameUnique(name) {
     }
 }
 
+// Store source configurations (PIDs per source)
+let sourceConfigs = {};
+
 // Add a source entry
 function addSource() {
     sourcesCount++;
     const isPrimary = sourcesCount === 1;
     const container = document.getElementById('sourcesContainer');
+
+    // Initialize config for this source
+    sourceConfigs[sourcesCount] = {
+        program_pid: '',
+        video_pid: '',
+        audio_pids: []
+    };
 
     const sourceHtml = `
         <div class="source-card ${isPrimary ? 'primary' : ''}" id="source-${sourcesCount}" data-source-id="${sourcesCount}">
@@ -349,9 +378,14 @@ function addSource() {
                 <span class="badge ${isPrimary ? 'bg-primary' : 'bg-secondary'}">
                     ${isPrimary ? 'Primary Source' : 'Failover Source ' + (sourcesCount - 1)}
                 </span>
-                ${!isPrimary ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="removeSource(${sourcesCount})">
-                    <i class="bi bi-trash"></i>
-                </button>` : ''}
+                <div>
+                    <button type="button" class="btn btn-sm btn-outline-primary configure-btn" onclick="openConfigureModal(${sourcesCount})">
+                        <i class="bi bi-gear"></i> Configure
+                    </button>
+                    ${!isPrimary ? `<button type="button" class="btn btn-sm btn-outline-danger ms-1" onclick="removeSource(${sourcesCount})">
+                        <i class="bi bi-trash"></i>
+                    </button>` : ''}
+                </div>
             </div>
 
             <div class="row">
@@ -411,6 +445,13 @@ function addSource() {
                             </select>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- PID Configuration Status -->
+            <div class="source-config-status mt-2" id="source-${sourcesCount}-config-status" style="display:none;">
+                <div class="alert alert-success mb-0 py-2">
+                    <small><i class="bi bi-check-circle me-1"></i><strong>Configured:</strong> <span class="config-info"></span></small>
                 </div>
             </div>
         </div>
@@ -488,20 +529,7 @@ function nextStep() {
         }
     }
 
-    if (currentStep === 2) {
-        // Validate step 2 - at least one source
-        const sources = document.querySelectorAll('.source-url');
-        let hasSource = false;
-        sources.forEach(input => {
-            if (input.value.trim()) hasSource = true;
-        });
-        if (!hasSource) {
-            alert('Please enter at least one source');
-            return;
-        }
-    }
-
-    if (currentStep < 3) {
+    if (currentStep < 2) {
         document.getElementById(`step${currentStep}`).style.display = 'none';
         currentStep++;
         document.getElementById(`step${currentStep}`).style.display = 'block';
@@ -513,7 +541,7 @@ function nextStep() {
 
         // Update buttons
         document.getElementById('prevBtn').style.display = 'inline-block';
-        if (currentStep === 3) {
+        if (currentStep === 2) {
             document.getElementById('nextBtn').style.display = 'none';
             document.getElementById('submitBtn').style.display = 'inline-block';
         }
@@ -540,16 +568,15 @@ function prevStep() {
     }
 }
 
-// Scan source for PIDs
-async function scanSource() {
-    const btn = document.getElementById('scanSourceBtn');
-    const statusEl = document.getElementById('scanStatus');
-    const resultsEl = document.getElementById('scanResults');
+// Configure Modal Functions
+let configureModal = null;
 
-    // Get first source URL and type
-    const firstSource = document.querySelector('.source-card');
-    const sourceInput = firstSource ? firstSource.querySelector('.source-url') : null;
-    const sourceType = firstSource ? firstSource.querySelector('.source-type') : null;
+function openConfigureModal(sourceId) {
+    const card = document.getElementById(`source-${sourceId}`);
+    if (!card) return;
+
+    const sourceInput = card.querySelector('.source-url');
+    const sourceType = card.querySelector('.source-type');
 
     const source = sourceInput ? sourceInput.value : '';
     const type = sourceType ? sourceType.value : 'udp';
@@ -558,6 +585,44 @@ async function scanSource() {
         alert('Please enter a source URL first');
         return;
     }
+
+    // Set modal fields
+    document.getElementById('configSourceId').value = sourceId;
+    document.getElementById('configSourceType').value = type.toUpperCase();
+    document.getElementById('configSourceUrl').value = source;
+
+    // Reset scan results
+    document.getElementById('configScanStatus').innerHTML = '';
+    document.getElementById('configScanResults').style.display = 'none';
+
+    // Load existing config if available
+    const config = sourceConfigs[sourceId] || {};
+    document.getElementById('configProgramSelect').innerHTML = '<option value="">-- Scan to detect --</option>';
+    document.getElementById('configVideoSelect').innerHTML = '<option value="">-- Scan to detect --</option>';
+    document.getElementById('configAudioSelect').innerHTML = '';
+    document.getElementById('configProgramManual').value = config.program_pid || '';
+    document.getElementById('configVideoManual').value = config.video_pid || '';
+    document.getElementById('configAudioManual').value = (config.audio_pids || []).join(',');
+
+    // Show the modal
+    if (!configureModal) {
+        configureModal = new bootstrap.Modal(document.getElementById('configureSourceModal'));
+    }
+    configureModal.show();
+}
+
+async function scanConfiguredSource() {
+    const sourceId = document.getElementById('configSourceId').value;
+    const card = document.getElementById(`source-${sourceId}`);
+    if (!card) return;
+
+    const sourceInput = card.querySelector('.source-url');
+    const sourceType = card.querySelector('.source-type');
+    const source = sourceInput ? sourceInput.value : '';
+    const type = sourceType ? sourceType.value : 'udp';
+
+    const btn = document.getElementById('configScanBtn');
+    const statusEl = document.getElementById('configScanStatus');
 
     btn.disabled = true;
     statusEl.innerHTML = '<i class="bi bi-hourglass-split"></i> Scanning source...';
@@ -575,11 +640,10 @@ async function scanSource() {
 
         if (data.success) {
             statusEl.innerHTML = '<i class="bi bi-check-circle text-success"></i> Scan complete';
-            populatePidSelects(data);
-            resultsEl.style.display = 'block';
+            populateConfigPidSelects(data);
+            document.getElementById('configScanResults').style.display = 'block';
         } else {
             statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-warning"></i> ${data.error || 'Scan failed'}`;
-            resultsEl.style.display = 'none';
         }
     } catch (e) {
         statusEl.innerHTML = '<i class="bi bi-x-circle text-danger"></i> Scan error';
@@ -589,12 +653,11 @@ async function scanSource() {
     btn.disabled = false;
 }
 
-// Populate PID selects from scan results
-function populatePidSelects(data) {
-    const programSelect = document.getElementById('programPidSelect');
-    const videoSelect = document.getElementById('videoPidSelect');
-    const audioSelect = document.getElementById('audioPidSelect');
-    const resultsContent = document.getElementById('scanResultsContent');
+function populateConfigPidSelects(data) {
+    const programSelect = document.getElementById('configProgramSelect');
+    const videoSelect = document.getElementById('configVideoSelect');
+    const audioSelect = document.getElementById('configAudioSelect');
+    const resultsContent = document.getElementById('configScanResultsContent');
 
     // Clear existing options
     programSelect.innerHTML = '<option value="">-- Select program --</option>';
@@ -640,8 +703,8 @@ function populatePidSelects(data) {
     // Show results summary
     let html = '<div class="row">';
     html += `<div class="col-md-4"><strong>Programs:</strong> ${data.programs?.length || 0}</div>`;
-    html += `<div class="col-md-4"><strong>Video tracks:</strong> ${data.video_pids?.length || 0}</div>`;
-    html += `<div class="col-md-4"><strong>Audio tracks:</strong> ${data.audio_pids?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Video:</strong> ${data.video_pids?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Audio:</strong> ${data.audio_pids?.length || 0}</div>`;
     html += '</div>';
 
     if (data.video_pids && data.video_pids.length > 0) {
@@ -659,6 +722,62 @@ function populatePidSelects(data) {
     resultsContent.innerHTML = html;
 }
 
+function saveSourceConfig() {
+    const sourceId = document.getElementById('configSourceId').value;
+
+    // Get values from selects or manual inputs
+    const programSelect = document.getElementById('configProgramSelect');
+    const videoSelect = document.getElementById('configVideoSelect');
+    const audioSelect = document.getElementById('configAudioSelect');
+
+    const programPid = programSelect.value || document.getElementById('configProgramManual').value;
+    const videoPid = videoSelect.value || document.getElementById('configVideoManual').value;
+
+    // Get audio PIDs from select or manual
+    let audioPids = [];
+    const selectedAudio = Array.from(audioSelect.selectedOptions).map(opt => opt.value).filter(v => v);
+    const manualAudio = document.getElementById('configAudioManual').value;
+
+    if (selectedAudio.length > 0) {
+        audioPids = selectedAudio;
+    } else if (manualAudio) {
+        audioPids = manualAudio.split(',').map(p => p.trim()).filter(p => p);
+    }
+
+    // Store config for this source
+    sourceConfigs[sourceId] = {
+        program_pid: programPid,
+        video_pid: videoPid,
+        audio_pids: audioPids
+    };
+
+    // Update the source card to show it's configured
+    const statusDiv = document.getElementById(`source-${sourceId}-config-status`);
+    if (statusDiv) {
+        let info = [];
+        if (videoPid) info.push(`Video: ${videoPid}`);
+        if (audioPids.length > 0) info.push(`Audio: ${audioPids.join(',')}`);
+        if (programPid) info.push(`Prog: ${programPid}`);
+
+        statusDiv.querySelector('.config-info').textContent = info.join(' | ') || 'No PIDs selected';
+        statusDiv.style.display = 'block';
+    }
+
+    // Update the configure button to show it's configured
+    const card = document.getElementById(`source-${sourceId}`);
+    if (card) {
+        const configBtn = card.querySelector('.configure-btn');
+        if (configBtn && (videoPid || audioPids.length > 0)) {
+            configBtn.classList.remove('btn-outline-primary');
+            configBtn.classList.add('btn-success');
+            configBtn.innerHTML = '<i class="bi bi-check-circle"></i> Configured';
+        }
+    }
+
+    // Close modal
+    configureModal.hide();
+}
+
 // Form submission
 async function handleFormSubmit(e) {
     e.preventDefault();
@@ -666,18 +785,27 @@ async function handleFormSubmit(e) {
     const form = e.target;
     const formData = new FormData(form);
 
+    // Validate that at least one source exists
+    const sources = document.querySelectorAll('.source-url');
+    let hasSource = false;
+    sources.forEach(input => {
+        if (input.value.trim()) hasSource = true;
+    });
+    if (!hasSource) {
+        alert('Please enter at least one source');
+        return;
+    }
+
     // Build the data object
     const data = {
         name: formData.get('name'),
         buffer: formData.get('buffer'),
-        sources: [],
-        video_pid: formData.get('video_pid') || formData.get('video_pid_manual'),
-        audio_pids: [],
-        program_pid: formData.get('program_pid') || formData.get('program_pid_manual')
+        sources: []
     };
 
-    // Collect sources with their individual settings
+    // Collect sources with their individual settings and PIDs
     document.querySelectorAll('.source-card').forEach((card) => {
+        const sourceId = card.dataset.sourceId;
         const urlInput = card.querySelector('.source-url');
         const typeSelect = card.querySelector('.source-type');
         const weightInput = card.querySelector('.source-weight');
@@ -703,20 +831,15 @@ async function handleFormSubmit(e) {
                 sourceData.file_loop = loopSelect ? loopSelect.value : '1';
             }
 
+            // Add PID configuration for this source
+            const config = sourceConfigs[sourceId] || {};
+            if (config.video_pid) sourceData.video_pid = config.video_pid;
+            if (config.audio_pids && config.audio_pids.length > 0) sourceData.audio_pids = config.audio_pids;
+            if (config.program_pid) sourceData.program_pid = config.program_pid;
+
             data.sources.push(sourceData);
         }
     });
-
-    // Collect audio PIDs (from select or manual)
-    const audioSelect = document.getElementById('audioPidSelect');
-    const selectedAudio = Array.from(audioSelect.selectedOptions).map(opt => opt.value).filter(v => v);
-    const manualAudio = formData.get('audio_pids_manual');
-
-    if (selectedAudio.length > 0) {
-        data.audio_pids = selectedAudio;
-    } else if (manualAudio) {
-        data.audio_pids = manualAudio.split(',').map(p => p.trim()).filter(p => p);
-    }
 
     // Submit
     try {
