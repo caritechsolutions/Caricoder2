@@ -272,26 +272,24 @@ install_librist() {
         return 0
     fi
 
-    local TEMP_DIR=$(mktemp -d)
-    cd "$TEMP_DIR"
+    # Also check /usr/local/bin
+    if [[ -f /usr/local/bin/ristreceiver ]]; then
+        log_info "librist already installed to /usr/local/bin"
+        return 0
+    fi
+
+    cd /tmp
+
+    # Clean up any existing librist directory
+    if [[ -d "librist" ]]; then
+        log_info "Removing existing librist directory..."
+        rm -rf librist
+    fi
 
     log_info "Cloning librist from VideoLAN..."
-
-    # Clone librist repository
-    local CLONE_SUCCESS=false
-    for attempt in 1 2 3; do
-        if git clone --depth 1 https://code.videolan.org/rist/librist.git 2>/dev/null; then
-            CLONE_SUCCESS=true
-            break
-        fi
-        log_warn "Clone attempt $attempt failed, retrying..."
-        sleep 2
-    done
-
-    if [[ "$CLONE_SUCCESS" = false ]]; then
+    if ! git clone https://code.videolan.org/rist/librist.git; then
         log_warn "Failed to clone librist repository"
         log_warn "RIST scanning will not be available"
-        rm -rf "$TEMP_DIR"
         return 1
     fi
 
@@ -300,23 +298,24 @@ install_librist() {
     log_info "Building librist with meson/ninja..."
 
     # Configure with meson
-    if ! meson setup build --buildtype=release -Dbuiltin_cjson=true; then
+    if ! meson setup build; then
         log_warn "Meson setup failed"
-        rm -rf "$TEMP_DIR"
+        cd /tmp && rm -rf librist
         return 1
     fi
 
     # Build
-    if ! ninja -C build; then
+    cd build
+    if ! ninja; then
         log_warn "Ninja build failed"
-        rm -rf "$TEMP_DIR"
+        cd /tmp && rm -rf librist
         return 1
     fi
 
     # Install
-    if ! ninja -C build install; then
+    if ! ninja install; then
         log_warn "Ninja install failed"
-        rm -rf "$TEMP_DIR"
+        cd /tmp && rm -rf librist
         return 1
     fi
 
@@ -324,20 +323,17 @@ install_librist() {
     ldconfig
 
     # Cleanup
-    cd /
-    rm -rf "$TEMP_DIR"
+    cd /tmp
+    rm -rf librist
 
     # Verify installation
     if command -v ristreceiver &> /dev/null; then
         log_info "librist installed successfully"
+    elif [[ -f /usr/local/bin/ristreceiver ]]; then
+        log_info "librist installed to /usr/local/bin"
     else
-        # Check if installed to /usr/local/bin
-        if [[ -f /usr/local/bin/ristreceiver ]]; then
-            log_info "librist installed to /usr/local/bin"
-        else
-            log_warn "ristreceiver not found in PATH after install"
-            log_warn "RIST scanning may not work"
-        fi
+        log_warn "ristreceiver not found in PATH after install"
+        log_warn "RIST scanning may not work"
     fi
 }
 
