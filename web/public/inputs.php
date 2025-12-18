@@ -70,8 +70,8 @@ include __DIR__ . '/../templates/header.php';
                         <th>Name</th>
                         <th style="width: 80px;">Type</th>
                         <th>Source</th>
-                        <th style="width: 100px;">Bitrate</th>
-                        <th style="width: 100px;">Packets</th>
+                        <th>Output</th>
+                        <th style="width: 180px;">Bitrate (V/A)</th>
                         <th style="width: 150px;">Actions</th>
                     </tr>
                 </thead>
@@ -87,15 +87,19 @@ include __DIR__ . '/../templates/header.php';
                         </td>
                     </tr>
                     <?php else: ?>
-                    <?php $rowNum = 0; foreach ($inputs as $input): $rowNum++; ?>
+                    <?php $rowNum = 0; foreach ($inputs as $input): $rowNum++;
+                        $outputAddr = ($input['config']['output']['address'] ?? '') . ':' . ($input['config']['output']['port'] ?? '');
+                        $apiPort = $input['config']['output']['api_port'] ?? null;
+                    ?>
                     <tr class="input-row <?php echo ($rowNum % 2 == 0) ? 'row-even' : 'row-odd'; ?>"
                         data-id="<?php echo htmlspecialchars($input['id']); ?>"
                         data-name="<?php echo htmlspecialchars(strtolower($input['name'])); ?>"
                         data-type="<?php echo htmlspecialchars(strtolower($input['type'] ?? 'udp')); ?>"
                         data-status="<?php echo htmlspecialchars($input['status']); ?>"
-                        data-source="<?php echo htmlspecialchars(strtolower($input['source'] ?? '')); ?>">
+                        data-source="<?php echo htmlspecialchars(strtolower($input['source'] ?? '')); ?>"
+                        data-api-port="<?php echo htmlspecialchars($apiPort ?? ''); ?>">
                         <td>
-                            <span class="status-dot status-<?php echo $input['status']; ?>" title="<?php echo ucfirst($input['status']); ?>"></span>
+                            <span class="status-dot status-<?php echo $input['status']; ?>" id="status-<?php echo $input['id']; ?>" title="<?php echo ucfirst($input['status']); ?>"></span>
                         </td>
                         <td>
                             <strong><?php echo htmlspecialchars($input['name']); ?></strong>
@@ -103,14 +107,27 @@ include __DIR__ . '/../templates/header.php';
                         <td>
                             <span class="badge bg-<?php echo getTypeBadgeColor($input['type'] ?? 'udp'); ?>"><?php echo htmlspecialchars(strtoupper($input['type'] ?? 'UDP')); ?></span>
                         </td>
-                        <td class="text-truncate" style="max-width: 300px;" title="<?php echo htmlspecialchars($input['source'] ?? ''); ?>">
+                        <td class="text-truncate" style="max-width: 200px;" title="<?php echo htmlspecialchars($input['source'] ?? ''); ?>">
                             <small class="text-muted"><?php echo htmlspecialchars($input['source'] ?? 'Not configured'); ?></small>
                         </td>
                         <td>
-                            <span class="fw-semibold"><?php echo format_bitrate($input['bitrate'] ?? 0); ?></span>
+                            <?php if ($outputAddr && $outputAddr !== ':'): ?>
+                            <small class="text-muted font-monospace"><?php echo htmlspecialchars($outputAddr); ?></small>
+                            <?php else: ?>
+                            <small class="text-muted">-</small>
+                            <?php endif; ?>
                         </td>
                         <td>
-                            <?php echo number_format($input['packets'] ?? 0); ?>
+                            <div class="bitrate-cell" id="bitrate-<?php echo $input['id']; ?>">
+                                <?php if ($apiPort): ?>
+                                <span class="bitrate-video">-</span> / <span class="bitrate-audio">-</span>
+                                <button class="btn btn-link btn-sm p-0 ms-2 graph-btn" onclick="showBitrateGraph('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>')" title="View bitrate graph">
+                                    <i class="bi bi-graph-up"></i>
+                                </button>
+                                <?php else: ?>
+                                <small class="text-muted">N/A</small>
+                                <?php endif; ?>
+                            </div>
                         </td>
                         <td>
                             <div class="btn-group btn-group-sm">
@@ -309,6 +326,75 @@ function getTypeBadgeColor($type) {
     </div>
 </div>
 
+<!-- Bitrate Graph Modal -->
+<div class="modal fade" id="bitrateGraphModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-graph-up me-2"></i>Bitrate Monitor - <span id="graphInputName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="graphInputId">
+
+                <!-- Current Stats -->
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <div class="card bg-light">
+                            <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted">Video</span>
+                                    <span class="fw-bold text-primary" id="graphVideoBitrate">-</span>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center mt-1">
+                                    <small class="text-muted">PID</small>
+                                    <small id="graphVideoPid">-</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card bg-light">
+                            <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted">Audio</span>
+                                    <span class="fw-bold text-success" id="graphAudioBitrate">-</span>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center mt-1">
+                                    <small class="text-muted">PID(s)</small>
+                                    <small id="graphAudioPid">-</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Graph Canvas -->
+                <div class="position-relative" style="height: 300px;">
+                    <canvas id="bitrateChart"></canvas>
+                </div>
+
+                <!-- Status Info -->
+                <div class="mt-3 d-flex justify-content-between align-items-center">
+                    <small class="text-muted">
+                        <span id="graphStatus" class="badge bg-success">Live</span>
+                        Last update: <span id="graphLastUpdate">-</span>
+                    </small>
+                    <small class="text-muted">
+                        Output: <span id="graphOutputAddr" class="font-monospace">-</span>
+                    </small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Chart.js for graphs -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
 <style>
 /* Status dots */
 .status-dot {
@@ -499,6 +585,31 @@ function getTypeBadgeColor($type) {
 }
 #nameStatus.invalid {
     color: #dc3545;
+}
+
+/* Bitrate cell styling */
+.bitrate-cell {
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+.bitrate-cell .bitrate-video {
+    color: #2563eb;
+    font-weight: 600;
+}
+.bitrate-cell .bitrate-audio {
+    color: #16a34a;
+    font-weight: 600;
+}
+.bitrate-cell .graph-btn {
+    color: #6b7280;
+    transition: color 0.15s;
+}
+.bitrate-cell .graph-btn:hover {
+    color: #2563eb;
+}
+.bitrate-cell.offline {
+    opacity: 0.5;
 }
 .source-type-settings {
     background: #fff;
@@ -1193,6 +1304,251 @@ function deleteService(type, id) {
 function editInput(id) {
     window.location.href = `inputs-edit.php?id=${id}`;
 }
+
+// ============ Metrics and Bitrate Graph ============
+
+let metricsInterval = null;
+let bitrateChart = null;
+let graphModal = null;
+let graphUpdateInterval = null;
+
+// Format bitrate to human readable
+function formatBitrate(bps) {
+    if (!bps || bps === 0) return '-';
+    if (bps >= 1000000) {
+        return (bps / 1000000).toFixed(2) + ' Mbps';
+    } else if (bps >= 1000) {
+        return (bps / 1000).toFixed(1) + ' Kbps';
+    }
+    return bps + ' bps';
+}
+
+// Fetch and update metrics for all inputs
+async function fetchAllMetrics() {
+    try {
+        const response = await fetch('api/inputs.php?action=all_metrics');
+        const data = await response.json();
+
+        if (data.success && data.inputs) {
+            for (const [inputId, metrics] of Object.entries(data.inputs)) {
+                updateInputMetrics(inputId, metrics);
+            }
+        }
+    } catch (e) {
+        console.error('Failed to fetch metrics:', e);
+    }
+}
+
+// Update metrics display for a single input
+function updateInputMetrics(inputId, metrics) {
+    const bitrateCell = document.getElementById(`bitrate-${inputId}`);
+    const statusDot = document.getElementById(`status-${inputId}`);
+
+    if (!bitrateCell) return;
+
+    const videoSpan = bitrateCell.querySelector('.bitrate-video');
+    const audioSpan = bitrateCell.querySelector('.bitrate-audio');
+
+    if (metrics.status === 'offline' || !metrics.pids) {
+        bitrateCell.classList.add('offline');
+        if (videoSpan) videoSpan.textContent = '-';
+        if (audioSpan) audioSpan.textContent = '-';
+        return;
+    }
+
+    bitrateCell.classList.remove('offline');
+
+    // Find video and audio PIDs
+    let videoBitrate = 0;
+    let audioBitrate = 0;
+
+    if (metrics.pids) {
+        for (const [pid, pidData] of Object.entries(metrics.pids)) {
+            const bitrate = pidData.current_bitrate || 0;
+            // Assume first PID is video (higher bitrate), rest are audio
+            if (videoBitrate === 0 && bitrate > 500000) {
+                videoBitrate = bitrate;
+            } else {
+                audioBitrate += bitrate;
+            }
+        }
+    }
+
+    if (videoSpan) videoSpan.textContent = formatBitrate(videoBitrate);
+    if (audioSpan) audioSpan.textContent = formatBitrate(audioBitrate);
+
+    // Update status dot based on bitrate
+    if (statusDot && metrics.status === 'running') {
+        if (videoBitrate > 0) {
+            statusDot.className = 'status-dot status-running';
+            statusDot.title = 'Running - receiving data';
+        } else {
+            statusDot.className = 'status-dot status-error';
+            statusDot.title = 'Running - no data';
+        }
+    }
+}
+
+// Show bitrate graph modal
+async function showBitrateGraph(inputId, inputName) {
+    document.getElementById('graphInputId').value = inputId;
+    document.getElementById('graphInputName').textContent = inputName;
+
+    // Initialize chart if needed
+    if (!bitrateChart) {
+        const ctx = document.getElementById('bitrateChart').getContext('2d');
+        bitrateChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Video',
+                    data: [],
+                    borderColor: '#2563eb',
+                    backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                    fill: true,
+                    tension: 0.3
+                }, {
+                    label: 'Audio',
+                    data: [],
+                    borderColor: '#16a34a',
+                    backgroundColor: 'rgba(22, 163, 74, 0.1)',
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return formatBitrate(value);
+                            }
+                        }
+                    },
+                    x: {
+                        display: true,
+                        title: {
+                            display: false
+                        }
+                    }
+                },
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return context.dataset.label + ': ' + formatBitrate(context.raw);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Clear existing data
+    bitrateChart.data.labels = [];
+    bitrateChart.data.datasets[0].data = [];
+    bitrateChart.data.datasets[1].data = [];
+    bitrateChart.update();
+
+    // Show modal
+    if (!graphModal) {
+        graphModal = new bootstrap.Modal(document.getElementById('bitrateGraphModal'));
+    }
+    graphModal.show();
+
+    // Start updating
+    updateBitrateGraph(inputId);
+    graphUpdateInterval = setInterval(() => updateBitrateGraph(inputId), 5000);
+
+    // Stop updating when modal closes
+    document.getElementById('bitrateGraphModal').addEventListener('hidden.bs.modal', function() {
+        if (graphUpdateInterval) {
+            clearInterval(graphUpdateInterval);
+            graphUpdateInterval = null;
+        }
+    }, { once: true });
+}
+
+// Update bitrate graph with current data
+async function updateBitrateGraph(inputId) {
+    try {
+        const response = await fetch(`api/inputs.php?action=metrics&id=${inputId}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            document.getElementById('graphStatus').className = 'badge bg-danger';
+            document.getElementById('graphStatus').textContent = 'Offline';
+            return;
+        }
+
+        document.getElementById('graphStatus').className = 'badge bg-success';
+        document.getElementById('graphStatus').textContent = 'Live';
+        document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
+        document.getElementById('graphOutputAddr').textContent = data.output_address || '-';
+
+        // Process PIDs
+        let videoPid = null, audioPids = [];
+        let videoBitrate = 0, audioBitrate = 0;
+
+        if (data.pids) {
+            for (const [pid, pidData] of Object.entries(data.pids)) {
+                const bitrate = pidData.current_bitrate || 0;
+                if (bitrate > 500000 && !videoPid) {
+                    videoPid = pid;
+                    videoBitrate = bitrate;
+                } else {
+                    audioPids.push(pid);
+                    audioBitrate += bitrate;
+                }
+            }
+        }
+
+        // Update stats display
+        document.getElementById('graphVideoBitrate').textContent = formatBitrate(videoBitrate);
+        document.getElementById('graphAudioBitrate').textContent = formatBitrate(audioBitrate);
+        document.getElementById('graphVideoPid').textContent = videoPid || '-';
+        document.getElementById('graphAudioPid').textContent = audioPids.join(', ') || '-';
+
+        // Update chart
+        const now = new Date().toLocaleTimeString();
+        bitrateChart.data.labels.push(now);
+        bitrateChart.data.datasets[0].data.push(videoBitrate);
+        bitrateChart.data.datasets[1].data.push(audioBitrate);
+
+        // Keep only last 60 points (5 minutes at 5-second intervals)
+        if (bitrateChart.data.labels.length > 60) {
+            bitrateChart.data.labels.shift();
+            bitrateChart.data.datasets[0].data.shift();
+            bitrateChart.data.datasets[1].data.shift();
+        }
+
+        bitrateChart.update('none');
+    } catch (e) {
+        console.error('Failed to update graph:', e);
+    }
+}
+
+// Start metrics polling on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Fetch metrics immediately and then every 5 seconds
+    fetchAllMetrics();
+    metricsInterval = setInterval(fetchAllMetrics, 5000);
+});
+
+// Clean up on page unload
+window.addEventListener('beforeunload', function() {
+    if (metricsInterval) clearInterval(metricsInterval);
+    if (graphUpdateInterval) clearInterval(graphUpdateInterval);
+});
 </script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>

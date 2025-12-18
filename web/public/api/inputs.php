@@ -145,8 +145,334 @@ switch ($action) {
         json_response($result);
         break;
 
+    case 'metrics':
+        // Proxy metrics request to udp_input API
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $metrics = get_input_metrics($id);
+        json_response($metrics);
+        break;
+
+    case 'all_metrics':
+        // Get metrics for all running inputs
+        $all_metrics = get_all_input_metrics();
+        json_response($all_metrics);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
+}
+
+/**
+ * Get metrics for a specific input from udp_input API
+ */
+function get_input_metrics($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Input not found'];
+    }
+
+    $config = parse_config($config_file);
+    $api_port = $config['output']['api_port'] ?? null;
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured for this input'];
+    }
+
+    // Query the udp_input API
+    $url = "http://127.0.0.1:{$api_port}/metrics";
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return [
+            'success' => false,
+            'error' => 'Cannot connect to input monitor',
+            'status' => 'offline'
+        ];
+    }
+
+    $data = json_decode($response, true);
+    if (!$data) {
+        return ['success' => false, 'error' => 'Invalid response from input monitor'];
+    }
+
+    // Add input metadata
+    $data['input_id'] = $id;
+    $data['input_name'] = $config['general']['name'] ?? $id;
+    $data['output_address'] = ($config['output']['address'] ?? '') . ':' . ($config['output']['port'] ?? '');
+    $data['success'] = true;
+
+    return $data;
+}
+
+/**
+ * Get metrics for all inputs
+ */
+function get_all_input_metrics() {
+    $inputs = get_service_list('inputs');
+    $all_metrics = [];
+
+    foreach ($inputs as $input) {
+        $id = $input['id'];
+
+        // Check if input is UDP type and has output config
+        $config = $input['config'] ?? [];
+        if (($config['general']['type'] ?? '') !== 'udp') {
+            continue;
+        }
+
+        $api_port = $config['output']['api_port'] ?? null;
+        if (!$api_port) {
+            continue;
+        }
+
+        // Query the udp_input API
+        $url = "http://127.0.0.1:{$api_port}/metrics";
+        $ctx = stream_context_create([
+            'http' => [
+                'timeout' => 1,
+                'ignore_errors' => true
+            ]
+        ]);
+
+        $response = @file_get_contents($url, false, $ctx);
+
+        if ($response === false) {
+            $all_metrics[$id] = [
+                'input_id' => $id,
+                'input_name' => $input['name'],
+                'status' => 'offline',
+                'pids' => []
+            ];
+            continue;
+        }
+
+        $data = json_decode($response, true);
+        if ($data) {
+            $data['input_id'] = $id;
+            $data['input_name'] = $input['name'];
+            $data['output_address'] = ($config['output']['address'] ?? '') . ':' . ($config['output']['port'] ?? '');
+            $all_metrics[$id] = $data;
+        }
+    }
+
+    return ['success' => true, 'inputs' => $all_metrics];
+}
+
+/**
+ * Get internal routing settings from main config
+ */
+function get_routing_config() {
+    $main_config = parse_config(MAIN_CONFIG);
+    return [
+        'multicast_base' => $main_config['internal_routing']['multicast_base'] ?? '239.100.0.1',
+        'multicast_port' => (int)($main_config['internal_routing']['multicast_port'] ?? 10000),
+        'api_port_base' => (int)($main_config['internal_routing']['api_port_base'] ?? 9100)
+    ];
+}
+
+/**
+ * Get list of already allocated output addresses
+ */
+function get_allocated_addresses() {
+    $allocated = [];
+    $inputs_dir = CONFIG_PATH . '/inputs';
+
+    if (!is_dir($inputs_dir)) {
+        return $allocated;
+    }
+
+    foreach (glob($inputs_dir . '/*.conf') as $file) {
+        $config = parse_config($file);
+        if (isset($config['output']['address'])) {
+            $allocated[] = [
+                'address' => $config['output']['address'],
+                'port' => $config['output']['port'] ?? 10000,
+                'api_port' => $config['output']['api_port'] ?? 0
+            ];
+        }
+    }
+
+    return $allocated;
+}
+
+/**
+ * Allocate next available output address and API port
+ */
+function allocate_output_address() {
+    $routing = get_routing_config();
+    $allocated = get_allocated_addresses();
+
+    // Parse base address
+    $base_parts = explode('.', $routing['multicast_base']);
+    $base_int = ip2long($routing['multicast_base']);
+
+    // Find next available address
+    $used_addresses = array_column($allocated, 'address');
+    $used_api_ports = array_column($allocated, 'api_port');
+
+    $offset = 0;
+    $address = null;
+    $api_port = null;
+
+    // Find next free address (max 254 inputs per /24)
+    for ($i = 0; $i < 254; $i++) {
+        $candidate = long2ip($base_int + $i);
+        if (!in_array($candidate, $used_addresses)) {
+            $address = $candidate;
+            $offset = $i;
+            break;
+        }
+    }
+
+    // Find next free API port
+    for ($i = 0; $i < 254; $i++) {
+        $candidate = $routing['api_port_base'] + $i;
+        if (!in_array($candidate, $used_api_ports)) {
+            $api_port = $candidate;
+            break;
+        }
+    }
+
+    if (!$address || !$api_port) {
+        return null; // Pool exhausted
+    }
+
+    return [
+        'address' => $address,
+        'port' => $routing['multicast_port'],
+        'api_port' => $api_port
+    ];
+}
+
+/**
+ * Generate systemd service file for udp_input
+ */
+function generate_udp_input_service($id, $config) {
+    // Get source info
+    $source_url = '';
+    $source_type = $config['general']['type'] ?? 'udp';
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_type = $parts[0] ?? 'udp';
+                $source_url = $parts[1] ?? '';
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Only generate for UDP inputs (for now)
+    if ($source_type !== 'udp') {
+        return ['success' => false, 'error' => 'Only UDP inputs supported currently'];
+    }
+
+    // Parse source URL (format: address:port or just address)
+    $source_parts = explode(':', $source_url);
+    $input_addr = $source_parts[0];
+    $input_port = $source_parts[1] ?? 5000;
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = $config['output']['port'] ?? 10000;
+    $api_port = $config['output']['api_port'] ?? 9100;
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    // Build PIDs list for --pids (video and audio only for monitoring)
+    $monitor_pids = [];
+    if ($video_pid) $monitor_pids[] = $video_pid;
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) $monitor_pids[] = $pid;
+        }
+    }
+
+    if (empty($monitor_pids) || empty($program_pid)) {
+        return ['success' => false, 'error' => 'PIDs not configured (need program, video, and audio PIDs)'];
+    }
+
+    $name = $config['general']['name'] ?? $id;
+    $log_file = "/var/log/caritrans/input-{$id}.log";
+
+    // Build systemd service content
+    $service_content = <<<EOF
+# CariTranscoder UDP Input Service
+# Generated: DATE_PLACEHOLDER
+# Input: {$name}
+
+[Unit]
+Description=CariTranscoder UDP Input - {$name}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/udp_input \\
+    --input {$input_addr}:{$input_port} \\
+    --output {$output_addr}:{$output_port} \\
+    --program {$program_pid} \\
+    --pids PID_LIST_PLACEHOLDER \\
+    --api-port {$api_port} \\
+    --log-file {$log_file} \\
+    --stall-timeout 30
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-input-{$id}
+
+[Install]
+WantedBy=multi-user.target
+EOF;
+
+    // Replace placeholders
+    $service_content = str_replace('DATE_PLACEHOLDER', date('Y-m-d H:i:s'), $service_content);
+    $service_content = str_replace('PID_LIST_PLACEHOLDER', implode(',', $monitor_pids), $service_content);
+
+    // Write service file
+    $service_file = "/etc/systemd/system/cari-input@{$id}.service";
+
+    // Try to write (may need sudo in production)
+    $result = @file_put_contents($service_file, $service_content);
+
+    if ($result === false) {
+        // Try with sudo
+        $temp_file = "/tmp/cari-input-{$id}.service";
+        file_put_contents($temp_file, $service_content);
+        exec("sudo cp {$temp_file} {$service_file} && sudo systemctl daemon-reload 2>&1", $output, $code);
+        unlink($temp_file);
+
+        if ($code !== 0) {
+            return ['success' => false, 'error' => 'Failed to install systemd service: ' . implode(' ', $output)];
+        }
+    } else {
+        // Reload systemd
+        exec("sudo systemctl daemon-reload 2>&1", $output, $code);
+    }
+
+    return ['success' => true, 'service_file' => $service_file];
 }
 
 /**
@@ -702,6 +1028,15 @@ function create_input($data) {
     if (empty($primaryAudio)) $primaryAudio = is_array($data['audio_pids'] ?? null) ? implode(',', $data['audio_pids']) : ($data['audio_pids'] ?? '');
     if (empty($primaryProgram)) $primaryProgram = $data['program_pid'] ?? '';
 
+    // Allocate output address and API port for UDP inputs
+    $output_alloc = null;
+    if ($primaryType === 'udp') {
+        $output_alloc = allocate_output_address();
+        if (!$output_alloc) {
+            return ['success' => false, 'error' => 'No available output addresses in pool'];
+        }
+    }
+
     $config = [
         'general' => [
             'name' => $name,
@@ -714,7 +1049,12 @@ function create_input($data) {
             'video' => $primaryVideo,
             'audio' => $primaryAudio,
             'program' => $primaryProgram
-        ]
+        ],
+        'output' => $output_alloc ? [
+            'address' => $output_alloc['address'],
+            'port' => $output_alloc['port'],
+            'api_port' => $output_alloc['api_port']
+        ] : []
     ];
 
     // Add sources with per-source type, settings, and PIDs
@@ -807,7 +1147,28 @@ function create_input($data) {
     if ($result !== false) {
         // Set permissions to 664 so both owner and group (www-data) can read/write
         chmod($config_file, 0664);
-        return ['success' => true, 'id' => $id, 'message' => "Input '{$name}' created successfully"];
+
+        // Generate systemd service for UDP inputs
+        $service_result = null;
+        if ($primaryType === 'udp' && $output_alloc) {
+            $service_result = generate_udp_input_service($id, $config);
+        }
+
+        $response = [
+            'success' => true,
+            'id' => $id,
+            'message' => "Input '{$name}' created successfully"
+        ];
+
+        if ($output_alloc) {
+            $response['output'] = $output_alloc;
+        }
+
+        if ($service_result && !$service_result['success']) {
+            $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+        }
+
+        return $response;
     }
 
     // Get more detailed error
