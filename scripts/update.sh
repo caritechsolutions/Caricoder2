@@ -256,6 +256,9 @@ configure_php_fpm() {
     local FPM_POOL_DIR="/etc/php/${PHP_VERSION}/fpm/pool.d"
     local FPM_SOCKET="/var/run/php/caritrans-fpm.sock"
 
+    # Ensure log directory exists
+    mkdir -p /var/log/caritrans
+
     # Create/update CariTranscoder pool if it doesn't exist
     if [[ ! -f "${FPM_POOL_DIR}/caritrans.conf" ]]; then
         log_info "Creating PHP-FPM pool running as root..."
