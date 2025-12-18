@@ -507,56 +507,66 @@ install_binaries() {
     done
 }
 
-# Install configuration files
+# Install configuration files (clean install - removes old configs)
 install_config() {
-    log_step "Installing configuration files..."
+    log_step "Installing configuration files (clean install)..."
 
     cd "$INSTALL_DIR"
 
-    # Main config
-    if [[ ! -f "$CONFIG_DIR/caritrans.conf" ]]; then
-        cp config/caritrans.conf "$CONFIG_DIR/"
-        # Update paths in config
-        sed -i "s|config_dir = .*|config_dir = $CONFIG_DIR|" "$CONFIG_DIR/caritrans.conf"
-        sed -i "s|run_dir = .*|run_dir = $RUN_DIR|" "$CONFIG_DIR/caritrans.conf"
-        sed -i "s|log_dir = .*|log_dir = $LOG_DIR|" "$CONFIG_DIR/caritrans.conf"
-        sed -i "s|data_dir = .*|data_dir = $DATA_DIR|" "$CONFIG_DIR/caritrans.conf"
-    else
-        log_info "Config exists, preserving: caritrans.conf"
-    fi
+    # Clean install: remove old config files
+    log_info "Removing old configuration files..."
+    rm -f "$CONFIG_DIR/caritrans.conf" 2>/dev/null || true
+    rm -f "$CONFIG_DIR/users.conf" 2>/dev/null || true
+    rm -rf "$CONFIG_DIR/inputs" 2>/dev/null || true
+    rm -rf "$CONFIG_DIR/transcoders" 2>/dev/null || true
+    rm -rf "$CONFIG_DIR/muxers" 2>/dev/null || true
+    rm -rf "$CONFIG_DIR/outputs" 2>/dev/null || true
 
-    # Users config
-    if [[ ! -f "$CONFIG_DIR/users.conf" ]]; then
-        cp config/users.conf "$CONFIG_DIR/"
-        log_info "Created: users.conf"
-    else
-        log_info "Config exists, preserving: users.conf"
-        # Fix broken default password hash from older versions (sha256('admin') -> sha256('caritrans:admin'))
-        if grep -q "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" "$CONFIG_DIR/users.conf" 2>/dev/null; then
-            sed -i 's/8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918/ff926ade7adab2dac701d5e883389d449fc40cb79145159ba8905202f2191dbb/' "$CONFIG_DIR/users.conf"
-            log_info "Fixed: default admin password hash"
-        fi
-    fi
-    # Always fix users.conf permissions (needs to be readable by www-data for PHP authentication)
+    # Recreate config subdirectories
+    mkdir -p "$CONFIG_DIR"/{inputs,transcoders,muxers,outputs,ssl}
+
+    # Main config - fresh install
+    cp config/caritrans.conf "$CONFIG_DIR/"
+    # Update paths in config
+    sed -i "s|config_dir = .*|config_dir = $CONFIG_DIR|" "$CONFIG_DIR/caritrans.conf"
+    sed -i "s|run_dir = .*|run_dir = $RUN_DIR|" "$CONFIG_DIR/caritrans.conf"
+    sed -i "s|log_dir = .*|log_dir = $LOG_DIR|" "$CONFIG_DIR/caritrans.conf"
+    sed -i "s|data_dir = .*|data_dir = $DATA_DIR|" "$CONFIG_DIR/caritrans.conf"
+    log_info "Created: caritrans.conf"
+
+    # Users config - fresh install
+    cp config/users.conf "$CONFIG_DIR/"
+    log_info "Created: users.conf"
+
+    # Set permissions
     chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/users.conf"
     chmod 640 "$CONFIG_DIR/users.conf"
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/caritrans.conf"
 
-    # Note: We don't copy example configs - users create their own via the web GUI
+    # Config subdirectories permissions (www-data writable for web GUI)
+    for subdir in inputs transcoders muxers outputs; do
+        chown "$SERVICE_USER:$WEB_USER" "$CONFIG_DIR/$subdir"
+        chmod 775 "$CONFIG_DIR/$subdir"
+    done
 
-    # Set proper ownership on main config file only
-    # Note: users.conf ownership is set above with www-data group for PHP access
-    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/caritrans.conf" 2>/dev/null || true
+    # Secure ssl directory
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/ssl"
+    chmod 700 "$CONFIG_DIR/ssl"
 
     log_info "Configuration files installed"
 }
 
-# Install web interface
+# Install web interface (clean install - removes old files)
 install_web() {
-    log_step "Installing web interface..."
+    log_step "Installing web interface (clean install)..."
 
     cd "$INSTALL_DIR"
 
-    # Copy web files
+    # Clean install: remove old web files
+    log_info "Removing old web files..."
+    rm -rf "$WEB_DIR"/* 2>/dev/null || true
+
+    # Copy fresh web files
     cp -r web/* "$WEB_DIR/"
 
     # Update config path in PHP
@@ -570,13 +580,24 @@ install_web() {
     log_info "Web interface installed to $WEB_DIR"
 }
 
-# Install systemd services
+# Install systemd services (clean install - stops and removes old services)
 install_services() {
-    log_step "Installing systemd services..."
+    log_step "Installing systemd services (clean install)..."
 
     cd "$INSTALL_DIR"
 
-    # Copy service files
+    # Clean install: stop and remove old services
+    log_info "Stopping and removing old services..."
+    for svc in /etc/systemd/system/cari-*.service; do
+        if [[ -f "$svc" ]]; then
+            svc_name=$(basename "$svc")
+            systemctl stop "$svc_name" 2>/dev/null || true
+            systemctl disable "$svc_name" 2>/dev/null || true
+            rm -f "$svc"
+        fi
+    done
+
+    # Copy fresh service files
     cp systemd/*.service /etc/systemd/system/
 
     # Update paths in service files

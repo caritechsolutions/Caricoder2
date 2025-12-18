@@ -23,6 +23,9 @@ require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
 
+// CariTranscoder API URL for privileged operations
+define('CARI_API_URL', 'http://127.0.0.1:8081');
+
 // Clear any output from includes
 ob_end_clean();
 
@@ -356,11 +359,6 @@ function allocate_output_address() {
         'api_port' => $api_port
     ];
 }
-
-/**
- * CariTranscoder API URL
- */
-define('CARI_API_URL', 'http://127.0.0.1:8081');
 
 /**
  * Call the privileged CariTranscoder API
