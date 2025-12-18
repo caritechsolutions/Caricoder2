@@ -301,6 +301,16 @@ PHPFPM
             sed -i 's|unix:/var/run/php/php.*-fpm.sock|unix:/var/run/php/caritrans-fpm.sock|' /etc/nginx/sites-available/caritrans
         fi
 
+        # Create systemd override to allow PHP-FPM to run as root
+        local OVERRIDE_DIR="/etc/systemd/system/php${PHP_VERSION}-fpm.service.d"
+        mkdir -p "$OVERRIDE_DIR"
+        cat > "$OVERRIDE_DIR/allow-root.conf" << OVERRIDE
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/php-fpm${PHP_VERSION} --nodaemonize --fpm-config /etc/php/${PHP_VERSION}/fpm/php-fpm.conf --allow-to-run-as-root
+OVERRIDE
+
+        systemctl daemon-reload
         log_info "PHP-FPM pool created"
     else
         log_info "PHP-FPM caritrans pool already configured"

@@ -650,6 +650,16 @@ PHPFPM
     # Store the socket path for nginx config
     PHP_FPM_SOCK="$FPM_SOCKET"
 
+    # Create systemd override to allow PHP-FPM to run as root
+    local OVERRIDE_DIR="/etc/systemd/system/php${PHP_VERSION}-fpm.service.d"
+    mkdir -p "$OVERRIDE_DIR"
+    cat > "$OVERRIDE_DIR/allow-root.conf" << OVERRIDE
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/php-fpm${PHP_VERSION} --nodaemonize --fpm-config /etc/php/${PHP_VERSION}/fpm/php-fpm.conf --allow-to-run-as-root
+OVERRIDE
+
+    systemctl daemon-reload
     log_info "PHP-FPM configured to run as root"
 }
 
