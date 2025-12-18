@@ -4,10 +4,27 @@
  * Copyright (c) 2024 CariTech Solutions
  */
 
+// Start output buffering to catch any unexpected output
+ob_start();
+
+// Set JSON content type early
+header('Content-Type: application/json');
+
+// Error handler to convert PHP errors to JSON
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    ob_end_clean();
+    http_response_code(500);
+    echo json_encode(['error' => "PHP Error: $errstr", 'file' => basename($errfile), 'line' => $errline]);
+    exit;
+});
+
 define('CARITRANS', true);
 require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
+
+// Clear any output from includes
+ob_end_clean();
 
 // Require login
 if (!auth_is_logged_in()) {
