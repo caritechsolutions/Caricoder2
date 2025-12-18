@@ -370,27 +370,27 @@ function scan_with_tsduck($url, $type) {
         }
 
         if ($rist_receiver) {
-            // Use ristreceiver to receive RIST and output to local UDP
+            // Use ristreceiver to receive RIST and output to local multicast UDP
             // ristreceiver requires -i (input) and -o (output) parameters
-            // We output to a local UDP port and capture with tsp
+            // We output to a multicast address and capture with tsp
             $local_port = rand(15000, 15999);
-            $local_udp = "udp://127.0.0.1:{$local_port}";
+            $probe_multicast = "udp://239.7.7.7:{$local_port}";
 
             // Start ristreceiver in background with timeout (auto-terminates, no pkill needed)
             $rist_cmd = sprintf(
                 'timeout 10 %s -i %s -o %s -S 0 -v -1 > /dev/null 2>&1 &',
                 $rist_receiver,
                 escapeshellarg($rist_url),
-                escapeshellarg($local_udp)
+                escapeshellarg($probe_multicast)
             );
             exec($rist_cmd);
 
             // Give ristreceiver a moment to start
             usleep(500000); // 500ms
 
-            // Capture from local UDP with tsp (shorter timeout than ristreceiver)
+            // Capture from multicast with tsp (shorter timeout than ristreceiver)
             $capture_cmd = sprintf(
-                'timeout 8 tsp -I ip 127.0.0.1:%d -O file %s 2>&1',
+                'timeout 8 tsp -I ip 239.7.7.7:%d -O file %s 2>&1',
                 $local_port,
                 escapeshellarg($capture_file)
             );
