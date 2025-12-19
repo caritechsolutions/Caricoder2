@@ -651,45 +651,27 @@ function get_input_config($id) {
 }
 
 /**
- * Scan source for PIDs using TSDuck or ffprobe
- * TSDuck works best for: UDP, SRT, RIST, File
- * FFprobe works best for: RTMP, HLS, HTTP streams
+ * Scan source for PIDs using CariTranscoder API (ffprobe-based)
+ * Returns programs with their associated video and audio PIDs.
+ * For MPTS streams, each program will have its own PIDs.
  */
 function scan_source_pids($source, $type = 'udp') {
-    $result = [
-        'success' => false,
-        'programs' => [],
-        'video_pids' => [],
-        'audio_pids' => [],
-        'error' => null
+    // Call the CariTranscoder API for stream scanning
+    $api_data = [
+        'stream_url' => $source,
+        'stream_type' => $type
     ];
 
-    // Build the source URL based on type
-    $scan_url = build_source_url($source, $type);
+    $result = call_cari_api('/stream/scan', 'POST', $api_data);
 
-    // Choose scanning method based on input type
-    // TSDuck is preferred for transport stream protocols
-    $tsduck_types = ['udp', 'srt', 'rist', 'file'];
-    // FFprobe is preferred for HTTP-based and RTMP protocols
-    $ffprobe_types = ['rtmp', 'hls', 'http', 'https'];
-
-    $tsduck_available = shell_exec('which tsp 2>/dev/null');
-    $ffprobe_available = shell_exec('which ffprobe 2>/dev/null');
-
-    if (in_array($type, $tsduck_types) && $tsduck_available) {
-        $result = scan_with_tsduck($scan_url, $type);
-    } elseif ($ffprobe_available) {
-        // Use ffprobe for HTTP-based protocols or as fallback
-        $result = scan_with_ffprobe($scan_url, $type);
-    } else {
-        $result['error'] = 'No scanning tools available (install TSDuck or FFmpeg)';
-    }
-
-    // If TSDuck failed, try ffprobe as fallback
-    if (!$result['success'] && $ffprobe_available && in_array($type, $tsduck_types)) {
-        $ffprobe_result = scan_with_ffprobe($scan_url, $type);
-        if ($ffprobe_result['success']) {
-            $result = $ffprobe_result;
+    // Ensure backwards compatibility - add flat arrays if only programs exist
+    if (isset($result['success']) && $result['success']) {
+        // Create flat video_pids and audio_pids arrays for backwards compatibility
+        if (!isset($result['video_pids'])) {
+            $result['video_pids'] = $result['all_video_pids'] ?? [];
+        }
+        if (!isset($result['audio_pids'])) {
+            $result['audio_pids'] = $result['all_audio_pids'] ?? [];
         }
     }
 

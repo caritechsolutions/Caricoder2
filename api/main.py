@@ -851,6 +851,197 @@ async def get_media_info(request: MediaInfoRequest):
         }
 
 
+class StreamScanRequest(BaseModel):
+    """Model for stream scan request"""
+    stream_url: str  # e.g., "udp://239.4.4.4:4000" or "239.4.4.4:4000"
+    stream_type: Optional[str] = "udp"  # udp, srt, rist, rtmp, hls, http
+
+
+@app.post("/stream/scan")
+async def scan_stream(request: StreamScanRequest):
+    """Scan a stream for programs and PIDs using ffprobe
+
+    Returns programs with their associated video and audio PIDs.
+    For MPTS (multi-program transport streams), each program will have its own PIDs.
+    """
+
+    stream_url = request.stream_url
+    stream_type = request.stream_type or "udp"
+
+    # Build proper URL based on type
+    if not stream_url.startswith(('udp://', 'srt://', 'rist://', 'rtmp://', 'http://', 'https://')):
+        if stream_type == "udp":
+            stream_url = f"udp://@{stream_url}"
+        elif stream_type == "srt":
+            stream_url = f"srt://{stream_url}"
+        elif stream_type == "rist":
+            stream_url = f"rist://{stream_url}"
+        elif stream_type in ("hls", "http", "https"):
+            if not stream_url.startswith("http"):
+                stream_url = f"http://{stream_url}"
+
+    # Adjust timeout based on type
+    timeout = 15 if stream_type in ("hls", "srt", "rist") else 10
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_programs",
+            "-show_streams",
+            "-analyzeduration", "3000000",  # 3 seconds
+            "-probesize", "3000000",
+            "-i", stream_url
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "error": f"FFprobe failed: {result.stderr[:300] if result.stderr else 'No stream data received'}"
+            }
+
+        data = json.loads(result.stdout)
+
+        # Build response with programs and their PIDs
+        scan_result = {
+            "success": True,
+            "programs": [],
+            "all_video_pids": [],
+            "all_audio_pids": []
+        }
+
+        # Process programs - each program has its own streams
+        for program in data.get("programs", []):
+            program_info = {
+                "id": program.get("program_id", 0),
+                "name": program.get("tags", {}).get("service_name", f"Program {program.get('program_id', 0)}"),
+                "provider": program.get("tags", {}).get("service_provider", ""),
+                "pmt_pid": program.get("pmt_pid", 0),
+                "pcr_pid": program.get("pcr_pid", 0),
+                "video_pids": [],
+                "audio_pids": []
+            }
+
+            # Process streams within this program
+            for stream in program.get("streams", []):
+                pid_hex = stream.get("id", "")
+                pid = int(pid_hex, 16) if pid_hex.startswith("0x") else int(pid_hex) if pid_hex else 0
+
+                if stream.get("codec_type") == "video":
+                    video_info = {
+                        "pid": pid,
+                        "pid_hex": pid_hex,
+                        "codec": stream.get("codec_name", "unknown").upper(),
+                        "profile": stream.get("profile", ""),
+                        "width": stream.get("width", 0),
+                        "height": stream.get("height", 0),
+                        "fps": stream.get("r_frame_rate", "0/0"),
+                        "pix_fmt": stream.get("pix_fmt", ""),
+                        "description": f"{stream.get('codec_name', 'video').upper()} {stream.get('width', 0)}x{stream.get('height', 0)}"
+                    }
+                    program_info["video_pids"].append(video_info)
+                    scan_result["all_video_pids"].append({**video_info, "program_id": program_info["id"]})
+
+                elif stream.get("codec_type") == "audio":
+                    audio_info = {
+                        "pid": pid,
+                        "pid_hex": pid_hex,
+                        "codec": stream.get("codec_name", "unknown").upper(),
+                        "profile": stream.get("profile", ""),
+                        "channels": stream.get("channels", 0),
+                        "channel_layout": stream.get("channel_layout", ""),
+                        "sample_rate": int(stream.get("sample_rate", 0)),
+                        "language": stream.get("tags", {}).get("language", "und"),
+                        "description": f"{stream.get('codec_name', 'audio').upper()} {stream.get('tags', {}).get('language', 'und')} {stream.get('channels', 0)}ch"
+                    }
+                    program_info["audio_pids"].append(audio_info)
+                    scan_result["all_audio_pids"].append({**audio_info, "program_id": program_info["id"]})
+
+            scan_result["programs"].append(program_info)
+
+        # If no programs found, fall back to top-level streams (for non-MPTS)
+        if not scan_result["programs"]:
+            # Create a default program from top-level streams
+            default_program = {
+                "id": 1,
+                "name": "Default Program",
+                "provider": "",
+                "pmt_pid": 0,
+                "pcr_pid": 0,
+                "video_pids": [],
+                "audio_pids": []
+            }
+
+            for stream in data.get("streams", []):
+                pid_hex = stream.get("id", "")
+                pid = int(pid_hex, 16) if pid_hex.startswith("0x") else int(pid_hex) if pid_hex else 0
+
+                if stream.get("codec_type") == "video":
+                    video_info = {
+                        "pid": pid,
+                        "pid_hex": pid_hex,
+                        "codec": stream.get("codec_name", "unknown").upper(),
+                        "profile": stream.get("profile", ""),
+                        "width": stream.get("width", 0),
+                        "height": stream.get("height", 0),
+                        "fps": stream.get("r_frame_rate", "0/0"),
+                        "pix_fmt": stream.get("pix_fmt", ""),
+                        "description": f"{stream.get('codec_name', 'video').upper()} {stream.get('width', 0)}x{stream.get('height', 0)}"
+                    }
+                    default_program["video_pids"].append(video_info)
+                    scan_result["all_video_pids"].append({**video_info, "program_id": 1})
+
+                elif stream.get("codec_type") == "audio":
+                    audio_info = {
+                        "pid": pid,
+                        "pid_hex": pid_hex,
+                        "codec": stream.get("codec_name", "unknown").upper(),
+                        "profile": stream.get("profile", ""),
+                        "channels": stream.get("channels", 0),
+                        "channel_layout": stream.get("channel_layout", ""),
+                        "sample_rate": int(stream.get("sample_rate", 0)),
+                        "language": stream.get("tags", {}).get("language", "und"),
+                        "description": f"{stream.get('codec_name', 'audio').upper()} {stream.get('tags', {}).get('language', 'und')} {stream.get('channels', 0)}ch"
+                    }
+                    default_program["audio_pids"].append(audio_info)
+                    scan_result["all_audio_pids"].append({**audio_info, "program_id": 1})
+
+            if default_program["video_pids"] or default_program["audio_pids"]:
+                scan_result["programs"].append(default_program)
+
+        scan_result["success"] = len(scan_result["programs"]) > 0
+        if not scan_result["success"]:
+            scan_result["error"] = "No programs or streams found in source"
+
+        return scan_result
+
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": f"Timeout waiting for stream data (waited {timeout}s)"
+        }
+    except json.JSONDecodeError as e:
+        return {
+            "success": False,
+            "error": f"Failed to parse ffprobe output: {str(e)}"
+        }
+    except Exception as e:
+        logger.error(f"Stream scan error: {e}")
+        logger.error(traceback.format_exc())
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 # ----------------------------------------------------------------------------
 # System Operations
 # ----------------------------------------------------------------------------
