@@ -1407,14 +1407,16 @@ async function showBitrateGraph(inputId, inputName) {
                     borderColor: '#2563eb',
                     backgroundColor: 'rgba(37, 99, 235, 0.1)',
                     fill: true,
-                    tension: 0.3
+                    tension: 0.3,
+                    pointRadius: 0
                 }, {
                     label: 'Audio',
                     data: [],
                     borderColor: '#16a34a',
                     backgroundColor: 'rgba(22, 163, 74, 0.1)',
                     fill: true,
-                    tension: 0.3
+                    tension: 0.3,
+                    pointRadius: 0
                 }]
             },
             options: {
@@ -1437,6 +1439,10 @@ async function showBitrateGraph(inputId, inputName) {
                         display: true,
                         title: {
                             display: false
+                        },
+                        ticks: {
+                            maxTicksLimit: 10,
+                            maxRotation: 0
                         }
                     }
                 },
@@ -1465,8 +1471,10 @@ async function showBitrateGraph(inputId, inputName) {
     }
     graphModal.show();
 
-    // Start updating
-    updateBitrateGraph(inputId);
+    // Load historical data first
+    await loadBitrateHistory(inputId);
+
+    // Then start live updates
     graphUpdateInterval = setInterval(() => updateBitrateGraph(inputId), 5000);
 
     // Stop updating when modal closes
@@ -1476,6 +1484,107 @@ async function showBitrateGraph(inputId, inputName) {
             graphUpdateInterval = null;
         }
     }, { once: true });
+}
+
+// Load historical bitrate data
+async function loadBitrateHistory(inputId) {
+    try {
+        document.getElementById('graphStatus').className = 'badge bg-warning';
+        document.getElementById('graphStatus').textContent = 'Loading history...';
+
+        const response = await fetch(`api/inputs.php?action=metrics_history&id=${inputId}`);
+        const data = await response.json();
+
+        if (!data.success || !data.pids) {
+            document.getElementById('graphStatus').className = 'badge bg-danger';
+            document.getElementById('graphStatus').textContent = 'No history';
+            return;
+        }
+
+        // Determine video and audio PIDs
+        let videoPid = null, audioPids = [];
+        for (const [pid, pidData] of Object.entries(data.pids)) {
+            if (pidData.history && pidData.history.length > 0) {
+                // Check last few samples to determine if video or audio
+                const lastSamples = pidData.history.slice(-5);
+                const avgBitrate = lastSamples.reduce((a, b) => a + b[1], 0) / lastSamples.length;
+                if (avgBitrate > 500000 && !videoPid) {
+                    videoPid = pid;
+                } else {
+                    audioPids.push(pid);
+                }
+            }
+        }
+
+        if (!videoPid && audioPids.length === 0) {
+            document.getElementById('graphStatus').className = 'badge bg-warning';
+            document.getElementById('graphStatus').textContent = 'No data yet';
+            return;
+        }
+
+        // Build combined timeline from all PIDs
+        const timelineMap = new Map();
+
+        // Add video data
+        if (videoPid && data.pids[videoPid].history) {
+            for (const [ts, bitrate] of data.pids[videoPid].history) {
+                if (!timelineMap.has(ts)) {
+                    timelineMap.set(ts, { video: 0, audio: 0 });
+                }
+                timelineMap.get(ts).video = bitrate;
+            }
+        }
+
+        // Add audio data (sum all audio PIDs)
+        for (const audioPid of audioPids) {
+            if (data.pids[audioPid] && data.pids[audioPid].history) {
+                for (const [ts, bitrate] of data.pids[audioPid].history) {
+                    if (!timelineMap.has(ts)) {
+                        timelineMap.set(ts, { video: 0, audio: 0 });
+                    }
+                    timelineMap.get(ts).audio += bitrate;
+                }
+            }
+        }
+
+        // Sort by timestamp and populate chart
+        const sortedTimestamps = Array.from(timelineMap.keys()).sort((a, b) => a - b);
+
+        // Limit to last 720 points (1 hour at 5-second intervals) for display
+        const displayTimestamps = sortedTimestamps.slice(-720);
+
+        for (const ts of displayTimestamps) {
+            const date = new Date(ts * 1000);
+            const label = date.toLocaleTimeString();
+            const values = timelineMap.get(ts);
+
+            bitrateChart.data.labels.push(label);
+            bitrateChart.data.datasets[0].data.push(values.video);
+            bitrateChart.data.datasets[1].data.push(values.audio);
+        }
+
+        bitrateChart.update();
+
+        document.getElementById('graphStatus').className = 'badge bg-success';
+        document.getElementById('graphStatus').textContent = 'Live';
+        document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
+        document.getElementById('graphOutputAddr').textContent = data.output_address || '-';
+
+        // Update current stats from last sample
+        if (displayTimestamps.length > 0) {
+            const lastTs = displayTimestamps[displayTimestamps.length - 1];
+            const lastValues = timelineMap.get(lastTs);
+            document.getElementById('graphVideoBitrate').textContent = formatBitrate(lastValues.video);
+            document.getElementById('graphAudioBitrate').textContent = formatBitrate(lastValues.audio);
+            document.getElementById('graphVideoPid').textContent = videoPid || '-';
+            document.getElementById('graphAudioPid').textContent = audioPids.join(', ') || '-';
+        }
+
+    } catch (e) {
+        console.error('Failed to load history:', e);
+        document.getElementById('graphStatus').className = 'badge bg-danger';
+        document.getElementById('graphStatus').textContent = 'Error';
+    }
 }
 
 // Update bitrate graph with current data
@@ -1524,8 +1633,8 @@ async function updateBitrateGraph(inputId) {
         bitrateChart.data.datasets[0].data.push(videoBitrate);
         bitrateChart.data.datasets[1].data.push(audioBitrate);
 
-        // Keep only last 60 points (5 minutes at 5-second intervals)
-        if (bitrateChart.data.labels.length > 60) {
+        // Keep only last 720 points (1 hour at 5-second intervals)
+        if (bitrateChart.data.labels.length > 720) {
             bitrateChart.data.labels.shift();
             bitrateChart.data.datasets[0].data.shift();
             bitrateChart.data.datasets[1].data.shift();

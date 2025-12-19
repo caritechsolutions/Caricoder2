@@ -165,6 +165,17 @@ switch ($action) {
         json_response($all_metrics);
         break;
 
+    case 'metrics_history':
+        // Get historical metrics for an input
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $history = get_input_metrics_history($id);
+        json_response($history);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
 }
@@ -192,6 +203,57 @@ function get_input_metrics($id) {
     $ctx = stream_context_create([
         'http' => [
             'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return [
+            'success' => false,
+            'error' => 'Cannot connect to input monitor',
+            'status' => 'offline'
+        ];
+    }
+
+    $data = json_decode($response, true);
+    if (!$data) {
+        return ['success' => false, 'error' => 'Invalid response from input monitor'];
+    }
+
+    // Add input metadata
+    $data['input_id'] = $id;
+    $data['input_name'] = $config['general']['name'] ?? $id;
+    $data['output_address'] = ($config['output']['address'] ?? '') . ':' . ($config['output']['port'] ?? '');
+    $data['success'] = true;
+
+    return $data;
+}
+
+/**
+ * Get historical metrics for a specific input from udp_input API
+ */
+function get_input_metrics_history($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Input not found'];
+    }
+
+    $config = parse_config($config_file);
+    $api_port = $config['output']['api_port'] ?? null;
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured for this input'];
+    }
+
+    // Query the udp_input API for history
+    $url = "http://127.0.0.1:{$api_port}/metrics/history";
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 10,  // History can be large, allow more time
             'ignore_errors' => true
         ]
     ]);

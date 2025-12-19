@@ -388,6 +388,64 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         return ret;
     }
 
+    if (strcmp(url, "/metrics/history") == 0) {
+        pthread_mutex_lock(&g_ctx.lock);
+
+        // Calculate required buffer size (worst case: HISTORY_SIZE entries per PID)
+        // Each entry: [timestamp,bitrate], ~ 25 chars max
+        size_t buf_size = 1024 + (g_ctx.monitor_count * HISTORY_SIZE * 30);
+        char *response = malloc(buf_size);
+        if (!response) {
+            pthread_mutex_unlock(&g_ctx.lock);
+            const char *err = "{\"error\":\"out of memory\"}";
+            struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
+                strlen(err), (void *)err, MHD_RESPMEM_MUST_COPY);
+            int ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, mhd_response);
+            MHD_destroy_response(mhd_response);
+            return ret;
+        }
+
+        strcpy(response, "{\"status\":\"running\",\"pids\":{");
+
+        for (int i = 0; i < g_ctx.monitor_count; i++) {
+            PIDMonitor *m = &g_ctx.monitors[i];
+
+            if (i > 0) strcat(response, ",");
+
+            sprintf(response + strlen(response),
+                   "\"%u\":{\"pid\":%u,\"name\":\"%s\",\"current_bitrate\":%u,\"history\":[",
+                   m->pid, m->pid, m->name, m->current_bitrate);
+
+            // Output history in chronological order (oldest first)
+            // Circular buffer: if full, start from history_index (oldest), else start from 0
+            int start_idx = (m->history_count == HISTORY_SIZE) ? m->history_index : 0;
+            int first = 1;
+
+            for (int j = 0; j < m->history_count; j++) {
+                int idx = (start_idx + j) % HISTORY_SIZE;
+                BitrateEntry *e = &m->history[idx];
+
+                if (!first) strcat(response, ",");
+                first = 0;
+
+                sprintf(response + strlen(response), "[%ld,%u]", e->timestamp, e->bitrate);
+            }
+
+            strcat(response, "]}");
+        }
+
+        strcat(response, "}}");
+
+        pthread_mutex_unlock(&g_ctx.lock);
+
+        struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
+            strlen(response), (void *)response, MHD_RESPMEM_MUST_FREE);
+        MHD_add_response_header(mhd_response, "Content-Type", "application/json");
+        int ret = MHD_queue_response(connection, MHD_HTTP_OK, mhd_response);
+        MHD_destroy_response(mhd_response);
+        return ret;
+    }
+
     if (strcmp(url, "/health") == 0) {
         const char *response = "{\"status\":\"ok\"}";
         struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
@@ -513,7 +571,7 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "HTTP server started on port %d\n", g_ctx.api_port);
-    fprintf(stderr, "Endpoints: GET /metrics, GET /health\n");
+    fprintf(stderr, "Endpoints: GET /metrics, GET /metrics/history, GET /health\n");
 
     // Main loop
     while (g_ctx.running) {
