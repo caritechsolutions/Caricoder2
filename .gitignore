@@ -1,0 +1,5 @@
+
+# Compiled binaries
+tools/*/player_preview
+tools/*/*.o
+tools/*/udp_input
