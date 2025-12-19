@@ -1115,6 +1115,8 @@ async function scanConfiguredSource() {
 }
 
 function populateConfigPidSelects(data) {
+    console.log('populateConfigPidSelects: Received data', data);
+
     // Store scan data for program filtering
     currentScanData = data;
 
@@ -1123,13 +1125,14 @@ function populateConfigPidSelects(data) {
     const audioSelect = document.getElementById('configAudioSelect');
     const resultsContent = document.getElementById('configScanResultsContent');
 
-    // Clear existing options
-    programSelect.innerHTML = '<option value="">-- Select program --</option>';
-    videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
+    // Clear ALL options - video/audio stay empty until program is selected
+    programSelect.innerHTML = '<option value="">-- Select program first --</option>';
+    videoSelect.innerHTML = '<option value="">-- Select program first --</option>';
     audioSelect.innerHTML = '';
 
     // Populate programs
     if (data.programs && data.programs.length > 0) {
+        console.log('populateConfigPidSelects: Found', data.programs.length, 'programs');
         data.programs.forEach(prog => {
             const opt = document.createElement('option');
             opt.value = prog.id;
@@ -1140,11 +1143,14 @@ function populateConfigPidSelects(data) {
             programSelect.appendChild(opt);
         });
 
-        // Auto-select if only one program
+        // Auto-select and populate PIDs only if exactly one program
         if (data.programs.length === 1) {
+            console.log('populateConfigPidSelects: Auto-selecting single program');
             programSelect.value = data.programs[0].id;
             filterPidsByProgram(data.programs[0].id);
         }
+    } else {
+        console.log('populateConfigPidSelects: No programs found');
     }
 
     // Show results summary
@@ -1170,18 +1176,31 @@ function populateConfigPidSelects(data) {
 
 // Filter video and audio PIDs based on selected program
 function filterPidsByProgram(programId) {
-    if (!currentScanData || !currentScanData.programs) return;
-
     const videoSelect = document.getElementById('configVideoSelect');
     const audioSelect = document.getElementById('configAudioSelect');
 
-    // Clear existing options
+    // Always clear existing options first
     videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
     audioSelect.innerHTML = '';
 
+    // If no program selected or no scan data, just leave empty
+    if (!programId || !currentScanData || !currentScanData.programs) {
+        console.log('filterPidsByProgram: No program selected or no scan data');
+        return;
+    }
+
+    // Convert to number for comparison (API returns numbers, select value is string)
+    const programIdNum = parseInt(programId, 10);
+    console.log('filterPidsByProgram: Looking for program', programIdNum, 'in', currentScanData.programs.map(p => p.id));
+
     // Find the selected program
-    const program = currentScanData.programs.find(p => p.id == programId);
-    if (!program) return;
+    const program = currentScanData.programs.find(p => p.id === programIdNum);
+    if (!program) {
+        console.log('filterPidsByProgram: Program not found');
+        return;
+    }
+
+    console.log('filterPidsByProgram: Found program', program.name, 'with', program.video_pids?.length, 'video and', program.audio_pids?.length, 'audio PIDs');
 
     // Populate video PIDs for this program
     if (program.video_pids && program.video_pids.length > 0) {

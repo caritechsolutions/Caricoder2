@@ -881,7 +881,7 @@ async def scan_stream(request: StreamScanRequest):
                 stream_url = f"http://{stream_url}"
 
     # Adjust timeout based on type
-    timeout = 15 if stream_type in ("hls", "srt", "rist") else 10
+    timeout = 20 if stream_type in ("hls", "srt", "rist") else 15
 
     try:
         cmd = [
@@ -890,8 +890,8 @@ async def scan_stream(request: StreamScanRequest):
             "-print_format", "json",
             "-show_programs",
             "-show_streams",
-            "-analyzeduration", "3000000",  # 3 seconds
-            "-probesize", "3000000",
+            "-analyzeduration", "5000000",  # 5 seconds for better detection
+            "-probesize", "5000000",
             "-i", stream_url
         ]
 
