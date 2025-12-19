@@ -177,7 +177,7 @@ include __DIR__ . '/../templates/header.php';
                 <div class="row">
                     <div class="col-md-4 mb-3">
                         <label class="form-label">Program</label>
-                        <select class="form-select" id="configProgramSelect">
+                        <select class="form-select" id="configProgramSelect" onchange="filterPidsByProgram(this.value)">
                             <option value="">-- Select or enter manually --</option>
                         </select>
                         <input type="number" class="form-control mt-2" id="configProgramManual" placeholder="Or enter PID manually">
@@ -249,6 +249,7 @@ const initialSources = <?php echo json_encode($sources); ?>;
 let sourceConfigs = {};
 let sourcesCount = 0;
 let configureModal = null;
+let currentScanData = null;
 
 document.addEventListener('DOMContentLoaded', function() {
     // Load existing sources
@@ -552,65 +553,107 @@ async function scanConfiguredSource() {
 }
 
 function populateConfigPidSelects(data) {
+    // Store scan data for program filtering
+    currentScanData = data;
+
     const programSelect = document.getElementById('configProgramSelect');
     const videoSelect = document.getElementById('configVideoSelect');
     const audioSelect = document.getElementById('configAudioSelect');
     const resultsContent = document.getElementById('configScanResultsContent');
 
-    programSelect.innerHTML = '<option value="">-- Select program --</option>';
-    videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
+    // Clear ALL options - video/audio stay empty until program is selected
+    programSelect.innerHTML = '<option value="">-- Select program first --</option>';
+    videoSelect.innerHTML = '<option value="">-- Select program first --</option>';
     audioSelect.innerHTML = '';
 
+    // Populate programs
     if (data.programs && data.programs.length > 0) {
         data.programs.forEach(prog => {
             const opt = document.createElement('option');
-            opt.value = prog.id || prog;
-            opt.textContent = prog.name || `Program ${prog.id || prog}`;
+            opt.value = prog.id;
+            opt.textContent = prog.name || `Program ${prog.id}`;
+            if (prog.provider) {
+                opt.textContent += ` (${prog.provider})`;
+            }
             programSelect.appendChild(opt);
         });
+
+        // Auto-select and populate PIDs only if exactly one program
+        if (data.programs.length === 1) {
+            programSelect.value = data.programs[0].id;
+            filterPidsByProgram(data.programs[0].id);
+        }
     }
 
-    if (data.video_pids && data.video_pids.length > 0) {
-        data.video_pids.forEach(vid => {
+    // Show results summary
+    let html = '<div class="row">';
+    html += `<div class="col-md-4"><strong>Programs:</strong> ${data.programs?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Video:</strong> ${data.all_video_pids?.length || 0}</div>`;
+    html += `<div class="col-md-4"><strong>Audio:</strong> ${data.all_audio_pids?.length || 0}</div>`;
+    html += '</div>';
+
+    // Show program details
+    if (data.programs && data.programs.length > 0) {
+        html += '<div class="mt-2">';
+        data.programs.forEach(prog => {
+            html += `<div class="mb-1"><strong>${prog.name}</strong>: `;
+            html += `${prog.video_pids?.length || 0} video, ${prog.audio_pids?.length || 0} audio`;
+            html += '</div>';
+        });
+        html += '</div>';
+    }
+
+    resultsContent.innerHTML = html;
+}
+
+// Filter video and audio PIDs based on selected program
+function filterPidsByProgram(programId) {
+    const videoSelect = document.getElementById('configVideoSelect');
+    const audioSelect = document.getElementById('configAudioSelect');
+
+    // Always clear existing options first
+    videoSelect.innerHTML = '<option value="">-- Select video PID --</option>';
+    audioSelect.innerHTML = '';
+
+    // If no program selected or no scan data, just leave empty
+    if (!programId || !currentScanData || !currentScanData.programs) {
+        return;
+    }
+
+    // Convert to number for comparison (API returns numbers, select value is string)
+    const programIdNum = parseInt(programId, 10);
+
+    // Find the selected program
+    const program = currentScanData.programs.find(p => p.id === programIdNum);
+    if (!program) {
+        return;
+    }
+
+    // Populate video PIDs for this program
+    if (program.video_pids && program.video_pids.length > 0) {
+        program.video_pids.forEach(vid => {
             const opt = document.createElement('option');
             opt.value = vid.pid;
             opt.textContent = `PID ${vid.pid} - ${vid.description || vid.codec || 'Video'}`;
             videoSelect.appendChild(opt);
         });
-        if (data.video_pids.length === 1) {
-            videoSelect.value = data.video_pids[0].pid;
+        // Auto-select first video
+        if (program.video_pids.length === 1) {
+            videoSelect.value = program.video_pids[0].pid;
         }
     }
 
-    if (data.audio_pids && data.audio_pids.length > 0) {
-        data.audio_pids.forEach(aud => {
+    // Populate audio PIDs for this program
+    if (program.audio_pids && program.audio_pids.length > 0) {
+        program.audio_pids.forEach(aud => {
             const opt = document.createElement('option');
             opt.value = aud.pid;
             opt.textContent = `PID ${aud.pid} - ${aud.description || aud.codec || 'Audio'} (${aud.language || 'und'})`;
             audioSelect.appendChild(opt);
         });
+        // Auto-select all audio tracks
         Array.from(audioSelect.options).forEach(opt => opt.selected = true);
     }
-
-    let html = '<div class="row">';
-    html += `<div class="col-md-4"><strong>Programs:</strong> ${data.programs?.length || 0}</div>`;
-    html += `<div class="col-md-4"><strong>Video:</strong> ${data.video_pids?.length || 0}</div>`;
-    html += `<div class="col-md-4"><strong>Audio:</strong> ${data.audio_pids?.length || 0}</div>`;
-    html += '</div>';
-
-    if (data.video_pids && data.video_pids.length > 0) {
-        html += '<div class="mt-2"><small class="text-muted">Video: ';
-        html += data.video_pids.map(v => `${v.description || 'PID ' + v.pid}`).join(', ');
-        html += '</small></div>';
-    }
-
-    if (data.audio_pids && data.audio_pids.length > 0) {
-        html += '<div class="mt-1"><small class="text-muted">Audio: ';
-        html += data.audio_pids.map(a => `${a.language || 'und'} (PID ${a.pid})`).join(', ');
-        html += '</small></div>';
-    }
-
-    resultsContent.innerHTML = html;
 }
 
 function saveSourceConfig() {
