@@ -12,6 +12,10 @@ header('Content-Type: application/json');
 
 // Error handler to convert PHP errors to JSON
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    // Respect @ error suppression operator
+    if (error_reporting() === 0) {
+        return false;
+    }
     ob_end_clean();
     http_response_code(500);
     echo json_encode(['error' => "PHP Error: $errstr", 'file' => basename($errfile), 'line' => $errline]);
