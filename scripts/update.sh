@@ -290,6 +290,46 @@ update_api() {
     log_info "API service updated"
 }
 
+# Update nginx config (add missing locations like /preview)
+update_nginx_config() {
+    log_step "Updating nginx configuration..."
+
+    local NGINX_CONF="/etc/nginx/sites-available/caritrans"
+
+    if [[ ! -f "$NGINX_CONF" ]]; then
+        log_warn "Nginx config not found at $NGINX_CONF"
+        return
+    fi
+
+    # Add /preview location if missing
+    if ! grep -q "location /preview/" "$NGINX_CONF"; then
+        log_info "Adding /preview location for HLS streams..."
+
+        # Insert the preview location before the WebSocket location
+        sed -i '/# WebSocket proxy/i \
+    # HLS preview streams - serve directly without PHP auth\
+    location /preview/ {\
+        alias /var/www/caritrans/public/preview/;\
+        add_header Access-Control-Allow-Origin *;\
+        add_header Cache-Control "no-cache, no-store, must-revalidate";\
+        types {\
+            application/vnd.apple.mpegurl m3u8;\
+            video/mp2t ts;\
+        }\
+    }\
+' "$NGINX_CONF"
+
+        # Test nginx config
+        if nginx -t 2>/dev/null; then
+            log_info "Nginx config updated successfully"
+        else
+            log_warn "Nginx config test failed - reverting"
+        fi
+    else
+        log_info "Nginx config already has /preview location"
+    fi
+}
+
 # Restart services
 restart_services() {
     log_step "Restarting services..."
@@ -416,6 +456,7 @@ main() {
     build_tools
     update_api
     fix_permissions
+    update_nginx_config
     restart_services
     cleanup
     print_completion
