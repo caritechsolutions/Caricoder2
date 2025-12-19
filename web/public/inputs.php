@@ -455,8 +455,8 @@ function getTypeBadgeColor($type) {
     </div>
 </div>
 
-<!-- Shaka Player - robust adaptive streaming player -->
-<script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.min.js"></script>
+<!-- HLS.js Library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.0-beta.1.0.canary.10759/hls.min.js"></script>
 
 <!-- Chart.js for graphs -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -1429,7 +1429,7 @@ let previewModal = null;
 let graphUpdateInterval = null;
 let previewKeepaliveInterval = null;
 let previewStatusInterval = null;
-let shakaPlayer = null;
+let hlsPlayer = null;
 let currentPreviewId = null;
 
 // Format bitrate to human readable
@@ -1681,51 +1681,47 @@ async function startPreview(inputId) {
     }
 }
 
-// Initialize Shaka Player
-async function initHlsPlayer(playlistUrl) {
+// Initialize HLS player
+function initHlsPlayer(playlistUrl) {
     const video = document.getElementById('previewVideo');
 
     // Clean up existing player
-    if (shakaPlayer) {
-        await shakaPlayer.destroy();
-        shakaPlayer = null;
+    if (hlsPlayer) {
+        hlsPlayer.destroy();
+        hlsPlayer = null;
     }
 
-    // Install polyfills
-    shaka.polyfill.installAll();
+    if (Hls.isSupported()) {
+        hlsPlayer = new Hls();
 
-    if (!shaka.Player.isBrowserSupported()) {
-        document.getElementById('videoLoadingStatus').textContent = 'Browser not supported';
-        return;
-    }
+        hlsPlayer.loadSource(playlistUrl);
+        hlsPlayer.attachMedia(video);
 
-    shakaPlayer = new shaka.Player(video);
+        hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+            // Hide loading, show video
+            document.getElementById('videoLoading').classList.remove('d-flex');
+            document.getElementById('videoLoading').classList.add('d-none');
+            video.classList.remove('d-none');
+            video.play().catch(e => console.log('Autoplay blocked:', e));
+        });
 
-    // Configure for better compatibility with various streams
-    shakaPlayer.configure({
-        streaming: {
-            bufferingGoal: 10,
-            rebufferingGoal: 2,
-            bufferBehind: 30
-        }
-    });
-
-    // Error handling
-    shakaPlayer.addEventListener('error', function(event) {
-        console.error('Shaka Player error:', event.detail);
-        document.getElementById('videoLoadingStatus').textContent = 'Playback error: ' + event.detail.code;
-    });
-
-    try {
-        await shakaPlayer.load(playlistUrl);
-        // Hide loading, show video
-        document.getElementById('videoLoading').classList.remove('d-flex');
-        document.getElementById('videoLoading').classList.add('d-none');
-        video.classList.remove('d-none');
-        video.play().catch(e => console.log('Autoplay blocked:', e));
-    } catch (e) {
-        console.error('Error loading stream:', e);
-        document.getElementById('videoLoadingStatus').textContent = 'Error: ' + e.message;
+        hlsPlayer.on(Hls.Events.ERROR, function(event, data) {
+            console.error('HLS error:', data);
+            if (data.fatal) {
+                document.getElementById('videoLoadingStatus').textContent = 'Playback error: ' + data.type;
+            }
+        });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        video.src = playlistUrl;
+        video.addEventListener('loadedmetadata', function() {
+            document.getElementById('videoLoading').classList.remove('d-flex');
+            document.getElementById('videoLoading').classList.add('d-none');
+            video.classList.remove('d-none');
+            video.play().catch(e => console.log('Autoplay blocked:', e));
+        });
+    } else {
+        document.getElementById('videoLoadingStatus').textContent = 'HLS not supported in this browser';
     }
 }
 
@@ -1754,10 +1750,10 @@ function cleanupPreview() {
         previewStatusInterval = null;
     }
 
-    // Destroy Shaka player
-    if (shakaPlayer) {
-        shakaPlayer.destroy();
-        shakaPlayer = null;
+    // Destroy HLS player
+    if (hlsPlayer) {
+        hlsPlayer.destroy();
+        hlsPlayer = null;
     }
 
     // Reset video element
