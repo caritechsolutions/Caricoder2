@@ -238,7 +238,7 @@ void* monitor_thread(void *arg) {
     return NULL;
 }
 
-static enum MHD_Result api_handler(void *cls, struct MHD_Connection *connection,
+static int api_handler(void *cls, struct MHD_Connection *connection,
                       const char *url, const char *method,
                       const char *version, const char *upload_data,
                       size_t *upload_data_size, void **con_cls) {
