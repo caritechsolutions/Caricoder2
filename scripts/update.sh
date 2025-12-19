@@ -232,6 +232,19 @@ build_tools() {
         fi
     fi
 
+    # Build player_preview
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/player_preview" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/player_preview"
+        log_info "Building player_preview..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "player_preview installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build player_preview"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
