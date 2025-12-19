@@ -14,9 +14,9 @@
 #include <pthread.h>
 
 #define KEEPALIVE_TIMEOUT 60  // Seconds before shutdown if no keepalive
-#define DEFAULT_DURATION 6    // Segment duration in seconds
-#define DEFAULT_LIVE_SEGMENTS 10
-#define DEFAULT_SEGMENT_SIZE 1200000  // Fixed segment size in bytes (~1.2MB for 6s at ~1.5Mbps)
+#define DEFAULT_DURATION 2    // Segment duration in seconds
+#define DEFAULT_LIVE_SEGMENTS 5
+#define DEFAULT_SEGMENT_SIZE 400000  // Fixed segment size in bytes (~400KB for 2s at ~1.5Mbps)
 
 typedef struct {
     char input_addr[64];
