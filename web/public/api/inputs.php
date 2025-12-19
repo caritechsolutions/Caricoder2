@@ -213,6 +213,17 @@ switch ($action) {
         json_response($result);
         break;
 
+    case 'preview_media_info':
+        // Get media info via ffprobe
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $result = get_preview_media_info($id);
+        json_response($result);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
 }
@@ -1785,4 +1796,25 @@ function send_preview_keepalive($id) {
         'success' => true,
         'timeout' => $data['timeout'] ?? 60
     ];
+}
+
+/**
+ * Get media info for a preview stream via ffprobe
+ */
+function get_preview_media_info($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+
+    $info = get_preview_info($id);
+    if (!$info) {
+        return ['success' => false, 'error' => 'Input not found'];
+    }
+
+    // Call the CariTranscoder API to run ffprobe
+    $api_data = [
+        'stream_url' => $info['input_address']
+    ];
+
+    $result = call_cari_api('/preview/media-info', 'POST', $api_data);
+
+    return $result;
 }

@@ -746,6 +746,111 @@ async def stop_preview(api_port: int):
         }
 
 
+class MediaInfoRequest(BaseModel):
+    """Model for media info request"""
+    stream_url: str  # e.g., "udp://239.100.0.1:10000" or multicast address
+
+
+@app.post("/preview/media-info")
+async def get_media_info(request: MediaInfoRequest):
+    """Get media information using ffprobe"""
+
+    stream_url = request.stream_url
+
+    # If it's just an address:port, assume UDP multicast
+    if not stream_url.startswith(('udp://', 'srt://', 'rtmp://', 'http://', 'https://')):
+        stream_url = f"udp://@{stream_url}"
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            "-show_programs",
+            "-analyzeduration", "2000000",  # 2 seconds
+            "-probesize", "2000000",
+            "-i", stream_url
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "error": f"FFprobe failed: {result.stderr[:200]}"
+            }
+
+        data = json.loads(result.stdout)
+
+        # Parse and simplify the response
+        media_info = {
+            "success": True,
+            "video": None,
+            "audio": [],
+            "programs": []
+        }
+
+        # Extract video info
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                media_info["video"] = {
+                    "codec": stream.get("codec_name", "unknown").upper(),
+                    "profile": stream.get("profile", ""),
+                    "width": stream.get("width", 0),
+                    "height": stream.get("height", 0),
+                    "fps": eval(stream.get("r_frame_rate", "0/1")) if "/" in str(stream.get("r_frame_rate", "0")) else float(stream.get("r_frame_rate", 0)),
+                    "pix_fmt": stream.get("pix_fmt", ""),
+                    "level": stream.get("level", ""),
+                    "bitrate": int(stream.get("bit_rate", 0)) if stream.get("bit_rate") else None,
+                    "pid": stream.get("id", "")
+                }
+            elif stream.get("codec_type") == "audio":
+                media_info["audio"].append({
+                    "codec": stream.get("codec_name", "unknown").upper(),
+                    "profile": stream.get("profile", ""),
+                    "channels": stream.get("channels", 0),
+                    "channel_layout": stream.get("channel_layout", ""),
+                    "sample_rate": int(stream.get("sample_rate", 0)),
+                    "bitrate": int(stream.get("bit_rate", 0)) if stream.get("bit_rate") else None,
+                    "language": stream.get("tags", {}).get("language", "und"),
+                    "pid": stream.get("id", "")
+                })
+
+        # Extract program info
+        for program in data.get("programs", []):
+            media_info["programs"].append({
+                "id": program.get("program_id", 0),
+                "name": program.get("tags", {}).get("service_name", f"Program {program.get('program_id', 0)}")
+            })
+
+        return media_info
+
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "Timeout waiting for stream data"
+        }
+    except json.JSONDecodeError as e:
+        return {
+            "success": False,
+            "error": f"Failed to parse ffprobe output: {str(e)}"
+        }
+    except Exception as e:
+        logger.error(f"Media info error: {e}")
+        logger.error(traceback.format_exc())
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 # ----------------------------------------------------------------------------
 # System Operations
 # ----------------------------------------------------------------------------

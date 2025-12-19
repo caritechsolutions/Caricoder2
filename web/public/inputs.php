@@ -337,32 +337,76 @@ function getTypeBadgeColor($type) {
             <div class="modal-body">
                 <input type="hidden" id="previewInputId">
 
-                <!-- Video Player Section -->
-                <div class="mb-4">
-                    <div id="videoContainer" class="position-relative bg-dark rounded" style="aspect-ratio: 16/9; max-height: 400px;">
-                        <!-- Placeholder with Play Button -->
-                        <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
-                            <i class="bi bi-play-circle display-1 mb-3"></i>
-                            <span id="videoStatusText">Click to start preview</span>
+                <!-- Video Player and Stream Info Row -->
+                <div class="row mb-3">
+                    <!-- Video Player Section -->
+                    <div class="col-lg-8">
+                        <div id="videoContainer" class="position-relative bg-dark rounded" style="aspect-ratio: 16/9; max-height: 400px;">
+                            <!-- Placeholder with Play Button -->
+                            <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
+                                <i class="bi bi-play-circle display-1 mb-3"></i>
+                                <span id="videoStatusText">Click to start preview</span>
+                            </div>
+                            <!-- Loading Spinner -->
+                            <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
+                                <div class="spinner-border text-light mb-3" role="status"></div>
+                                <span>Loading stream...</span>
+                                <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
+                            </div>
+                            <!-- Video Element -->
+                            <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
                         </div>
-                        <!-- Loading Spinner -->
-                        <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
-                            <div class="spinner-border text-light mb-3" role="status"></div>
-                            <span>Loading stream...</span>
-                            <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
+                    </div>
+
+                    <!-- Stream Info Panel -->
+                    <div class="col-lg-4">
+                        <div class="card h-100">
+                            <div class="card-header py-2">
+                                <strong><i class="bi bi-info-circle me-1"></i>Stream Info</strong>
+                                <button class="btn btn-sm btn-outline-secondary float-end" onclick="refreshMediaInfo()" title="Refresh">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
+                            <div class="card-body p-2" id="streamInfoBody">
+                                <div class="text-center text-muted py-4" id="streamInfoLoading">
+                                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                                    Loading stream info...
+                                </div>
+                                <div id="streamInfoContent" style="display: none;">
+                                    <!-- Video Info -->
+                                    <div class="mb-3">
+                                        <h6 class="text-primary mb-2"><i class="bi bi-camera-video me-1"></i>Video</h6>
+                                        <table class="table table-sm table-borderless mb-0">
+                                            <tr><td class="text-muted" style="width:40%">Codec</td><td id="infoVideoCodec">-</td></tr>
+                                            <tr><td class="text-muted">Resolution</td><td id="infoVideoRes">-</td></tr>
+                                            <tr><td class="text-muted">Frame Rate</td><td id="infoVideoFps">-</td></tr>
+                                            <tr><td class="text-muted">Profile</td><td id="infoVideoProfile">-</td></tr>
+                                        </table>
+                                    </div>
+                                    <!-- Audio Info -->
+                                    <div>
+                                        <h6 class="text-success mb-2"><i class="bi bi-volume-up me-1"></i>Audio</h6>
+                                        <div id="infoAudioTracks">
+                                            <!-- Audio tracks will be inserted here -->
+                                        </div>
+                                    </div>
+                                </div>
+                                <div id="streamInfoError" class="text-danger text-center py-3" style="display: none;">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    <span id="streamInfoErrorText">Failed to load</span>
+                                </div>
+                            </div>
                         </div>
-                        <!-- Video Element -->
-                        <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
                     </div>
                 </div>
 
-                <!-- Current Stats -->
+                <!-- Bitrate Stats -->
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <div class="card bg-light">
                             <div class="card-body py-2">
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Video</span>
+                                    <span class="text-muted">Video Bitrate</span>
                                     <span class="fw-bold text-primary" id="graphVideoBitrate">-</span>
                                 </div>
                                 <div class="d-flex justify-content-between align-items-center mt-1">
@@ -376,7 +420,7 @@ function getTypeBadgeColor($type) {
                         <div class="card bg-light">
                             <div class="card-body py-2">
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Audio</span>
+                                    <span class="text-muted">Audio Bitrate</span>
                                     <span class="fw-bold text-success" id="graphAudioBitrate">-</span>
                                 </div>
                                 <div class="d-flex justify-content-between align-items-center mt-1">
@@ -1506,8 +1550,16 @@ async function showPreview(inputId, inputName) {
     }
     previewModal.show();
 
+    // Reset stream info panel
+    document.getElementById('streamInfoLoading').style.display = 'block';
+    document.getElementById('streamInfoContent').style.display = 'none';
+    document.getElementById('streamInfoError').style.display = 'none';
+
     // Start player_preview
     await startPreview(inputId);
+
+    // Load media info (don't await - let it load in background)
+    loadMediaInfo(inputId);
 
     // Load historical bitrate data
     await loadBitrateHistory(inputId);
@@ -1667,6 +1719,77 @@ function cleanupPreview() {
     }
 
     currentPreviewId = null;
+}
+
+// Load media info via ffprobe
+async function loadMediaInfo(inputId) {
+    try {
+        document.getElementById('streamInfoLoading').style.display = 'block';
+        document.getElementById('streamInfoContent').style.display = 'none';
+        document.getElementById('streamInfoError').style.display = 'none';
+
+        const response = await fetch(`api/inputs.php?action=preview_media_info&id=${inputId}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            document.getElementById('streamInfoLoading').style.display = 'none';
+            document.getElementById('streamInfoError').style.display = 'block';
+            document.getElementById('streamInfoErrorText').textContent = data.error || 'Failed to load';
+            return;
+        }
+
+        // Update video info
+        if (data.video) {
+            document.getElementById('infoVideoCodec').textContent = data.video.codec + (data.video.profile ? ` (${data.video.profile})` : '');
+            document.getElementById('infoVideoRes').textContent = data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
+            document.getElementById('infoVideoFps').textContent = data.video.fps ? `${Math.round(data.video.fps * 100) / 100} fps` : '-';
+            document.getElementById('infoVideoProfile').textContent = data.video.pix_fmt || '-';
+        } else {
+            document.getElementById('infoVideoCodec').textContent = 'No video';
+            document.getElementById('infoVideoRes').textContent = '-';
+            document.getElementById('infoVideoFps').textContent = '-';
+            document.getElementById('infoVideoProfile').textContent = '-';
+        }
+
+        // Update audio info
+        const audioContainer = document.getElementById('infoAudioTracks');
+        audioContainer.innerHTML = '';
+
+        if (data.audio && data.audio.length > 0) {
+            data.audio.forEach((track, idx) => {
+                const trackDiv = document.createElement('div');
+                trackDiv.className = 'mb-2 pb-2' + (idx < data.audio.length - 1 ? ' border-bottom' : '');
+                trackDiv.innerHTML = `
+                    <table class="table table-sm table-borderless mb-0">
+                        <tr><td class="text-muted" style="width:40%">Track ${idx + 1}</td><td>${track.codec}${track.profile ? ' (' + track.profile + ')' : ''}</td></tr>
+                        <tr><td class="text-muted">Channels</td><td>${track.channels}ch${track.channel_layout ? ' (' + track.channel_layout + ')' : ''}</td></tr>
+                        <tr><td class="text-muted">Sample Rate</td><td>${track.sample_rate ? (track.sample_rate / 1000) + ' kHz' : '-'}</td></tr>
+                        <tr><td class="text-muted">Language</td><td>${track.language || 'und'}</td></tr>
+                    </table>
+                `;
+                audioContainer.appendChild(trackDiv);
+            });
+        } else {
+            audioContainer.innerHTML = '<span class="text-muted">No audio tracks</span>';
+        }
+
+        // Show content
+        document.getElementById('streamInfoLoading').style.display = 'none';
+        document.getElementById('streamInfoContent').style.display = 'block';
+
+    } catch (e) {
+        console.error('Failed to load media info:', e);
+        document.getElementById('streamInfoLoading').style.display = 'none';
+        document.getElementById('streamInfoError').style.display = 'block';
+        document.getElementById('streamInfoErrorText').textContent = e.message;
+    }
+}
+
+// Refresh media info (called by button)
+function refreshMediaInfo() {
+    if (currentPreviewId) {
+        loadMediaInfo(currentPreviewId);
+    }
 }
 
 // Load historical bitrate data
