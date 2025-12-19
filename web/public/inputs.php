@@ -121,8 +121,8 @@ include __DIR__ . '/../templates/header.php';
                             <div class="bitrate-cell" id="bitrate-<?php echo $input['id']; ?>">
                                 <?php if ($apiPort): ?>
                                 <span class="bitrate-video">-</span> / <span class="bitrate-audio">-</span>
-                                <button class="btn btn-link btn-sm p-0 ms-2 graph-btn" onclick="showBitrateGraph('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>')" title="View bitrate graph">
-                                    <i class="bi bi-graph-up"></i>
+                                <button class="btn btn-link btn-sm p-0 ms-2 preview-btn" onclick="showPreview('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>')" title="Preview stream">
+                                    <i class="bi bi-play-circle"></i>
                                 </button>
                                 <?php else: ?>
                                 <small class="text-muted">N/A</small>
@@ -326,16 +326,35 @@ function getTypeBadgeColor($type) {
     </div>
 </div>
 
-<!-- Bitrate Graph Modal -->
-<div class="modal fade" id="bitrateGraphModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+<!-- Preview Modal -->
+<div class="modal fade" id="previewModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-graph-up me-2"></i>Bitrate Monitor - <span id="graphInputName"></span></h5>
+                <h5 class="modal-title"><i class="bi bi-play-circle me-2"></i>Preview - <span id="previewInputName"></span></h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <input type="hidden" id="graphInputId">
+                <input type="hidden" id="previewInputId">
+
+                <!-- Video Player Section -->
+                <div class="mb-4">
+                    <div id="videoContainer" class="position-relative bg-dark rounded" style="aspect-ratio: 16/9; max-height: 400px;">
+                        <!-- Placeholder with Play Button -->
+                        <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
+                            <i class="bi bi-play-circle display-1 mb-3"></i>
+                            <span id="videoStatusText">Click to start preview</span>
+                        </div>
+                        <!-- Loading Spinner -->
+                        <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
+                            <div class="spinner-border text-light mb-3" role="status"></div>
+                            <span>Loading stream...</span>
+                            <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
+                        </div>
+                        <!-- Video Element -->
+                        <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                    </div>
+                </div>
 
                 <!-- Current Stats -->
                 <div class="row mb-3">
@@ -370,7 +389,7 @@ function getTypeBadgeColor($type) {
                 </div>
 
                 <!-- Graph Canvas -->
-                <div class="position-relative" style="height: 300px;">
+                <div class="position-relative" style="height: 200px;">
                     <canvas id="bitrateChart"></canvas>
                 </div>
 
@@ -391,6 +410,9 @@ function getTypeBadgeColor($type) {
         </div>
     </div>
 </div>
+
+<!-- HLS.js Library -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 
 <!-- Chart.js for graphs -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -1305,12 +1327,16 @@ function editInput(id) {
     window.location.href = `inputs-edit.php?id=${id}`;
 }
 
-// ============ Metrics and Bitrate Graph ============
+// ============ Metrics, Preview and Bitrate Graph ============
 
 let metricsInterval = null;
 let bitrateChart = null;
-let graphModal = null;
+let previewModal = null;
 let graphUpdateInterval = null;
+let previewKeepaliveInterval = null;
+let previewStatusInterval = null;
+let hlsPlayer = null;
+let currentPreviewId = null;
 
 // Format bitrate to human readable
 function formatBitrate(bps) {
@@ -1389,10 +1415,19 @@ function updateInputMetrics(inputId, metrics) {
     }
 }
 
-// Show bitrate graph modal
-async function showBitrateGraph(inputId, inputName) {
-    document.getElementById('graphInputId').value = inputId;
-    document.getElementById('graphInputName').textContent = inputName;
+// Show preview modal
+async function showPreview(inputId, inputName) {
+    currentPreviewId = inputId;
+    document.getElementById('previewInputId').value = inputId;
+    document.getElementById('previewInputName').textContent = inputName;
+
+    // Reset video player UI
+    document.getElementById('videoPlaceholder').classList.remove('d-none');
+    document.getElementById('videoPlaceholder').classList.add('d-flex');
+    document.getElementById('videoLoading').classList.remove('d-flex');
+    document.getElementById('videoLoading').classList.add('d-none');
+    document.getElementById('previewVideo').classList.add('d-none');
+    document.getElementById('videoStatusText').textContent = 'Starting preview...';
 
     // Initialize chart if needed
     if (!bitrateChart) {
@@ -1459,31 +1494,179 @@ async function showBitrateGraph(inputId, inputName) {
         });
     }
 
-    // Clear existing data
+    // Clear existing chart data
     bitrateChart.data.labels = [];
     bitrateChart.data.datasets[0].data = [];
     bitrateChart.data.datasets[1].data = [];
     bitrateChart.update();
 
     // Show modal
-    if (!graphModal) {
-        graphModal = new bootstrap.Modal(document.getElementById('bitrateGraphModal'));
+    if (!previewModal) {
+        previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
     }
-    graphModal.show();
+    previewModal.show();
 
-    // Load historical data first
+    // Start player_preview
+    await startPreview(inputId);
+
+    // Load historical bitrate data
     await loadBitrateHistory(inputId);
 
-    // Then start live updates
+    // Start live graph updates
     graphUpdateInterval = setInterval(() => updateBitrateGraph(inputId), 5000);
 
-    // Stop updating when modal closes
-    document.getElementById('bitrateGraphModal').addEventListener('hidden.bs.modal', function() {
-        if (graphUpdateInterval) {
-            clearInterval(graphUpdateInterval);
-            graphUpdateInterval = null;
-        }
+    // Start keepalive (every 30 seconds)
+    previewKeepaliveInterval = setInterval(() => sendPreviewKeepalive(inputId), 30000);
+
+    // Clean up when modal closes
+    document.getElementById('previewModal').addEventListener('hidden.bs.modal', function() {
+        cleanupPreview();
     }, { once: true });
+}
+
+// Start preview and wait for it to be ready
+async function startPreview(inputId) {
+    try {
+        // Show loading state
+        document.getElementById('videoPlaceholder').classList.remove('d-flex');
+        document.getElementById('videoPlaceholder').classList.add('d-none');
+        document.getElementById('videoLoading').classList.remove('d-none');
+        document.getElementById('videoLoading').classList.add('d-flex');
+        document.getElementById('videoLoadingStatus').textContent = 'Starting preview...';
+
+        // Start preview via API
+        const startResponse = await fetch(`api/inputs.php?action=preview_start&id=${inputId}`, { method: 'POST' });
+        const startData = await startResponse.json();
+
+        if (!startData.success) {
+            document.getElementById('videoLoadingStatus').textContent = 'Error: ' + (startData.error || 'Failed to start');
+            return;
+        }
+
+        const playlistUrl = startData.playlist_url;
+        document.getElementById('videoLoadingStatus').textContent = 'Waiting for segments...';
+
+        // Poll for ready status
+        let attempts = 0;
+        const maxAttempts = 30; // 30 seconds max wait
+
+        previewStatusInterval = setInterval(async () => {
+            attempts++;
+            try {
+                const statusResponse = await fetch(`api/inputs.php?action=preview_status&id=${inputId}`);
+                const statusData = await statusResponse.json();
+
+                if (statusData.ready) {
+                    clearInterval(previewStatusInterval);
+                    previewStatusInterval = null;
+                    document.getElementById('videoLoadingStatus').textContent = 'Loading player...';
+                    initHlsPlayer(playlistUrl);
+                } else if (statusData.running) {
+                    document.getElementById('videoLoadingStatus').textContent = `Buffering... (${statusData.segments || 0} segments)`;
+                } else if (attempts >= maxAttempts) {
+                    clearInterval(previewStatusInterval);
+                    previewStatusInterval = null;
+                    document.getElementById('videoLoadingStatus').textContent = 'Timeout waiting for stream';
+                }
+            } catch (e) {
+                console.error('Status check failed:', e);
+            }
+        }, 1000);
+
+    } catch (e) {
+        console.error('Failed to start preview:', e);
+        document.getElementById('videoLoadingStatus').textContent = 'Error: ' + e.message;
+    }
+}
+
+// Initialize HLS player
+function initHlsPlayer(playlistUrl) {
+    const video = document.getElementById('previewVideo');
+
+    // Clean up existing player
+    if (hlsPlayer) {
+        hlsPlayer.destroy();
+        hlsPlayer = null;
+    }
+
+    if (Hls.isSupported()) {
+        hlsPlayer = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 30
+        });
+
+        hlsPlayer.loadSource(playlistUrl);
+        hlsPlayer.attachMedia(video);
+
+        hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+            // Hide loading, show video
+            document.getElementById('videoLoading').classList.remove('d-flex');
+            document.getElementById('videoLoading').classList.add('d-none');
+            video.classList.remove('d-none');
+            video.play().catch(e => console.log('Autoplay blocked:', e));
+        });
+
+        hlsPlayer.on(Hls.Events.ERROR, function(event, data) {
+            console.error('HLS error:', data);
+            if (data.fatal) {
+                document.getElementById('videoLoadingStatus').textContent = 'Playback error: ' + data.type;
+            }
+        });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        video.src = playlistUrl;
+        video.addEventListener('loadedmetadata', function() {
+            document.getElementById('videoLoading').classList.remove('d-flex');
+            document.getElementById('videoLoading').classList.add('d-none');
+            video.classList.remove('d-none');
+            video.play().catch(e => console.log('Autoplay blocked:', e));
+        });
+    } else {
+        document.getElementById('videoLoadingStatus').textContent = 'HLS not supported in this browser';
+    }
+}
+
+// Send keepalive to preview
+async function sendPreviewKeepalive(inputId) {
+    try {
+        await fetch(`api/inputs.php?action=preview_keepalive&id=${inputId}`, { method: 'POST' });
+    } catch (e) {
+        console.error('Keepalive failed:', e);
+    }
+}
+
+// Clean up preview resources
+function cleanupPreview() {
+    // Stop intervals
+    if (graphUpdateInterval) {
+        clearInterval(graphUpdateInterval);
+        graphUpdateInterval = null;
+    }
+    if (previewKeepaliveInterval) {
+        clearInterval(previewKeepaliveInterval);
+        previewKeepaliveInterval = null;
+    }
+    if (previewStatusInterval) {
+        clearInterval(previewStatusInterval);
+        previewStatusInterval = null;
+    }
+
+    // Destroy HLS player
+    if (hlsPlayer) {
+        hlsPlayer.destroy();
+        hlsPlayer = null;
+    }
+
+    // Reset video element
+    const video = document.getElementById('previewVideo');
+    if (video) {
+        video.pause();
+        video.src = '';
+        video.classList.add('d-none');
+    }
+
+    currentPreviewId = null;
 }
 
 // Load historical bitrate data

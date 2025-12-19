@@ -176,6 +176,39 @@ switch ($action) {
         json_response($history);
         break;
 
+    case 'preview_start':
+        // Start player_preview for an input
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $result = start_player_preview($id);
+        json_response($result);
+        break;
+
+    case 'preview_status':
+        // Get player_preview status
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $result = get_preview_status($id);
+        json_response($result);
+        break;
+
+    case 'preview_keepalive':
+        // Send keepalive to player_preview
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Input ID required'], 400);
+        }
+
+        $result = send_preview_keepalive($id);
+        json_response($result);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
 }
@@ -1527,4 +1560,207 @@ function build_ini_content($config) {
     }
 
     return $content;
+}
+
+/**
+ * Get preview API port for an input (input api_port + 1000)
+ */
+function get_preview_port($id) {
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    if (!file_exists($config_file)) {
+        return null;
+    }
+    $config = parse_config($config_file);
+    $api_port = $config['output']['api_port'] ?? null;
+    return $api_port ? (int)$api_port + 1000 : null;
+}
+
+/**
+ * Get preview info for an input
+ */
+function get_preview_info($id) {
+    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    if (!file_exists($config_file)) {
+        return null;
+    }
+    $config = parse_config($config_file);
+
+    $name = $config['general']['name'] ?? $id;
+    $folder_name = preg_replace('/[^a-zA-Z0-9_-]/', '-', strtolower($name));
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = $config['output']['port'] ?? '';
+    $api_port = $config['output']['api_port'] ?? null;
+    $preview_port = $api_port ? (int)$api_port + 1000 : null;
+
+    return [
+        'id' => $id,
+        'name' => $name,
+        'folder' => $folder_name,
+        'input_address' => $output_addr . ':' . $output_port,
+        'preview_port' => $preview_port,
+        'output_dir' => '/var/www/caritrans/public/preview/' . $folder_name,
+        'playlist_url' => '/preview/' . $folder_name . '/playlist.m3u8'
+    ];
+}
+
+/**
+ * Check if player_preview is running for an input
+ */
+function is_preview_running($id) {
+    $preview_port = get_preview_port($id);
+    if (!$preview_port) {
+        return false;
+    }
+
+    // Try to connect to the preview API
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 1,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents("http://127.0.0.1:{$preview_port}/health", false, $ctx);
+    return $response !== false;
+}
+
+/**
+ * Start player_preview for an input
+ */
+function start_player_preview($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+
+    $info = get_preview_info($id);
+    if (!$info) {
+        return ['success' => false, 'error' => 'Input not found'];
+    }
+
+    // Check if already running
+    if (is_preview_running($id)) {
+        // Send keepalive to extend timeout
+        send_preview_keepalive($id);
+        return [
+            'success' => true,
+            'already_running' => true,
+            'message' => 'Preview already running',
+            'playlist_url' => $info['playlist_url'],
+            'preview_port' => $info['preview_port']
+        ];
+    }
+
+    // Create output directory
+    $output_dir = $info['output_dir'];
+    if (!is_dir($output_dir)) {
+        mkdir($output_dir, 0755, true);
+    }
+
+    // Build command
+    $cmd = sprintf(
+        'nohup /usr/local/bin/player_preview --input %s --output-dir %s --api-port %d > /var/log/caritrans/preview-%s.log 2>&1 &',
+        escapeshellarg($info['input_address']),
+        escapeshellarg($output_dir),
+        $info['preview_port'],
+        $info['folder']
+    );
+
+    // Execute in background
+    exec($cmd);
+
+    // Wait a moment for it to start
+    usleep(500000); // 500ms
+
+    // Check if it started
+    if (is_preview_running($id)) {
+        return [
+            'success' => true,
+            'message' => 'Preview started',
+            'playlist_url' => $info['playlist_url'],
+            'preview_port' => $info['preview_port']
+        ];
+    }
+
+    return ['success' => false, 'error' => 'Failed to start preview'];
+}
+
+/**
+ * Get player_preview status for an input
+ */
+function get_preview_status($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+
+    $info = get_preview_info($id);
+    if (!$info) {
+        return ['success' => false, 'error' => 'Input not found'];
+    }
+
+    $preview_port = $info['preview_port'];
+    if (!$preview_port) {
+        return ['success' => false, 'error' => 'No preview port configured'];
+    }
+
+    // Query player_preview status
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents("http://127.0.0.1:{$preview_port}/status", false, $ctx);
+
+    if ($response === false) {
+        return [
+            'success' => true,
+            'running' => false,
+            'ready' => false,
+            'playlist_url' => $info['playlist_url']
+        ];
+    }
+
+    $data = json_decode($response, true);
+    if (!$data) {
+        return ['success' => false, 'error' => 'Invalid response from preview'];
+    }
+
+    return [
+        'success' => true,
+        'running' => true,
+        'ready' => $data['ready'] ?? false,
+        'segments' => $data['segments'] ?? 0,
+        'ttl' => $data['ttl'] ?? 0,
+        'playlist_url' => $info['playlist_url']
+    ];
+}
+
+/**
+ * Send keepalive to player_preview
+ */
+function send_preview_keepalive($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+
+    $preview_port = get_preview_port($id);
+    if (!$preview_port) {
+        return ['success' => false, 'error' => 'No preview port configured'];
+    }
+
+    // Send POST to keepalive endpoint
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'POST',
+            'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents("http://127.0.0.1:{$preview_port}/keepalive", false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Preview not running'];
+    }
+
+    $data = json_decode($response, true);
+    return [
+        'success' => true,
+        'timeout' => $data['timeout'] ?? 60
+    ];
 }
