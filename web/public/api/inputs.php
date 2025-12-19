@@ -1592,13 +1592,16 @@ function get_preview_info($id) {
     $api_port = $config['output']['api_port'] ?? null;
     $preview_port = $api_port ? (int)$api_port + 1000 : null;
 
+    // Use the web root directory (parent of 'api' folder)
+    $web_root = dirname(__DIR__);
+
     return [
         'id' => $id,
         'name' => $name,
         'folder' => $folder_name,
         'input_address' => $output_addr . ':' . $output_port,
         'preview_port' => $preview_port,
-        'output_dir' => '/var/www/caritrans/public/preview/' . $folder_name,
+        'output_dir' => $web_root . '/preview/' . $folder_name,
         'playlist_url' => '/preview/' . $folder_name . '/playlist.m3u8'
     ];
 }
