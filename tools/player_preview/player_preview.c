@@ -16,6 +16,7 @@
 #define KEEPALIVE_TIMEOUT 60  // Seconds before shutdown if no keepalive
 #define DEFAULT_DURATION 2    // Segment duration in seconds
 #define DEFAULT_LIVE_SEGMENTS 5
+#define DEFAULT_SEGMENT_SIZE 400000  // Fixed segment size in bytes (~400KB for 2s at ~1.5Mbps)
 
 typedef struct {
     char input_addr[64];
@@ -26,6 +27,7 @@ typedef struct {
     int api_port;
     int duration;
     int live_segments;
+    int fixed_segment_size;    // Fixed segment size for streams without detectable I-frames
     int segment_count;
     int ready;  // 1 when >= 3 segments available
     time_t last_keepalive;
@@ -45,6 +47,7 @@ void print_help(const char *prog) {
     printf("  --api-port PORT              REST API port (required)\n");
     printf("  --duration SECONDS           Segment duration (default: %d)\n", DEFAULT_DURATION);
     printf("  --live-segments COUNT        Number of live segments (default: %d)\n", DEFAULT_LIVE_SEGMENTS);
+    printf("  --segment-size BYTES         Fixed segment size in bytes (default: %d)\n", DEFAULT_SEGMENT_SIZE);
     printf("  --help                       Show this help\n");
     printf("\nAPI Endpoints:\n");
     printf("  GET  /health     - Health check\n");
@@ -56,6 +59,7 @@ void init_context() {
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.duration = DEFAULT_DURATION;
     g_ctx.live_segments = DEFAULT_LIVE_SEGMENTS;
+    g_ctx.fixed_segment_size = DEFAULT_SEGMENT_SIZE;
     g_ctx.last_keepalive = time(NULL);
     g_ctx.running = 1;
     pthread_mutex_init(&g_ctx.lock, NULL);
@@ -151,17 +155,20 @@ void* tsp_manager_thread(void *arg) {
         char input_arg[128];
         snprintf(input_arg, sizeof(input_arg), "%s:%d", g_ctx.input_addr, g_ctx.input_port);
 
-        char duration_str[16], live_str[16];
+        char duration_str[16], live_str[16], segment_size_str[16];
         snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
         snprintf(live_str, sizeof(live_str), "%d", g_ctx.live_segments);
+        snprintf(segment_size_str, sizeof(segment_size_str), "%d", g_ctx.fixed_segment_size);
 
-        // Build tsp command
+        // Build tsp command with fixed segment size for reliable segmentation
+        // The -f option ensures segments are created even when I-frames can't be detected
         char *argv[] = {
             "tsp",
             "-I", "ip", input_arg,
             "-O", "hls",
             "--live", live_str,
             "--duration", duration_str,
+            "-f", segment_size_str,
             "--playlist", g_ctx.playlist_path,
             g_ctx.segment_template,
             NULL
@@ -338,6 +345,8 @@ int main(int argc, char *argv[]) {
             g_ctx.duration = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--live-segments") == 0 && i + 1 < argc) {
             g_ctx.live_segments = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--segment-size") == 0 && i + 1 < argc) {
+            g_ctx.fixed_segment_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
             return 0;
@@ -373,6 +382,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
     fprintf(stderr, "Segment Duration: %d seconds\n", g_ctx.duration);
     fprintf(stderr, "Live Segments: %d\n", g_ctx.live_segments);
+    fprintf(stderr, "Fixed Segment Size: %d bytes\n", g_ctx.fixed_segment_size);
     fprintf(stderr, "Keepalive Timeout: %d seconds\n", KEEPALIVE_TIMEOUT);
 
     // Start tsp manager thread
