@@ -723,6 +723,17 @@ server {
         deny all;
     }
 
+    # HLS preview streams - serve directly without PHP auth
+    location /preview/ {
+        alias /var/www/caritrans/public/preview/;
+        add_header Access-Control-Allow-Origin *;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/mp2t ts;
+        }
+    }
+
     # WebSocket proxy for stats
     location /ws {
         proxy_pass http://127.0.0.1:8081;
