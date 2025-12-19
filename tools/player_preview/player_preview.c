@@ -20,9 +20,9 @@
 typedef struct {
     char input_addr[64];
     int input_port;
-    char output_dir[512];
-    char playlist_path[512];
-    char segment_template[512];
+    char output_dir[256];
+    char playlist_path[280];   // output_dir + "/playlist.m3u8"
+    char segment_template[280]; // output_dir + "/segment.ts"
     int api_port;
     int duration;
     int live_segments;
@@ -181,7 +181,9 @@ void* tsp_manager_thread(void *arg) {
             prctl(PR_SET_PDEATHSIG, SIGKILL);
 
             // Redirect stderr to /dev/null to reduce noise
-            freopen("/dev/null", "w", stderr);
+            if (freopen("/dev/null", "w", stderr) == NULL) {
+                // Ignore failure - not critical
+            }
 
             execvp("tsp", argv);
             perror("execvp tsp failed");
