@@ -455,8 +455,8 @@ function getTypeBadgeColor($type) {
     </div>
 </div>
 
-<!-- HLS.js Library -->
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<!-- HLS.js Library - specific version that handles MP2 audio -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.0-beta.1.0.canary.10759/hls.min.js"></script>
 
 <!-- Chart.js for graphs -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -1692,11 +1692,8 @@ function initHlsPlayer(playlistUrl) {
     }
 
     if (Hls.isSupported()) {
-        hlsPlayer = new Hls({
-            enableWorker: true,
-            lowLatencyMode: true,
-            backBufferLength: 30
-        });
+        // Simple initialization without extra options for better codec compatibility
+        hlsPlayer = new Hls();
 
         hlsPlayer.loadSource(playlistUrl);
         hlsPlayer.attachMedia(video);
