@@ -1631,58 +1631,89 @@ function is_preview_running($id) {
  * Start player_preview for an input
  */
 function start_player_preview($id) {
-    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    try {
+        $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
 
-    $info = get_preview_info($id);
-    if (!$info) {
-        return ['success' => false, 'error' => 'Input not found'];
-    }
+        $info = get_preview_info($id);
+        if (!$info) {
+            return ['success' => false, 'error' => 'Input not found'];
+        }
 
-    // Check if already running
-    if (is_preview_running($id)) {
-        // Send keepalive to extend timeout
-        send_preview_keepalive($id);
+        // Validate we have required info
+        if (empty($info['preview_port'])) {
+            return ['success' => false, 'error' => 'No API port configured for this input'];
+        }
+
+        if (empty($info['input_address']) || $info['input_address'] === ':') {
+            return ['success' => false, 'error' => 'No output address configured for this input'];
+        }
+
+        // Check if already running
+        if (is_preview_running($id)) {
+            // Send keepalive to extend timeout
+            send_preview_keepalive($id);
+            return [
+                'success' => true,
+                'already_running' => true,
+                'message' => 'Preview already running',
+                'playlist_url' => $info['playlist_url'],
+                'preview_port' => $info['preview_port']
+            ];
+        }
+
+        // Create output directory
+        $output_dir = $info['output_dir'];
+        if (!is_dir($output_dir)) {
+            if (!@mkdir($output_dir, 0755, true)) {
+                return ['success' => false, 'error' => 'Failed to create output directory: ' . $output_dir];
+            }
+        }
+
+        // Check player_preview binary exists
+        if (!file_exists('/usr/local/bin/player_preview')) {
+            return ['success' => false, 'error' => 'player_preview binary not found at /usr/local/bin/player_preview'];
+        }
+
+        // Build command
+        $cmd = sprintf(
+            'nohup /usr/local/bin/player_preview --input %s --output-dir %s --api-port %d > /var/log/caritrans/preview-%s.log 2>&1 &',
+            escapeshellarg($info['input_address']),
+            escapeshellarg($output_dir),
+            (int)$info['preview_port'],
+            $info['folder']
+        );
+
+        // Execute in background
+        exec($cmd);
+
+        // Wait a moment for it to start
+        usleep(500000); // 500ms
+
+        // Check if it started
+        if (is_preview_running($id)) {
+            return [
+                'success' => true,
+                'message' => 'Preview started',
+                'playlist_url' => $info['playlist_url'],
+                'preview_port' => $info['preview_port']
+            ];
+        }
+
+        // Check log for errors
+        $log_file = '/var/log/caritrans/preview-' . $info['folder'] . '.log';
+        $log_content = file_exists($log_file) ? @file_get_contents($log_file) : '';
+
         return [
-            'success' => true,
-            'already_running' => true,
-            'message' => 'Preview already running',
-            'playlist_url' => $info['playlist_url'],
-            'preview_port' => $info['preview_port']
+            'success' => false,
+            'error' => 'Failed to start preview',
+            'debug' => [
+                'cmd' => $cmd,
+                'log' => substr($log_content, 0, 500)
+            ]
         ];
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => 'Exception: ' . $e->getMessage()];
     }
-
-    // Create output directory
-    $output_dir = $info['output_dir'];
-    if (!is_dir($output_dir)) {
-        mkdir($output_dir, 0755, true);
-    }
-
-    // Build command
-    $cmd = sprintf(
-        'nohup /usr/local/bin/player_preview --input %s --output-dir %s --api-port %d > /var/log/caritrans/preview-%s.log 2>&1 &',
-        escapeshellarg($info['input_address']),
-        escapeshellarg($output_dir),
-        $info['preview_port'],
-        $info['folder']
-    );
-
-    // Execute in background
-    exec($cmd);
-
-    // Wait a moment for it to start
-    usleep(500000); // 500ms
-
-    // Check if it started
-    if (is_preview_running($id)) {
-        return [
-            'success' => true,
-            'message' => 'Preview started',
-            'playlist_url' => $info['playlist_url'],
-            'preview_port' => $info['preview_port']
-        ];
-    }
-
-    return ['success' => false, 'error' => 'Failed to start preview'];
 }
 
 /**
