@@ -1,10 +1,3 @@
-/*
- * player_preview.c - HLS Preview Generator using FFmpeg
- *
- * Creates HLS stream for web preview with proper keyframe alignment.
- * Uses FFmpeg instead of tsp for better codec compatibility.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,19 +16,23 @@
 #define KEEPALIVE_TIMEOUT 60  // Seconds before shutdown if no keepalive
 #define DEFAULT_DURATION 2    // Segment duration in seconds
 #define DEFAULT_LIVE_SEGMENTS 5
+#define DEFAULT_SEGMENT_SIZE 400000  // Fixed segment size in bytes (~400KB for 2s at ~1.5Mbps)
 
 typedef struct {
-    char input_addr[128];     // Full input URL (udp://addr:port)
+    char input_addr[64];
+    int input_port;
     char output_dir[256];
-    char playlist_path[280];  // output_dir + "/playlist.m3u8"
+    char playlist_path[280];   // output_dir + "/playlist.m3u8"
+    char segment_template[280]; // output_dir + "/segment.ts"
     int api_port;
     int duration;
     int live_segments;
+    int fixed_segment_size;    // Fixed segment size for streams without detectable I-frames
     int segment_count;
-    int ready;                // 1 when >= 3 segments available
+    int ready;  // 1 when >= 3 segments available
     time_t last_keepalive;
     volatile int running;
-    pid_t ffmpeg_child;
+    pid_t tsp_child;
     pthread_mutex_t lock;
 } AppContext;
 
@@ -43,13 +40,14 @@ AppContext g_ctx;
 
 void print_help(const char *prog) {
     printf("Usage: %s [options]\n\n", prog);
-    printf("HLS Preview Generator (FFmpeg) - Creates HLS stream for web preview\n\n");
+    printf("HLS Preview Generator - Creates HLS stream for web preview\n\n");
     printf("Options:\n");
     printf("  --input ADDRESS:PORT         Input UDP multicast address (required)\n");
     printf("  --output-dir PATH            Output directory for HLS files (required)\n");
     printf("  --api-port PORT              REST API port (required)\n");
     printf("  --duration SECONDS           Segment duration (default: %d)\n", DEFAULT_DURATION);
     printf("  --live-segments COUNT        Number of live segments (default: %d)\n", DEFAULT_LIVE_SEGMENTS);
+    printf("  --segment-size BYTES         Fixed segment size in bytes (default: %d)\n", DEFAULT_SEGMENT_SIZE);
     printf("  --help                       Show this help\n");
     printf("\nAPI Endpoints:\n");
     printf("  GET  /health     - Health check\n");
@@ -61,6 +59,7 @@ void init_context() {
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.duration = DEFAULT_DURATION;
     g_ctx.live_segments = DEFAULT_LIVE_SEGMENTS;
+    g_ctx.fixed_segment_size = DEFAULT_SEGMENT_SIZE;
     g_ctx.last_keepalive = time(NULL);
     g_ctx.running = 1;
     pthread_mutex_init(&g_ctx.lock, NULL);
@@ -85,15 +84,16 @@ int count_segments() {
     return count;
 }
 
-// Clear output directory
+// Clear all files in output directory
 int clear_output_dir() {
     DIR *dir = opendir(g_ctx.output_dir);
     if (!dir) {
-        // Try to create it
+        // Directory doesn't exist, try to create it
         if (mkdir(g_ctx.output_dir, 0755) != 0) {
             fprintf(stderr, "ERROR: Cannot create output directory: %s\n", g_ctx.output_dir);
             return -1;
         }
+        fprintf(stderr, "Created output directory: %s\n", g_ctx.output_dir);
         return 0;
     }
 
@@ -112,20 +112,20 @@ int clear_output_dir() {
     return 0;
 }
 
-void kill_ffmpeg_child() {
-    if (g_ctx.ffmpeg_child > 0) {
-        fprintf(stderr, "Killing ffmpeg child process %d\n", g_ctx.ffmpeg_child);
-        kill(g_ctx.ffmpeg_child, SIGTERM);
+void kill_tsp_child() {
+    if (g_ctx.tsp_child > 0) {
+        fprintf(stderr, "Killing tsp child process %d\n", g_ctx.tsp_child);
+        kill(g_ctx.tsp_child, SIGTERM);
         usleep(100000);  // 100ms grace period
-        kill(g_ctx.ffmpeg_child, SIGKILL);
-        waitpid(g_ctx.ffmpeg_child, NULL, WNOHANG);
-        g_ctx.ffmpeg_child = 0;
+        kill(g_ctx.tsp_child, SIGKILL);
+        waitpid(g_ctx.tsp_child, NULL, WNOHANG);
+        g_ctx.tsp_child = 0;
     }
 }
 
 void cleanup_and_exit() {
     fprintf(stderr, "Cleaning up...\n");
-    kill_ffmpeg_child();
+    kill_tsp_child();
 
     // Clear HLS files on exit
     DIR *dir = opendir(g_ctx.output_dir);
@@ -148,39 +148,34 @@ void signal_handler(int sig) {
     g_ctx.running = 0;
 }
 
-void* ffmpeg_manager_thread(void *arg) {
+void* tsp_manager_thread(void *arg) {
     (void)arg;
 
     while (g_ctx.running) {
-        char duration_str[16], list_size_str[16];
-        char segment_pattern[512];
+        char input_arg[128];
+        snprintf(input_arg, sizeof(input_arg), "%s:%d", g_ctx.input_addr, g_ctx.input_port);
 
+        char duration_str[16], live_str[16], segment_size_str[16];
         snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
-        snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
-        snprintf(segment_pattern, sizeof(segment_pattern), "%s/segment-%%06d.ts", g_ctx.output_dir);
+        snprintf(live_str, sizeof(live_str), "%d", g_ctx.live_segments);
+        snprintf(segment_size_str, sizeof(segment_size_str), "%d", g_ctx.fixed_segment_size);
 
-        // Build ffmpeg command
-        // ffmpeg -i udp://addr:port -c:v copy -c:a copy -f hls [options] playlist.m3u8
+        // Build tsp command with fixed segment size for reliable segmentation
+        // The -f option ensures segments are created even when I-frames can't be detected
         char *argv[] = {
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-fflags", "+genpts",
-            "-i", g_ctx.input_addr,
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-f", "hls",
-            "-hls_time", duration_str,
-            "-hls_list_size", list_size_str,
-            "-hls_flags", "delete_segments+independent_segments",
-            "-hls_segment_type", "mpegts",
-            "-hls_segment_filename", segment_pattern,
-            g_ctx.playlist_path,
+            "tsp",
+            "-I", "ip", input_arg,
+            "-O", "hls",
+            "--live", live_str,
+            "--duration", duration_str,
+            "-f", segment_size_str,
+            "--playlist", g_ctx.playlist_path,
+            g_ctx.segment_template,
             NULL
         };
 
         // Log the command
-        fprintf(stderr, "Starting ffmpeg:");
+        fprintf(stderr, "Starting tsp:");
         for (int i = 0; argv[i]; i++) {
             fprintf(stderr, " %s", argv[i]);
         }
@@ -192,25 +187,27 @@ void* ffmpeg_manager_thread(void *arg) {
             // Child process
             prctl(PR_SET_PDEATHSIG, SIGKILL);
 
-            // Redirect stderr to /dev/null to reduce noise (or keep for debugging)
-            // freopen("/dev/null", "w", stderr);
+            // Redirect stderr to /dev/null to reduce noise
+            if (freopen("/dev/null", "w", stderr) == NULL) {
+                // Ignore failure - not critical
+            }
 
-            execvp("ffmpeg", argv);
-            perror("execvp ffmpeg failed");
+            execvp("tsp", argv);
+            perror("execvp tsp failed");
             _exit(1);
         } else if (pid > 0) {
-            g_ctx.ffmpeg_child = pid;
-            fprintf(stderr, "ffmpeg started with PID %d\n", pid);
+            g_ctx.tsp_child = pid;
+            fprintf(stderr, "tsp started with PID %d\n", pid);
 
             int status;
             waitpid(pid, &status, 0);
-            g_ctx.ffmpeg_child = 0;
+            g_ctx.tsp_child = 0;
 
             if (g_ctx.running) {
                 if (WIFEXITED(status)) {
-                    fprintf(stderr, "ffmpeg exited with code %d, restarting...\n", WEXITSTATUS(status));
+                    fprintf(stderr, "tsp exited with code %d, restarting...\n", WEXITSTATUS(status));
                 } else if (WIFSIGNALED(status)) {
-                    fprintf(stderr, "ffmpeg killed by signal %d, restarting...\n", WTERMSIG(status));
+                    fprintf(stderr, "tsp killed by signal %d, restarting...\n", WTERMSIG(status));
                 }
                 sleep(2);
             }
@@ -238,7 +235,7 @@ void* monitor_thread(void *arg) {
     return NULL;
 }
 
-static enum MHD_Result api_handler(void *cls, struct MHD_Connection *connection,
+static int api_handler(void *cls, struct MHD_Connection *connection,
                       const char *url, const char *method,
                       const char *version, const char *upload_data,
                       size_t *upload_data_size, void **con_cls) {
@@ -251,7 +248,7 @@ static enum MHD_Result api_handler(void *cls, struct MHD_Connection *connection,
     struct MHD_Response *mhd_response;
     int ret;
 
-    // CORS preflight
+    // Handle OPTIONS for CORS preflight
     if (strcmp(method, "OPTIONS") == 0) {
         mhd_response = MHD_create_response_from_buffer(0, "", MHD_RESPMEM_PERSISTENT);
         MHD_add_response_header(mhd_response, "Access-Control-Allow-Origin", "*");
@@ -327,12 +324,17 @@ int main(int argc, char *argv[]) {
 
     int has_input = 0, has_output = 0, has_port = 0;
 
+    // Parse command line
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
-            // Build UDP URL from address:port
-            const char *addr_port = argv[++i];
-            snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "udp://%s", addr_port);
-            has_input = 1;
+            char *addr_port = argv[++i];
+            char *colon = strchr(addr_port, ':');
+            if (colon) {
+                strncpy(g_ctx.input_addr, addr_port, colon - addr_port);
+                g_ctx.input_addr[colon - addr_port] = '\0';
+                g_ctx.input_port = atoi(colon + 1);
+                has_input = 1;
+            }
         } else if (strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc) {
             strncpy(g_ctx.output_dir, argv[++i], sizeof(g_ctx.output_dir) - 1);
             has_output = 1;
@@ -343,6 +345,8 @@ int main(int argc, char *argv[]) {
             g_ctx.duration = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--live-segments") == 0 && i + 1 < argc) {
             g_ctx.live_segments = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--segment-size") == 0 && i + 1 < argc) {
+            g_ctx.fixed_segment_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
             return 0;
@@ -359,8 +363,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Build playlist path
+    // Build paths
     snprintf(g_ctx.playlist_path, sizeof(g_ctx.playlist_path), "%s/playlist.m3u8", g_ctx.output_dir);
+    snprintf(g_ctx.segment_template, sizeof(g_ctx.segment_template), "%s/segment.ts", g_ctx.output_dir);
 
     // Clear/create output directory
     if (clear_output_dir() != 0) {
@@ -371,17 +376,18 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    fprintf(stderr, "Player Preview Starting (FFmpeg)\n");
-    fprintf(stderr, "Input:  %s\n", g_ctx.input_addr);
+    fprintf(stderr, "Player Preview Starting\n");
+    fprintf(stderr, "Input:  %s:%d\n", g_ctx.input_addr, g_ctx.input_port);
     fprintf(stderr, "Output: %s\n", g_ctx.output_dir);
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
     fprintf(stderr, "Segment Duration: %d seconds\n", g_ctx.duration);
     fprintf(stderr, "Live Segments: %d\n", g_ctx.live_segments);
+    fprintf(stderr, "Fixed Segment Size: %d bytes\n", g_ctx.fixed_segment_size);
     fprintf(stderr, "Keepalive Timeout: %d seconds\n", KEEPALIVE_TIMEOUT);
 
-    // Start ffmpeg manager thread
-    pthread_t ffmpeg_thread;
-    pthread_create(&ffmpeg_thread, NULL, ffmpeg_manager_thread, NULL);
+    // Start tsp manager thread
+    pthread_t tsp_thread;
+    pthread_create(&tsp_thread, NULL, tsp_manager_thread, NULL);
 
     // Start monitor thread
     pthread_t mon_thread;
@@ -398,7 +404,7 @@ int main(int argc, char *argv[]) {
     if (!daemon) {
         fprintf(stderr, "ERROR: Failed to start HTTP server on port %d\n", g_ctx.api_port);
         g_ctx.running = 0;
-        pthread_join(ffmpeg_thread, NULL);
+        pthread_join(tsp_thread, NULL);
         return 1;
     }
 
@@ -424,9 +430,9 @@ int main(int argc, char *argv[]) {
     // Cleanup
     fprintf(stderr, "Shutting down...\n");
     MHD_stop_daemon(daemon);
-    kill_ffmpeg_child();
+    kill_tsp_child();
     pthread_cancel(mon_thread);
-    pthread_join(ffmpeg_thread, NULL);
+    pthread_join(tsp_thread, NULL);
     pthread_join(mon_thread, NULL);
     cleanup_and_exit();
 
