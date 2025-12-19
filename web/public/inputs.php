@@ -1135,19 +1135,20 @@ function populateConfigPidSelects(data) {
         console.log('populateConfigPidSelects: Found', data.programs.length, 'programs');
         data.programs.forEach(prog => {
             const opt = document.createElement('option');
-            opt.value = prog.id;
+            opt.value = prog.pmt_pid;  // Use PMT PID, not program number
             opt.textContent = prog.name || `Program ${prog.id}`;
             if (prog.provider) {
                 opt.textContent += ` (${prog.provider})`;
             }
+            opt.textContent += ` (PMT: ${prog.pmt_pid})`;
             programSelect.appendChild(opt);
         });
 
         // Auto-select and populate PIDs only if exactly one program
         if (data.programs.length === 1) {
             console.log('populateConfigPidSelects: Auto-selecting single program');
-            programSelect.value = data.programs[0].id;
-            filterPidsByProgram(data.programs[0].id);
+            programSelect.value = data.programs[0].pmt_pid;
+            filterPidsByProgram(data.programs[0].pmt_pid);
         }
     } else {
         console.log('populateConfigPidSelects: No programs found');
@@ -1174,8 +1175,8 @@ function populateConfigPidSelects(data) {
     resultsContent.innerHTML = html;
 }
 
-// Filter video and audio PIDs based on selected program
-function filterPidsByProgram(programId) {
+// Filter video and audio PIDs based on selected program (by PMT PID)
+function filterPidsByProgram(pmtPid) {
     const videoSelect = document.getElementById('configVideoSelect');
     const audioSelect = document.getElementById('configAudioSelect');
 
@@ -1184,17 +1185,17 @@ function filterPidsByProgram(programId) {
     audioSelect.innerHTML = '';
 
     // If no program selected or no scan data, just leave empty
-    if (!programId || !currentScanData || !currentScanData.programs) {
+    if (!pmtPid || !currentScanData || !currentScanData.programs) {
         console.log('filterPidsByProgram: No program selected or no scan data');
         return;
     }
 
     // Convert to number for comparison (API returns numbers, select value is string)
-    const programIdNum = parseInt(programId, 10);
-    console.log('filterPidsByProgram: Looking for program', programIdNum, 'in', currentScanData.programs.map(p => p.id));
+    const pmtPidNum = parseInt(pmtPid, 10);
+    console.log('filterPidsByProgram: Looking for program with PMT PID', pmtPidNum, 'in', currentScanData.programs.map(p => p.pmt_pid));
 
-    // Find the selected program
-    const program = currentScanData.programs.find(p => p.id === programIdNum);
+    // Find the selected program by PMT PID
+    const program = currentScanData.programs.find(p => p.pmt_pid === pmtPidNum);
     if (!program) {
         console.log('filterPidsByProgram: Program not found');
         return;
