@@ -1566,7 +1566,7 @@ function build_ini_content($config) {
  * Get preview API port for an input (input api_port + 1000)
  */
 function get_preview_port($id) {
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
     if (!file_exists($config_file)) {
         return null;
     }
@@ -1579,7 +1579,7 @@ function get_preview_port($id) {
  * Get preview info for an input
  */
 function get_preview_info($id) {
-    $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
     if (!file_exists($config_file)) {
         return null;
     }
