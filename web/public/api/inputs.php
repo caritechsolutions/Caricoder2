@@ -1673,47 +1673,31 @@ function start_player_preview($id) {
             }
         }
 
-        // Check player_preview binary exists
-        if (!file_exists('/usr/local/bin/player_preview')) {
-            return ['success' => false, 'error' => 'player_preview binary not found at /usr/local/bin/player_preview'];
-        }
+        // Call the CariTranscoder API to start player_preview
+        // The API runs as root and can properly manage background processes
+        $api_data = [
+            'input_address' => $info['input_address'],
+            'output_dir' => $output_dir,
+            'api_port' => (int)$info['preview_port'],
+            'folder' => $info['folder']
+        ];
 
-        // Build command
-        $cmd = sprintf(
-            'nohup /usr/local/bin/player_preview --input %s --output-dir %s --api-port %d > /var/log/caritrans/preview-%s.log 2>&1 &',
-            escapeshellarg($info['input_address']),
-            escapeshellarg($output_dir),
-            (int)$info['preview_port'],
-            $info['folder']
-        );
+        $result = call_cari_api('/preview/start', 'POST', $api_data);
 
-        // Execute in background
-        exec($cmd);
-
-        // Wait a moment for it to start
-        usleep(500000); // 500ms
-
-        // Check if it started
-        if (is_preview_running($id)) {
+        if (isset($result['success']) && $result['success']) {
             return [
                 'success' => true,
-                'message' => 'Preview started',
+                'message' => $result['message'] ?? 'Preview started',
                 'playlist_url' => $info['playlist_url'],
-                'preview_port' => $info['preview_port']
+                'preview_port' => $info['preview_port'],
+                'already_running' => $result['already_running'] ?? false
             ];
         }
 
-        // Check log for errors
-        $log_file = '/var/log/caritrans/preview-' . $info['folder'] . '.log';
-        $log_content = file_exists($log_file) ? @file_get_contents($log_file) : '';
-
         return [
             'success' => false,
-            'error' => 'Failed to start preview',
-            'debug' => [
-                'cmd' => $cmd,
-                'log' => substr($log_content, 0, 500)
-            ]
+            'error' => $result['error'] ?? 'Failed to start preview',
+            'debug' => $result
         ];
     } catch (Exception $e) {
         return ['success' => false, 'error' => 'Exception: ' . $e->getMessage()];

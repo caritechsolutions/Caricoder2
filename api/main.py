@@ -612,6 +612,141 @@ async def delete_config(path: str):
 
 
 # ----------------------------------------------------------------------------
+# Preview Management (player_preview)
+# ----------------------------------------------------------------------------
+
+class PreviewStart(BaseModel):
+    """Model for starting a preview"""
+    input_address: str  # e.g., "239.100.0.1:10000"
+    output_dir: str     # e.g., "/var/www/html/caritrans/preview/bet"
+    api_port: int       # e.g., 10100
+    folder: str         # e.g., "bet" (for log file naming)
+
+
+def is_preview_running(api_port: int) -> bool:
+    """Check if player_preview is running on the given port"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        result = sock.connect_ex(('127.0.0.1', api_port))
+        return result == 0
+    except:
+        return False
+    finally:
+        sock.close()
+
+
+@app.post("/preview/start")
+async def start_preview(preview: PreviewStart):
+    """Start player_preview for an input"""
+
+    # Check if already running
+    if is_preview_running(preview.api_port):
+        return {
+            "success": True,
+            "already_running": True,
+            "message": "Preview already running",
+            "api_port": preview.api_port
+        }
+
+    # Create output directory if needed
+    os.makedirs(preview.output_dir, exist_ok=True)
+
+    # Check binary exists
+    binary = "/usr/local/bin/player_preview"
+    if not os.path.exists(binary):
+        return {
+            "success": False,
+            "error": f"Binary not found: {binary}"
+        }
+
+    log_file = f"{LOG_DIR}/preview-{preview.folder}.log"
+
+    try:
+        # Start player_preview as a detached subprocess
+        cmd = [
+            binary,
+            "--input", preview.input_address,
+            "--output-dir", preview.output_dir,
+            "--api-port", str(preview.api_port)
+        ]
+
+        # Open log file for output
+        with open(log_file, 'w') as log_f:
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True  # Detach from parent
+            )
+
+        logger.info(f"Started player_preview: PID={process.pid}, port={preview.api_port}")
+
+        # Wait a moment and check if it started
+        import time
+        time.sleep(0.5)
+
+        if is_preview_running(preview.api_port):
+            return {
+                "success": True,
+                "message": "Preview started",
+                "pid": process.pid,
+                "api_port": preview.api_port,
+                "log_file": log_file
+            }
+        else:
+            # Read log for error info
+            log_content = ""
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    log_content = f.read()[:500]
+
+            return {
+                "success": False,
+                "error": "Failed to start preview",
+                "log": log_content
+            }
+
+    except Exception as e:
+        logger.error(f"Failed to start preview: {e}")
+        logger.error(traceback.format_exc())
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.post("/preview/stop/{api_port}")
+async def stop_preview(api_port: int):
+    """Stop a player_preview by sending a request to its shutdown or just killing it"""
+
+    if not is_preview_running(api_port):
+        return {
+            "success": True,
+            "message": "Preview not running"
+        }
+
+    # Find and kill the process listening on that port
+    try:
+        result = subprocess.run(
+            ["fuser", "-k", f"{api_port}/tcp"],
+            capture_output=True,
+            text=True
+        )
+        return {
+            "success": True,
+            "message": f"Stopped preview on port {api_port}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# ----------------------------------------------------------------------------
 # System Operations
 # ----------------------------------------------------------------------------
 
