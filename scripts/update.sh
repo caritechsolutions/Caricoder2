@@ -27,6 +27,7 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
+# Updated: 2024-12-20 22:40
 BRANCH="claude/av-sync-monitor-Y57VM"
 
 # Parse arguments
