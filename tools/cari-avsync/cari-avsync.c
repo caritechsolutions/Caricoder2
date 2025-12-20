@@ -309,13 +309,20 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
         "-P pcrextract --pts --pcr --pid %d --pid %d --csv "
-        "-O drop 2>/dev/null",
+        "-O drop 2>&1",
         SAMPLE_DURATION + 2,
         input->address, input->port,
         input->video_pid, input->audio_pid);
 
+    printf("  Running: %s\n", cmd);
+    fflush(stdout);
+
     FILE* fp = popen(cmd, "r");
-    if (!fp) return -1;
+    if (!fp) {
+        printf("  popen failed\n");
+        fflush(stdout);
+        return -1;
+    }
 
     char line[512];
 
@@ -385,7 +392,13 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
 
     pclose(fp);
 
+    printf("  Collected: %d PCR, %d video PTS, %d audio PTS\n",
+           pcr_count, video_count, audio_count);
+    fflush(stdout);
+
     if (pcr_count == 0 || video_count == 0 || audio_count == 0) {
+        printf("  Failed: insufficient data\n");
+        fflush(stdout);
         return -1;
     }
 
