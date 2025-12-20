@@ -308,7 +308,7 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
-        "-P pcrextract --pts --pcr --evaluate-pcr-offset --pid %d --pid %d --csv "
+        "-P pcrextract --pts --pcr --pid %d --pid %d --csv "
         "-O drop 2>/dev/null",
         SAMPLE_DURATION + 2,
         input->address, input->port,
@@ -318,8 +318,16 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
     if (!fp) return -1;
 
     char line[512];
-    double video_offsets[100];
-    double audio_offsets[100];
+
+    // Store PCR values with packet positions
+    typedef struct { int packet; double pcr; } PcrSample;
+    PcrSample pcrs[200];
+    int pcr_count = 0;
+
+    // Store PTS values with packet positions
+    typedef struct { int packet; double pts; } PtsSample;
+    PtsSample video_pts[100];
+    PtsSample audio_pts[100];
     int video_count = 0;
     int audio_count = 0;
 
@@ -332,10 +340,10 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
     // Parse CSV: PID,Packet,PID-Packet,Type,Count,Value,ValueOffset,OffsetFromPCR
     while (fgets(line, sizeof(line), fp)) {
         int pid = 0;
+        int packet = 0;
         char type[16] = "";
-        double offset_from_pcr = 0;
+        double value = 0;
 
-        // Parse: PID,...,Type,...,OffsetFromPCR
         char* token;
         char* saveptr;
         int field = 0;
@@ -347,42 +355,85 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         while (token) {
             switch (field) {
                 case 0: pid = atoi(token); break;
+                case 1: packet = atoi(token); break;
                 case 3: snprintf(type, sizeof(type), "%s", token); break;
-                case 7:
-                    if (strlen(token) > 0 && token[0] != '\n' && token[0] != '\r') {
-                        offset_from_pcr = atof(token);
-                    }
-                    break;
+                case 5: value = atof(token); break;
             }
             field++;
             token = strtok_r(NULL, ",", &saveptr);
         }
 
-        // Only count PTS entries with valid offset
-        if (strcmp(type, "PTS") == 0 && offset_from_pcr > 0) {
+        // Collect PCR entries (from video PID which carries PCR)
+        if (strcmp(type, "PCR") == 0 && pcr_count < 200) {
+            pcrs[pcr_count].packet = packet;
+            pcrs[pcr_count].pcr = value;
+            pcr_count++;
+        }
+        // Collect PTS entries
+        else if (strcmp(type, "PTS") == 0) {
             if (pid == input->video_pid && video_count < 100) {
-                video_offsets[video_count++] = offset_from_pcr;
+                video_pts[video_count].packet = packet;
+                video_pts[video_count].pts = value;
+                video_count++;
             } else if (pid == input->audio_pid && audio_count < 100) {
-                audio_offsets[audio_count++] = offset_from_pcr;
+                audio_pts[audio_count].packet = packet;
+                audio_pts[audio_count].pts = value;
+                audio_count++;
             }
         }
     }
 
     pclose(fp);
 
-    if (video_count == 0 || audio_count == 0) {
+    if (pcr_count == 0 || video_count == 0 || audio_count == 0) {
         return -1;
     }
 
-    // Calculate averages
-    double video_avg = 0, audio_avg = 0;
-    for (int i = 0; i < video_count; i++) video_avg += video_offsets[i];
-    for (int i = 0; i < audio_count; i++) audio_avg += audio_offsets[i];
-    video_avg /= video_count;
-    audio_avg /= audio_count;
+    // Helper macro to find interpolated PCR at a packet position
+    #define GET_PCR_AT_PACKET(pkt, result) do { \
+        int idx; \
+        for (idx = 0; idx < pcr_count - 1; idx++) { \
+            if (pcrs[idx+1].packet >= (pkt)) break; \
+        } \
+        if (idx >= pcr_count - 1) idx = pcr_count - 2; \
+        if (idx < 0) idx = 0; \
+        int p1 = pcrs[idx].packet; \
+        int p2 = pcrs[idx+1].packet; \
+        double pcr1 = pcrs[idx].pcr; \
+        double pcr2 = pcrs[idx+1].pcr; \
+        if (p2 == p1) { result = pcr1; } \
+        else { \
+            double ratio = (double)((pkt) - p1) / (double)(p2 - p1); \
+            result = pcr1 + ratio * (pcr2 - pcr1); \
+        } \
+    } while(0)
+
+    // Calculate average offset for video PTS
+    // PTS is in 90kHz, PCR is in 27MHz
+    // Convert PTS to 27MHz: PTS * 300
+    double video_offset_sum = 0;
+    for (int i = 0; i < video_count; i++) {
+        double pts_27mhz = video_pts[i].pts * 300.0;
+        double pcr_at_pkt;
+        GET_PCR_AT_PACKET(video_pts[i].packet, pcr_at_pkt);
+        video_offset_sum += (pts_27mhz - pcr_at_pkt);
+    }
+    double video_avg_offset = video_offset_sum / video_count;
+
+    // Calculate average offset for audio PTS
+    double audio_offset_sum = 0;
+    for (int i = 0; i < audio_count; i++) {
+        double pts_27mhz = audio_pts[i].pts * 300.0;
+        double pcr_at_pkt;
+        GET_PCR_AT_PACKET(audio_pts[i].packet, pcr_at_pkt);
+        audio_offset_sum += (pts_27mhz - pcr_at_pkt);
+    }
+    double audio_avg_offset = audio_offset_sum / audio_count;
+
+    #undef GET_PCR_AT_PACKET
 
     // A/V offset in 27MHz ticks, convert to ms
-    double offset_ticks = audio_avg - video_avg;
+    double offset_ticks = audio_avg_offset - video_avg_offset;
     *offset_ms = offset_ticks / 27000.0;
 
     return 0;
