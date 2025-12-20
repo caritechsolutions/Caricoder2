@@ -44,6 +44,10 @@ typedef int MHD_Result;
 #define MAX_INPUTS 100
 #define MAX_PTS_SAMPLES 500     // Max PTS samples to capture
 
+// Alarm thresholds (milliseconds)
+#define THRESHOLD_OK 300.0       // < 300ms = OK
+#define THRESHOLD_WARNING 600.0  // 300-600ms = WARNING, > 600ms = ERROR
+
 // PTS sample for sorting
 typedef struct {
     int pid;
@@ -58,6 +62,7 @@ typedef struct {
     double v2a_avg_ms;      // Video→Audio mean gap
     int a2v_count;          // Sample count used
     int v2a_count;          // Sample count used
+    char status[16];        // "OK", "WARNING", "ERROR"
 } MeasurementResult;
 
 typedef struct {
@@ -463,10 +468,17 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
     struct tm* tm = localtime(&now);
     strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
 
-    printf("  [STATS] A→V mean: %.1fms (%d samples, max excluded)\n",
-           result->a2v_avg_ms, result->a2v_count);
-    printf("  [STATS] V→A mean: %.1fms (%d samples, max excluded)\n",
-           result->v2a_avg_ms, result->v2a_count);
+    // Set status based on A→V mean
+    if (result->a2v_avg_ms < THRESHOLD_OK) {
+        snprintf(result->status, sizeof(result->status), "OK");
+    } else if (result->a2v_avg_ms < THRESHOLD_WARNING) {
+        snprintf(result->status, sizeof(result->status), "WARNING");
+    } else {
+        snprintf(result->status, sizeof(result->status), "ERROR");
+    }
+
+    printf("  [STATS] A→V mean: %.1fms, V→A mean: %.1fms, Status: %s\n",
+           result->a2v_avg_ms, result->v2a_avg_ms, result->status);
 
     return 0;
 }
@@ -553,13 +565,15 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
         "\"a2v_mean_ms\":%.2f,"
         "\"v2a_mean_ms\":%.2f,"
         "\"a2v_samples\":%d,"
-        "\"v2a_samples\":%d"
+        "\"v2a_samples\":%d,"
+        "\"status\":\"%s\""
         "}",
         result->timestamp,
         result->a2v_avg_ms,
         result->v2a_avg_ms,
         result->a2v_count,
-        result->v2a_count);
+        result->v2a_count,
+        result->status);
 }
 
 // Build JSON for single input
@@ -774,6 +788,11 @@ void print_help(const char* prog) {
     printf("  4. FILTER    - Keep only alternating video/audio frames\n");
     printf("  5. COMPARE   - Calculate A→V and V→A mean gaps (max excluded)\n");
     printf("  6. SAVE      - Store results with timestamp for trending\n");
+    printf("\n");
+    printf("Status Thresholds (A→V mean):\n");
+    printf("  OK:      < %.0fms\n", THRESHOLD_OK);
+    printf("  WARNING: %.0fms - %.0fms\n", THRESHOLD_OK, THRESHOLD_WARNING);
+    printf("  ERROR:   > %.0fms\n", THRESHOLD_WARNING);
 }
 
 int main(int argc, char* argv[]) {
