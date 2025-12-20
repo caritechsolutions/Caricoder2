@@ -402,34 +402,28 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         return -1;
     }
 
-    // Helper macro to find interpolated PCR at a packet position
-    #define GET_PCR_AT_PACKET(pkt, result) do { \
-        int idx; \
-        for (idx = 0; idx < pcr_count - 1; idx++) { \
-            if (pcrs[idx+1].packet >= (pkt)) break; \
-        } \
-        if (idx >= pcr_count - 1) idx = pcr_count - 2; \
-        if (idx < 0) idx = 0; \
-        int p1 = pcrs[idx].packet; \
-        int p2 = pcrs[idx+1].packet; \
-        double pcr1 = pcrs[idx].pcr; \
-        double pcr2 = pcrs[idx+1].pcr; \
-        if (p2 == p1) { result = pcr1; } \
-        else { \
-            double ratio = (double)((pkt) - p1) / (double)(p2 - p1); \
-            result = pcr1 + ratio * (pcr2 - pcr1); \
+    // Find the nearest PRECEDING PCR for a given packet position
+    // This is how tsp calculates "Offset from PCR" - use the last PCR before the PTS
+    #define GET_PRECEDING_PCR(pkt, result) do { \
+        result = pcrs[0].pcr; \
+        for (int idx = pcr_count - 1; idx >= 0; idx--) { \
+            if (pcrs[idx].packet <= (pkt)) { \
+                result = pcrs[idx].pcr; \
+                break; \
+            } \
         } \
     } while(0)
 
     // Calculate average offset for video PTS
     // PTS is in 90kHz, PCR is in 27MHz
     // Convert PTS to 27MHz: PTS * 300
+    // Offset = (PTS * 300) - preceding_PCR
     double video_offset_sum = 0;
     for (int i = 0; i < video_count; i++) {
         double pts_27mhz = video_pts[i].pts * 300.0;
-        double pcr_at_pkt;
-        GET_PCR_AT_PACKET(video_pts[i].packet, pcr_at_pkt);
-        video_offset_sum += (pts_27mhz - pcr_at_pkt);
+        double pcr;
+        GET_PRECEDING_PCR(video_pts[i].packet, pcr);
+        video_offset_sum += (pts_27mhz - pcr);
     }
     double video_avg_offset = video_offset_sum / video_count;
 
@@ -437,17 +431,22 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
     double audio_offset_sum = 0;
     for (int i = 0; i < audio_count; i++) {
         double pts_27mhz = audio_pts[i].pts * 300.0;
-        double pcr_at_pkt;
-        GET_PCR_AT_PACKET(audio_pts[i].packet, pcr_at_pkt);
-        audio_offset_sum += (pts_27mhz - pcr_at_pkt);
+        double pcr;
+        GET_PRECEDING_PCR(audio_pts[i].packet, pcr);
+        audio_offset_sum += (pts_27mhz - pcr);
     }
     double audio_avg_offset = audio_offset_sum / audio_count;
 
-    #undef GET_PCR_AT_PACKET
+    #undef GET_PRECEDING_PCR
 
     // A/V offset in 27MHz ticks, convert to ms
     double offset_ticks = audio_avg_offset - video_avg_offset;
     *offset_ms = offset_ticks / 27000.0;
+
+    printf("  Video avg offset: %.0f ticks (%.2f ms)\n", video_avg_offset, video_avg_offset / 27000.0);
+    printf("  Audio avg offset: %.0f ticks (%.2f ms)\n", audio_avg_offset, audio_avg_offset / 27000.0);
+    printf("  A/V offset: %.2f ms\n", *offset_ms);
+    fflush(stdout);
 
     return 0;
 }
