@@ -27,7 +27,7 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/video-transcoder-gstreamer-YnBIH"
+BRANCH="claude/av-sync-monitor-Y57VM"
 
 # Parse arguments
 AUTO_CONFIRM=false
