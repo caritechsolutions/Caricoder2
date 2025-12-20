@@ -502,6 +502,19 @@ build_tools() {
         fi
     fi
 
+    # Build cari-avsync
+    if [[ -d "$INSTALL_DIR/tools/cari-avsync" ]]; then
+        cd "$INSTALL_DIR/tools/cari-avsync"
+        log_info "Building cari-avsync..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-avsync installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-avsync"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
@@ -673,6 +686,31 @@ install_api() {
     fi
 
     log_info "API service installed"
+}
+
+# Install A/V Sync Monitor service
+install_avsync_service() {
+    log_step "Installing A/V Sync Monitor service..."
+
+    # Copy systemd service
+    if [[ -f "$INSTALL_DIR/systemd/cari-avsync.service" ]]; then
+        cp "$INSTALL_DIR/systemd/cari-avsync.service" /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable cari-avsync
+        systemctl start cari-avsync || systemctl restart cari-avsync
+
+        sleep 2
+        if systemctl is-active --quiet cari-avsync; then
+            log_info "A/V Sync Monitor service is running"
+        else
+            log_warn "A/V Sync Monitor service may not be running properly"
+            log_warn "Check with: journalctl -u cari-avsync -f"
+        fi
+    else
+        log_warn "cari-avsync.service not found, skipping"
+    fi
+
+    log_info "A/V Sync Monitor service installed"
 }
 
 # Configure Nginx (optional)
@@ -924,6 +962,7 @@ main() {
     install_web
     install_services
     install_api
+    install_avsync_service
     configure_nginx
     create_tmpfiles
     start_services
