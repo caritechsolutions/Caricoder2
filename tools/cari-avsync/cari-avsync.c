@@ -1,15 +1,13 @@
 /*
  * cari-avsync.c - A/V Sync Monitor Service
  *
- * Monitors audio/video synchronization for all running inputs.
- * Uses tsp pcrextract with --evaluate-pcr-offset to get PTS timing.
- *
- * Method: PTS Alignment Check
- * - Collect audio and video PTS values with packet positions
- * - For each audio frame, find the nearest video frame by packet position
- * - Compare their PTS values (both on same 90kHz timeline)
- * - Track the PTS difference over time - drift indicates sync problems
- * - A consistent offset is normal (video PTS leads due to decode buffer)
+ * Workflow:
+ * 1. CAPTURE - Run tsp to extract PTS values from live stream
+ * 2. PARSE & SORT - Extract PTS entries, sort chronologically
+ * 3. FILTER - Keep only alternating video/audio frames
+ * 4. COMPARE - Calculate gaps between frame pairs, separate into A→V and V→A
+ * 5. ANALYZE - Compare to baseline, detect patterns, assign status/score
+ * 6. SAVE - Store results with trending data for API consumption
  *
  * Copyright (c) 2024 CariTech Solutions
  */
@@ -39,40 +37,104 @@ typedef int MHD_Result;
 #define API_PORT 8082
 #define CONFIG_DIR "/etc/caritrans/inputs"
 #define DATA_FILE "/var/lib/caritrans/avsync.json"
+#define BASELINE_FILE "/var/lib/caritrans/avsync_baseline.json"
 #define CHECK_INTERVAL 300      // 5 minutes between checks
-#define SAMPLE_DURATION 5       // 5 seconds per sample
+#define SAMPLE_DURATION 10      // 10 seconds per sample (user specified)
 #define HISTORY_SIZE 288        // 24 hours at 5-minute intervals
 #define MAX_INPUTS 100
-#define MAX_WORKERS 10
+#define MAX_PTS_SAMPLES 500     // Max PTS samples to capture
 
-// Color status thresholds (milliseconds)
-#define THRESHOLD_GREEN 10.0
-#define THRESHOLD_YELLOW 25.0
-#define THRESHOLD_ORANGE 45.0
+// Status thresholds relative to baseline (milliseconds)
+#define THRESHOLD_WARNING 50.0   // baseline + 50ms = WARNING
+#define THRESHOLD_CRITICAL 100.0 // baseline + 100ms = CRITICAL
 
+// Variance thresholds (percentage)
+#define VARIANCE_OK 10.0         // Within ±10% of baseline
+#define VARIANCE_WARNING 20.0    // Within ±20% of baseline
+
+// Pattern detection thresholds
+#define DRIFT_THRESHOLD 5.0      // Steady change > 5ms = drifting
+#define ANOMALY_THRESHOLD 100.0  // Single spike > 100ms from mean
+
+// PTS sample for sorting
+typedef struct {
+    int pid;
+    int64_t pts;           // 90kHz ticks
+    int packet_num;        // Original packet order
+} PtsSample;
+
+// Gap measurement
+typedef struct {
+    double gap_ms;         // Gap in milliseconds
+    char direction[8];     // "a2v" or "v2a"
+} GapMeasurement;
+
+// Single measurement result
 typedef struct {
     char timestamp[32];
-    double offset_ms;
-} HistorySample;
+
+    // Audio→Video gaps
+    double a2v_avg_ms;
+    double a2v_min_ms;
+    double a2v_max_ms;
+    double a2v_stddev_ms;
+    int a2v_count;
+
+    // Video→Audio gaps
+    double v2a_avg_ms;
+    double v2a_min_ms;
+    double v2a_max_ms;
+    double v2a_stddev_ms;
+    int v2a_count;
+
+    // Analysis results
+    double variance_pct;    // Variance from baseline (%)
+    char pattern[16];       // "healthy", "drifting", "oscillating", "anomaly"
+    char status[16];        // "OK", "WARNING", "CRITICAL"
+    int sync_score;         // 0-100 (100 = perfect)
+
+    // Anomalies
+    int anomaly_count;
+    char anomaly_desc[256];
+} MeasurementResult;
+
+// Baseline values (historical average)
+typedef struct {
+    double a2v_avg_ms;
+    double v2a_avg_ms;
+    int sample_count;       // Number of samples used to calculate baseline
+    char last_updated[32];
+} Baseline;
+
+// Trend analysis (last N runs)
+typedef struct {
+    double a2v_values[10];
+    double v2a_values[10];
+    int count;
+    char trend[16];         // "stable", "improving", "degrading"
+} TrendData;
 
 typedef struct {
-    char id[64];                // e.g., "bet" (from [general] name)
-    char name[128];             // e.g., "bet"
-    char type[32];              // e.g., "udp", "srt", "rist", "hls"
-    char address[64];           // Output address (e.g., "239.100.0.1")
-    int port;                   // Output port (e.g., 10000)
+    char id[64];
+    char name[128];
+    char type[32];
+    char address[64];
+    int port;
     int video_pid;
-    int audio_pid;              // Primary audio PID
-    int running;                // Is the input service running?
+    int audio_pid;
+    int running;
 
     // Current measurement
-    double current_offset_ms;
-    char current_status[16];    // "green", "yellow", "orange", "red"
-    int status_code;            // 0=green, 1=yellow, 2=orange, 3=red
-    char last_check[32];
+    MeasurementResult current;
+
+    // Baseline
+    Baseline baseline;
+
+    // Trend
+    TrendData trend;
 
     // History (circular buffer)
-    HistorySample history[HISTORY_SIZE];
+    MeasurementResult history[HISTORY_SIZE];
     int history_count;
     int history_index;
 
@@ -91,13 +153,15 @@ AppContext g_ctx;
 
 // Forward declarations
 void* check_thread(void* arg);
-void* api_thread(void* arg);
 void discover_inputs(void);
 void check_input_avsync(InputStatus* input);
 void save_data(void);
 void load_data(void);
-const char* get_status_color(double offset_ms);
-int get_status_code(double offset_ms);
+void update_baseline(InputStatus* input, MeasurementResult* result);
+void analyze_trend(InputStatus* input);
+int calculate_sync_score(MeasurementResult* result, Baseline* baseline);
+const char* detect_pattern(InputStatus* input, MeasurementResult* result);
+const char* get_status(MeasurementResult* result, Baseline* baseline);
 
 void signal_handler(int sig) {
     (void)sig;
@@ -118,35 +182,21 @@ void init_context(void) {
 static void trim(char* str) {
     if (!str || !*str) return;
 
-    // Trim leading
     char* start = str;
     while (*start && isspace((unsigned char)*start)) start++;
 
-    // Trim trailing
     char* end = start + strlen(start) - 1;
     while (end > start && (isspace((unsigned char)*end) || *end == '\n' || *end == '\r')) {
         *end = '\0';
         end--;
     }
 
-    // Shift if needed
     if (start != str) {
         memmove(str, start, strlen(start) + 1);
     }
 }
 
 // Parse INI-style config file
-// Config format:
-// [general]
-// name = bet
-// type = udp
-// enabled = 1
-// [pids]
-// video = 211
-// audio = 221
-// [output]
-// address = 239.100.0.1
-// port = 10000
 int parse_config(const char* filepath, InputStatus* input) {
     FILE* fp = fopen(filepath, "r");
     if (!fp) return -1;
@@ -165,10 +215,8 @@ int parse_config(const char* filepath, InputStatus* input) {
     while (fgets(line, sizeof(line), fp)) {
         trim(line);
 
-        // Skip comments and empty lines
         if (line[0] == '#' || line[0] == ';' || line[0] == '\0') continue;
 
-        // Section header
         if (line[0] == '[') {
             char* end = strchr(line, ']');
             if (end) {
@@ -178,7 +226,6 @@ int parse_config(const char* filepath, InputStatus* input) {
             continue;
         }
 
-        // Key = Value
         char* eq = strchr(line, '=');
         if (!eq) continue;
 
@@ -189,7 +236,6 @@ int parse_config(const char* filepath, InputStatus* input) {
         trim(key);
         trim(value);
 
-        // Parse based on section
         if (strcmp(section, "general") == 0) {
             if (strcmp(key, "name") == 0) {
                 snprintf(input->name, sizeof(input->name), "%s", value);
@@ -201,11 +247,9 @@ int parse_config(const char* filepath, InputStatus* input) {
             if (strcmp(key, "video") == 0) {
                 input->video_pid = atoi(value);
             } else if (strcmp(key, "audio") == 0) {
-                // Take first audio PID if comma-separated
                 input->audio_pid = atoi(value);
             }
         } else if (strcmp(section, "output") == 0) {
-            // Read output address and port (this is what we monitor)
             if (strcmp(key, "address") == 0) {
                 snprintf(input->address, sizeof(input->address), "%s", value);
             } else if (strcmp(key, "port") == 0) {
@@ -216,7 +260,6 @@ int parse_config(const char* filepath, InputStatus* input) {
 
     fclose(fp);
 
-    // Debug output
     if (input->name[0]) {
         printf("  Parsed: %s (type=%s) - output=%s:%d, video=%d, audio=%d\n",
                input->name, input->type[0] ? input->type : "unknown",
@@ -227,10 +270,9 @@ int parse_config(const char* filepath, InputStatus* input) {
     return 0;
 }
 
-// Check if a systemd service is running
+// Check if systemd service is running
 int is_service_running(const char* input_name) {
     char cmd[256];
-    // Service is named cari-udp-{name}, e.g., cari-udp-bet
     snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
     return system(cmd) == 0;
 }
@@ -263,42 +305,44 @@ void discover_inputs(void) {
 
         InputStatus* input = &g_ctx.inputs[count];
 
-        // Preserve history if same input
+        // Preserve existing data if same input
         char old_id[64];
         snprintf(old_id, sizeof(old_id), "%s", input->id);
+        Baseline old_baseline = input->baseline;
+        TrendData old_trend = input->trend;
         int old_history_count = input->history_count;
         int old_history_index = input->history_index;
-        HistorySample old_history[HISTORY_SIZE];
+        MeasurementResult old_history[HISTORY_SIZE];
         if (old_history_count > 0) {
             memcpy(old_history, input->history, sizeof(old_history));
         }
 
-        // Clear and reinit
         pthread_mutex_t saved_lock = input->lock;
         memset(input, 0, sizeof(InputStatus));
         input->lock = saved_lock;
 
         if (parse_config(filepath, input) == 0) {
-            // Check if we have required info
             if (input->address[0] && input->port > 0 &&
                 input->video_pid > 0 && input->audio_pid > 0) {
 
-                // Check if service is running
                 input->running = is_service_running(input->id);
                 printf("  Service cari-udp-%s: %s\n", input->id,
                        input->running ? "RUNNING" : "not running");
 
-                // Restore history if same input
-                if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
-                    memcpy(input->history, old_history, sizeof(input->history));
-                    input->history_count = old_history_count;
-                    input->history_index = old_history_index;
+                // Restore data if same input
+                if (strcmp(old_id, input->id) == 0) {
+                    input->baseline = old_baseline;
+                    input->trend = old_trend;
+                    if (old_history_count > 0) {
+                        memcpy(input->history, old_history, sizeof(input->history));
+                        input->history_count = old_history_count;
+                        input->history_index = old_history_index;
+                    }
                 }
 
                 count++;
             } else {
-                printf("  Skipping: missing required fields (addr=%s, port=%d, vpid=%d, apid=%d)\n",
-                       input->address, input->port, input->video_pid, input->audio_pid);
+                printf("  Skipping: missing required fields\n");
             }
         }
     }
@@ -310,38 +354,57 @@ void discover_inputs(void) {
     printf("Discovered %d inputs with A/V sync capability\n", count);
 }
 
-// Run tsp pcrextract and parse output using PTS alignment method
-int measure_avsync(InputStatus* input, double* offset_ms) {
+// Comparison function for qsort - sort by PTS value
+static int compare_pts(const void* a, const void* b) {
+    const PtsSample* pa = (const PtsSample*)a;
+    const PtsSample* pb = (const PtsSample*)b;
+
+    if (pa->pts < pb->pts) return -1;
+    if (pa->pts > pb->pts) return 1;
+    return 0;
+}
+
+// Calculate standard deviation
+static double calc_stddev(double* values, int count, double mean) {
+    if (count < 2) return 0.0;
+
+    double sum_sq = 0.0;
+    for (int i = 0; i < count; i++) {
+        double diff = values[i] - mean;
+        sum_sq += diff * diff;
+    }
+    return sqrt(sum_sq / (count - 1));
+}
+
+// STEP 1-4: Capture, Parse, Sort, Filter, Compare
+int measure_avsync(InputStatus* input, MeasurementResult* result) {
     char cmd[512];
 
-    // Use --evaluate-pcr-offset to get timing for both PIDs
-    // Use --good-pts-only to filter out B-frame reordering artifacts
+    memset(result, 0, sizeof(MeasurementResult));
+
+    // STEP 1: CAPTURE - Run tsp to extract PTS values
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
-        "-P pcrextract --pid %d --pid %d --pts --pcr --good-pts-only --evaluate-pcr-offset --csv "
+        "-P pcrextract --pid %d --pid %d --pts --csv "
         "-O drop 2>&1",
         SAMPLE_DURATION + 2,
         input->address, input->port,
         input->video_pid, input->audio_pid);
 
-    printf("  Running: %s\n", cmd);
+    printf("  [CAPTURE] Running: %s\n", cmd);
     fflush(stdout);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
         printf("  popen failed\n");
-        fflush(stdout);
         return -1;
     }
 
     char line[512];
 
-    // Store PTS values with packet positions
-    typedef struct { int packet; int64_t pts; } PtsSample;
-    PtsSample video_pts[200];
-    PtsSample audio_pts[100];
-    int video_count = 0;
-    int audio_count = 0;
+    // Collect all PTS samples
+    PtsSample samples[MAX_PTS_SAMPLES];
+    int sample_count = 0;
 
     // Skip header
     if (!fgets(line, sizeof(line), fp)) {
@@ -349,8 +412,8 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         return -1;
     }
 
-    // Parse CSV: PID,Packet,PID-Packet,Type,Count,Value,ValueOffset,OffsetFromPCR
-    while (fgets(line, sizeof(line), fp)) {
+    // STEP 2: PARSE - Extract PTS entries
+    while (fgets(line, sizeof(line), fp) && sample_count < MAX_PTS_SAMPLES) {
         int pid = 0;
         int packet = 0;
         char type[16] = "";
@@ -375,175 +438,385 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
             token = strtok_r(NULL, ",", &saveptr);
         }
 
-        // Collect PTS entries only (we compare PTS values directly)
-        if (strcmp(type, "PTS") == 0) {
-            if (pid == input->video_pid && video_count < 200) {
-                video_pts[video_count].packet = packet;
-                video_pts[video_count].pts = value;
-                video_count++;
-            } else if (pid == input->audio_pid && audio_count < 100) {
-                audio_pts[audio_count].packet = packet;
-                audio_pts[audio_count].pts = value;
-                audio_count++;
-            }
+        // Collect only PTS entries
+        if (strcmp(type, "PTS") == 0 && (pid == input->video_pid || pid == input->audio_pid)) {
+            samples[sample_count].pid = pid;
+            samples[sample_count].pts = value;
+            samples[sample_count].packet_num = packet;
+            sample_count++;
         }
     }
 
     pclose(fp);
 
-    printf("  Collected: %d video PTS, %d audio PTS\n", video_count, audio_count);
-    fflush(stdout);
+    printf("  [PARSE] Collected %d PTS samples\n", sample_count);
 
-    if (video_count < 5 || audio_count < 3) {
-        printf("  Failed: insufficient data (need at least 5 video, 3 audio)\n");
-        fflush(stdout);
+    if (sample_count < 10) {
+        printf("  Failed: insufficient PTS samples\n");
         return -1;
     }
 
-    // PTS Alignment Method:
-    // For each audio frame, find the video frame with closest PTS value
-    // (i.e., content scheduled to play at similar times)
-    //
-    // Key insight: Audio and video that should play together have similar PTS values.
-    // The difference between matched PTS values indicates sync quality:
-    // - Mean near zero = audio/video on same timeline (good)
-    // - Large drift = timelines diverging (bad)
-    // - Large mean offset = systematic sync error (bad)
+    // STEP 2 (cont): SORT by PTS value (chronological presentation order)
+    qsort(samples, sample_count, sizeof(PtsSample), compare_pts);
 
-    double pts_diffs[100];  // Store PTS differences for each audio sample
-    int diff_count = 0;
+    printf("  [SORT] Sorted %d samples by PTS\n", sample_count);
 
-    for (int a = 0; a < audio_count && diff_count < 100; a++) {
-        int64_t audio_pts_val = audio_pts[a].pts;
+    // STEP 3: FILTER - Remove consecutive same-PID frames
+    // Keep only alternating video/audio frames
+    PtsSample filtered[MAX_PTS_SAMPLES];
+    int filtered_count = 0;
 
-        // Find video with closest PTS VALUE (not packet position)
-        // This finds video content scheduled to play at similar time
-        int best_video_idx = 0;
-        int64_t best_pts_distance = llabs(video_pts[0].pts - audio_pts_val);
-
-        for (int v = 1; v < video_count; v++) {
-            int64_t pts_distance = llabs(video_pts[v].pts - audio_pts_val);
-            if (pts_distance < best_pts_distance) {
-                best_pts_distance = pts_distance;
-                best_video_idx = v;
-            }
+    for (int i = 0; i < sample_count; i++) {
+        // Skip if current PID == next PID (not alternating)
+        if (i < sample_count - 1 && samples[i].pid == samples[i + 1].pid) {
+            continue;
         }
-
-        int64_t video_pts_val = video_pts[best_video_idx].pts;
-
-        // PTS difference in 90kHz ticks (signed)
-        // Positive = video scheduled after audio
-        // Negative = video scheduled before audio
-        int64_t pts_diff = video_pts_val - audio_pts_val;
-
-        // Convert to milliseconds
-        double diff_ms = (double)pts_diff / 90.0;
-        pts_diffs[diff_count++] = diff_ms;
+        filtered[filtered_count++] = samples[i];
     }
 
-    if (diff_count < 3) {
-        printf("  Failed: not enough paired samples\n");
-        fflush(stdout);
+    printf("  [FILTER] After filter: %d alternating frames\n", filtered_count);
+
+    if (filtered_count < 4) {
+        printf("  Failed: insufficient alternating frames\n");
         return -1;
     }
 
-    // Calculate statistics on the PTS differences
-    double sum = 0;
-    double min_diff = pts_diffs[0];
-    double max_diff = pts_diffs[0];
+    // STEP 4: COMPARE - Calculate gaps between frame pairs
+    double a2v_gaps[MAX_PTS_SAMPLES];  // Audio→Video gaps
+    double v2a_gaps[MAX_PTS_SAMPLES];  // Video→Audio gaps
+    int a2v_count = 0;
+    int v2a_count = 0;
 
-    for (int i = 0; i < diff_count; i++) {
-        sum += pts_diffs[i];
-        if (pts_diffs[i] < min_diff) min_diff = pts_diffs[i];
-        if (pts_diffs[i] > max_diff) max_diff = pts_diffs[i];
+    for (int i = 0; i < filtered_count - 1; i++) {
+        int64_t pts_diff = filtered[i + 1].pts - filtered[i].pts;
+        double gap_ms = (double)pts_diff / 90.0;  // Convert 90kHz ticks to ms
+
+        // Classify based on direction
+        if (filtered[i].pid == input->audio_pid && filtered[i + 1].pid == input->video_pid) {
+            // Audio→Video transition
+            a2v_gaps[a2v_count++] = gap_ms;
+        } else if (filtered[i].pid == input->video_pid && filtered[i + 1].pid == input->audio_pid) {
+            // Video→Audio transition
+            v2a_gaps[v2a_count++] = gap_ms;
+        }
     }
 
-    double mean = sum / diff_count;
+    printf("  [COMPARE] Gaps: %d A→V, %d V→A\n", a2v_count, v2a_count);
 
-    // Calculate drift: difference between average of last 3 and first 3 samples
-    // This detects if audio/video timelines are diverging
-    double first_avg = 0, last_avg = 0;
-    int num_avg = (diff_count >= 3) ? 3 : diff_count;
-
-    for (int i = 0; i < num_avg; i++) {
-        first_avg += pts_diffs[i];
-    }
-    first_avg /= num_avg;
-
-    for (int i = 0; i < num_avg; i++) {
-        last_avg += pts_diffs[diff_count - 1 - i];
-    }
-    last_avg /= num_avg;
-
-    double drift = last_avg - first_avg;
-
-    // Sync quality is determined by:
-    // 1. Mean offset - should be near zero (both timelines aligned)
-    //    Note: small mean due to frame rate mismatch is acceptable (~±20ms)
-    // 2. Drift - should be near zero (timelines not diverging)
-    //
-    // Primary metric is DRIFT (indicates ongoing sync problem)
-    // Secondary check is if MEAN exceeds acceptable threshold (indicates fixed offset)
-    //
-    // Note: stddev is NOT a good metric because frame rate differences between
-    // audio (256ms) and video (33ms) cause inherent matching jitter (~±16ms)
-
-    double sync_error = fabs(drift);
-
-    // If mean offset is large (>40ms), that's also a problem
-    // This catches cases where there's a fixed A/V offset but no drift
-    if (fabs(mean) > 40.0 && fabs(mean) > sync_error) {
-        sync_error = fabs(mean);
+    // Calculate statistics for Audio→Video gaps
+    if (a2v_count > 0) {
+        double sum = 0, min_val = a2v_gaps[0], max_val = a2v_gaps[0];
+        for (int i = 0; i < a2v_count; i++) {
+            sum += a2v_gaps[i];
+            if (a2v_gaps[i] < min_val) min_val = a2v_gaps[i];
+            if (a2v_gaps[i] > max_val) max_val = a2v_gaps[i];
+        }
+        result->a2v_avg_ms = sum / a2v_count;
+        result->a2v_min_ms = min_val;
+        result->a2v_max_ms = max_val;
+        result->a2v_stddev_ms = calc_stddev(a2v_gaps, a2v_count, result->a2v_avg_ms);
+        result->a2v_count = a2v_count;
     }
 
-    *offset_ms = sync_error;
+    // Calculate statistics for Video→Audio gaps
+    if (v2a_count > 0) {
+        double sum = 0, min_val = v2a_gaps[0], max_val = v2a_gaps[0];
+        for (int i = 0; i < v2a_count; i++) {
+            sum += v2a_gaps[i];
+            if (v2a_gaps[i] < min_val) min_val = v2a_gaps[i];
+            if (v2a_gaps[i] > max_val) max_val = v2a_gaps[i];
+        }
+        result->v2a_avg_ms = sum / v2a_count;
+        result->v2a_min_ms = min_val;
+        result->v2a_max_ms = max_val;
+        result->v2a_stddev_ms = calc_stddev(v2a_gaps, v2a_count, result->v2a_avg_ms);
+        result->v2a_count = v2a_count;
+    }
 
-    printf("  PTS alignment analysis (%d paired samples):\n", diff_count);
-    printf("    Mean offset: %.2f ms (should be near zero)\n", mean);
-    printf("    Drift: %.2f ms (first vs last samples)\n", drift);
-    printf("    Range: %.1f to %.1f ms\n", min_diff, max_diff);
-    printf("  Sync error metric: %.2f ms\n", sync_error);
-    fflush(stdout);
+    // Detect anomalies (single gap spikes)
+    result->anomaly_count = 0;
+    memset(result->anomaly_desc, 0, sizeof(result->anomaly_desc));
+
+    for (int i = 0; i < a2v_count; i++) {
+        if (fabs(a2v_gaps[i] - result->a2v_avg_ms) > ANOMALY_THRESHOLD) {
+            result->anomaly_count++;
+        }
+    }
+    for (int i = 0; i < v2a_count; i++) {
+        if (fabs(v2a_gaps[i] - result->v2a_avg_ms) > ANOMALY_THRESHOLD) {
+            result->anomaly_count++;
+        }
+    }
+
+    if (result->anomaly_count > 0) {
+        snprintf(result->anomaly_desc, sizeof(result->anomaly_desc),
+                 "%d gap spikes > %.0fms from mean", result->anomaly_count, ANOMALY_THRESHOLD);
+    }
+
+    // Set timestamp
+    time_t now = time(NULL);
+    struct tm* tm = localtime(&now);
+    strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
+
+    printf("  [STATS] A→V: avg=%.1fms, range=[%.1f,%.1f], stddev=%.1f\n",
+           result->a2v_avg_ms, result->a2v_min_ms, result->a2v_max_ms, result->a2v_stddev_ms);
+    printf("  [STATS] V→A: avg=%.1fms, range=[%.1f,%.1f], stddev=%.1f\n",
+           result->v2a_avg_ms, result->v2a_min_ms, result->v2a_max_ms, result->v2a_stddev_ms);
 
     return 0;
 }
 
-const char* get_status_color(double offset_ms) {
-    double abs_offset = fabs(offset_ms);
-    if (abs_offset <= THRESHOLD_GREEN) return "green";
-    if (abs_offset <= THRESHOLD_YELLOW) return "yellow";
-    if (abs_offset <= THRESHOLD_ORANGE) return "orange";
-    return "red";
+// STEP 5: Analyze and Conclude
+void analyze_result(InputStatus* input, MeasurementResult* result) {
+    Baseline* baseline = &input->baseline;
+
+    // If no baseline yet, use current as baseline
+    if (baseline->sample_count == 0) {
+        baseline->a2v_avg_ms = result->a2v_avg_ms;
+        baseline->v2a_avg_ms = result->v2a_avg_ms;
+        baseline->sample_count = 1;
+        snprintf(baseline->last_updated, sizeof(baseline->last_updated), "%s", result->timestamp);
+        printf("  [BASELINE] Initialized: A→V=%.1fms, V→A=%.1fms\n",
+               baseline->a2v_avg_ms, baseline->v2a_avg_ms);
+    }
+
+    // Calculate variance from baseline
+    double a2v_diff = fabs(result->a2v_avg_ms - baseline->a2v_avg_ms);
+    double v2a_diff = fabs(result->v2a_avg_ms - baseline->v2a_avg_ms);
+    double max_diff = (a2v_diff > v2a_diff) ? a2v_diff : v2a_diff;
+
+    // Variance as percentage of baseline (avoid division by zero)
+    double baseline_avg = (fabs(baseline->a2v_avg_ms) + fabs(baseline->v2a_avg_ms)) / 2.0;
+    if (baseline_avg > 1.0) {
+        result->variance_pct = (max_diff / baseline_avg) * 100.0;
+    } else {
+        result->variance_pct = max_diff * 10.0;  // Scale for small baselines
+    }
+
+    // Detect pattern
+    const char* pattern = detect_pattern(input, result);
+    snprintf(result->pattern, sizeof(result->pattern), "%s", pattern);
+
+    // Determine status
+    const char* status = get_status(result, baseline);
+    snprintf(result->status, sizeof(result->status), "%s", status);
+
+    // Calculate sync score
+    result->sync_score = calculate_sync_score(result, baseline);
+
+    printf("  [ANALYZE] Variance: %.1f%%, Pattern: %s, Status: %s, Score: %d/100\n",
+           result->variance_pct, result->pattern, result->status, result->sync_score);
+
+    // Update baseline with exponential moving average (slow update)
+    update_baseline(input, result);
+
+    // Update trend data
+    analyze_trend(input);
 }
 
-int get_status_code(double offset_ms) {
-    double abs_offset = fabs(offset_ms);
-    if (abs_offset <= THRESHOLD_GREEN) return 0;
-    if (abs_offset <= THRESHOLD_YELLOW) return 1;
-    if (abs_offset <= THRESHOLD_ORANGE) return 2;
-    return 3;
+// Detect pattern: healthy, drifting, oscillating, anomaly
+const char* detect_pattern(InputStatus* input, MeasurementResult* result) {
+    // Need at least 3 history samples to detect patterns
+    if (input->history_count < 3) {
+        if (result->anomaly_count > 0) return "anomaly";
+        return "healthy";
+    }
+
+    // Check for anomalies first
+    if (result->anomaly_count > 0) {
+        return "anomaly";
+    }
+
+    // Analyze last N samples for drift
+    int n = (input->history_count > 5) ? 5 : input->history_count;
+
+    // Get historical A→V values
+    double a2v_trend[5] = {0};
+    int start_idx = input->history_index - n;
+    if (start_idx < 0) start_idx += HISTORY_SIZE;
+
+    for (int i = 0; i < n; i++) {
+        int idx = (start_idx + i) % HISTORY_SIZE;
+        a2v_trend[i] = input->history[idx].a2v_avg_ms;
+    }
+
+    // Check for steady drift (monotonic increase or decrease)
+    int increasing = 1, decreasing = 1;
+    for (int i = 1; i < n; i++) {
+        if (a2v_trend[i] <= a2v_trend[i - 1]) increasing = 0;
+        if (a2v_trend[i] >= a2v_trend[i - 1]) decreasing = 0;
+    }
+
+    // Calculate total drift
+    double drift = result->a2v_avg_ms - a2v_trend[0];
+
+    if ((increasing || decreasing) && fabs(drift) > DRIFT_THRESHOLD) {
+        return "drifting";
+    }
+
+    // Check for oscillation (gaps bouncing but returning to baseline)
+    double max_dev = 0;
+    for (int i = 0; i < n; i++) {
+        double dev = fabs(a2v_trend[i] - input->baseline.a2v_avg_ms);
+        if (dev > max_dev) max_dev = dev;
+    }
+
+    // Current close to baseline but had deviations = oscillating
+    double current_dev = fabs(result->a2v_avg_ms - input->baseline.a2v_avg_ms);
+    if (max_dev > DRIFT_THRESHOLD && current_dev < max_dev * 0.5) {
+        return "oscillating";
+    }
+
+    // Within tolerance = healthy
+    if (result->variance_pct <= VARIANCE_OK) {
+        return "healthy";
+    }
+
+    return "oscillating";  // Default to oscillating for minor variations
 }
 
+// Determine status: OK, WARNING, CRITICAL
+const char* get_status(MeasurementResult* result, Baseline* baseline) {
+    // Calculate deviation from baseline
+    double a2v_diff = fabs(result->a2v_avg_ms - baseline->a2v_avg_ms);
+    double v2a_diff = fabs(result->v2a_avg_ms - baseline->v2a_avg_ms);
+    double max_diff = (a2v_diff > v2a_diff) ? a2v_diff : v2a_diff;
+
+    // Check thresholds
+    if (max_diff >= THRESHOLD_CRITICAL) {
+        return "CRITICAL";
+    }
+    if (max_diff >= THRESHOLD_WARNING) {
+        return "WARNING";
+    }
+
+    // Check pattern
+    if (strcmp(result->pattern, "drifting") == 0) {
+        return "CRITICAL";  // Drifting is always critical
+    }
+    if (strcmp(result->pattern, "anomaly") == 0) {
+        return "WARNING";   // Anomalies warrant attention
+    }
+
+    return "OK";
+}
+
+// Calculate sync score (0-100, where 100 is perfect sync)
+int calculate_sync_score(MeasurementResult* result, Baseline* baseline) {
+    double score = 100.0;
+
+    // Deduct for variance from baseline (up to 40 points)
+    double variance_penalty = result->variance_pct * 2.0;
+    if (variance_penalty > 40.0) variance_penalty = 40.0;
+    score -= variance_penalty;
+
+    // Deduct for high standard deviation (up to 20 points)
+    double stddev = (result->a2v_stddev_ms + result->v2a_stddev_ms) / 2.0;
+    double stddev_penalty = stddev * 2.0;
+    if (stddev_penalty > 20.0) stddev_penalty = 20.0;
+    score -= stddev_penalty;
+
+    // Deduct for pattern issues (up to 20 points)
+    if (strcmp(result->pattern, "drifting") == 0) {
+        score -= 20.0;
+    } else if (strcmp(result->pattern, "anomaly") == 0) {
+        score -= 15.0;
+    } else if (strcmp(result->pattern, "oscillating") == 0) {
+        score -= 5.0;
+    }
+
+    // Deduct for anomalies (up to 20 points)
+    int anomaly_penalty = result->anomaly_count * 5;
+    if (anomaly_penalty > 20) anomaly_penalty = 20;
+    score -= anomaly_penalty;
+
+    // Clamp to 0-100
+    if (score < 0.0) score = 0.0;
+    if (score > 100.0) score = 100.0;
+
+    return (int)score;
+}
+
+// Update baseline with exponential moving average
+void update_baseline(InputStatus* input, MeasurementResult* result) {
+    Baseline* baseline = &input->baseline;
+
+    if (baseline->sample_count == 0) {
+        baseline->a2v_avg_ms = result->a2v_avg_ms;
+        baseline->v2a_avg_ms = result->v2a_avg_ms;
+        baseline->sample_count = 1;
+    } else {
+        // EMA with alpha = 0.1 (slow adaptation)
+        double alpha = 0.1;
+        baseline->a2v_avg_ms = alpha * result->a2v_avg_ms + (1.0 - alpha) * baseline->a2v_avg_ms;
+        baseline->v2a_avg_ms = alpha * result->v2a_avg_ms + (1.0 - alpha) * baseline->v2a_avg_ms;
+        baseline->sample_count++;
+    }
+
+    snprintf(baseline->last_updated, sizeof(baseline->last_updated), "%s", result->timestamp);
+}
+
+// Analyze trend over last 10 runs
+void analyze_trend(InputStatus* input) {
+    TrendData* trend = &input->trend;
+
+    // Shift values
+    for (int i = 9; i > 0; i--) {
+        trend->a2v_values[i] = trend->a2v_values[i - 1];
+        trend->v2a_values[i] = trend->v2a_values[i - 1];
+    }
+
+    // Add current
+    trend->a2v_values[0] = input->current.a2v_avg_ms;
+    trend->v2a_values[0] = input->current.v2a_avg_ms;
+
+    if (trend->count < 10) trend->count++;
+
+    // Analyze trend direction (need at least 3 samples)
+    if (trend->count >= 3) {
+        // Compare first half to second half
+        double first_avg = 0, second_avg = 0;
+        int half = trend->count / 2;
+
+        for (int i = 0; i < half; i++) {
+            first_avg += trend->a2v_values[trend->count - 1 - i];  // Older samples
+        }
+        first_avg /= half;
+
+        for (int i = 0; i < half; i++) {
+            second_avg += trend->a2v_values[i];  // Newer samples
+        }
+        second_avg /= half;
+
+        double diff = second_avg - first_avg;
+
+        if (fabs(diff) < 2.0) {
+            snprintf(trend->trend, sizeof(trend->trend), "stable");
+        } else if (diff < 0) {
+            snprintf(trend->trend, sizeof(trend->trend), "improving");
+        } else {
+            snprintf(trend->trend, sizeof(trend->trend), "degrading");
+        }
+    } else {
+        snprintf(trend->trend, sizeof(trend->trend), "insufficient_data");
+    }
+}
+
+// STEP 6: Save result to history
 void check_input_avsync(InputStatus* input) {
-    double offset_ms = 0;
+    MeasurementResult result;
 
-    if (measure_avsync(input, &offset_ms) == 0) {
+    if (measure_avsync(input, &result) == 0) {
+        // Analyze the result
+        analyze_result(input, &result);
+
         pthread_mutex_lock(&input->lock);
 
-        input->current_offset_ms = offset_ms;
-        snprintf(input->current_status, sizeof(input->current_status), "%s", get_status_color(offset_ms));
-        input->status_code = get_status_code(offset_ms);
-
-        // Update timestamp
-        time_t now = time(NULL);
-        struct tm* tm = localtime(&now);
-        strftime(input->last_check, sizeof(input->last_check), "%Y-%m-%dT%H:%M:%SZ", tm);
+        // Store current result
+        input->current = result;
 
         // Add to history
-        HistorySample* sample = &input->history[input->history_index];
-        snprintf(sample->timestamp, sizeof(sample->timestamp), "%s", input->last_check);
-        sample->offset_ms = offset_ms;
-
+        input->history[input->history_index] = result;
         input->history_index = (input->history_index + 1) % HISTORY_SIZE;
         if (input->history_count < HISTORY_SIZE) {
             input->history_count++;
@@ -551,8 +824,9 @@ void check_input_avsync(InputStatus* input) {
 
         pthread_mutex_unlock(&input->lock);
 
-        printf("[%s] %s: A/V offset = %.2f ms (%s)\n",
-               input->last_check, input->id, offset_ms, input->current_status);
+        printf("[%s] %s: Score=%d/100, Status=%s, A→V=%.1fms, V→A=%.1fms\n",
+               result.timestamp, input->id, result.sync_score, result.status,
+               result.a2v_avg_ms, result.v2a_avg_ms);
     } else {
         printf("[CHECK] %s: Failed to measure A/V sync\n", input->id);
     }
@@ -563,22 +837,18 @@ void* check_thread(void* arg) {
     (void)arg;
 
     while (g_ctx.running) {
-        // Refresh input list
         discover_inputs();
 
-        // Check each running input
         for (int i = 0; i < g_ctx.input_count && g_ctx.running; i++) {
             InputStatus* input = &g_ctx.inputs[i];
 
-            // Re-check if service is running
             input->running = is_service_running(input->id);
 
             if (input->running) {
                 check_input_avsync(input);
             }
 
-            // Small delay between checks to avoid overwhelming
-            usleep(500000);  // 0.5 second
+            usleep(500000);  // 0.5 second between checks
         }
 
         // Save data periodically
@@ -588,7 +858,7 @@ void* check_thread(void* arg) {
             g_ctx.last_save = now;
         }
 
-        // Wait for next check interval
+        // Wait for next interval
         for (int i = 0; i < CHECK_INTERVAL && g_ctx.running; i++) {
             sleep(1);
         }
@@ -609,6 +879,47 @@ void json_escape(const char* str, char* out, size_t out_size) {
     out[j] = '\0';
 }
 
+// Build JSON for measurement result
+int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
+    char anomaly_escaped[512];
+    json_escape(result->anomaly_desc, anomaly_escaped, sizeof(anomaly_escaped));
+
+    return snprintf(buf, buf_size,
+        "{"
+        "\"timestamp\":\"%s\","
+        "\"audio_to_video\":{"
+            "\"avg_ms\":%.2f,"
+            "\"min_ms\":%.2f,"
+            "\"max_ms\":%.2f,"
+            "\"stddev_ms\":%.2f,"
+            "\"count\":%d"
+        "},"
+        "\"video_to_audio\":{"
+            "\"avg_ms\":%.2f,"
+            "\"min_ms\":%.2f,"
+            "\"max_ms\":%.2f,"
+            "\"stddev_ms\":%.2f,"
+            "\"count\":%d"
+        "},"
+        "\"variance_pct\":%.2f,"
+        "\"pattern\":\"%s\","
+        "\"status\":\"%s\","
+        "\"sync_score\":%d,"
+        "\"anomalies\":{\"count\":%d,\"description\":\"%s\"}"
+        "}",
+        result->timestamp,
+        result->a2v_avg_ms, result->a2v_min_ms, result->a2v_max_ms,
+        result->a2v_stddev_ms, result->a2v_count,
+        result->v2a_avg_ms, result->v2a_min_ms, result->v2a_max_ms,
+        result->v2a_stddev_ms, result->v2a_count,
+        result->variance_pct,
+        result->pattern,
+        result->status,
+        result->sync_score,
+        result->anomaly_count,
+        anomaly_escaped);
+}
+
 // Build JSON for single input
 int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include_history) {
     char name_escaped[256];
@@ -623,36 +934,49 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
         "\"video_pid\":%d,"
         "\"audio_pid\":%d,"
         "\"running\":%s,"
-        "\"current\":{"
-            "\"av_offset_ms\":%.2f,"
-            "\"status\":\"%s\","
-            "\"status_code\":%d,"
-            "\"timestamp\":\"%s\""
-        "}",
+        "\"current\":",
         input->id,
         name_escaped,
         input->type[0] ? input->type : "unknown",
         input->address, input->port,
         input->video_pid,
         input->audio_pid,
-        input->running ? "true" : "false",
-        input->current_offset_ms,
-        input->current_status,
-        input->status_code,
-        input->last_check);
+        input->running ? "true" : "false");
 
-    if (include_history && len < (int)buf_size - 100) {
+    // Add current measurement
+    len += build_result_json(&input->current, buf + len, buf_size - len);
+
+    // Add baseline
+    len += snprintf(buf + len, buf_size - len,
+        ",\"baseline\":{"
+            "\"a2v_avg_ms\":%.2f,"
+            "\"v2a_avg_ms\":%.2f,"
+            "\"sample_count\":%d,"
+            "\"last_updated\":\"%s\""
+        "}",
+        input->baseline.a2v_avg_ms,
+        input->baseline.v2a_avg_ms,
+        input->baseline.sample_count,
+        input->baseline.last_updated);
+
+    // Add trend
+    len += snprintf(buf + len, buf_size - len,
+        ",\"trend\":{"
+            "\"direction\":\"%s\","
+            "\"sample_count\":%d"
+        "}",
+        input->trend.trend,
+        input->trend.count);
+
+    // Add history if requested
+    if (include_history && len < (int)buf_size - 1000) {
         len += snprintf(buf + len, buf_size - len, ",\"history\":[");
 
-        // Output history in chronological order
         int start = (input->history_count < HISTORY_SIZE) ? 0 : input->history_index;
-        for (int i = 0; i < input->history_count && len < (int)buf_size - 100; i++) {
+        for (int i = 0; i < input->history_count && len < (int)buf_size - 500; i++) {
             int idx = (start + i) % HISTORY_SIZE;
             if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
-            len += snprintf(buf + len, buf_size - len,
-                "{\"ts\":\"%s\",\"offset_ms\":%.2f}",
-                input->history[idx].timestamp,
-                input->history[idx].offset_ms);
+            len += build_result_json(&input->history[idx], buf + len, buf_size - len);
         }
         len += snprintf(buf + len, buf_size - len, "]");
     }
@@ -675,9 +999,8 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
     struct MHD_Response* response;
     int ret;
     char* buf = NULL;
-    size_t buf_size = 1024 * 1024;  // 1MB buffer for history
+    size_t buf_size = 2 * 1024 * 1024;  // 2MB buffer for full history
 
-    // Only handle GET
     if (strcmp(method, "GET") != 0) {
         const char* error = "{\"error\":\"Method not allowed\"}";
         response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
@@ -758,8 +1081,66 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
             status = MHD_HTTP_NOT_FOUND;
         }
     }
+    else if (strcmp(url, "/baseline") == 0) {
+        // Get all baselines
+        int len = snprintf(buf, buf_size, "{\"baselines\":[");
+        pthread_mutex_lock(&g_ctx.global_lock);
+        for (int i = 0; i < g_ctx.input_count; i++) {
+            if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
+            pthread_mutex_lock(&g_ctx.inputs[i].lock);
+            len += snprintf(buf + len, buf_size - len,
+                "{\"id\":\"%s\",\"a2v_avg_ms\":%.2f,\"v2a_avg_ms\":%.2f,"
+                "\"sample_count\":%d,\"last_updated\":\"%s\"}",
+                g_ctx.inputs[i].id,
+                g_ctx.inputs[i].baseline.a2v_avg_ms,
+                g_ctx.inputs[i].baseline.v2a_avg_ms,
+                g_ctx.inputs[i].baseline.sample_count,
+                g_ctx.inputs[i].baseline.last_updated);
+            pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+        }
+        pthread_mutex_unlock(&g_ctx.global_lock);
+        len += snprintf(buf + len, buf_size - len, "]}");
+    }
+    else if (strncmp(url, "/baseline/", 10) == 0) {
+        // Get single baseline
+        const char* input_id = url + 10;
+        int found = 0;
+
+        pthread_mutex_lock(&g_ctx.global_lock);
+        for (int i = 0; i < g_ctx.input_count; i++) {
+            if (strcmp(g_ctx.inputs[i].id, input_id) == 0) {
+                pthread_mutex_lock(&g_ctx.inputs[i].lock);
+                snprintf(buf, buf_size,
+                    "{\"id\":\"%s\",\"a2v_avg_ms\":%.2f,\"v2a_avg_ms\":%.2f,"
+                    "\"sample_count\":%d,\"last_updated\":\"%s\"}",
+                    g_ctx.inputs[i].id,
+                    g_ctx.inputs[i].baseline.a2v_avg_ms,
+                    g_ctx.inputs[i].baseline.v2a_avg_ms,
+                    g_ctx.inputs[i].baseline.sample_count,
+                    g_ctx.inputs[i].baseline.last_updated);
+                pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+                found = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_ctx.global_lock);
+
+        if (!found) {
+            snprintf(buf, buf_size, "{\"error\":\"Input not found\"}");
+            status = MHD_HTTP_NOT_FOUND;
+        }
+    }
     else {
-        snprintf(buf, buf_size, "{\"error\":\"Not found\"}");
+        snprintf(buf, buf_size,
+            "{\"error\":\"Not found\","
+            "\"endpoints\":["
+                "\"/health\","
+                "\"/status\","
+                "\"/status/{id}\","
+                "\"/history/{id}\","
+                "\"/baseline\","
+                "\"/baseline/{id}\""
+            "]}");
         status = MHD_HTTP_NOT_FOUND;
     }
 
@@ -785,7 +1166,7 @@ void save_data(void) {
     for (int i = 0; i < g_ctx.input_count; i++) {
         if (i > 0) fprintf(fp, ",");
 
-        char buf[1024 * 100];
+        char buf[1024 * 500];
         pthread_mutex_lock(&g_ctx.inputs[i].lock);
         build_input_json(&g_ctx.inputs[i], buf, sizeof(buf), 1);
         pthread_mutex_unlock(&g_ctx.inputs[i].lock);
@@ -801,14 +1182,13 @@ void save_data(void) {
 }
 
 void load_data(void) {
-    // TODO: Parse JSON and restore history
-    // For now, start fresh each time
+    // TODO: Parse JSON and restore history/baselines
     printf("Starting with fresh data (persistence loading not yet implemented)\n");
 }
 
 void print_help(const char* prog) {
     printf("Usage: %s [options]\n\n", prog);
-    printf("A/V Sync Monitor Service\n\n");
+    printf("A/V Sync Monitor Service - Enhanced Version\n\n");
     printf("Options:\n");
     printf("  --help         Show this help\n");
     printf("\n");
@@ -817,21 +1197,31 @@ void print_help(const char* prog) {
     printf("  GET /status            - All inputs status\n");
     printf("  GET /status/{id}       - Single input status\n");
     printf("  GET /history/{id}      - Single input with 24h history\n");
+    printf("  GET /baseline          - All baselines\n");
+    printf("  GET /baseline/{id}     - Single input baseline\n");
     printf("\n");
-    printf("Configuration:\n");
-    printf("  Check interval: %d seconds\n", CHECK_INTERVAL);
-    printf("  Sample duration: %d seconds\n", SAMPLE_DURATION);
-    printf("  History size: %d samples (24 hours)\n", HISTORY_SIZE);
+    printf("Workflow:\n");
+    printf("  1. CAPTURE   - Run tsp to extract PTS values (10s sample)\n");
+    printf("  2. PARSE     - Extract PTS entries for video/audio PIDs\n");
+    printf("  3. SORT      - Sort by PTS value (presentation order)\n");
+    printf("  4. FILTER    - Keep only alternating video/audio frames\n");
+    printf("  5. COMPARE   - Calculate A→V and V→A gaps with statistics\n");
+    printf("  6. ANALYZE   - Compare to baseline, detect patterns, score\n");
+    printf("  7. SAVE      - Store results for trending\n");
     printf("\n");
-    printf("Status Thresholds:\n");
-    printf("  Green:  0-%.0f ms\n", THRESHOLD_GREEN);
-    printf("  Yellow: %.0f-%.0f ms\n", THRESHOLD_GREEN, THRESHOLD_YELLOW);
-    printf("  Orange: %.0f-%.0f ms\n", THRESHOLD_YELLOW, THRESHOLD_ORANGE);
-    printf("  Red:    >%.0f ms\n", THRESHOLD_ORANGE);
+    printf("Status Thresholds (from baseline):\n");
+    printf("  OK:       < %.0fms deviation\n", THRESHOLD_WARNING);
+    printf("  WARNING:  %.0fms - %.0fms deviation\n", THRESHOLD_WARNING, THRESHOLD_CRITICAL);
+    printf("  CRITICAL: > %.0fms deviation or drifting\n", THRESHOLD_CRITICAL);
+    printf("\n");
+    printf("Patterns:\n");
+    printf("  healthy     - Within ±%.0f%% of baseline, gaps consistent\n", VARIANCE_OK);
+    printf("  drifting    - Gaps steadily increasing/decreasing\n");
+    printf("  oscillating - Gaps bouncing but returning to baseline\n");
+    printf("  anomaly     - Sudden gap spikes > %.0fms from mean\n", ANOMALY_THRESHOLD);
 }
 
 int main(int argc, char* argv[]) {
-    // Parse arguments
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_help(argv[0]);
@@ -839,22 +1229,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("CariTranscoder A/V Sync Monitor\n");
+    printf("CariTranscoder A/V Sync Monitor (Enhanced)\n");
     printf("API port: %d\n", API_PORT);
     printf("Check interval: %d seconds\n", CHECK_INTERVAL);
+    printf("Sample duration: %d seconds\n", SAMPLE_DURATION);
 
-    // Setup
     init_context();
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Load previous data if exists
     load_data();
-
-    // Initial discovery
     discover_inputs();
 
-    // Start HTTP API
     struct MHD_Daemon* daemon = MHD_start_daemon(
         MHD_USE_SELECT_INTERNALLY,
         API_PORT,
@@ -869,22 +1255,18 @@ int main(int argc, char* argv[]) {
 
     printf("API server started on port %d\n", API_PORT);
 
-    // Start check thread
     pthread_t check_tid;
     pthread_create(&check_tid, NULL, check_thread, NULL);
 
-    // Main loop - just wait for signals
     while (g_ctx.running) {
         sleep(1);
     }
 
     printf("\nShutting down...\n");
 
-    // Cleanup
     pthread_join(check_tid, NULL);
     MHD_stop_daemon(daemon);
 
-    // Final save
     save_data();
 
     printf("Done.\n");
