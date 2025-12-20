@@ -44,17 +44,6 @@ typedef int MHD_Result;
 #define MAX_INPUTS 100
 #define MAX_PTS_SAMPLES 500     // Max PTS samples to capture
 
-// Status thresholds relative to baseline (milliseconds)
-#define THRESHOLD_WARNING 50.0   // baseline + 50ms = WARNING
-#define THRESHOLD_CRITICAL 100.0 // baseline + 100ms = CRITICAL
-
-// Variance thresholds (percentage)
-#define VARIANCE_OK 10.0         // Within ±10% of baseline
-#define VARIANCE_WARNING 20.0    // Within ±20% of baseline
-
-// Pattern detection thresholds
-#define DRIFT_THRESHOLD 5.0      // Steady change > 5ms = drifting
-
 // PTS sample for sorting
 typedef struct {
     int pid;
@@ -62,44 +51,14 @@ typedef struct {
     int packet_num;        // Original packet order
 } PtsSample;
 
-// Gap measurement
-typedef struct {
-    double gap_ms;         // Gap in milliseconds
-    char direction[8];     // "a2v" or "v2a"
-} GapMeasurement;
-
-// Single measurement result
+// Single measurement result - just the means with timestamp
 typedef struct {
     char timestamp[32];
-
-    // Mean offsets (max value excluded from calculation)
     double a2v_avg_ms;      // Audio→Video mean gap
     double v2a_avg_ms;      // Video→Audio mean gap
     int a2v_count;          // Sample count used
     int v2a_count;          // Sample count used
-
-    // Analysis results
-    double variance_pct;    // Variance from baseline (%)
-    char pattern[16];       // "healthy", "drifting", "oscillating", "anomaly"
-    char status[16];        // "OK", "WARNING", "CRITICAL"
-    int sync_score;         // 0-100 (100 = perfect)
 } MeasurementResult;
-
-// Baseline values (historical average)
-typedef struct {
-    double a2v_avg_ms;
-    double v2a_avg_ms;
-    int sample_count;       // Number of samples used to calculate baseline
-    char last_updated[32];
-} Baseline;
-
-// Trend analysis (last N runs)
-typedef struct {
-    double a2v_values[10];
-    double v2a_values[10];
-    int count;
-    char trend[16];         // "stable", "improving", "degrading"
-} TrendData;
 
 typedef struct {
     char id[64];
@@ -113,12 +72,6 @@ typedef struct {
 
     // Current measurement
     MeasurementResult current;
-
-    // Baseline
-    Baseline baseline;
-
-    // Trend
-    TrendData trend;
 
     // History (circular buffer)
     MeasurementResult history[HISTORY_SIZE];
@@ -144,11 +97,6 @@ void discover_inputs(void);
 void check_input_avsync(InputStatus* input);
 void save_data(void);
 void load_data(void);
-void update_baseline(InputStatus* input, MeasurementResult* result);
-void analyze_trend(InputStatus* input);
-int calculate_sync_score(MeasurementResult* result, Baseline* baseline);
-const char* detect_pattern(InputStatus* input, MeasurementResult* result);
-const char* get_status(MeasurementResult* result, Baseline* baseline);
 
 void signal_handler(int sig) {
     (void)sig;
@@ -292,11 +240,9 @@ void discover_inputs(void) {
 
         InputStatus* input = &g_ctx.inputs[count];
 
-        // Preserve existing data if same input
+        // Preserve existing history if same input
         char old_id[64];
         snprintf(old_id, sizeof(old_id), "%s", input->id);
-        Baseline old_baseline = input->baseline;
-        TrendData old_trend = input->trend;
         int old_history_count = input->history_count;
         int old_history_index = input->history_index;
         MeasurementResult old_history[HISTORY_SIZE];
@@ -316,15 +262,11 @@ void discover_inputs(void) {
                 printf("  Service cari-udp-%s: %s\n", input->id,
                        input->running ? "RUNNING" : "not running");
 
-                // Restore data if same input
-                if (strcmp(old_id, input->id) == 0) {
-                    input->baseline = old_baseline;
-                    input->trend = old_trend;
-                    if (old_history_count > 0) {
-                        memcpy(input->history, old_history, sizeof(input->history));
-                        input->history_count = old_history_count;
-                        input->history_index = old_history_index;
-                    }
+                // Restore history if same input
+                if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
+                    memcpy(input->history, old_history, sizeof(input->history));
+                    input->history_count = old_history_count;
+                    input->history_index = old_history_index;
                 }
 
                 count++;
@@ -529,229 +471,11 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
     return 0;
 }
 
-// STEP 5: Analyze and Conclude
-void analyze_result(InputStatus* input, MeasurementResult* result) {
-    Baseline* baseline = &input->baseline;
-
-    // If no baseline yet, use current as baseline
-    if (baseline->sample_count == 0) {
-        baseline->a2v_avg_ms = result->a2v_avg_ms;
-        baseline->v2a_avg_ms = result->v2a_avg_ms;
-        baseline->sample_count = 1;
-        snprintf(baseline->last_updated, sizeof(baseline->last_updated), "%s", result->timestamp);
-        printf("  [BASELINE] Initialized: A→V=%.1fms, V→A=%.1fms\n",
-               baseline->a2v_avg_ms, baseline->v2a_avg_ms);
-    }
-
-    // Calculate variance from baseline
-    double a2v_diff = fabs(result->a2v_avg_ms - baseline->a2v_avg_ms);
-    double v2a_diff = fabs(result->v2a_avg_ms - baseline->v2a_avg_ms);
-    double max_diff = (a2v_diff > v2a_diff) ? a2v_diff : v2a_diff;
-
-    // Variance as percentage of baseline (avoid division by zero)
-    double baseline_avg = (fabs(baseline->a2v_avg_ms) + fabs(baseline->v2a_avg_ms)) / 2.0;
-    if (baseline_avg > 1.0) {
-        result->variance_pct = (max_diff / baseline_avg) * 100.0;
-    } else {
-        result->variance_pct = max_diff * 10.0;  // Scale for small baselines
-    }
-
-    // Detect pattern
-    const char* pattern = detect_pattern(input, result);
-    snprintf(result->pattern, sizeof(result->pattern), "%s", pattern);
-
-    // Determine status
-    const char* status = get_status(result, baseline);
-    snprintf(result->status, sizeof(result->status), "%s", status);
-
-    // Calculate sync score
-    result->sync_score = calculate_sync_score(result, baseline);
-
-    printf("  [ANALYZE] Variance: %.1f%%, Pattern: %s, Status: %s, Score: %d/100\n",
-           result->variance_pct, result->pattern, result->status, result->sync_score);
-
-    // Update baseline with exponential moving average (slow update)
-    update_baseline(input, result);
-
-    // Update trend data
-    analyze_trend(input);
-}
-
-// Detect pattern: healthy, drifting, oscillating
-const char* detect_pattern(InputStatus* input, MeasurementResult* result) {
-    // Need at least 3 history samples to detect patterns
-    if (input->history_count < 3) {
-        return "healthy";
-    }
-
-    // Analyze last N samples for drift
-    int n = (input->history_count > 5) ? 5 : input->history_count;
-
-    // Get historical A→V values
-    double a2v_trend[5] = {0};
-    int start_idx = input->history_index - n;
-    if (start_idx < 0) start_idx += HISTORY_SIZE;
-
-    for (int i = 0; i < n; i++) {
-        int idx = (start_idx + i) % HISTORY_SIZE;
-        a2v_trend[i] = input->history[idx].a2v_avg_ms;
-    }
-
-    // Check for steady drift (monotonic increase or decrease)
-    int increasing = 1, decreasing = 1;
-    for (int i = 1; i < n; i++) {
-        if (a2v_trend[i] <= a2v_trend[i - 1]) increasing = 0;
-        if (a2v_trend[i] >= a2v_trend[i - 1]) decreasing = 0;
-    }
-
-    // Calculate total drift
-    double drift = result->a2v_avg_ms - a2v_trend[0];
-
-    if ((increasing || decreasing) && fabs(drift) > DRIFT_THRESHOLD) {
-        return "drifting";
-    }
-
-    // Check for oscillation (gaps bouncing but returning to baseline)
-    double max_dev = 0;
-    for (int i = 0; i < n; i++) {
-        double dev = fabs(a2v_trend[i] - input->baseline.a2v_avg_ms);
-        if (dev > max_dev) max_dev = dev;
-    }
-
-    // Current close to baseline but had deviations = oscillating
-    double current_dev = fabs(result->a2v_avg_ms - input->baseline.a2v_avg_ms);
-    if (max_dev > DRIFT_THRESHOLD && current_dev < max_dev * 0.5) {
-        return "oscillating";
-    }
-
-    // Within tolerance = healthy
-    if (result->variance_pct <= VARIANCE_OK) {
-        return "healthy";
-    }
-
-    return "oscillating";  // Default to oscillating for minor variations
-}
-
-// Determine status: OK, WARNING, CRITICAL
-const char* get_status(MeasurementResult* result, Baseline* baseline) {
-    // Calculate deviation from baseline
-    double a2v_diff = fabs(result->a2v_avg_ms - baseline->a2v_avg_ms);
-    double v2a_diff = fabs(result->v2a_avg_ms - baseline->v2a_avg_ms);
-    double max_diff = (a2v_diff > v2a_diff) ? a2v_diff : v2a_diff;
-
-    // Check thresholds
-    if (max_diff >= THRESHOLD_CRITICAL) {
-        return "CRITICAL";
-    }
-    if (max_diff >= THRESHOLD_WARNING) {
-        return "WARNING";
-    }
-
-    // Check pattern
-    if (strcmp(result->pattern, "drifting") == 0) {
-        return "CRITICAL";  // Drifting is always critical
-    }
-
-    return "OK";
-}
-
-// Calculate sync score (0-100, where 100 is perfect sync)
-int calculate_sync_score(MeasurementResult* result, Baseline* baseline) {
-    (void)baseline;  // Used for reference only
-    double score = 100.0;
-
-    // Deduct for variance from baseline (up to 50 points)
-    double variance_penalty = result->variance_pct * 2.5;
-    if (variance_penalty > 50.0) variance_penalty = 50.0;
-    score -= variance_penalty;
-
-    // Deduct for pattern issues (up to 30 points)
-    if (strcmp(result->pattern, "drifting") == 0) {
-        score -= 30.0;
-    } else if (strcmp(result->pattern, "oscillating") == 0) {
-        score -= 10.0;
-    }
-
-    // Clamp to 0-100
-    if (score < 0.0) score = 0.0;
-    if (score > 100.0) score = 100.0;
-
-    return (int)score;
-}
-
-// Update baseline with exponential moving average
-void update_baseline(InputStatus* input, MeasurementResult* result) {
-    Baseline* baseline = &input->baseline;
-
-    if (baseline->sample_count == 0) {
-        baseline->a2v_avg_ms = result->a2v_avg_ms;
-        baseline->v2a_avg_ms = result->v2a_avg_ms;
-        baseline->sample_count = 1;
-    } else {
-        // EMA with alpha = 0.1 (slow adaptation)
-        double alpha = 0.1;
-        baseline->a2v_avg_ms = alpha * result->a2v_avg_ms + (1.0 - alpha) * baseline->a2v_avg_ms;
-        baseline->v2a_avg_ms = alpha * result->v2a_avg_ms + (1.0 - alpha) * baseline->v2a_avg_ms;
-        baseline->sample_count++;
-    }
-
-    snprintf(baseline->last_updated, sizeof(baseline->last_updated), "%s", result->timestamp);
-}
-
-// Analyze trend over last 10 runs
-void analyze_trend(InputStatus* input) {
-    TrendData* trend = &input->trend;
-
-    // Shift values
-    for (int i = 9; i > 0; i--) {
-        trend->a2v_values[i] = trend->a2v_values[i - 1];
-        trend->v2a_values[i] = trend->v2a_values[i - 1];
-    }
-
-    // Add current
-    trend->a2v_values[0] = input->current.a2v_avg_ms;
-    trend->v2a_values[0] = input->current.v2a_avg_ms;
-
-    if (trend->count < 10) trend->count++;
-
-    // Analyze trend direction (need at least 3 samples)
-    if (trend->count >= 3) {
-        // Compare first half to second half
-        double first_avg = 0, second_avg = 0;
-        int half = trend->count / 2;
-
-        for (int i = 0; i < half; i++) {
-            first_avg += trend->a2v_values[trend->count - 1 - i];  // Older samples
-        }
-        first_avg /= half;
-
-        for (int i = 0; i < half; i++) {
-            second_avg += trend->a2v_values[i];  // Newer samples
-        }
-        second_avg /= half;
-
-        double diff = second_avg - first_avg;
-
-        if (fabs(diff) < 2.0) {
-            snprintf(trend->trend, sizeof(trend->trend), "stable");
-        } else if (diff < 0) {
-            snprintf(trend->trend, sizeof(trend->trend), "improving");
-        } else {
-            snprintf(trend->trend, sizeof(trend->trend), "degrading");
-        }
-    } else {
-        snprintf(trend->trend, sizeof(trend->trend), "insufficient_data");
-    }
-}
-
-// STEP 6: Save result to history
+// Save result to history
 void check_input_avsync(InputStatus* input) {
     MeasurementResult result;
 
     if (measure_avsync(input, &result) == 0) {
-        // Analyze the result
-        analyze_result(input, &result);
-
         pthread_mutex_lock(&input->lock);
 
         // Store current result
@@ -829,21 +553,13 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
         "\"a2v_mean_ms\":%.2f,"
         "\"v2a_mean_ms\":%.2f,"
         "\"a2v_samples\":%d,"
-        "\"v2a_samples\":%d,"
-        "\"variance_pct\":%.2f,"
-        "\"pattern\":\"%s\","
-        "\"status\":\"%s\","
-        "\"sync_score\":%d"
+        "\"v2a_samples\":%d"
         "}",
         result->timestamp,
         result->a2v_avg_ms,
         result->v2a_avg_ms,
         result->a2v_count,
-        result->v2a_count,
-        result->variance_pct,
-        result->pattern,
-        result->status,
-        result->sync_score);
+        result->v2a_count);
 }
 
 // Build JSON for single input
@@ -871,28 +587,6 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
 
     // Add current measurement
     len += build_result_json(&input->current, buf + len, buf_size - len);
-
-    // Add baseline
-    len += snprintf(buf + len, buf_size - len,
-        ",\"baseline\":{"
-            "\"a2v_avg_ms\":%.2f,"
-            "\"v2a_avg_ms\":%.2f,"
-            "\"sample_count\":%d,"
-            "\"last_updated\":\"%s\""
-        "}",
-        input->baseline.a2v_avg_ms,
-        input->baseline.v2a_avg_ms,
-        input->baseline.sample_count,
-        input->baseline.last_updated);
-
-    // Add trend
-    len += snprintf(buf + len, buf_size - len,
-        ",\"trend\":{"
-            "\"direction\":\"%s\","
-            "\"sample_count\":%d"
-        "}",
-        input->trend.trend,
-        input->trend.count);
 
     // Add history if requested
     if (include_history && len < (int)buf_size - 1000) {
@@ -1007,55 +701,6 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
             status = MHD_HTTP_NOT_FOUND;
         }
     }
-    else if (strcmp(url, "/baseline") == 0) {
-        // Get all baselines
-        int len = snprintf(buf, buf_size, "{\"baselines\":[");
-        pthread_mutex_lock(&g_ctx.global_lock);
-        for (int i = 0; i < g_ctx.input_count; i++) {
-            if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
-            pthread_mutex_lock(&g_ctx.inputs[i].lock);
-            len += snprintf(buf + len, buf_size - len,
-                "{\"id\":\"%s\",\"a2v_avg_ms\":%.2f,\"v2a_avg_ms\":%.2f,"
-                "\"sample_count\":%d,\"last_updated\":\"%s\"}",
-                g_ctx.inputs[i].id,
-                g_ctx.inputs[i].baseline.a2v_avg_ms,
-                g_ctx.inputs[i].baseline.v2a_avg_ms,
-                g_ctx.inputs[i].baseline.sample_count,
-                g_ctx.inputs[i].baseline.last_updated);
-            pthread_mutex_unlock(&g_ctx.inputs[i].lock);
-        }
-        pthread_mutex_unlock(&g_ctx.global_lock);
-        len += snprintf(buf + len, buf_size - len, "]}");
-    }
-    else if (strncmp(url, "/baseline/", 10) == 0) {
-        // Get single baseline
-        const char* input_id = url + 10;
-        int found = 0;
-
-        pthread_mutex_lock(&g_ctx.global_lock);
-        for (int i = 0; i < g_ctx.input_count; i++) {
-            if (strcmp(g_ctx.inputs[i].id, input_id) == 0) {
-                pthread_mutex_lock(&g_ctx.inputs[i].lock);
-                snprintf(buf, buf_size,
-                    "{\"id\":\"%s\",\"a2v_avg_ms\":%.2f,\"v2a_avg_ms\":%.2f,"
-                    "\"sample_count\":%d,\"last_updated\":\"%s\"}",
-                    g_ctx.inputs[i].id,
-                    g_ctx.inputs[i].baseline.a2v_avg_ms,
-                    g_ctx.inputs[i].baseline.v2a_avg_ms,
-                    g_ctx.inputs[i].baseline.sample_count,
-                    g_ctx.inputs[i].baseline.last_updated);
-                pthread_mutex_unlock(&g_ctx.inputs[i].lock);
-                found = 1;
-                break;
-            }
-        }
-        pthread_mutex_unlock(&g_ctx.global_lock);
-
-        if (!found) {
-            snprintf(buf, buf_size, "{\"error\":\"Input not found\"}");
-            status = MHD_HTTP_NOT_FOUND;
-        }
-    }
     else {
         snprintf(buf, buf_size,
             "{\"error\":\"Not found\","
@@ -1063,9 +708,7 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
                 "\"/health\","
                 "\"/status\","
                 "\"/status/{id}\","
-                "\"/history/{id}\","
-                "\"/baseline\","
-                "\"/baseline/{id}\""
+                "\"/history/{id}\""
             "]}");
         status = MHD_HTTP_NOT_FOUND;
     }
@@ -1114,17 +757,15 @@ void load_data(void) {
 
 void print_help(const char* prog) {
     printf("Usage: %s [options]\n\n", prog);
-    printf("A/V Sync Monitor Service - Enhanced Version\n\n");
+    printf("A/V Sync Monitor Service\n\n");
     printf("Options:\n");
     printf("  --help         Show this help\n");
     printf("\n");
     printf("API Endpoints (port %d):\n", API_PORT);
     printf("  GET /health            - Health check\n");
-    printf("  GET /status            - All inputs status\n");
+    printf("  GET /status            - All inputs current status\n");
     printf("  GET /status/{id}       - Single input status\n");
     printf("  GET /history/{id}      - Single input with 24h history\n");
-    printf("  GET /baseline          - All baselines\n");
-    printf("  GET /baseline/{id}     - Single input baseline\n");
     printf("\n");
     printf("Workflow:\n");
     printf("  1. CAPTURE   - Run tsp to extract PTS values (10s sample)\n");
@@ -1132,18 +773,7 @@ void print_help(const char* prog) {
     printf("  3. SORT      - Sort by PTS value (presentation order)\n");
     printf("  4. FILTER    - Keep only alternating video/audio frames\n");
     printf("  5. COMPARE   - Calculate A→V and V→A mean gaps (max excluded)\n");
-    printf("  6. ANALYZE   - Compare to baseline, detect patterns, score\n");
-    printf("  7. SAVE      - Store results for trending\n");
-    printf("\n");
-    printf("Status Thresholds (from baseline):\n");
-    printf("  OK:       < %.0fms deviation\n", THRESHOLD_WARNING);
-    printf("  WARNING:  %.0fms - %.0fms deviation\n", THRESHOLD_WARNING, THRESHOLD_CRITICAL);
-    printf("  CRITICAL: > %.0fms deviation or drifting\n", THRESHOLD_CRITICAL);
-    printf("\n");
-    printf("Patterns:\n");
-    printf("  healthy     - Within ±%.0f%% of baseline\n", VARIANCE_OK);
-    printf("  drifting    - Gaps steadily increasing/decreasing\n");
-    printf("  oscillating - Gaps bouncing but returning to baseline\n");
+    printf("  6. SAVE      - Store results with timestamp for trending\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -1154,7 +784,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("CariTranscoder A/V Sync Monitor (Enhanced)\n");
+    printf("CariTranscoder A/V Sync Monitor\n");
     printf("API port: %d\n", API_PORT);
     printf("Check interval: %d seconds\n", CHECK_INTERVAL);
     printf("Sample duration: %d seconds\n", SAMPLE_DURATION);
