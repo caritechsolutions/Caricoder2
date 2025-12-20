@@ -2,8 +2,14 @@
  * cari-avsync.c - A/V Sync Monitor Service
  *
  * Monitors audio/video synchronization for all running inputs.
- * Uses tsp pcrextract to measure PTS-PCR offsets.
- * Formula: A/V offset = (audio_PTS - PCR) - (video_PTS - PCR)
+ * Uses tsp pcrextract with --evaluate-pcr-offset to get PTS timing.
+ *
+ * Method: PTS Alignment Check
+ * - Collect audio and video PTS values with packet positions
+ * - For each audio frame, find the nearest video frame by packet position
+ * - Compare their PTS values (both on same 90kHz timeline)
+ * - Track the PTS difference over time - drift indicates sync problems
+ * - A consistent offset is normal (video PTS leads due to decode buffer)
  *
  * Copyright (c) 2024 CariTech Solutions
  */
@@ -11,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
@@ -303,16 +310,19 @@ void discover_inputs(void) {
     printf("Discovered %d inputs with A/V sync capability\n", count);
 }
 
-// Run tsp pcrextract and parse output
+// Run tsp pcrextract and parse output using PTS alignment method
 int measure_avsync(InputStatus* input, double* offset_ms) {
     char cmd[512];
-    // Don't filter by PID - let tsp find PCR on any PID (might be PMT or separate PCR PID)
+
+    // Use --evaluate-pcr-offset to get timing for both PIDs
+    // Use --good-pts-only to filter out B-frame reordering artifacts
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
-        "-P pcrextract --pts --pcr --csv "
+        "-P pcrextract --pid %d --pid %d --pts --pcr --good-pts-only --evaluate-pcr-offset --csv "
         "-O drop 2>&1",
         SAMPLE_DURATION + 2,
-        input->address, input->port);
+        input->address, input->port,
+        input->video_pid, input->audio_pid);
 
     printf("  Running: %s\n", cmd);
     fflush(stdout);
@@ -326,14 +336,9 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
 
     char line[512];
 
-    // Store PCR values with packet positions
-    typedef struct { int packet; double pcr; } PcrSample;
-    PcrSample pcrs[200];
-    int pcr_count = 0;
-
     // Store PTS values with packet positions
-    typedef struct { int packet; double pts; } PtsSample;
-    PtsSample video_pts[100];
+    typedef struct { int packet; int64_t pts; } PtsSample;
+    PtsSample video_pts[200];
     PtsSample audio_pts[100];
     int video_count = 0;
     int audio_count = 0;
@@ -349,7 +354,7 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         int pid = 0;
         int packet = 0;
         char type[16] = "";
-        double value = 0;
+        int64_t value = 0;
 
         char* token;
         char* saveptr;
@@ -364,21 +369,15 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
                 case 0: pid = atoi(token); break;
                 case 1: packet = atoi(token); break;
                 case 3: snprintf(type, sizeof(type), "%s", token); break;
-                case 5: value = atof(token); break;
+                case 5: value = strtoll(token, NULL, 10); break;
             }
             field++;
             token = strtok_r(NULL, ",", &saveptr);
         }
 
-        // Collect PCR entries (from video PID which carries PCR)
-        if (strcmp(type, "PCR") == 0 && pcr_count < 200) {
-            pcrs[pcr_count].packet = packet;
-            pcrs[pcr_count].pcr = value;
-            pcr_count++;
-        }
-        // Collect PTS entries
-        else if (strcmp(type, "PTS") == 0) {
-            if (pid == input->video_pid && video_count < 100) {
+        // Collect PTS entries only (we compare PTS values directly)
+        if (strcmp(type, "PTS") == 0) {
+            if (pid == input->video_pid && video_count < 200) {
                 video_pts[video_count].packet = packet;
                 video_pts[video_count].pts = value;
                 video_count++;
@@ -392,60 +391,118 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
 
     pclose(fp);
 
-    printf("  Collected: %d PCR, %d video PTS, %d audio PTS\n",
-           pcr_count, video_count, audio_count);
+    printf("  Collected: %d video PTS, %d audio PTS\n", video_count, audio_count);
     fflush(stdout);
 
-    if (pcr_count == 0 || video_count == 0 || audio_count == 0) {
-        printf("  Failed: insufficient data\n");
+    if (video_count < 5 || audio_count < 3) {
+        printf("  Failed: insufficient data (need at least 5 video, 3 audio)\n");
         fflush(stdout);
         return -1;
     }
 
-    // Find the nearest PRECEDING PCR for a given packet position
-    // This is how tsp calculates "Offset from PCR" - use the last PCR before the PTS
-    #define GET_PRECEDING_PCR(pkt, result) do { \
-        result = pcrs[0].pcr; \
-        for (int idx = pcr_count - 1; idx >= 0; idx--) { \
-            if (pcrs[idx].packet <= (pkt)) { \
-                result = pcrs[idx].pcr; \
-                break; \
-            } \
-        } \
-    } while(0)
+    // PTS Alignment Method:
+    // For each audio frame, find the video frame with closest PTS value
+    // (i.e., content scheduled to play at similar times)
+    //
+    // Key insight: Audio and video that should play together have similar PTS values.
+    // The difference between matched PTS values indicates sync quality:
+    // - Mean near zero = audio/video on same timeline (good)
+    // - Large drift = timelines diverging (bad)
+    // - Large mean offset = systematic sync error (bad)
 
-    // Calculate average offset for video PTS
-    // PTS is in 90kHz, PCR is in 27MHz
-    // Convert PTS to 27MHz: PTS * 300
-    // Offset = (PTS * 300) - preceding_PCR
-    double video_offset_sum = 0;
-    for (int i = 0; i < video_count; i++) {
-        double pts_27mhz = video_pts[i].pts * 300.0;
-        double pcr;
-        GET_PRECEDING_PCR(video_pts[i].packet, pcr);
-        video_offset_sum += (pts_27mhz - pcr);
+    double pts_diffs[100];  // Store PTS differences for each audio sample
+    int diff_count = 0;
+
+    for (int a = 0; a < audio_count && diff_count < 100; a++) {
+        int64_t audio_pts_val = audio_pts[a].pts;
+
+        // Find video with closest PTS VALUE (not packet position)
+        // This finds video content scheduled to play at similar time
+        int best_video_idx = 0;
+        int64_t best_pts_distance = llabs(video_pts[0].pts - audio_pts_val);
+
+        for (int v = 1; v < video_count; v++) {
+            int64_t pts_distance = llabs(video_pts[v].pts - audio_pts_val);
+            if (pts_distance < best_pts_distance) {
+                best_pts_distance = pts_distance;
+                best_video_idx = v;
+            }
+        }
+
+        int64_t video_pts_val = video_pts[best_video_idx].pts;
+
+        // PTS difference in 90kHz ticks (signed)
+        // Positive = video scheduled after audio
+        // Negative = video scheduled before audio
+        int64_t pts_diff = video_pts_val - audio_pts_val;
+
+        // Convert to milliseconds
+        double diff_ms = (double)pts_diff / 90.0;
+        pts_diffs[diff_count++] = diff_ms;
     }
-    double video_avg_offset = video_offset_sum / video_count;
 
-    // Calculate average offset for audio PTS
-    double audio_offset_sum = 0;
-    for (int i = 0; i < audio_count; i++) {
-        double pts_27mhz = audio_pts[i].pts * 300.0;
-        double pcr;
-        GET_PRECEDING_PCR(audio_pts[i].packet, pcr);
-        audio_offset_sum += (pts_27mhz - pcr);
+    if (diff_count < 3) {
+        printf("  Failed: not enough paired samples\n");
+        fflush(stdout);
+        return -1;
     }
-    double audio_avg_offset = audio_offset_sum / audio_count;
 
-    #undef GET_PRECEDING_PCR
+    // Calculate statistics on the PTS differences
+    double sum = 0;
+    double min_diff = pts_diffs[0];
+    double max_diff = pts_diffs[0];
 
-    // A/V offset in 27MHz ticks, convert to ms
-    double offset_ticks = audio_avg_offset - video_avg_offset;
-    *offset_ms = offset_ticks / 27000.0;
+    for (int i = 0; i < diff_count; i++) {
+        sum += pts_diffs[i];
+        if (pts_diffs[i] < min_diff) min_diff = pts_diffs[i];
+        if (pts_diffs[i] > max_diff) max_diff = pts_diffs[i];
+    }
 
-    printf("  Video avg offset: %.0f ticks (%.2f ms)\n", video_avg_offset, video_avg_offset / 27000.0);
-    printf("  Audio avg offset: %.0f ticks (%.2f ms)\n", audio_avg_offset, audio_avg_offset / 27000.0);
-    printf("  A/V offset: %.2f ms\n", *offset_ms);
+    double mean = sum / diff_count;
+
+    // Calculate drift: difference between average of last 3 and first 3 samples
+    // This detects if audio/video timelines are diverging
+    double first_avg = 0, last_avg = 0;
+    int num_avg = (diff_count >= 3) ? 3 : diff_count;
+
+    for (int i = 0; i < num_avg; i++) {
+        first_avg += pts_diffs[i];
+    }
+    first_avg /= num_avg;
+
+    for (int i = 0; i < num_avg; i++) {
+        last_avg += pts_diffs[diff_count - 1 - i];
+    }
+    last_avg /= num_avg;
+
+    double drift = last_avg - first_avg;
+
+    // Sync quality is determined by:
+    // 1. Mean offset - should be near zero (both timelines aligned)
+    //    Note: small mean due to frame rate mismatch is acceptable (~±20ms)
+    // 2. Drift - should be near zero (timelines not diverging)
+    //
+    // Primary metric is DRIFT (indicates ongoing sync problem)
+    // Secondary check is if MEAN exceeds acceptable threshold (indicates fixed offset)
+    //
+    // Note: stddev is NOT a good metric because frame rate differences between
+    // audio (256ms) and video (33ms) cause inherent matching jitter (~±16ms)
+
+    double sync_error = fabs(drift);
+
+    // If mean offset is large (>40ms), that's also a problem
+    // This catches cases where there's a fixed A/V offset but no drift
+    if (fabs(mean) > 40.0 && fabs(mean) > sync_error) {
+        sync_error = fabs(mean);
+    }
+
+    *offset_ms = sync_error;
+
+    printf("  PTS alignment analysis (%d paired samples):\n", diff_count);
+    printf("    Mean offset: %.2f ms (should be near zero)\n", mean);
+    printf("    Drift: %.2f ms (first vs last samples)\n", drift);
+    printf("    Range: %.1f to %.1f ms\n", min_diff, max_diff);
+    printf("  Sync error metric: %.2f ms\n", sync_error);
     fflush(stdout);
 
     return 0;
