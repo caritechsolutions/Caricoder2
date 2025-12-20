@@ -245,6 +245,19 @@ build_tools() {
         fi
     fi
 
+    # Build cari-avsync
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/cari-avsync" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/cari-avsync"
+        log_info "Building cari-avsync..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-avsync installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-avsync"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
@@ -288,6 +301,31 @@ update_api() {
     fi
 
     log_info "API service updated"
+}
+
+# Update A/V sync monitor service
+update_avsync_service() {
+    log_step "Updating A/V Sync Monitor service..."
+
+    # Update systemd service file
+    if [[ -f "$TEMP_DIR/caritrans_latest/systemd/cari-avsync.service" ]]; then
+        cp "$TEMP_DIR/caritrans_latest/systemd/cari-avsync.service" /etc/systemd/system/
+        log_info "Updated cari-avsync.service"
+        systemctl daemon-reload
+    fi
+
+    # Enable and start/restart service
+    systemctl enable cari-avsync 2>/dev/null || true
+
+    if systemctl is-active --quiet cari-avsync; then
+        systemctl restart cari-avsync
+        log_info "Restarted cari-avsync service"
+    else
+        systemctl start cari-avsync
+        log_info "Started cari-avsync service"
+    fi
+
+    log_info "A/V Sync Monitor service updated"
 }
 
 # Update nginx config (add missing locations like /preview)
@@ -455,6 +493,7 @@ main() {
     rebuild_apps
     build_tools
     update_api
+    update_avsync_service
     fix_permissions
     update_nginx_config
     restart_services

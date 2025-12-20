@@ -47,6 +47,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | `cari-output` | Output stream distribution |
 | `cari-stats` | Real-time statistics collection |
 | `cari-api` | FastAPI service for privileged operations |
+| `cari-avsync` | A/V sync monitor with 24-hour trending |
 | `udp_input` | UDP input tool with PID filtering and monitoring |
 | `player_preview` | HLS preview generator using FFmpeg |
 

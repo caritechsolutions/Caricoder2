@@ -1,0 +1,22 @@
+[Unit]
+Description=CariTranscoder A/V Sync Monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cari-avsync
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+# Ensure data directory exists
+ExecStartPre=/bin/mkdir -p /var/lib/caritrans
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-avsync
+
+[Install]
+WantedBy=multi-user.target

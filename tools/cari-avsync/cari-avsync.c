@@ -1,0 +1,716 @@
+/*
+ * cari-avsync.c - A/V Sync Monitor Service
+ *
+ * Monitors audio/video synchronization for all running inputs.
+ * Uses tsp pcrextract to measure PTS-PCR offsets.
+ * Formula: A/V offset = (audio_PTS - PCR) - (video_PTS - PCR)
+ *
+ * Copyright (c) 2024 CariTech Solutions
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <signal.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <pthread.h>
+#include <microhttpd.h>
+#include <ctype.h>
+#include <math.h>
+
+#define API_PORT 8082
+#define CONFIG_DIR "/etc/caritrans/inputs"
+#define DATA_FILE "/var/lib/caritrans/avsync.json"
+#define CHECK_INTERVAL 300      // 5 minutes between checks
+#define SAMPLE_DURATION 5       // 5 seconds per sample
+#define HISTORY_SIZE 288        // 24 hours at 5-minute intervals
+#define MAX_INPUTS 100
+#define MAX_WORKERS 10
+
+// Color status thresholds (milliseconds)
+#define THRESHOLD_GREEN 10.0
+#define THRESHOLD_YELLOW 25.0
+#define THRESHOLD_ORANGE 45.0
+
+typedef struct {
+    char timestamp[32];
+    double offset_ms;
+} HistorySample;
+
+typedef struct {
+    char id[64];                // e.g., "input-001"
+    char name[128];             // e.g., "BET"
+    char address[64];           // e.g., "239.6.6.6"
+    int port;                   // e.g., 6000
+    int video_pid;
+    int audio_pid;              // Primary audio PID
+    int running;                // Is the input service running?
+
+    // Current measurement
+    double current_offset_ms;
+    char current_status[16];    // "green", "yellow", "orange", "red"
+    int status_code;            // 0=green, 1=yellow, 2=orange, 3=red
+    char last_check[32];
+
+    // History (circular buffer)
+    HistorySample history[HISTORY_SIZE];
+    int history_count;
+    int history_index;
+
+    pthread_mutex_t lock;
+} InputStatus;
+
+typedef struct {
+    InputStatus inputs[MAX_INPUTS];
+    int input_count;
+    volatile int running;
+    pthread_mutex_t global_lock;
+    time_t last_save;
+} AppContext;
+
+AppContext g_ctx;
+
+// Forward declarations
+void* check_thread(void* arg);
+void* api_thread(void* arg);
+void discover_inputs(void);
+void check_input_avsync(InputStatus* input);
+void save_data(void);
+void load_data(void);
+const char* get_status_color(double offset_ms);
+int get_status_code(double offset_ms);
+
+void signal_handler(int sig) {
+    (void)sig;
+    g_ctx.running = 0;
+}
+
+void init_context(void) {
+    memset(&g_ctx, 0, sizeof(g_ctx));
+    g_ctx.running = 1;
+    pthread_mutex_init(&g_ctx.global_lock, NULL);
+
+    for (int i = 0; i < MAX_INPUTS; i++) {
+        pthread_mutex_init(&g_ctx.inputs[i].lock, NULL);
+    }
+}
+
+// Parse INI-style config file
+int parse_config(const char* filepath, InputStatus* input) {
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) return -1;
+
+    char line[512];
+    char section[64] = "";
+
+    // Extract ID from filename
+    const char* filename = strrchr(filepath, '/');
+    if (filename) {
+        filename++;
+        // Remove .conf extension
+        strncpy(input->id, filename, sizeof(input->id) - 1);
+        char* ext = strstr(input->id, ".conf");
+        if (ext) *ext = '\0';
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Trim whitespace
+        char* p = line;
+        while (*p && isspace(*p)) p++;
+
+        // Skip comments and empty lines
+        if (*p == '#' || *p == ';' || *p == '\0' || *p == '\n') continue;
+
+        // Section header
+        if (*p == '[') {
+            char* end = strchr(p, ']');
+            if (end) {
+                *end = '\0';
+                strncpy(section, p + 1, sizeof(section) - 1);
+            }
+            continue;
+        }
+
+        // Key = Value
+        char* eq = strchr(p, '=');
+        if (!eq) continue;
+
+        *eq = '\0';
+        char* key = p;
+        char* value = eq + 1;
+
+        // Trim key and value
+        while (*key && isspace(key[strlen(key)-1])) key[strlen(key)-1] = '\0';
+        while (*value && isspace(*value)) value++;
+        while (*value && (value[strlen(value)-1] == '\n' || isspace(value[strlen(value)-1])))
+            value[strlen(value)-1] = '\0';
+
+        // Parse based on section
+        if (strcmp(section, "input") == 0) {
+            if (strcmp(key, "name") == 0) {
+                strncpy(input->name, value, sizeof(input->name) - 1);
+            }
+        } else if (strcmp(section, "pids") == 0) {
+            if (strcmp(key, "video") == 0) {
+                input->video_pid = atoi(value);
+            } else if (strcmp(key, "audio") == 0) {
+                // Take first audio PID if comma-separated
+                input->audio_pid = atoi(value);
+            }
+        } else if (strcmp(section, "sources") == 0) {
+            // Parse source line: type|url|weight|settings
+            // e.g., udp|udp://239.6.6.6:6000|100|video_pid=211;audio_pids=221
+            if (strncmp(key, "source", 6) == 0 && strstr(value, "udp://")) {
+                char* url_start = strstr(value, "udp://");
+                if (url_start) {
+                    url_start += 6;  // Skip "udp://"
+                    char* colon = strchr(url_start, ':');
+                    if (colon) {
+                        *colon = '\0';
+                        strncpy(input->address, url_start, sizeof(input->address) - 1);
+                        input->port = atoi(colon + 1);
+                        // Port may have trailing |
+                        char* pipe = strchr(input->address, '|');
+                        if (pipe) *pipe = '\0';
+                    }
+
+                    // Look for PIDs in settings
+                    char* video_pid_str = strstr(value, "video_pid=");
+                    if (video_pid_str) {
+                        input->video_pid = atoi(video_pid_str + 10);
+                    }
+                    char* audio_pids_str = strstr(value, "audio_pids=");
+                    if (audio_pids_str) {
+                        input->audio_pid = atoi(audio_pids_str + 11);
+                    }
+                }
+            }
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+// Check if a systemd service is running
+int is_service_running(const char* input_id) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_id);
+    return system(cmd) == 0;
+}
+
+// Discover all inputs from config files
+void discover_inputs(void) {
+    DIR* dir = opendir(CONFIG_DIR);
+    if (!dir) {
+        fprintf(stderr, "Cannot open config directory: %s\n", CONFIG_DIR);
+        return;
+    }
+
+    pthread_mutex_lock(&g_ctx.global_lock);
+
+    struct dirent* entry;
+    int count = 0;
+
+    while ((entry = readdir(dir)) != NULL && count < MAX_INPUTS) {
+        if (entry->d_type != DT_REG) continue;
+
+        const char* ext = strrchr(entry->d_name, '.');
+        if (!ext || strcmp(ext, ".conf") != 0) continue;
+
+        char filepath[512];
+        snprintf(filepath, sizeof(filepath), "%s/%s", CONFIG_DIR, entry->d_name);
+
+        InputStatus* input = &g_ctx.inputs[count];
+        memset(input, 0, sizeof(InputStatus));
+        pthread_mutex_init(&input->lock, NULL);
+
+        if (parse_config(filepath, input) == 0) {
+            // Check if we have required info
+            if (input->address[0] && input->port > 0 &&
+                input->video_pid > 0 && input->audio_pid > 0) {
+                input->running = is_service_running(input->id);
+                count++;
+            }
+        }
+    }
+
+    g_ctx.input_count = count;
+    pthread_mutex_unlock(&g_ctx.global_lock);
+    closedir(dir);
+
+    printf("Discovered %d inputs with A/V sync capability\n", count);
+}
+
+// Run tsp pcrextract and parse output
+int measure_avsync(InputStatus* input, double* offset_ms) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "timeout %d tsp -I ip %s:%d "
+        "-P pcrextract --pts --pcr --evaluate-pcr-offset --pid %d --pid %d --csv "
+        "-O drop 2>/dev/null",
+        SAMPLE_DURATION + 2,
+        input->address, input->port,
+        input->video_pid, input->audio_pid);
+
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return -1;
+
+    char line[512];
+    double video_offsets[100];
+    double audio_offsets[100];
+    int video_count = 0;
+    int audio_count = 0;
+
+    // Skip header
+    if (!fgets(line, sizeof(line), fp)) {
+        pclose(fp);
+        return -1;
+    }
+
+    // Parse CSV: PID,Packet,PID-Packet,Type,Count,Value,ValueOffset,OffsetFromPCR
+    while (fgets(line, sizeof(line), fp)) {
+        int pid;
+        char type[16];
+        double offset_from_pcr;
+
+        // Parse: PID,...,Type,...,OffsetFromPCR
+        char* token;
+        char* saveptr;
+        int field = 0;
+
+        pid = 0;
+        type[0] = '\0';
+        offset_from_pcr = 0;
+
+        token = strtok_r(line, ",", &saveptr);
+        while (token) {
+            switch (field) {
+                case 0: pid = atoi(token); break;
+                case 3: strncpy(type, token, sizeof(type) - 1); break;
+                case 7:
+                    if (strlen(token) > 0 && token[0] != '\n') {
+                        offset_from_pcr = atof(token);
+                    }
+                    break;
+            }
+            field++;
+            token = strtok_r(NULL, ",", &saveptr);
+        }
+
+        // Only count PTS entries with valid offset
+        if (strcmp(type, "PTS") == 0 && offset_from_pcr > 0) {
+            if (pid == input->video_pid && video_count < 100) {
+                video_offsets[video_count++] = offset_from_pcr;
+            } else if (pid == input->audio_pid && audio_count < 100) {
+                audio_offsets[audio_count++] = offset_from_pcr;
+            }
+        }
+    }
+
+    pclose(fp);
+
+    if (video_count == 0 || audio_count == 0) {
+        return -1;
+    }
+
+    // Calculate averages
+    double video_avg = 0, audio_avg = 0;
+    for (int i = 0; i < video_count; i++) video_avg += video_offsets[i];
+    for (int i = 0; i < audio_count; i++) audio_avg += audio_offsets[i];
+    video_avg /= video_count;
+    audio_avg /= audio_count;
+
+    // A/V offset in 27MHz ticks, convert to ms
+    double offset_ticks = audio_avg - video_avg;
+    *offset_ms = offset_ticks / 27000.0;
+
+    return 0;
+}
+
+const char* get_status_color(double offset_ms) {
+    double abs_offset = fabs(offset_ms);
+    if (abs_offset <= THRESHOLD_GREEN) return "green";
+    if (abs_offset <= THRESHOLD_YELLOW) return "yellow";
+    if (abs_offset <= THRESHOLD_ORANGE) return "orange";
+    return "red";
+}
+
+int get_status_code(double offset_ms) {
+    double abs_offset = fabs(offset_ms);
+    if (abs_offset <= THRESHOLD_GREEN) return 0;
+    if (abs_offset <= THRESHOLD_YELLOW) return 1;
+    if (abs_offset <= THRESHOLD_ORANGE) return 2;
+    return 3;
+}
+
+void check_input_avsync(InputStatus* input) {
+    double offset_ms = 0;
+
+    if (measure_avsync(input, &offset_ms) == 0) {
+        pthread_mutex_lock(&input->lock);
+
+        input->current_offset_ms = offset_ms;
+        strncpy(input->current_status, get_status_color(offset_ms), sizeof(input->current_status) - 1);
+        input->status_code = get_status_code(offset_ms);
+
+        // Update timestamp
+        time_t now = time(NULL);
+        struct tm* tm = localtime(&now);
+        strftime(input->last_check, sizeof(input->last_check), "%Y-%m-%dT%H:%M:%SZ", tm);
+
+        // Add to history
+        HistorySample* sample = &input->history[input->history_index];
+        strncpy(sample->timestamp, input->last_check, sizeof(sample->timestamp) - 1);
+        sample->offset_ms = offset_ms;
+
+        input->history_index = (input->history_index + 1) % HISTORY_SIZE;
+        if (input->history_count < HISTORY_SIZE) {
+            input->history_count++;
+        }
+
+        pthread_mutex_unlock(&input->lock);
+
+        printf("[%s] %s: A/V offset = %.2f ms (%s)\n",
+               input->last_check, input->id, offset_ms, input->current_status);
+    } else {
+        printf("[CHECK] %s: Failed to measure A/V sync\n", input->id);
+    }
+}
+
+// Background thread for periodic checks
+void* check_thread(void* arg) {
+    (void)arg;
+
+    while (g_ctx.running) {
+        // Refresh input list
+        discover_inputs();
+
+        // Check each running input
+        for (int i = 0; i < g_ctx.input_count && g_ctx.running; i++) {
+            InputStatus* input = &g_ctx.inputs[i];
+
+            // Re-check if service is running
+            input->running = is_service_running(input->id);
+
+            if (input->running) {
+                check_input_avsync(input);
+            }
+
+            // Small delay between checks to avoid overwhelming
+            usleep(500000);  // 0.5 second
+        }
+
+        // Save data periodically
+        time_t now = time(NULL);
+        if (now - g_ctx.last_save >= 60) {
+            save_data();
+            g_ctx.last_save = now;
+        }
+
+        // Wait for next check interval
+        for (int i = 0; i < CHECK_INTERVAL && g_ctx.running; i++) {
+            sleep(1);
+        }
+    }
+
+    return NULL;
+}
+
+// JSON helpers
+void json_escape(const char* str, char* out, size_t out_size) {
+    size_t j = 0;
+    for (size_t i = 0; str[i] && j < out_size - 2; i++) {
+        if (str[i] == '"' || str[i] == '\\') {
+            out[j++] = '\\';
+        }
+        out[j++] = str[i];
+    }
+    out[j] = '\0';
+}
+
+// Build JSON for single input
+int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include_history) {
+    char name_escaped[256];
+    json_escape(input->name, name_escaped, sizeof(name_escaped));
+
+    int len = snprintf(buf, buf_size,
+        "{"
+        "\"id\":\"%s\","
+        "\"name\":\"%s\","
+        "\"address\":\"%s:%d\","
+        "\"video_pid\":%d,"
+        "\"audio_pid\":%d,"
+        "\"running\":%s,"
+        "\"current\":{"
+            "\"av_offset_ms\":%.2f,"
+            "\"status\":\"%s\","
+            "\"status_code\":%d,"
+            "\"timestamp\":\"%s\""
+        "}",
+        input->id,
+        name_escaped,
+        input->address, input->port,
+        input->video_pid,
+        input->audio_pid,
+        input->running ? "true" : "false",
+        input->current_offset_ms,
+        input->current_status,
+        input->status_code,
+        input->last_check);
+
+    if (include_history && len < (int)buf_size - 100) {
+        len += snprintf(buf + len, buf_size - len, ",\"history\":[");
+
+        // Output history in chronological order
+        int start = (input->history_count < HISTORY_SIZE) ? 0 : input->history_index;
+        for (int i = 0; i < input->history_count && len < (int)buf_size - 100; i++) {
+            int idx = (start + i) % HISTORY_SIZE;
+            if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
+            len += snprintf(buf + len, buf_size - len,
+                "{\"ts\":\"%s\",\"offset_ms\":%.2f}",
+                input->history[idx].timestamp,
+                input->history[idx].offset_ms);
+        }
+        len += snprintf(buf + len, buf_size - len, "]");
+    }
+
+    len += snprintf(buf + len, buf_size - len, "}");
+    return len;
+}
+
+// REST API handler
+static int api_handler(void* cls, struct MHD_Connection* connection,
+                       const char* url, const char* method,
+                       const char* version, const char* upload_data,
+                       size_t* upload_data_size, void** con_cls) {
+    (void)cls;
+    (void)version;
+    (void)upload_data;
+    (void)upload_data_size;
+    (void)con_cls;
+
+    struct MHD_Response* response;
+    int ret;
+    char* buf = NULL;
+    size_t buf_size = 1024 * 1024;  // 1MB buffer for history
+
+    // Only handle GET
+    if (strcmp(method, "GET") != 0) {
+        const char* error = "{\"error\":\"Method not allowed\"}";
+        response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        ret = MHD_queue_response(connection, MHD_HTTP_METHOD_NOT_ALLOWED, response);
+        MHD_destroy_response(response);
+        return ret;
+    }
+
+    buf = malloc(buf_size);
+    if (!buf) {
+        const char* error = "{\"error\":\"Out of memory\"}";
+        response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
+        ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
+        MHD_destroy_response(response);
+        return ret;
+    }
+
+    int status = MHD_HTTP_OK;
+
+    if (strcmp(url, "/health") == 0) {
+        snprintf(buf, buf_size, "{\"status\":\"ok\",\"inputs\":%d}", g_ctx.input_count);
+    }
+    else if (strcmp(url, "/status") == 0) {
+        // All inputs status (without history)
+        int len = snprintf(buf, buf_size, "{\"inputs\":[");
+        pthread_mutex_lock(&g_ctx.global_lock);
+        for (int i = 0; i < g_ctx.input_count; i++) {
+            if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
+            pthread_mutex_lock(&g_ctx.inputs[i].lock);
+            len += build_input_json(&g_ctx.inputs[i], buf + len, buf_size - len, 0);
+            pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+        }
+        pthread_mutex_unlock(&g_ctx.global_lock);
+        len += snprintf(buf + len, buf_size - len, "]}");
+    }
+    else if (strncmp(url, "/status/", 8) == 0) {
+        // Single input status (without history)
+        const char* input_id = url + 8;
+        int found = 0;
+
+        pthread_mutex_lock(&g_ctx.global_lock);
+        for (int i = 0; i < g_ctx.input_count; i++) {
+            if (strcmp(g_ctx.inputs[i].id, input_id) == 0) {
+                pthread_mutex_lock(&g_ctx.inputs[i].lock);
+                build_input_json(&g_ctx.inputs[i], buf, buf_size, 0);
+                pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+                found = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_ctx.global_lock);
+
+        if (!found) {
+            snprintf(buf, buf_size, "{\"error\":\"Input not found\"}");
+            status = MHD_HTTP_NOT_FOUND;
+        }
+    }
+    else if (strncmp(url, "/history/", 9) == 0) {
+        // Single input with history
+        const char* input_id = url + 9;
+        int found = 0;
+
+        pthread_mutex_lock(&g_ctx.global_lock);
+        for (int i = 0; i < g_ctx.input_count; i++) {
+            if (strcmp(g_ctx.inputs[i].id, input_id) == 0) {
+                pthread_mutex_lock(&g_ctx.inputs[i].lock);
+                build_input_json(&g_ctx.inputs[i], buf, buf_size, 1);
+                pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+                found = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_ctx.global_lock);
+
+        if (!found) {
+            snprintf(buf, buf_size, "{\"error\":\"Input not found\"}");
+            status = MHD_HTTP_NOT_FOUND;
+        }
+    }
+    else {
+        snprintf(buf, buf_size, "{\"error\":\"Not found\"}");
+        status = MHD_HTTP_NOT_FOUND;
+    }
+
+    response = MHD_create_response_from_buffer(strlen(buf), buf, MHD_RESPMEM_MUST_FREE);
+    MHD_add_response_header(response, "Content-Type", "application/json");
+    MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+    ret = MHD_queue_response(connection, status, response);
+    MHD_destroy_response(response);
+
+    return ret;
+}
+
+void save_data(void) {
+    FILE* fp = fopen(DATA_FILE, "w");
+    if (!fp) {
+        fprintf(stderr, "Cannot save data to %s\n", DATA_FILE);
+        return;
+    }
+
+    fprintf(fp, "{\"inputs\":[");
+
+    pthread_mutex_lock(&g_ctx.global_lock);
+    for (int i = 0; i < g_ctx.input_count; i++) {
+        if (i > 0) fprintf(fp, ",");
+
+        char buf[1024 * 100];
+        pthread_mutex_lock(&g_ctx.inputs[i].lock);
+        build_input_json(&g_ctx.inputs[i], buf, sizeof(buf), 1);
+        pthread_mutex_unlock(&g_ctx.inputs[i].lock);
+
+        fprintf(fp, "%s", buf);
+    }
+    pthread_mutex_unlock(&g_ctx.global_lock);
+
+    fprintf(fp, "]}\n");
+    fclose(fp);
+
+    printf("Saved data to %s\n", DATA_FILE);
+}
+
+void load_data(void) {
+    // TODO: Parse JSON and restore history
+    // For now, start fresh each time
+    printf("Starting with fresh data (persistence loading not yet implemented)\n");
+}
+
+void print_help(const char* prog) {
+    printf("Usage: %s [options]\n\n", prog);
+    printf("A/V Sync Monitor Service\n\n");
+    printf("Options:\n");
+    printf("  --help         Show this help\n");
+    printf("\n");
+    printf("API Endpoints (port %d):\n", API_PORT);
+    printf("  GET /health            - Health check\n");
+    printf("  GET /status            - All inputs status\n");
+    printf("  GET /status/{id}       - Single input status\n");
+    printf("  GET /history/{id}      - Single input with 24h history\n");
+    printf("\n");
+    printf("Configuration:\n");
+    printf("  Check interval: %d seconds\n", CHECK_INTERVAL);
+    printf("  Sample duration: %d seconds\n", SAMPLE_DURATION);
+    printf("  History size: %d samples (24 hours)\n", HISTORY_SIZE);
+    printf("\n");
+    printf("Status Thresholds:\n");
+    printf("  Green:  0-%.0f ms\n", THRESHOLD_GREEN);
+    printf("  Yellow: %.0f-%.0f ms\n", THRESHOLD_GREEN, THRESHOLD_YELLOW);
+    printf("  Orange: %.0f-%.0f ms\n", THRESHOLD_YELLOW, THRESHOLD_ORANGE);
+    printf("  Red:    >%.0f ms\n", THRESHOLD_ORANGE);
+}
+
+int main(int argc, char* argv[]) {
+    // Parse arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_help(argv[0]);
+            return 0;
+        }
+    }
+
+    printf("CariTranscoder A/V Sync Monitor\n");
+    printf("API port: %d\n", API_PORT);
+    printf("Check interval: %d seconds\n", CHECK_INTERVAL);
+
+    // Setup
+    init_context();
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    // Load previous data if exists
+    load_data();
+
+    // Initial discovery
+    discover_inputs();
+
+    // Start HTTP API
+    struct MHD_Daemon* daemon = MHD_start_daemon(
+        MHD_USE_SELECT_INTERNALLY,
+        API_PORT,
+        NULL, NULL,
+        &api_handler, NULL,
+        MHD_OPTION_END);
+
+    if (!daemon) {
+        fprintf(stderr, "Failed to start HTTP server on port %d\n", API_PORT);
+        return 1;
+    }
+
+    printf("API server started on port %d\n", API_PORT);
+
+    // Start check thread
+    pthread_t check_tid;
+    pthread_create(&check_tid, NULL, check_thread, NULL);
+
+    // Main loop - just wait for signals
+    while (g_ctx.running) {
+        sleep(1);
+    }
+
+    printf("\nShutting down...\n");
+
+    // Cleanup
+    pthread_join(check_tid, NULL);
+    MHD_stop_daemon(daemon);
+
+    // Final save
+    save_data();
+
+    printf("Done.\n");
+    return 0;
+}

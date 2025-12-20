@@ -128,6 +128,40 @@ echo "Web UI: http://$(hostname -I | awk '{print $1}'):8080"
 2. **MP2 Audio**: Some browsers may not support MP2 audio playback natively
 3. **Preview Startup**: First preview request may take 5-10 seconds while segments are generated
 
+## In Progress
+
+### A/V Sync Monitor (cari-avsync)
+**Status:** 🔧 In Development
+
+A standalone service for monitoring audio/video synchronization across all pipeline stages.
+
+**Features:**
+- Monitors A/V sync for all running inputs (future: transcoders, muxers, outputs)
+- Uses tsp pcrextract to measure PTS-PCR offsets
+- Formula: `A/V offset = (audio_PTS - PCR) - (video_PTS - PCR)`
+- 24-hour trending data (288 samples at 5-minute intervals)
+- REST API on port 8082
+- Color-coded status indicators:
+  | Range | Color | Status |
+  |-------|-------|--------|
+  | 0-10ms | Green | Excellent |
+  | 10-25ms | Yellow | Warning |
+  | 25-45ms | Orange | Poor |
+  | >45ms | Red | Out of sync |
+
+**Files:**
+- `tools/cari-avsync/cari-avsync.c` - Main service
+- `tools/cari-avsync/Makefile` - Build configuration
+- `systemd/cari-avsync.service` - Systemd service file
+
+**API Endpoints:**
+- `GET /health` - Health check
+- `GET /status` - All channels status
+- `GET /status/{channel}` - Single channel status
+- `GET /history/{channel}` - 24-hour trend data
+
+---
+
 ## Roadmap
 
 - [ ] SRT input/output support in web UI
