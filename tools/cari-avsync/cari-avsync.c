@@ -44,8 +44,8 @@ typedef struct {
 } HistorySample;
 
 typedef struct {
-    char id[64];                // e.g., "input-001"
-    char name[128];             // e.g., "BET"
+    char id[64];                // e.g., "bet" (from [general] name)
+    char name[128];             // e.g., "bet"
     char address[64];           // e.g., "239.6.6.6"
     int port;                   // e.g., 6000
     int video_pid;
@@ -101,7 +101,37 @@ void init_context(void) {
     }
 }
 
+// Trim whitespace from string (in-place)
+static void trim(char* str) {
+    if (!str || !*str) return;
+
+    // Trim leading
+    char* start = str;
+    while (*start && isspace((unsigned char)*start)) start++;
+
+    // Trim trailing
+    char* end = start + strlen(start) - 1;
+    while (end > start && (isspace((unsigned char)*end) || *end == '\n' || *end == '\r')) {
+        *end = '\0';
+        end--;
+    }
+
+    // Shift if needed
+    if (start != str) {
+        memmove(str, start, strlen(start) + 1);
+    }
+}
+
 // Parse INI-style config file
+// Config format:
+// [general]
+// name = bet
+// type = udp
+// [sources]
+// source_0 = udp|239.6.6.6:6000|100|video_pid=211,audio_pids=221,program_pid=1000
+// [pids]
+// video = 211
+// audio = 221
 int parse_config(const char* filepath, InputStatus* input) {
     FILE* fp = fopen(filepath, "r");
     if (!fp) return -1;
@@ -109,52 +139,48 @@ int parse_config(const char* filepath, InputStatus* input) {
     char line[512];
     char section[64] = "";
 
-    // Extract ID from filename
-    const char* filename = strrchr(filepath, '/');
-    if (filename) {
-        filename++;
-        // Remove .conf extension
-        strncpy(input->id, filename, sizeof(input->id) - 1);
-        char* ext = strstr(input->id, ".conf");
-        if (ext) *ext = '\0';
-    }
+    memset(input->id, 0, sizeof(input->id));
+    memset(input->name, 0, sizeof(input->name));
+    memset(input->address, 0, sizeof(input->address));
+    input->port = 0;
+    input->video_pid = 0;
+    input->audio_pid = 0;
 
     while (fgets(line, sizeof(line), fp)) {
-        // Trim whitespace
-        char* p = line;
-        while (*p && isspace(*p)) p++;
+        trim(line);
 
         // Skip comments and empty lines
-        if (*p == '#' || *p == ';' || *p == '\0' || *p == '\n') continue;
+        if (line[0] == '#' || line[0] == ';' || line[0] == '\0') continue;
 
         // Section header
-        if (*p == '[') {
-            char* end = strchr(p, ']');
+        if (line[0] == '[') {
+            char* end = strchr(line, ']');
             if (end) {
                 *end = '\0';
-                strncpy(section, p + 1, sizeof(section) - 1);
+                strncpy(section, line + 1, sizeof(section) - 1);
+                section[sizeof(section) - 1] = '\0';
             }
             continue;
         }
 
         // Key = Value
-        char* eq = strchr(p, '=');
+        char* eq = strchr(line, '=');
         if (!eq) continue;
 
         *eq = '\0';
-        char* key = p;
-        char* value = eq + 1;
-
-        // Trim key and value
-        while (*key && isspace(key[strlen(key)-1])) key[strlen(key)-1] = '\0';
-        while (*value && isspace(*value)) value++;
-        while (*value && (value[strlen(value)-1] == '\n' || isspace(value[strlen(value)-1])))
-            value[strlen(value)-1] = '\0';
+        char key[64], value[256];
+        strncpy(key, line, sizeof(key) - 1);
+        key[sizeof(key) - 1] = '\0';
+        strncpy(value, eq + 1, sizeof(value) - 1);
+        value[sizeof(value) - 1] = '\0';
+        trim(key);
+        trim(value);
 
         // Parse based on section
-        if (strcmp(section, "input") == 0) {
+        if (strcmp(section, "general") == 0) {
             if (strcmp(key, "name") == 0) {
                 strncpy(input->name, value, sizeof(input->name) - 1);
+                strncpy(input->id, value, sizeof(input->id) - 1);  // Use name as ID
             }
         } else if (strcmp(section, "pids") == 0) {
             if (strcmp(key, "video") == 0) {
@@ -164,30 +190,25 @@ int parse_config(const char* filepath, InputStatus* input) {
                 input->audio_pid = atoi(value);
             }
         } else if (strcmp(section, "sources") == 0) {
-            // Parse source line: type|url|weight|settings
-            // e.g., udp|udp://239.6.6.6:6000|100|video_pid=211;audio_pids=221
-            if (strncmp(key, "source", 6) == 0 && strstr(value, "udp://")) {
-                char* url_start = strstr(value, "udp://");
-                if (url_start) {
-                    url_start += 6;  // Skip "udp://"
-                    char* colon = strchr(url_start, ':');
-                    if (colon) {
-                        *colon = '\0';
-                        strncpy(input->address, url_start, sizeof(input->address) - 1);
-                        input->port = atoi(colon + 1);
-                        // Port may have trailing |
-                        char* pipe = strchr(input->address, '|');
-                        if (pipe) *pipe = '\0';
-                    }
+            // Parse source line: type|address:port|weight|settings
+            // e.g., udp|239.6.6.6:6000|100|video_pid=211,audio_pids=221
+            if (strncmp(key, "source", 6) == 0) {
+                // Check if it's a UDP source
+                if (strncmp(value, "udp|", 4) == 0) {
+                    char* addr_start = value + 4;  // Skip "udp|"
 
-                    // Look for PIDs in settings
-                    char* video_pid_str = strstr(value, "video_pid=");
-                    if (video_pid_str) {
-                        input->video_pid = atoi(video_pid_str + 10);
-                    }
-                    char* audio_pids_str = strstr(value, "audio_pids=");
-                    if (audio_pids_str) {
-                        input->audio_pid = atoi(audio_pids_str + 11);
+                    // Find the colon separating address and port
+                    char* colon = strchr(addr_start, ':');
+                    if (colon) {
+                        // Extract address
+                        size_t addr_len = colon - addr_start;
+                        if (addr_len < sizeof(input->address)) {
+                            strncpy(input->address, addr_start, addr_len);
+                            input->address[addr_len] = '\0';
+                        }
+
+                        // Extract port (stops at | or end)
+                        input->port = atoi(colon + 1);
                     }
                 }
             }
@@ -195,13 +216,22 @@ int parse_config(const char* filepath, InputStatus* input) {
     }
 
     fclose(fp);
+
+    // Debug output
+    if (input->name[0]) {
+        printf("  Parsed: %s - addr=%s:%d, video=%d, audio=%d\n",
+               input->name, input->address, input->port,
+               input->video_pid, input->audio_pid);
+    }
+
     return 0;
 }
 
 // Check if a systemd service is running
-int is_service_running(const char* input_id) {
+int is_service_running(const char* input_name) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_id);
+    // Service is named cari-udp-{name}, e.g., cari-udp-bet
+    snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
     return system(cmd) == 0;
 }
 
@@ -218,6 +248,8 @@ void discover_inputs(void) {
     struct dirent* entry;
     int count = 0;
 
+    printf("Scanning config directory: %s\n", CONFIG_DIR);
+
     while ((entry = readdir(dir)) != NULL && count < MAX_INPUTS) {
         if (entry->d_type != DT_REG) continue;
 
@@ -227,16 +259,46 @@ void discover_inputs(void) {
         char filepath[512];
         snprintf(filepath, sizeof(filepath), "%s/%s", CONFIG_DIR, entry->d_name);
 
+        printf("Reading config: %s\n", filepath);
+
         InputStatus* input = &g_ctx.inputs[count];
+
+        // Preserve history if same input
+        char old_id[64];
+        strncpy(old_id, input->id, sizeof(old_id) - 1);
+        int old_history_count = input->history_count;
+        int old_history_index = input->history_index;
+        HistorySample old_history[HISTORY_SIZE];
+        if (old_history_count > 0) {
+            memcpy(old_history, input->history, sizeof(old_history));
+        }
+
+        // Clear and reinit
+        pthread_mutex_t saved_lock = input->lock;
         memset(input, 0, sizeof(InputStatus));
-        pthread_mutex_init(&input->lock, NULL);
+        input->lock = saved_lock;
 
         if (parse_config(filepath, input) == 0) {
             // Check if we have required info
             if (input->address[0] && input->port > 0 &&
                 input->video_pid > 0 && input->audio_pid > 0) {
+
+                // Check if service is running
                 input->running = is_service_running(input->id);
+                printf("  Service cari-udp-%s: %s\n", input->id,
+                       input->running ? "RUNNING" : "not running");
+
+                // Restore history if same input
+                if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
+                    memcpy(input->history, old_history, sizeof(input->history));
+                    input->history_count = old_history_count;
+                    input->history_index = old_history_index;
+                }
+
                 count++;
+            } else {
+                printf("  Skipping: missing required fields (addr=%s, port=%d, vpid=%d, apid=%d)\n",
+                       input->address, input->port, input->video_pid, input->audio_pid);
             }
         }
     }
@@ -276,26 +338,26 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
 
     // Parse CSV: PID,Packet,PID-Packet,Type,Count,Value,ValueOffset,OffsetFromPCR
     while (fgets(line, sizeof(line), fp)) {
-        int pid;
-        char type[16];
-        double offset_from_pcr;
+        int pid = 0;
+        char type[16] = "";
+        double offset_from_pcr = 0;
 
         // Parse: PID,...,Type,...,OffsetFromPCR
         char* token;
         char* saveptr;
         int field = 0;
 
-        pid = 0;
-        type[0] = '\0';
-        offset_from_pcr = 0;
+        char line_copy[512];
+        strncpy(line_copy, line, sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
 
-        token = strtok_r(line, ",", &saveptr);
+        token = strtok_r(line_copy, ",", &saveptr);
         while (token) {
             switch (field) {
                 case 0: pid = atoi(token); break;
                 case 3: strncpy(type, token, sizeof(type) - 1); break;
                 case 7:
-                    if (strlen(token) > 0 && token[0] != '\n') {
+                    if (strlen(token) > 0 && token[0] != '\n' && token[0] != '\r') {
                         offset_from_pcr = atof(token);
                     }
                     break;
@@ -358,6 +420,7 @@ void check_input_avsync(InputStatus* input) {
 
         input->current_offset_ms = offset_ms;
         strncpy(input->current_status, get_status_color(offset_ms), sizeof(input->current_status) - 1);
+        input->current_status[sizeof(input->current_status) - 1] = '\0';
         input->status_code = get_status_code(offset_ms);
 
         // Update timestamp
@@ -368,6 +431,7 @@ void check_input_avsync(InputStatus* input) {
         // Add to history
         HistorySample* sample = &input->history[input->history_index];
         strncpy(sample->timestamp, input->last_check, sizeof(sample->timestamp) - 1);
+        sample->timestamp[sizeof(sample->timestamp) - 1] = '\0';
         sample->offset_ms = offset_ms;
 
         input->history_index = (input->history_index + 1) % HISTORY_SIZE;
