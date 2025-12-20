@@ -306,13 +306,13 @@ void discover_inputs(void) {
 // Run tsp pcrextract and parse output
 int measure_avsync(InputStatus* input, double* offset_ms) {
     char cmd[512];
+    // Don't filter by PID - let tsp find PCR on any PID (might be PMT or separate PCR PID)
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
-        "-P pcrextract --pts --pcr --pid %d --pid %d --csv "
+        "-P pcrextract --pts --pcr --csv "
         "-O drop 2>&1",
         SAMPLE_DURATION + 2,
-        input->address, input->port,
-        input->video_pid, input->audio_pid);
+        input->address, input->port);
 
     printf("  Running: %s\n", cmd);
     fflush(stdout);

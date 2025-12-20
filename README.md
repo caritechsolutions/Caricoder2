@@ -179,6 +179,51 @@ curl -X POST http://localhost:PORT/keepalive
 curl http://localhost:PORT/status
 ```
 
+### A/V Sync Monitor API (Port 8082)
+
+The cari-avsync service monitors audio/video synchronization for all running inputs. It polls every 5 minutes and keeps 24 hours of trending data.
+
+```bash
+# Health check
+curl http://localhost:8082/health
+
+# Get status of all inputs
+curl http://localhost:8082/status
+
+# Get status of single input
+curl http://localhost:8082/status/bet
+
+# Get status with 24-hour history
+curl http://localhost:8082/history/bet
+```
+
+**Status Colors:**
+| Color | Offset Range | Status Code |
+|-------|--------------|-------------|
+| Green | 0-10 ms | 0 |
+| Yellow | 10-25 ms | 1 |
+| Orange | 25-45 ms | 2 |
+| Red | >45 ms | 3 |
+
+**Example Response:**
+```json
+{
+  "id": "bet",
+  "name": "bet",
+  "type": "udp",
+  "address": "239.100.0.1:10000",
+  "video_pid": 211,
+  "audio_pid": 221,
+  "running": true,
+  "current": {
+    "av_offset_ms": 3.42,
+    "status": "green",
+    "status_code": 0,
+    "timestamp": "2024-12-20T12:05:58Z"
+  }
+}
+```
+
 ## Troubleshooting
 
 ### Preview not working
@@ -233,6 +278,31 @@ cd ../player_preview && make && sudo make install
 ### Branch
 
 Current development branch: `claude/video-transcoder-gstreamer-YnBIH`
+
+## Changelog
+
+### 2024-12-20
+
+**A/V Sync Monitor (cari-avsync)**
+- New standalone service for monitoring audio/video synchronization
+- Measures A/V offset using PCR/PTS timing from MPEG-TS streams
+- Formula: `A/V offset = (audio_PTS - PCR) - (video_PTS - PCR)`
+- Polls every 5 minutes, keeps 24 hours of trending data (288 samples)
+- Color-coded status thresholds (green/yellow/orange/red)
+- REST API on port 8082 for status queries
+- Auto-discovers inputs from `/etc/caritrans/inputs/*.conf`
+- Monitors output multicast address from `[output]` config section
+- Supports UDP, SRT, RIST, HLS input types (type field in config)
+
+**Input Handling**
+- Fixed PMT PID detection for program selection
+- Improved stream scanning with proper program association
+- Added support for multiple audio PIDs in source configuration
+
+**Player Preview**
+- FFmpeg-based HLS preview generation
+- Automatic cleanup on keepalive timeout
+- Stream analysis via ffprobe integration
 
 ## License
 
