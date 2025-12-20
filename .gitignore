@@ -3,3 +3,4 @@
 tools/*/player_preview
 tools/*/*.o
 tools/*/udp_input
+tools/*/cari-avsync
