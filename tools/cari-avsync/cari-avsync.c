@@ -54,7 +54,6 @@ typedef int MHD_Result;
 
 // Pattern detection thresholds
 #define DRIFT_THRESHOLD 5.0      // Steady change > 5ms = drifting
-#define ANOMALY_THRESHOLD 100.0  // Single spike > 100ms from mean
 
 // PTS sample for sorting
 typedef struct {
@@ -73,29 +72,17 @@ typedef struct {
 typedef struct {
     char timestamp[32];
 
-    // Audio→Video gaps
-    double a2v_avg_ms;
-    double a2v_min_ms;
-    double a2v_max_ms;
-    double a2v_stddev_ms;
-    int a2v_count;
-
-    // Video→Audio gaps
-    double v2a_avg_ms;
-    double v2a_min_ms;
-    double v2a_max_ms;
-    double v2a_stddev_ms;
-    int v2a_count;
+    // Mean offsets (max value excluded from calculation)
+    double a2v_avg_ms;      // Audio→Video mean gap
+    double v2a_avg_ms;      // Video→Audio mean gap
+    int a2v_count;          // Sample count used
+    int v2a_count;          // Sample count used
 
     // Analysis results
     double variance_pct;    // Variance from baseline (%)
     char pattern[16];       // "healthy", "drifting", "oscillating", "anomaly"
     char status[16];        // "OK", "WARNING", "CRITICAL"
     int sync_score;         // 0-100 (100 = perfect)
-
-    // Anomalies
-    int anomaly_count;
-    char anomaly_desc[256];
 } MeasurementResult;
 
 // Baseline values (historical average)
@@ -364,18 +351,6 @@ static int compare_pts(const void* a, const void* b) {
     return 0;
 }
 
-// Calculate standard deviation
-static double calc_stddev(double* values, int count, double mean) {
-    if (count < 2) return 0.0;
-
-    double sum_sq = 0.0;
-    for (int i = 0; i < count; i++) {
-        double diff = values[i] - mean;
-        sum_sq += diff * diff;
-    }
-    return sqrt(sum_sq / (count - 1));
-}
-
 // STEP 1-4: Capture, Parse, Sort, Filter, Compare
 int measure_avsync(InputStatus* input, MeasurementResult* result) {
     char cmd[512];
@@ -503,54 +478,42 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
 
     printf("  [COMPARE] Gaps: %d A→V, %d V→A\n", a2v_count, v2a_count);
 
-    // Calculate statistics for Audio→Video gaps
-    if (a2v_count > 0) {
-        double sum = 0, min_val = a2v_gaps[0], max_val = a2v_gaps[0];
+    // Calculate mean for Audio→Video gaps (excluding max value as it's likely a capture error)
+    if (a2v_count > 1) {
+        // Find max index
+        int max_idx = 0;
+        for (int i = 1; i < a2v_count; i++) {
+            if (a2v_gaps[i] > a2v_gaps[max_idx]) max_idx = i;
+        }
+        // Calculate mean excluding max
+        double sum = 0;
         for (int i = 0; i < a2v_count; i++) {
-            sum += a2v_gaps[i];
-            if (a2v_gaps[i] < min_val) min_val = a2v_gaps[i];
-            if (a2v_gaps[i] > max_val) max_val = a2v_gaps[i];
+            if (i != max_idx) sum += a2v_gaps[i];
         }
-        result->a2v_avg_ms = sum / a2v_count;
-        result->a2v_min_ms = min_val;
-        result->a2v_max_ms = max_val;
-        result->a2v_stddev_ms = calc_stddev(a2v_gaps, a2v_count, result->a2v_avg_ms);
-        result->a2v_count = a2v_count;
+        result->a2v_avg_ms = sum / (a2v_count - 1);
+        result->a2v_count = a2v_count - 1;  // Report count without the excluded max
+    } else if (a2v_count == 1) {
+        result->a2v_avg_ms = a2v_gaps[0];
+        result->a2v_count = 1;
     }
 
-    // Calculate statistics for Video→Audio gaps
-    if (v2a_count > 0) {
-        double sum = 0, min_val = v2a_gaps[0], max_val = v2a_gaps[0];
+    // Calculate mean for Video→Audio gaps (excluding max value as it's likely a capture error)
+    if (v2a_count > 1) {
+        // Find max index
+        int max_idx = 0;
+        for (int i = 1; i < v2a_count; i++) {
+            if (v2a_gaps[i] > v2a_gaps[max_idx]) max_idx = i;
+        }
+        // Calculate mean excluding max
+        double sum = 0;
         for (int i = 0; i < v2a_count; i++) {
-            sum += v2a_gaps[i];
-            if (v2a_gaps[i] < min_val) min_val = v2a_gaps[i];
-            if (v2a_gaps[i] > max_val) max_val = v2a_gaps[i];
+            if (i != max_idx) sum += v2a_gaps[i];
         }
-        result->v2a_avg_ms = sum / v2a_count;
-        result->v2a_min_ms = min_val;
-        result->v2a_max_ms = max_val;
-        result->v2a_stddev_ms = calc_stddev(v2a_gaps, v2a_count, result->v2a_avg_ms);
-        result->v2a_count = v2a_count;
-    }
-
-    // Detect anomalies (single gap spikes)
-    result->anomaly_count = 0;
-    memset(result->anomaly_desc, 0, sizeof(result->anomaly_desc));
-
-    for (int i = 0; i < a2v_count; i++) {
-        if (fabs(a2v_gaps[i] - result->a2v_avg_ms) > ANOMALY_THRESHOLD) {
-            result->anomaly_count++;
-        }
-    }
-    for (int i = 0; i < v2a_count; i++) {
-        if (fabs(v2a_gaps[i] - result->v2a_avg_ms) > ANOMALY_THRESHOLD) {
-            result->anomaly_count++;
-        }
-    }
-
-    if (result->anomaly_count > 0) {
-        snprintf(result->anomaly_desc, sizeof(result->anomaly_desc),
-                 "%d gap spikes > %.0fms from mean", result->anomaly_count, ANOMALY_THRESHOLD);
+        result->v2a_avg_ms = sum / (v2a_count - 1);
+        result->v2a_count = v2a_count - 1;  // Report count without the excluded max
+    } else if (v2a_count == 1) {
+        result->v2a_avg_ms = v2a_gaps[0];
+        result->v2a_count = 1;
     }
 
     // Set timestamp
@@ -558,10 +521,10 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
     struct tm* tm = localtime(&now);
     strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
 
-    printf("  [STATS] A→V: avg=%.1fms, range=[%.1f,%.1f], stddev=%.1f\n",
-           result->a2v_avg_ms, result->a2v_min_ms, result->a2v_max_ms, result->a2v_stddev_ms);
-    printf("  [STATS] V→A: avg=%.1fms, range=[%.1f,%.1f], stddev=%.1f\n",
-           result->v2a_avg_ms, result->v2a_min_ms, result->v2a_max_ms, result->v2a_stddev_ms);
+    printf("  [STATS] A→V mean: %.1fms (%d samples, max excluded)\n",
+           result->a2v_avg_ms, result->a2v_count);
+    printf("  [STATS] V→A mean: %.1fms (%d samples, max excluded)\n",
+           result->v2a_avg_ms, result->v2a_count);
 
     return 0;
 }
@@ -614,17 +577,11 @@ void analyze_result(InputStatus* input, MeasurementResult* result) {
     analyze_trend(input);
 }
 
-// Detect pattern: healthy, drifting, oscillating, anomaly
+// Detect pattern: healthy, drifting, oscillating
 const char* detect_pattern(InputStatus* input, MeasurementResult* result) {
     // Need at least 3 history samples to detect patterns
     if (input->history_count < 3) {
-        if (result->anomaly_count > 0) return "anomaly";
         return "healthy";
-    }
-
-    // Check for anomalies first
-    if (result->anomaly_count > 0) {
-        return "anomaly";
     }
 
     // Analyze last N samples for drift
@@ -694,41 +651,26 @@ const char* get_status(MeasurementResult* result, Baseline* baseline) {
     if (strcmp(result->pattern, "drifting") == 0) {
         return "CRITICAL";  // Drifting is always critical
     }
-    if (strcmp(result->pattern, "anomaly") == 0) {
-        return "WARNING";   // Anomalies warrant attention
-    }
 
     return "OK";
 }
 
 // Calculate sync score (0-100, where 100 is perfect sync)
 int calculate_sync_score(MeasurementResult* result, Baseline* baseline) {
+    (void)baseline;  // Used for reference only
     double score = 100.0;
 
-    // Deduct for variance from baseline (up to 40 points)
-    double variance_penalty = result->variance_pct * 2.0;
-    if (variance_penalty > 40.0) variance_penalty = 40.0;
+    // Deduct for variance from baseline (up to 50 points)
+    double variance_penalty = result->variance_pct * 2.5;
+    if (variance_penalty > 50.0) variance_penalty = 50.0;
     score -= variance_penalty;
 
-    // Deduct for high standard deviation (up to 20 points)
-    double stddev = (result->a2v_stddev_ms + result->v2a_stddev_ms) / 2.0;
-    double stddev_penalty = stddev * 2.0;
-    if (stddev_penalty > 20.0) stddev_penalty = 20.0;
-    score -= stddev_penalty;
-
-    // Deduct for pattern issues (up to 20 points)
+    // Deduct for pattern issues (up to 30 points)
     if (strcmp(result->pattern, "drifting") == 0) {
-        score -= 20.0;
-    } else if (strcmp(result->pattern, "anomaly") == 0) {
-        score -= 15.0;
+        score -= 30.0;
     } else if (strcmp(result->pattern, "oscillating") == 0) {
-        score -= 5.0;
+        score -= 10.0;
     }
-
-    // Deduct for anomalies (up to 20 points)
-    int anomaly_penalty = result->anomaly_count * 5;
-    if (anomaly_penalty > 20) anomaly_penalty = 20;
-    score -= anomaly_penalty;
 
     // Clamp to 0-100
     if (score < 0.0) score = 0.0;
@@ -881,43 +823,27 @@ void json_escape(const char* str, char* out, size_t out_size) {
 
 // Build JSON for measurement result
 int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
-    char anomaly_escaped[512];
-    json_escape(result->anomaly_desc, anomaly_escaped, sizeof(anomaly_escaped));
-
     return snprintf(buf, buf_size,
         "{"
         "\"timestamp\":\"%s\","
-        "\"audio_to_video\":{"
-            "\"avg_ms\":%.2f,"
-            "\"min_ms\":%.2f,"
-            "\"max_ms\":%.2f,"
-            "\"stddev_ms\":%.2f,"
-            "\"count\":%d"
-        "},"
-        "\"video_to_audio\":{"
-            "\"avg_ms\":%.2f,"
-            "\"min_ms\":%.2f,"
-            "\"max_ms\":%.2f,"
-            "\"stddev_ms\":%.2f,"
-            "\"count\":%d"
-        "},"
+        "\"a2v_mean_ms\":%.2f,"
+        "\"v2a_mean_ms\":%.2f,"
+        "\"a2v_samples\":%d,"
+        "\"v2a_samples\":%d,"
         "\"variance_pct\":%.2f,"
         "\"pattern\":\"%s\","
         "\"status\":\"%s\","
-        "\"sync_score\":%d,"
-        "\"anomalies\":{\"count\":%d,\"description\":\"%s\"}"
+        "\"sync_score\":%d"
         "}",
         result->timestamp,
-        result->a2v_avg_ms, result->a2v_min_ms, result->a2v_max_ms,
-        result->a2v_stddev_ms, result->a2v_count,
-        result->v2a_avg_ms, result->v2a_min_ms, result->v2a_max_ms,
-        result->v2a_stddev_ms, result->v2a_count,
+        result->a2v_avg_ms,
+        result->v2a_avg_ms,
+        result->a2v_count,
+        result->v2a_count,
         result->variance_pct,
         result->pattern,
         result->status,
-        result->sync_score,
-        result->anomaly_count,
-        anomaly_escaped);
+        result->sync_score);
 }
 
 // Build JSON for single input
@@ -1205,7 +1131,7 @@ void print_help(const char* prog) {
     printf("  2. PARSE     - Extract PTS entries for video/audio PIDs\n");
     printf("  3. SORT      - Sort by PTS value (presentation order)\n");
     printf("  4. FILTER    - Keep only alternating video/audio frames\n");
-    printf("  5. COMPARE   - Calculate A→V and V→A gaps with statistics\n");
+    printf("  5. COMPARE   - Calculate A→V and V→A mean gaps (max excluded)\n");
     printf("  6. ANALYZE   - Compare to baseline, detect patterns, score\n");
     printf("  7. SAVE      - Store results for trending\n");
     printf("\n");
@@ -1215,10 +1141,9 @@ void print_help(const char* prog) {
     printf("  CRITICAL: > %.0fms deviation or drifting\n", THRESHOLD_CRITICAL);
     printf("\n");
     printf("Patterns:\n");
-    printf("  healthy     - Within ±%.0f%% of baseline, gaps consistent\n", VARIANCE_OK);
+    printf("  healthy     - Within ±%.0f%% of baseline\n", VARIANCE_OK);
     printf("  drifting    - Gaps steadily increasing/decreasing\n");
     printf("  oscillating - Gaps bouncing but returning to baseline\n");
-    printf("  anomaly     - Sudden gap spikes > %.0fms from mean\n", ANOMALY_THRESHOLD);
 }
 
 int main(int argc, char* argv[]) {
