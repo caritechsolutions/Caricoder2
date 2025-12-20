@@ -502,8 +502,8 @@ void check_input_avsync(InputStatus* input) {
 
         pthread_mutex_unlock(&input->lock);
 
-        printf("[%s] %s: Score=%d/100, Status=%s, A→V=%.1fms, V→A=%.1fms\n",
-               result.timestamp, input->id, result.sync_score, result.status,
+        printf("[%s] %s: Status=%s, A→V=%.1fms, V→A=%.1fms\n",
+               result.timestamp, input->id, result.status,
                result.a2v_avg_ms, result.v2a_avg_ms);
     } else {
         printf("[CHECK] %s: Failed to measure A/V sync\n", input->id);
