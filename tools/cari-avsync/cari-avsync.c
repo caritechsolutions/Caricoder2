@@ -24,6 +24,11 @@
 #include <ctype.h>
 #include <math.h>
 
+// Compatibility for older libmicrohttpd versions (< 0.9.71)
+#ifndef MHD_Result
+typedef int MHD_Result;
+#endif
+
 #define API_PORT 8082
 #define CONFIG_DIR "/etc/caritrans/inputs"
 #define DATA_FILE "/var/lib/caritrans/avsync.json"
@@ -537,7 +542,7 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
 }
 
 // REST API handler
-static enum MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
+static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
                        const char* url, const char* method,
                        const char* version, const char* upload_data,
                        size_t* upload_data_size, void** con_cls) {
