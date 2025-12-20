@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -pthread
+CFLAGS = -Wall -Wextra -O2 -pthread -Wno-format-truncation
 LIBS = -lmicrohttpd -lm -pthread
 TARGET = cari-avsync
 

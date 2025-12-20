@@ -46,8 +46,9 @@ typedef struct {
 typedef struct {
     char id[64];                // e.g., "bet" (from [general] name)
     char name[128];             // e.g., "bet"
-    char address[64];           // e.g., "239.6.6.6"
-    int port;                   // e.g., 6000
+    char type[32];              // e.g., "udp", "srt", "rist", "hls"
+    char address[64];           // Output address (e.g., "239.100.0.1")
+    int port;                   // Output port (e.g., 10000)
     int video_pid;
     int audio_pid;              // Primary audio PID
     int running;                // Is the input service running?
@@ -127,11 +128,13 @@ static void trim(char* str) {
 // [general]
 // name = bet
 // type = udp
-// [sources]
-// source_0 = udp|239.6.6.6:6000|100|video_pid=211,audio_pids=221,program_pid=1000
+// enabled = 1
 // [pids]
 // video = 211
 // audio = 221
+// [output]
+// address = 239.100.0.1
+// port = 10000
 int parse_config(const char* filepath, InputStatus* input) {
     FILE* fp = fopen(filepath, "r");
     if (!fp) return -1;
@@ -141,6 +144,7 @@ int parse_config(const char* filepath, InputStatus* input) {
 
     memset(input->id, 0, sizeof(input->id));
     memset(input->name, 0, sizeof(input->name));
+    memset(input->type, 0, sizeof(input->type));
     memset(input->address, 0, sizeof(input->address));
     input->port = 0;
     input->video_pid = 0;
@@ -157,8 +161,7 @@ int parse_config(const char* filepath, InputStatus* input) {
             char* end = strchr(line, ']');
             if (end) {
                 *end = '\0';
-                strncpy(section, line + 1, sizeof(section) - 1);
-                section[sizeof(section) - 1] = '\0';
+                snprintf(section, sizeof(section), "%s", line + 1);
             }
             continue;
         }
@@ -169,18 +172,18 @@ int parse_config(const char* filepath, InputStatus* input) {
 
         *eq = '\0';
         char key[64], value[256];
-        strncpy(key, line, sizeof(key) - 1);
-        key[sizeof(key) - 1] = '\0';
-        strncpy(value, eq + 1, sizeof(value) - 1);
-        value[sizeof(value) - 1] = '\0';
+        snprintf(key, sizeof(key), "%s", line);
+        snprintf(value, sizeof(value), "%s", eq + 1);
         trim(key);
         trim(value);
 
         // Parse based on section
         if (strcmp(section, "general") == 0) {
             if (strcmp(key, "name") == 0) {
-                strncpy(input->name, value, sizeof(input->name) - 1);
-                strncpy(input->id, value, sizeof(input->id) - 1);  // Use name as ID
+                snprintf(input->name, sizeof(input->name), "%s", value);
+                snprintf(input->id, sizeof(input->id), "%s", value);
+            } else if (strcmp(key, "type") == 0) {
+                snprintf(input->type, sizeof(input->type), "%s", value);
             }
         } else if (strcmp(section, "pids") == 0) {
             if (strcmp(key, "video") == 0) {
@@ -189,28 +192,12 @@ int parse_config(const char* filepath, InputStatus* input) {
                 // Take first audio PID if comma-separated
                 input->audio_pid = atoi(value);
             }
-        } else if (strcmp(section, "sources") == 0) {
-            // Parse source line: type|address:port|weight|settings
-            // e.g., udp|239.6.6.6:6000|100|video_pid=211,audio_pids=221
-            if (strncmp(key, "source", 6) == 0) {
-                // Check if it's a UDP source
-                if (strncmp(value, "udp|", 4) == 0) {
-                    char* addr_start = value + 4;  // Skip "udp|"
-
-                    // Find the colon separating address and port
-                    char* colon = strchr(addr_start, ':');
-                    if (colon) {
-                        // Extract address
-                        size_t addr_len = colon - addr_start;
-                        if (addr_len < sizeof(input->address)) {
-                            strncpy(input->address, addr_start, addr_len);
-                            input->address[addr_len] = '\0';
-                        }
-
-                        // Extract port (stops at | or end)
-                        input->port = atoi(colon + 1);
-                    }
-                }
+        } else if (strcmp(section, "output") == 0) {
+            // Read output address and port (this is what we monitor)
+            if (strcmp(key, "address") == 0) {
+                snprintf(input->address, sizeof(input->address), "%s", value);
+            } else if (strcmp(key, "port") == 0) {
+                input->port = atoi(value);
             }
         }
     }
@@ -219,8 +206,9 @@ int parse_config(const char* filepath, InputStatus* input) {
 
     // Debug output
     if (input->name[0]) {
-        printf("  Parsed: %s - addr=%s:%d, video=%d, audio=%d\n",
-               input->name, input->address, input->port,
+        printf("  Parsed: %s (type=%s) - output=%s:%d, video=%d, audio=%d\n",
+               input->name, input->type[0] ? input->type : "unknown",
+               input->address, input->port,
                input->video_pid, input->audio_pid);
     }
 
@@ -265,7 +253,7 @@ void discover_inputs(void) {
 
         // Preserve history if same input
         char old_id[64];
-        strncpy(old_id, input->id, sizeof(old_id) - 1);
+        snprintf(old_id, sizeof(old_id), "%s", input->id);
         int old_history_count = input->history_count;
         int old_history_index = input->history_index;
         HistorySample old_history[HISTORY_SIZE];
@@ -348,14 +336,13 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         int field = 0;
 
         char line_copy[512];
-        strncpy(line_copy, line, sizeof(line_copy) - 1);
-        line_copy[sizeof(line_copy) - 1] = '\0';
+        snprintf(line_copy, sizeof(line_copy), "%s", line);
 
         token = strtok_r(line_copy, ",", &saveptr);
         while (token) {
             switch (field) {
                 case 0: pid = atoi(token); break;
-                case 3: strncpy(type, token, sizeof(type) - 1); break;
+                case 3: snprintf(type, sizeof(type), "%s", token); break;
                 case 7:
                     if (strlen(token) > 0 && token[0] != '\n' && token[0] != '\r') {
                         offset_from_pcr = atof(token);
@@ -419,8 +406,7 @@ void check_input_avsync(InputStatus* input) {
         pthread_mutex_lock(&input->lock);
 
         input->current_offset_ms = offset_ms;
-        strncpy(input->current_status, get_status_color(offset_ms), sizeof(input->current_status) - 1);
-        input->current_status[sizeof(input->current_status) - 1] = '\0';
+        snprintf(input->current_status, sizeof(input->current_status), "%s", get_status_color(offset_ms));
         input->status_code = get_status_code(offset_ms);
 
         // Update timestamp
@@ -430,8 +416,7 @@ void check_input_avsync(InputStatus* input) {
 
         // Add to history
         HistorySample* sample = &input->history[input->history_index];
-        strncpy(sample->timestamp, input->last_check, sizeof(sample->timestamp) - 1);
-        sample->timestamp[sizeof(sample->timestamp) - 1] = '\0';
+        snprintf(sample->timestamp, sizeof(sample->timestamp), "%s", input->last_check);
         sample->offset_ms = offset_ms;
 
         input->history_index = (input->history_index + 1) % HISTORY_SIZE;
@@ -508,6 +493,7 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
         "{"
         "\"id\":\"%s\","
         "\"name\":\"%s\","
+        "\"type\":\"%s\","
         "\"address\":\"%s:%d\","
         "\"video_pid\":%d,"
         "\"audio_pid\":%d,"
@@ -520,6 +506,7 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
         "}",
         input->id,
         name_escaped,
+        input->type[0] ? input->type : "unknown",
         input->address, input->port,
         input->video_pid,
         input->audio_pid,
@@ -550,7 +537,7 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
 }
 
 // REST API handler
-static int api_handler(void* cls, struct MHD_Connection* connection,
+static enum MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
                        const char* url, const char* method,
                        const char* version, const char* upload_data,
                        size_t* upload_data_size, void** con_cls) {
