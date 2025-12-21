@@ -2278,12 +2278,21 @@ async function loadAVSyncHistory(inputId) {
             return;
         }
 
-        // Update current values
-        if (data.current) {
-            const a2v = data.current.a2v_mean_ms;
-            const v2a = data.current.v2a_mean_ms;
-            const status = data.current.status;
-            const samples = data.current.a2v_samples || 0;
+        // Determine which data to show in stat cards
+        // Prefer current, fall back to last history entry
+        let displayData = null;
+        if (data.current && data.current.timestamp && data.current.timestamp.length > 0) {
+            displayData = data.current;
+        } else if (data.history && data.history.length > 0) {
+            displayData = data.history[data.history.length - 1];
+        }
+
+        // Update stat cards
+        if (displayData) {
+            const a2v = displayData.a2v_mean_ms;
+            const v2a = displayData.v2a_mean_ms;
+            const status = displayData.status;
+            const samples = displayData.a2v_samples || 0;
 
             document.getElementById('avsyncA2V').textContent = a2v.toFixed(1) + ' ms';
             document.getElementById('avsyncV2A').textContent = v2a.toFixed(1) + ' ms';
@@ -2293,7 +2302,7 @@ async function loadAVSyncHistory(inputId) {
             statusEl.className = 'stat-value status-' + status.toLowerCase();
 
             document.getElementById('avsyncSamples').textContent = samples + ' samples';
-            document.getElementById('avsyncLastUpdate').textContent = data.current.timestamp;
+            document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp;
 
             // Update status badge
             const badge = document.getElementById('avsyncStatus');
@@ -2306,7 +2315,18 @@ async function loadAVSyncHistory(inputId) {
             } else if (status === 'ERROR') {
                 badge.className = 'badge avsync-error';
                 badge.textContent = 'ERROR';
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'No Data';
             }
+        } else {
+            // No data available at all
+            document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+            document.getElementById('avsyncStatus').textContent = 'No Data';
+            document.getElementById('avsyncA2V').textContent = '-';
+            document.getElementById('avsyncV2A').textContent = '-';
+            document.getElementById('avsyncCurrentStatus').textContent = '-';
+            document.getElementById('avsyncSamples').textContent = 'No measurements yet';
         }
 
         // Update chart with history
