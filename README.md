@@ -12,6 +12,11 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 - **Real-time Monitoring**: Bitrate graphs, PID statistics, and stream health
 - **REST API**: FastAPI-based privileged operations service
 - **Appliance Mode**: Designed for turnkey deployment
+- **A/V Sync Monitor**: Real-time audio/video synchronization monitoring with 24-hour trending
+
+## Documentation
+
+- **[User Manual](docs/USER_MANUAL.md)** - Complete guide to using CariTranscoder
 
 ## Architecture
 
@@ -138,9 +143,12 @@ Default credentials: `admin` / `admin`
 ### Stream Preview
 
 Click on any input to open the preview modal:
-- Live HLS video player
-- Stream information (resolution, codecs, bitrate)
-- PIDs and program details via ffprobe
+- **Live HLS video player** - Real-time stream playback
+- **Stream information** - Video/audio codecs, resolution, frame rate, audio channels
+- **Bitrate Monitor** - Real-time graph showing video and audio bitrate (updates every 5 seconds)
+- **A/V Sync Monitor** - Shows audio-to-video and video-to-audio gap measurements with 24-hour history graph (updates every 5 minutes)
+
+The preview modal features a modern gradient design with status indicators and detailed stream analysis.
 
 ## API Endpoints
 
