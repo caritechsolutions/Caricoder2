@@ -663,31 +663,22 @@ function get_input_config($id) {
 }
 
 /**
- * Scan source for PIDs using CariTranscoder API (ffprobe-based)
- * Returns programs with their associated video and audio PIDs.
- * For MPTS streams, each program will have its own PIDs.
+ * Scan source for PIDs using appropriate method based on source type.
+ * Uses TSDuck for UDP, SRT, RIST streams.
+ * Uses CariTranscoder API (ffprobe) for RTMP, HLS, and other HTTP streams.
  */
 function scan_source_pids($source, $type = 'udp', $srt_options = []) {
-    // Call the CariTranscoder API for stream scanning
+    // For transport stream based inputs (UDP, SRT, RIST), use TSDuck directly
+    if (in_array($type, ['udp', 'srt', 'rist', 'file'])) {
+        $url = build_source_url($source, $type);
+        return scan_with_tsduck($url, $type, $srt_options);
+    }
+
+    // For other types (RTMP, HLS), use CariTranscoder API with ffprobe
     $api_data = [
         'stream_url' => $source,
         'stream_type' => $type
     ];
-
-    // Add SRT-specific options if provided
-    if ($type === 'srt' && !empty($srt_options)) {
-        $api_data['srt_mode'] = $srt_options['mode'] ?? 'caller';
-        $api_data['srt_latency'] = $srt_options['latency'] ?? 200;
-        if (!empty($srt_options['streamid'])) {
-            $api_data['srt_streamid'] = $srt_options['streamid'];
-        }
-        if (!empty($srt_options['passphrase'])) {
-            $api_data['srt_passphrase'] = $srt_options['passphrase'];
-            if (!empty($srt_options['pbkeylen']) && $srt_options['pbkeylen'] != '0') {
-                $api_data['srt_pbkeylen'] = $srt_options['pbkeylen'];
-            }
-        }
-    }
 
     $result = call_cari_api('/stream/scan', 'POST', $api_data);
 
@@ -937,23 +928,45 @@ function parse_tsduck_output($output, $result = null) {
             'programs' => [],
             'video_pids' => [],
             'audio_pids' => [],
+            'all_video_pids' => [],
+            'all_audio_pids' => [],
             'error' => null
         ];
     }
 
     $output_text = is_array($output) ? implode("\n", $output) : $output;
 
+    // Parse PMT PID: "PID: 0x0064 (100)" from PMT section
+    $pmt_pid = 0;
+    if (preg_match('/PMT.*?PID:\s*0x([0-9A-Fa-f]+)/i', $output_text, $pmt_match)) {
+        $pmt_pid = hexdec($pmt_match[1]);
+    } elseif (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+PMT/i', $output_text, $pmt_match)) {
+        $pmt_pid = hexdec($pmt_match[1]);
+    }
+
     // Parse service info: "Service: 0x03E8 (1000)" and "Service name: BET"
     if (preg_match('/Service:\s*0x([0-9A-Fa-f]+)\s*\((\d+)\)/', $output_text, $svc_match)) {
         $program = [
             'id' => (int)$svc_match[2],
-            'name' => 'Program ' . $svc_match[2]
+            'name' => 'Program ' . $svc_match[2],
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => [],
+            'audio_pids' => []
         ];
         // Try to get service name
         if (preg_match('/Service name:\s*([^,\n]+)/i', $output_text, $name_match)) {
             $program['name'] = trim($name_match[1]);
         }
         $result['programs'][] = $program;
+    } elseif ($pmt_pid > 0) {
+        // If we have a PMT but no service info, create a basic program entry
+        $result['programs'][] = [
+            'id' => 1,
+            'name' => 'Program 1',
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => [],
+            'audio_pids' => []
+        ];
     }
 
     // Parse PIDs from lines like:
@@ -1023,6 +1036,30 @@ function parse_tsduck_output($output, $result = null) {
                 'description' => $desc
             ];
         }
+    }
+
+    // Copy PIDs to all_* arrays for compatibility
+    $result['all_video_pids'] = $result['video_pids'];
+    $result['all_audio_pids'] = $result['audio_pids'];
+
+    // If we found PIDs but no program, create a default program
+    if (empty($result['programs']) && (!empty($result['video_pids']) || !empty($result['audio_pids']))) {
+        // Try to find PMT PID from the raw output
+        $pmt_pid = 100;  // Default PMT PID
+        if (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+PMT/i', $output_text, $pmt_match)) {
+            $pmt_pid = hexdec($pmt_match[1]);
+        }
+        $result['programs'][] = [
+            'id' => 1,
+            'name' => 'Program 1',
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => $result['video_pids'],
+            'audio_pids' => $result['audio_pids']
+        ];
+    } elseif (!empty($result['programs'])) {
+        // Add PIDs to the first program if exists (for SPTS, all PIDs belong to the single program)
+        $result['programs'][0]['video_pids'] = $result['video_pids'];
+        $result['programs'][0]['audio_pids'] = $result['audio_pids'];
     }
 
     $result['success'] = !empty($result['video_pids']) || !empty($result['audio_pids']);
