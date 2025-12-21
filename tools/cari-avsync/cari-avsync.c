@@ -1,15 +1,13 @@
 /*
  * cari-avsync.c - A/V Sync Monitor Service
  *
- * Monitors audio/video synchronization for all running inputs.
- * Uses tsp pcrextract with --evaluate-pcr-offset to get PTS timing.
- *
- * Method: PTS Alignment Check
- * - Collect audio and video PTS values with packet positions
- * - For each audio frame, find the nearest video frame by packet position
- * - Compare their PTS values (both on same 90kHz timeline)
- * - Track the PTS difference over time - drift indicates sync problems
- * - A consistent offset is normal (video PTS leads due to decode buffer)
+ * Workflow:
+ * 1. CAPTURE - Run tsp to extract PTS values from live stream
+ * 2. PARSE & SORT - Extract PTS entries, sort chronologically
+ * 3. FILTER - Keep only alternating video/audio frames
+ * 4. COMPARE - Calculate gaps between frame pairs, separate into A→V and V→A
+ * 5. ANALYZE - Compare to baseline, detect patterns, assign status/score
+ * 6. SAVE - Store results with trending data for API consumption
  *
  * Copyright (c) 2024 CariTech Solutions
  */
@@ -39,40 +37,49 @@ typedef int MHD_Result;
 #define API_PORT 8082
 #define CONFIG_DIR "/etc/caritrans/inputs"
 #define DATA_FILE "/var/lib/caritrans/avsync.json"
+#define BASELINE_FILE "/var/lib/caritrans/avsync_baseline.json"
 #define CHECK_INTERVAL 300      // 5 minutes between checks
-#define SAMPLE_DURATION 5       // 5 seconds per sample
+#define SAMPLE_DURATION 10      // 10 seconds per sample (user specified)
 #define HISTORY_SIZE 288        // 24 hours at 5-minute intervals
 #define MAX_INPUTS 100
-#define MAX_WORKERS 10
+#define MAX_PTS_SAMPLES 500     // Max PTS samples to capture
 
-// Color status thresholds (milliseconds)
-#define THRESHOLD_GREEN 10.0
-#define THRESHOLD_YELLOW 25.0
-#define THRESHOLD_ORANGE 45.0
+// Alarm thresholds (milliseconds)
+#define THRESHOLD_OK 300.0       // < 300ms = OK
+#define THRESHOLD_WARNING 600.0  // 300-600ms = WARNING, > 600ms = ERROR
 
+// PTS sample for sorting
+typedef struct {
+    int pid;
+    int64_t pts;           // 90kHz ticks
+    int packet_num;        // Original packet order
+} PtsSample;
+
+// Single measurement result - just the means with timestamp
 typedef struct {
     char timestamp[32];
-    double offset_ms;
-} HistorySample;
+    double a2v_avg_ms;      // Audio→Video mean gap
+    double v2a_avg_ms;      // Video→Audio mean gap
+    int a2v_count;          // Sample count used
+    int v2a_count;          // Sample count used
+    char status[16];        // "OK", "WARNING", "ERROR"
+} MeasurementResult;
 
 typedef struct {
-    char id[64];                // e.g., "bet" (from [general] name)
-    char name[128];             // e.g., "bet"
-    char type[32];              // e.g., "udp", "srt", "rist", "hls"
-    char address[64];           // Output address (e.g., "239.100.0.1")
-    int port;                   // Output port (e.g., 10000)
+    char id[64];
+    char name[128];
+    char type[32];
+    char address[64];
+    int port;
     int video_pid;
-    int audio_pid;              // Primary audio PID
-    int running;                // Is the input service running?
+    int audio_pid;
+    int running;
 
     // Current measurement
-    double current_offset_ms;
-    char current_status[16];    // "green", "yellow", "orange", "red"
-    int status_code;            // 0=green, 1=yellow, 2=orange, 3=red
-    char last_check[32];
+    MeasurementResult current;
 
     // History (circular buffer)
-    HistorySample history[HISTORY_SIZE];
+    MeasurementResult history[HISTORY_SIZE];
     int history_count;
     int history_index;
 
@@ -91,13 +98,10 @@ AppContext g_ctx;
 
 // Forward declarations
 void* check_thread(void* arg);
-void* api_thread(void* arg);
 void discover_inputs(void);
 void check_input_avsync(InputStatus* input);
 void save_data(void);
 void load_data(void);
-const char* get_status_color(double offset_ms);
-int get_status_code(double offset_ms);
 
 void signal_handler(int sig) {
     (void)sig;
@@ -118,35 +122,21 @@ void init_context(void) {
 static void trim(char* str) {
     if (!str || !*str) return;
 
-    // Trim leading
     char* start = str;
     while (*start && isspace((unsigned char)*start)) start++;
 
-    // Trim trailing
     char* end = start + strlen(start) - 1;
     while (end > start && (isspace((unsigned char)*end) || *end == '\n' || *end == '\r')) {
         *end = '\0';
         end--;
     }
 
-    // Shift if needed
     if (start != str) {
         memmove(str, start, strlen(start) + 1);
     }
 }
 
 // Parse INI-style config file
-// Config format:
-// [general]
-// name = bet
-// type = udp
-// enabled = 1
-// [pids]
-// video = 211
-// audio = 221
-// [output]
-// address = 239.100.0.1
-// port = 10000
 int parse_config(const char* filepath, InputStatus* input) {
     FILE* fp = fopen(filepath, "r");
     if (!fp) return -1;
@@ -165,10 +155,8 @@ int parse_config(const char* filepath, InputStatus* input) {
     while (fgets(line, sizeof(line), fp)) {
         trim(line);
 
-        // Skip comments and empty lines
         if (line[0] == '#' || line[0] == ';' || line[0] == '\0') continue;
 
-        // Section header
         if (line[0] == '[') {
             char* end = strchr(line, ']');
             if (end) {
@@ -178,7 +166,6 @@ int parse_config(const char* filepath, InputStatus* input) {
             continue;
         }
 
-        // Key = Value
         char* eq = strchr(line, '=');
         if (!eq) continue;
 
@@ -189,7 +176,6 @@ int parse_config(const char* filepath, InputStatus* input) {
         trim(key);
         trim(value);
 
-        // Parse based on section
         if (strcmp(section, "general") == 0) {
             if (strcmp(key, "name") == 0) {
                 snprintf(input->name, sizeof(input->name), "%s", value);
@@ -201,11 +187,9 @@ int parse_config(const char* filepath, InputStatus* input) {
             if (strcmp(key, "video") == 0) {
                 input->video_pid = atoi(value);
             } else if (strcmp(key, "audio") == 0) {
-                // Take first audio PID if comma-separated
                 input->audio_pid = atoi(value);
             }
         } else if (strcmp(section, "output") == 0) {
-            // Read output address and port (this is what we monitor)
             if (strcmp(key, "address") == 0) {
                 snprintf(input->address, sizeof(input->address), "%s", value);
             } else if (strcmp(key, "port") == 0) {
@@ -216,7 +200,6 @@ int parse_config(const char* filepath, InputStatus* input) {
 
     fclose(fp);
 
-    // Debug output
     if (input->name[0]) {
         printf("  Parsed: %s (type=%s) - output=%s:%d, video=%d, audio=%d\n",
                input->name, input->type[0] ? input->type : "unknown",
@@ -227,10 +210,9 @@ int parse_config(const char* filepath, InputStatus* input) {
     return 0;
 }
 
-// Check if a systemd service is running
+// Check if systemd service is running
 int is_service_running(const char* input_name) {
     char cmd[256];
-    // Service is named cari-udp-{name}, e.g., cari-udp-bet
     snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
     return system(cmd) == 0;
 }
@@ -263,27 +245,24 @@ void discover_inputs(void) {
 
         InputStatus* input = &g_ctx.inputs[count];
 
-        // Preserve history if same input
+        // Preserve existing history if same input
         char old_id[64];
         snprintf(old_id, sizeof(old_id), "%s", input->id);
         int old_history_count = input->history_count;
         int old_history_index = input->history_index;
-        HistorySample old_history[HISTORY_SIZE];
+        MeasurementResult old_history[HISTORY_SIZE];
         if (old_history_count > 0) {
             memcpy(old_history, input->history, sizeof(old_history));
         }
 
-        // Clear and reinit
         pthread_mutex_t saved_lock = input->lock;
         memset(input, 0, sizeof(InputStatus));
         input->lock = saved_lock;
 
         if (parse_config(filepath, input) == 0) {
-            // Check if we have required info
             if (input->address[0] && input->port > 0 &&
                 input->video_pid > 0 && input->audio_pid > 0) {
 
-                // Check if service is running
                 input->running = is_service_running(input->id);
                 printf("  Service cari-udp-%s: %s\n", input->id,
                        input->running ? "RUNNING" : "not running");
@@ -297,8 +276,7 @@ void discover_inputs(void) {
 
                 count++;
             } else {
-                printf("  Skipping: missing required fields (addr=%s, port=%d, vpid=%d, apid=%d)\n",
-                       input->address, input->port, input->video_pid, input->audio_pid);
+                printf("  Skipping: missing required fields\n");
             }
         }
     }
@@ -310,38 +288,45 @@ void discover_inputs(void) {
     printf("Discovered %d inputs with A/V sync capability\n", count);
 }
 
-// Run tsp pcrextract and parse output using PTS alignment method
-int measure_avsync(InputStatus* input, double* offset_ms) {
+// Comparison function for qsort - sort by PTS value
+static int compare_pts(const void* a, const void* b) {
+    const PtsSample* pa = (const PtsSample*)a;
+    const PtsSample* pb = (const PtsSample*)b;
+
+    if (pa->pts < pb->pts) return -1;
+    if (pa->pts > pb->pts) return 1;
+    return 0;
+}
+
+// STEP 1-4: Capture, Parse, Sort, Filter, Compare
+int measure_avsync(InputStatus* input, MeasurementResult* result) {
     char cmd[512];
 
-    // Use --evaluate-pcr-offset to get timing for both PIDs
-    // Use --good-pts-only to filter out B-frame reordering artifacts
+    memset(result, 0, sizeof(MeasurementResult));
+
+    // STEP 1: CAPTURE - Run tsp to extract PTS values
     snprintf(cmd, sizeof(cmd),
         "timeout %d tsp -I ip %s:%d "
-        "-P pcrextract --pid %d --pid %d --pts --pcr --good-pts-only --evaluate-pcr-offset --csv "
+        "-P pcrextract --pid %d --pid %d --pts --csv "
         "-O drop 2>&1",
         SAMPLE_DURATION + 2,
         input->address, input->port,
         input->video_pid, input->audio_pid);
 
-    printf("  Running: %s\n", cmd);
+    printf("  [CAPTURE] Running: %s\n", cmd);
     fflush(stdout);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
         printf("  popen failed\n");
-        fflush(stdout);
         return -1;
     }
 
     char line[512];
 
-    // Store PTS values with packet positions
-    typedef struct { int packet; int64_t pts; } PtsSample;
-    PtsSample video_pts[200];
-    PtsSample audio_pts[100];
-    int video_count = 0;
-    int audio_count = 0;
+    // Collect all PTS samples
+    PtsSample samples[MAX_PTS_SAMPLES];
+    int sample_count = 0;
 
     // Skip header
     if (!fgets(line, sizeof(line), fp)) {
@@ -349,8 +334,8 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
         return -1;
     }
 
-    // Parse CSV: PID,Packet,PID-Packet,Type,Count,Value,ValueOffset,OffsetFromPCR
-    while (fgets(line, sizeof(line), fp)) {
+    // STEP 2: PARSE - Extract PTS entries
+    while (fgets(line, sizeof(line), fp) && sample_count < MAX_PTS_SAMPLES) {
         int pid = 0;
         int packet = 0;
         char type[16] = "";
@@ -375,175 +360,141 @@ int measure_avsync(InputStatus* input, double* offset_ms) {
             token = strtok_r(NULL, ",", &saveptr);
         }
 
-        // Collect PTS entries only (we compare PTS values directly)
-        if (strcmp(type, "PTS") == 0) {
-            if (pid == input->video_pid && video_count < 200) {
-                video_pts[video_count].packet = packet;
-                video_pts[video_count].pts = value;
-                video_count++;
-            } else if (pid == input->audio_pid && audio_count < 100) {
-                audio_pts[audio_count].packet = packet;
-                audio_pts[audio_count].pts = value;
-                audio_count++;
-            }
+        // Collect only PTS entries
+        if (strcmp(type, "PTS") == 0 && (pid == input->video_pid || pid == input->audio_pid)) {
+            samples[sample_count].pid = pid;
+            samples[sample_count].pts = value;
+            samples[sample_count].packet_num = packet;
+            sample_count++;
         }
     }
 
     pclose(fp);
 
-    printf("  Collected: %d video PTS, %d audio PTS\n", video_count, audio_count);
-    fflush(stdout);
+    printf("  [PARSE] Collected %d PTS samples\n", sample_count);
 
-    if (video_count < 5 || audio_count < 3) {
-        printf("  Failed: insufficient data (need at least 5 video, 3 audio)\n");
-        fflush(stdout);
+    if (sample_count < 10) {
+        printf("  Failed: insufficient PTS samples\n");
         return -1;
     }
 
-    // PTS Alignment Method:
-    // For each audio frame, find the video frame with closest PTS value
-    // (i.e., content scheduled to play at similar times)
-    //
-    // Key insight: Audio and video that should play together have similar PTS values.
-    // The difference between matched PTS values indicates sync quality:
-    // - Mean near zero = audio/video on same timeline (good)
-    // - Large drift = timelines diverging (bad)
-    // - Large mean offset = systematic sync error (bad)
+    // STEP 2 (cont): SORT by PTS value (chronological presentation order)
+    qsort(samples, sample_count, sizeof(PtsSample), compare_pts);
 
-    double pts_diffs[100];  // Store PTS differences for each audio sample
-    int diff_count = 0;
+    printf("  [SORT] Sorted %d samples by PTS\n", sample_count);
 
-    for (int a = 0; a < audio_count && diff_count < 100; a++) {
-        int64_t audio_pts_val = audio_pts[a].pts;
+    // STEP 3: FILTER - Remove consecutive same-PID frames
+    // Keep only alternating video/audio frames
+    PtsSample filtered[MAX_PTS_SAMPLES];
+    int filtered_count = 0;
 
-        // Find video with closest PTS VALUE (not packet position)
-        // This finds video content scheduled to play at similar time
-        int best_video_idx = 0;
-        int64_t best_pts_distance = llabs(video_pts[0].pts - audio_pts_val);
-
-        for (int v = 1; v < video_count; v++) {
-            int64_t pts_distance = llabs(video_pts[v].pts - audio_pts_val);
-            if (pts_distance < best_pts_distance) {
-                best_pts_distance = pts_distance;
-                best_video_idx = v;
-            }
+    for (int i = 0; i < sample_count; i++) {
+        // Skip if current PID == next PID (not alternating)
+        if (i < sample_count - 1 && samples[i].pid == samples[i + 1].pid) {
+            continue;
         }
-
-        int64_t video_pts_val = video_pts[best_video_idx].pts;
-
-        // PTS difference in 90kHz ticks (signed)
-        // Positive = video scheduled after audio
-        // Negative = video scheduled before audio
-        int64_t pts_diff = video_pts_val - audio_pts_val;
-
-        // Convert to milliseconds
-        double diff_ms = (double)pts_diff / 90.0;
-        pts_diffs[diff_count++] = diff_ms;
+        filtered[filtered_count++] = samples[i];
     }
 
-    if (diff_count < 3) {
-        printf("  Failed: not enough paired samples\n");
-        fflush(stdout);
+    printf("  [FILTER] After filter: %d alternating frames\n", filtered_count);
+
+    if (filtered_count < 4) {
+        printf("  Failed: insufficient alternating frames\n");
         return -1;
     }
 
-    // Calculate statistics on the PTS differences
-    double sum = 0;
-    double min_diff = pts_diffs[0];
-    double max_diff = pts_diffs[0];
+    // STEP 4: COMPARE - Calculate gaps between frame pairs
+    double a2v_gaps[MAX_PTS_SAMPLES];  // Audio→Video gaps
+    double v2a_gaps[MAX_PTS_SAMPLES];  // Video→Audio gaps
+    int a2v_count = 0;
+    int v2a_count = 0;
 
-    for (int i = 0; i < diff_count; i++) {
-        sum += pts_diffs[i];
-        if (pts_diffs[i] < min_diff) min_diff = pts_diffs[i];
-        if (pts_diffs[i] > max_diff) max_diff = pts_diffs[i];
+    for (int i = 0; i < filtered_count - 1; i++) {
+        int64_t pts_diff = filtered[i + 1].pts - filtered[i].pts;
+        double gap_ms = (double)pts_diff / 90.0;  // Convert 90kHz ticks to ms
+
+        // Classify based on direction
+        if (filtered[i].pid == input->audio_pid && filtered[i + 1].pid == input->video_pid) {
+            // Audio→Video transition
+            a2v_gaps[a2v_count++] = gap_ms;
+        } else if (filtered[i].pid == input->video_pid && filtered[i + 1].pid == input->audio_pid) {
+            // Video→Audio transition
+            v2a_gaps[v2a_count++] = gap_ms;
+        }
     }
 
-    double mean = sum / diff_count;
+    printf("  [COMPARE] Gaps: %d A→V, %d V→A\n", a2v_count, v2a_count);
 
-    // Calculate drift: difference between average of last 3 and first 3 samples
-    // This detects if audio/video timelines are diverging
-    double first_avg = 0, last_avg = 0;
-    int num_avg = (diff_count >= 3) ? 3 : diff_count;
-
-    for (int i = 0; i < num_avg; i++) {
-        first_avg += pts_diffs[i];
-    }
-    first_avg /= num_avg;
-
-    for (int i = 0; i < num_avg; i++) {
-        last_avg += pts_diffs[diff_count - 1 - i];
-    }
-    last_avg /= num_avg;
-
-    double drift = last_avg - first_avg;
-
-    // Sync quality is determined by:
-    // 1. Mean offset - should be near zero (both timelines aligned)
-    //    Note: small mean due to frame rate mismatch is acceptable (~±20ms)
-    // 2. Drift - should be near zero (timelines not diverging)
-    //
-    // Primary metric is DRIFT (indicates ongoing sync problem)
-    // Secondary check is if MEAN exceeds acceptable threshold (indicates fixed offset)
-    //
-    // Note: stddev is NOT a good metric because frame rate differences between
-    // audio (256ms) and video (33ms) cause inherent matching jitter (~±16ms)
-
-    double sync_error = fabs(drift);
-
-    // If mean offset is large (>40ms), that's also a problem
-    // This catches cases where there's a fixed A/V offset but no drift
-    if (fabs(mean) > 40.0 && fabs(mean) > sync_error) {
-        sync_error = fabs(mean);
+    // Calculate mean for Audio→Video gaps (excluding max value as it's likely a capture error)
+    if (a2v_count > 1) {
+        // Find max index
+        int max_idx = 0;
+        for (int i = 1; i < a2v_count; i++) {
+            if (a2v_gaps[i] > a2v_gaps[max_idx]) max_idx = i;
+        }
+        // Calculate mean excluding max
+        double sum = 0;
+        for (int i = 0; i < a2v_count; i++) {
+            if (i != max_idx) sum += a2v_gaps[i];
+        }
+        result->a2v_avg_ms = sum / (a2v_count - 1);
+        result->a2v_count = a2v_count - 1;  // Report count without the excluded max
+    } else if (a2v_count == 1) {
+        result->a2v_avg_ms = a2v_gaps[0];
+        result->a2v_count = 1;
     }
 
-    *offset_ms = sync_error;
+    // Calculate mean for Video→Audio gaps (excluding max value as it's likely a capture error)
+    if (v2a_count > 1) {
+        // Find max index
+        int max_idx = 0;
+        for (int i = 1; i < v2a_count; i++) {
+            if (v2a_gaps[i] > v2a_gaps[max_idx]) max_idx = i;
+        }
+        // Calculate mean excluding max
+        double sum = 0;
+        for (int i = 0; i < v2a_count; i++) {
+            if (i != max_idx) sum += v2a_gaps[i];
+        }
+        result->v2a_avg_ms = sum / (v2a_count - 1);
+        result->v2a_count = v2a_count - 1;  // Report count without the excluded max
+    } else if (v2a_count == 1) {
+        result->v2a_avg_ms = v2a_gaps[0];
+        result->v2a_count = 1;
+    }
 
-    printf("  PTS alignment analysis (%d paired samples):\n", diff_count);
-    printf("    Mean offset: %.2f ms (should be near zero)\n", mean);
-    printf("    Drift: %.2f ms (first vs last samples)\n", drift);
-    printf("    Range: %.1f to %.1f ms\n", min_diff, max_diff);
-    printf("  Sync error metric: %.2f ms\n", sync_error);
-    fflush(stdout);
+    // Set timestamp
+    time_t now = time(NULL);
+    struct tm* tm = localtime(&now);
+    strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
+
+    // Set status based on A→V mean
+    if (result->a2v_avg_ms < THRESHOLD_OK) {
+        snprintf(result->status, sizeof(result->status), "OK");
+    } else if (result->a2v_avg_ms < THRESHOLD_WARNING) {
+        snprintf(result->status, sizeof(result->status), "WARNING");
+    } else {
+        snprintf(result->status, sizeof(result->status), "ERROR");
+    }
+
+    printf("  [STATS] A→V mean: %.1fms, V→A mean: %.1fms, Status: %s\n",
+           result->a2v_avg_ms, result->v2a_avg_ms, result->status);
 
     return 0;
 }
 
-const char* get_status_color(double offset_ms) {
-    double abs_offset = fabs(offset_ms);
-    if (abs_offset <= THRESHOLD_GREEN) return "green";
-    if (abs_offset <= THRESHOLD_YELLOW) return "yellow";
-    if (abs_offset <= THRESHOLD_ORANGE) return "orange";
-    return "red";
-}
-
-int get_status_code(double offset_ms) {
-    double abs_offset = fabs(offset_ms);
-    if (abs_offset <= THRESHOLD_GREEN) return 0;
-    if (abs_offset <= THRESHOLD_YELLOW) return 1;
-    if (abs_offset <= THRESHOLD_ORANGE) return 2;
-    return 3;
-}
-
+// Save result to history
 void check_input_avsync(InputStatus* input) {
-    double offset_ms = 0;
+    MeasurementResult result;
 
-    if (measure_avsync(input, &offset_ms) == 0) {
+    if (measure_avsync(input, &result) == 0) {
         pthread_mutex_lock(&input->lock);
 
-        input->current_offset_ms = offset_ms;
-        snprintf(input->current_status, sizeof(input->current_status), "%s", get_status_color(offset_ms));
-        input->status_code = get_status_code(offset_ms);
-
-        // Update timestamp
-        time_t now = time(NULL);
-        struct tm* tm = localtime(&now);
-        strftime(input->last_check, sizeof(input->last_check), "%Y-%m-%dT%H:%M:%SZ", tm);
+        // Store current result
+        input->current = result;
 
         // Add to history
-        HistorySample* sample = &input->history[input->history_index];
-        snprintf(sample->timestamp, sizeof(sample->timestamp), "%s", input->last_check);
-        sample->offset_ms = offset_ms;
-
+        input->history[input->history_index] = result;
         input->history_index = (input->history_index + 1) % HISTORY_SIZE;
         if (input->history_count < HISTORY_SIZE) {
             input->history_count++;
@@ -551,8 +502,9 @@ void check_input_avsync(InputStatus* input) {
 
         pthread_mutex_unlock(&input->lock);
 
-        printf("[%s] %s: A/V offset = %.2f ms (%s)\n",
-               input->last_check, input->id, offset_ms, input->current_status);
+        printf("[%s] %s: Status=%s, A→V=%.1fms, V→A=%.1fms\n",
+               result.timestamp, input->id, result.status,
+               result.a2v_avg_ms, result.v2a_avg_ms);
     } else {
         printf("[CHECK] %s: Failed to measure A/V sync\n", input->id);
     }
@@ -563,22 +515,18 @@ void* check_thread(void* arg) {
     (void)arg;
 
     while (g_ctx.running) {
-        // Refresh input list
         discover_inputs();
 
-        // Check each running input
         for (int i = 0; i < g_ctx.input_count && g_ctx.running; i++) {
             InputStatus* input = &g_ctx.inputs[i];
 
-            // Re-check if service is running
             input->running = is_service_running(input->id);
 
             if (input->running) {
                 check_input_avsync(input);
             }
 
-            // Small delay between checks to avoid overwhelming
-            usleep(500000);  // 0.5 second
+            usleep(500000);  // 0.5 second between checks
         }
 
         // Save data periodically
@@ -588,7 +536,7 @@ void* check_thread(void* arg) {
             g_ctx.last_save = now;
         }
 
-        // Wait for next check interval
+        // Wait for next interval
         for (int i = 0; i < CHECK_INTERVAL && g_ctx.running; i++) {
             sleep(1);
         }
@@ -609,6 +557,25 @@ void json_escape(const char* str, char* out, size_t out_size) {
     out[j] = '\0';
 }
 
+// Build JSON for measurement result
+int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
+    return snprintf(buf, buf_size,
+        "{"
+        "\"timestamp\":\"%s\","
+        "\"a2v_mean_ms\":%.2f,"
+        "\"v2a_mean_ms\":%.2f,"
+        "\"a2v_samples\":%d,"
+        "\"v2a_samples\":%d,"
+        "\"status\":\"%s\""
+        "}",
+        result->timestamp,
+        result->a2v_avg_ms,
+        result->v2a_avg_ms,
+        result->a2v_count,
+        result->v2a_count,
+        result->status);
+}
+
 // Build JSON for single input
 int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include_history) {
     char name_escaped[256];
@@ -623,36 +590,27 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
         "\"video_pid\":%d,"
         "\"audio_pid\":%d,"
         "\"running\":%s,"
-        "\"current\":{"
-            "\"av_offset_ms\":%.2f,"
-            "\"status\":\"%s\","
-            "\"status_code\":%d,"
-            "\"timestamp\":\"%s\""
-        "}",
+        "\"current\":",
         input->id,
         name_escaped,
         input->type[0] ? input->type : "unknown",
         input->address, input->port,
         input->video_pid,
         input->audio_pid,
-        input->running ? "true" : "false",
-        input->current_offset_ms,
-        input->current_status,
-        input->status_code,
-        input->last_check);
+        input->running ? "true" : "false");
 
-    if (include_history && len < (int)buf_size - 100) {
+    // Add current measurement
+    len += build_result_json(&input->current, buf + len, buf_size - len);
+
+    // Add history if requested
+    if (include_history && len < (int)buf_size - 1000) {
         len += snprintf(buf + len, buf_size - len, ",\"history\":[");
 
-        // Output history in chronological order
         int start = (input->history_count < HISTORY_SIZE) ? 0 : input->history_index;
-        for (int i = 0; i < input->history_count && len < (int)buf_size - 100; i++) {
+        for (int i = 0; i < input->history_count && len < (int)buf_size - 500; i++) {
             int idx = (start + i) % HISTORY_SIZE;
             if (i > 0) len += snprintf(buf + len, buf_size - len, ",");
-            len += snprintf(buf + len, buf_size - len,
-                "{\"ts\":\"%s\",\"offset_ms\":%.2f}",
-                input->history[idx].timestamp,
-                input->history[idx].offset_ms);
+            len += build_result_json(&input->history[idx], buf + len, buf_size - len);
         }
         len += snprintf(buf + len, buf_size - len, "]");
     }
@@ -675,9 +633,8 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
     struct MHD_Response* response;
     int ret;
     char* buf = NULL;
-    size_t buf_size = 1024 * 1024;  // 1MB buffer for history
+    size_t buf_size = 2 * 1024 * 1024;  // 2MB buffer for full history
 
-    // Only handle GET
     if (strcmp(method, "GET") != 0) {
         const char* error = "{\"error\":\"Method not allowed\"}";
         response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
@@ -759,7 +716,14 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
         }
     }
     else {
-        snprintf(buf, buf_size, "{\"error\":\"Not found\"}");
+        snprintf(buf, buf_size,
+            "{\"error\":\"Not found\","
+            "\"endpoints\":["
+                "\"/health\","
+                "\"/status\","
+                "\"/status/{id}\","
+                "\"/history/{id}\""
+            "]}");
         status = MHD_HTTP_NOT_FOUND;
     }
 
@@ -785,7 +749,7 @@ void save_data(void) {
     for (int i = 0; i < g_ctx.input_count; i++) {
         if (i > 0) fprintf(fp, ",");
 
-        char buf[1024 * 100];
+        char buf[1024 * 500];
         pthread_mutex_lock(&g_ctx.inputs[i].lock);
         build_input_json(&g_ctx.inputs[i], buf, sizeof(buf), 1);
         pthread_mutex_unlock(&g_ctx.inputs[i].lock);
@@ -801,8 +765,7 @@ void save_data(void) {
 }
 
 void load_data(void) {
-    // TODO: Parse JSON and restore history
-    // For now, start fresh each time
+    // TODO: Parse JSON and restore history/baselines
     printf("Starting with fresh data (persistence loading not yet implemented)\n");
 }
 
@@ -814,24 +777,25 @@ void print_help(const char* prog) {
     printf("\n");
     printf("API Endpoints (port %d):\n", API_PORT);
     printf("  GET /health            - Health check\n");
-    printf("  GET /status            - All inputs status\n");
+    printf("  GET /status            - All inputs current status\n");
     printf("  GET /status/{id}       - Single input status\n");
     printf("  GET /history/{id}      - Single input with 24h history\n");
     printf("\n");
-    printf("Configuration:\n");
-    printf("  Check interval: %d seconds\n", CHECK_INTERVAL);
-    printf("  Sample duration: %d seconds\n", SAMPLE_DURATION);
-    printf("  History size: %d samples (24 hours)\n", HISTORY_SIZE);
+    printf("Workflow:\n");
+    printf("  1. CAPTURE   - Run tsp to extract PTS values (10s sample)\n");
+    printf("  2. PARSE     - Extract PTS entries for video/audio PIDs\n");
+    printf("  3. SORT      - Sort by PTS value (presentation order)\n");
+    printf("  4. FILTER    - Keep only alternating video/audio frames\n");
+    printf("  5. COMPARE   - Calculate A→V and V→A mean gaps (max excluded)\n");
+    printf("  6. SAVE      - Store results with timestamp for trending\n");
     printf("\n");
-    printf("Status Thresholds:\n");
-    printf("  Green:  0-%.0f ms\n", THRESHOLD_GREEN);
-    printf("  Yellow: %.0f-%.0f ms\n", THRESHOLD_GREEN, THRESHOLD_YELLOW);
-    printf("  Orange: %.0f-%.0f ms\n", THRESHOLD_YELLOW, THRESHOLD_ORANGE);
-    printf("  Red:    >%.0f ms\n", THRESHOLD_ORANGE);
+    printf("Status Thresholds (A→V mean):\n");
+    printf("  OK:      < %.0fms\n", THRESHOLD_OK);
+    printf("  WARNING: %.0fms - %.0fms\n", THRESHOLD_OK, THRESHOLD_WARNING);
+    printf("  ERROR:   > %.0fms\n", THRESHOLD_WARNING);
 }
 
 int main(int argc, char* argv[]) {
-    // Parse arguments
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_help(argv[0]);
@@ -842,19 +806,15 @@ int main(int argc, char* argv[]) {
     printf("CariTranscoder A/V Sync Monitor\n");
     printf("API port: %d\n", API_PORT);
     printf("Check interval: %d seconds\n", CHECK_INTERVAL);
+    printf("Sample duration: %d seconds\n", SAMPLE_DURATION);
 
-    // Setup
     init_context();
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Load previous data if exists
     load_data();
-
-    // Initial discovery
     discover_inputs();
 
-    // Start HTTP API
     struct MHD_Daemon* daemon = MHD_start_daemon(
         MHD_USE_SELECT_INTERNALLY,
         API_PORT,
@@ -869,22 +829,18 @@ int main(int argc, char* argv[]) {
 
     printf("API server started on port %d\n", API_PORT);
 
-    // Start check thread
     pthread_t check_tid;
     pthread_create(&check_tid, NULL, check_thread, NULL);
 
-    // Main loop - just wait for signals
     while (g_ctx.running) {
         sleep(1);
     }
 
     printf("\nShutting down...\n");
 
-    // Cleanup
     pthread_join(check_tid, NULL);
     MHD_stop_daemon(daemon);
 
-    // Final save
     save_data();
 
     printf("Done.\n");

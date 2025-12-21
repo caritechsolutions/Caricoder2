@@ -181,7 +181,15 @@ curl http://localhost:PORT/status
 
 ### A/V Sync Monitor API (Port 8082)
 
-The cari-avsync service monitors audio/video synchronization for all running inputs. It polls every 5 minutes and keeps 24 hours of trending data.
+The cari-avsync service monitors audio/video synchronization for all running inputs. It captures PTS values, sorts by presentation time, filters to alternating A/V frames, and calculates the gap between consecutive audio and video frames.
+
+**How it works:**
+1. Captures 10 seconds of PTS data using `tsp pcrextract`
+2. Sorts entries by PTS value (chronological presentation order)
+3. Filters to keep only alternating video/audio frames
+4. Calculates A→V gaps (audio to next video) and V→A gaps (video to next audio)
+5. Reports mean offset (excluding max value to filter capture errors)
+6. Polls every 5 minutes, keeps 24 hours of history (288 samples)
 
 ```bash
 # Health check
@@ -197,13 +205,12 @@ curl http://localhost:8082/status/bet
 curl http://localhost:8082/history/bet
 ```
 
-**Status Colors:**
-| Color | Offset Range | Status Code |
-|-------|--------------|-------------|
-| Green | 0-10 ms | 0 |
-| Yellow | 10-25 ms | 1 |
-| Orange | 25-45 ms | 2 |
-| Red | >45 ms | 3 |
+**Status Thresholds:**
+| Status | A→V Mean Offset | Description |
+|--------|-----------------|-------------|
+| OK | < 300 ms | Sync within acceptable range |
+| WARNING | 300-600 ms | Sync degraded, investigate |
+| ERROR | > 600 ms | Sync out of spec, action needed |
 
 **Example Response:**
 ```json
@@ -216,10 +223,12 @@ curl http://localhost:8082/history/bet
   "audio_pid": 221,
   "running": true,
   "current": {
-    "av_offset_ms": 3.42,
-    "status": "green",
-    "status_code": 0,
-    "timestamp": "2024-12-20T12:05:58Z"
+    "timestamp": "2024-12-20T12:05:58Z",
+    "a2v_avg_ms": 45.2,
+    "v2a_avg_ms": 38.7,
+    "a2v_count": 42,
+    "v2a_count": 41,
+    "status": "OK"
   }
 }
 ```
@@ -285,14 +294,15 @@ Current development branch: `claude/video-transcoder-gstreamer-YnBIH`
 
 **A/V Sync Monitor (cari-avsync)**
 - New standalone service for monitoring audio/video synchronization
-- Measures A/V offset using PCR/PTS timing from MPEG-TS streams
-- Formula: `A/V offset = (audio_PTS - PCR) - (video_PTS - PCR)`
+- Captures PTS values using TSDuck `tsp pcrextract`
+- Sorts by PTS, filters alternating A/V frames, calculates gap statistics
+- Reports A→V and V→A mean offsets (excludes max to filter capture errors)
+- Status thresholds: OK (<300ms), WARNING (300-600ms), ERROR (>600ms)
 - Polls every 5 minutes, keeps 24 hours of trending data (288 samples)
-- Color-coded status thresholds (green/yellow/orange/red)
-- REST API on port 8082 for status queries
-- Auto-discovers inputs from `/etc/caritrans/inputs/*.conf`
+- REST API on port 8082 for status queries and history
+- Auto-discovers running inputs from `/etc/caritrans/inputs/*.conf`
 - Monitors output multicast address from `[output]` config section
-- Supports UDP, SRT, RIST, HLS input types (type field in config)
+- Supports UDP, SRT, RIST, HLS input types
 
 **Input Handling**
 - Fixed PMT PID detection for program selection
