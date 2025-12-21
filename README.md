@@ -296,6 +296,22 @@ cd ../player_preview && make && sudo make install
 
 Current development branch: `claude/video-transcoder-gstreamer-YnBIH`
 
+## Roadmap / TODO
+
+### Input Types
+Building on the UDP input foundation, the following input types are planned:
+
+- [ ] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes
+- [ ] **HLS Input** - HTTP Live Streaming input support
+- [ ] **RIST Input** - Reliable Internet Stream Transport
+
+### Planned Features
+- [ ] Web UI for input configuration wizard
+- [ ] Transcoder profiles management
+- [ ] Output multiplexing configuration
+- [ ] System settings page
+- [ ] User authentication improvements
+
 ## Changelog
 
 ### 2024-12-20
