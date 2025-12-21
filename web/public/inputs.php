@@ -1003,20 +1003,36 @@ function addSource() {
                 <!-- SRT Settings -->
                 <div class="srt-settings" style="display:none;">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">SRT Mode</label>
                             <select class="form-select" name="sources[${sourcesCount - 1}][srt_mode]">
                                 <option value="caller">Caller</option>
                                 <option value="listener">Listener</option>
+                                <option value="rendezvous">Rendezvous</option>
                             </select>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">Latency (ms)</label>
-                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][srt_latency]" value="200">
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][srt_latency]" value="200" min="20" max="8000">
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-6 mb-2">
+                            <label class="form-label">Stream ID</label>
+                            <input type="text" class="form-control" name="sources[${sourcesCount - 1}][srt_streamid]" placeholder="Optional - for multi-stream servers">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-2">
                             <label class="form-label">Passphrase</label>
-                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][srt_passphrase]" placeholder="Optional">
+                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][srt_passphrase]" placeholder="Optional - for encryption">
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Key Length</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][srt_pbkeylen]">
+                                <option value="0">Auto</option>
+                                <option value="16">AES-128</option>
+                                <option value="24">AES-192</option>
+                                <option value="32">AES-256</option>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -1250,6 +1266,21 @@ async function scanConfiguredSource() {
         const formData = new FormData();
         formData.append('source', source);
         formData.append('type', type);
+
+        // Add SRT-specific options if this is an SRT source
+        if (type === 'srt') {
+            const modeSelect = card.querySelector('[name*="srt_mode"]');
+            const latencyInput = card.querySelector('[name*="srt_latency"]');
+            const streamidInput = card.querySelector('[name*="srt_streamid"]');
+            const passphraseInput = card.querySelector('[name*="srt_passphrase"]');
+            const pbkeylenSelect = card.querySelector('[name*="srt_pbkeylen"]');
+
+            if (modeSelect) formData.append('srt_mode', modeSelect.value);
+            if (latencyInput) formData.append('srt_latency', latencyInput.value);
+            if (streamidInput && streamidInput.value) formData.append('srt_streamid', streamidInput.value);
+            if (passphraseInput && passphraseInput.value) formData.append('srt_passphrase', passphraseInput.value);
+            if (pbkeylenSelect && pbkeylenSelect.value != '0') formData.append('srt_pbkeylen', pbkeylenSelect.value);
+        }
 
         const response = await fetch('api/inputs.php?action=scan', {
             method: 'POST',
@@ -1488,10 +1519,14 @@ async function handleFormSubmit(e) {
             if (type === 'srt') {
                 const modeSelect = card.querySelector('[name*="srt_mode"]');
                 const latencyInput = card.querySelector('[name*="srt_latency"]');
+                const streamidInput = card.querySelector('[name*="srt_streamid"]');
                 const passphraseInput = card.querySelector('[name*="srt_passphrase"]');
+                const pbkeylenSelect = card.querySelector('[name*="srt_pbkeylen"]');
                 sourceData.srt_mode = modeSelect ? modeSelect.value : 'caller';
                 sourceData.srt_latency = latencyInput ? latencyInput.value : 200;
+                sourceData.srt_streamid = streamidInput ? streamidInput.value : '';
                 sourceData.srt_passphrase = passphraseInput ? passphraseInput.value : '';
+                sourceData.srt_pbkeylen = pbkeylenSelect ? pbkeylenSelect.value : 0;
             } else if (type === 'rist') {
                 const profileSelect = card.querySelector('[name*="rist_profile"]');
                 const bufferInput = card.querySelector('[name*="rist_buffer"]');

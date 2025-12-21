@@ -87,7 +87,19 @@ switch ($action) {
             json_response(['error' => 'Source URL required'], 400);
         }
 
-        $pids = scan_source_pids($source, $type);
+        // Collect SRT options if provided
+        $srt_options = [];
+        if ($type === 'srt') {
+            $srt_options = [
+                'mode' => $_POST['srt_mode'] ?? 'caller',
+                'latency' => $_POST['srt_latency'] ?? 200,
+                'streamid' => $_POST['srt_streamid'] ?? '',
+                'passphrase' => $_POST['srt_passphrase'] ?? '',
+                'pbkeylen' => $_POST['srt_pbkeylen'] ?? 0
+            ];
+        }
+
+        $pids = scan_source_pids($source, $type, $srt_options);
         json_response($pids);
         break;
 
@@ -655,12 +667,27 @@ function get_input_config($id) {
  * Returns programs with their associated video and audio PIDs.
  * For MPTS streams, each program will have its own PIDs.
  */
-function scan_source_pids($source, $type = 'udp') {
+function scan_source_pids($source, $type = 'udp', $srt_options = []) {
     // Call the CariTranscoder API for stream scanning
     $api_data = [
         'stream_url' => $source,
         'stream_type' => $type
     ];
+
+    // Add SRT-specific options if provided
+    if ($type === 'srt' && !empty($srt_options)) {
+        $api_data['srt_mode'] = $srt_options['mode'] ?? 'caller';
+        $api_data['srt_latency'] = $srt_options['latency'] ?? 200;
+        if (!empty($srt_options['streamid'])) {
+            $api_data['srt_streamid'] = $srt_options['streamid'];
+        }
+        if (!empty($srt_options['passphrase'])) {
+            $api_data['srt_passphrase'] = $srt_options['passphrase'];
+            if (!empty($srt_options['pbkeylen']) && $srt_options['pbkeylen'] != '0') {
+                $api_data['srt_pbkeylen'] = $srt_options['pbkeylen'];
+            }
+        }
+    }
 
     $result = call_cari_api('/stream/scan', 'POST', $api_data);
 
@@ -723,7 +750,7 @@ function build_source_url($source, $type) {
 /**
  * Scan using TSDuck (capture + tsanalyze)
  */
-function scan_with_tsduck($url, $type) {
+function scan_with_tsduck($url, $type, $srt_options = []) {
     $result = [
         'success' => false,
         'programs' => [],
@@ -748,38 +775,54 @@ function scan_with_tsduck($url, $type) {
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
-        // SRT input - prefer srt-live-transmit if available
-        $srt_transmit = trim(shell_exec('which srt-live-transmit 2>/dev/null'));
+        // SRT input - use TSDuck SRT plugin for better control
+        $srt_addr = preg_replace('/^srt:\/\//', '', $url);
+        $parts = explode(':', $srt_addr);
+        $address = $parts[0] ?? '';
+        $port = $parts[1] ?? 9000;
 
-        // Ensure URL has srt:// prefix
-        $srt_url = $url;
-        if (strpos($url, 'srt://') !== 0) {
-            $srt_url = 'srt://' . $url;
+        // Build TSDuck SRT command with all options
+        $srt_mode = $srt_options['mode'] ?? 'caller';
+        $srt_latency = $srt_options['latency'] ?? 200;
+        $srt_streamid = $srt_options['streamid'] ?? '';
+        $srt_passphrase = $srt_options['passphrase'] ?? '';
+        $srt_pbkeylen = $srt_options['pbkeylen'] ?? 0;
+
+        $mode_flag = '--caller';
+        if ($srt_mode === 'listener') {
+            $mode_flag = '--listener';
+        } elseif ($srt_mode === 'rendezvous') {
+            // Rendezvous uses both flags
+            $mode_flag = '--caller';
         }
 
-        if ($srt_transmit) {
-            // Use srt-live-transmit to receive SRT and output to stdout, redirect to file
-            // file://con outputs to stdout which we redirect to the capture file
-            // stderr must go to /dev/null to avoid corrupting the TS capture
-            $capture_cmd = sprintf(
-                'timeout 8 srt-live-transmit %s file://con 2>/dev/null > %s',
-                escapeshellarg($srt_url),
-                escapeshellarg($capture_file)
-            );
-        } else {
-            // Fallback to TSDuck SRT plugin
-            $srt_addr = preg_replace('/^srt:\/\//', '', $url);
-            $parts = explode(':', $srt_addr);
-            $address = $parts[0] ?? '';
-            $port = $parts[1] ?? 9000;
+        $tsp_cmd = sprintf(
+            'timeout 8 tsp -I srt %s %s:%d --latency %d',
+            $mode_flag,
+            escapeshellarg($address),
+            (int)$port,
+            (int)$srt_latency
+        );
 
-            $capture_cmd = sprintf(
-                'timeout 8 tsp -I srt --caller %s:%d -O file %s 2>&1',
-                escapeshellarg($address),
-                (int)$port,
-                escapeshellarg($capture_file)
-            );
+        // Add rendezvous flag if needed
+        if ($srt_mode === 'rendezvous') {
+            $tsp_cmd .= sprintf(' --listener %s:%d', escapeshellarg($address), (int)$port);
         }
+
+        // Add streamid if provided
+        if (!empty($srt_streamid)) {
+            $tsp_cmd .= sprintf(' --streamid %s', escapeshellarg($srt_streamid));
+        }
+
+        // Add encryption options if provided
+        if (!empty($srt_passphrase)) {
+            $tsp_cmd .= sprintf(' --passphrase %s', escapeshellarg($srt_passphrase));
+            if (!empty($srt_pbkeylen) && $srt_pbkeylen != '0') {
+                $tsp_cmd .= sprintf(' --pbkeylen %d', (int)$srt_pbkeylen);
+            }
+        }
+
+        $capture_cmd = $tsp_cmd . sprintf(' -O file %s 2>&1', escapeshellarg($capture_file));
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
         // RIST input - prefer ristreceiver if available
         $rist_receiver = trim(shell_exec('which ristreceiver 2>/dev/null') ?:
@@ -1168,11 +1211,19 @@ function create_input($data) {
             if ($type === 'srt') {
                 $mode = $source['srt_mode'] ?? 'caller';
                 $latency = $source['srt_latency'] ?? 200;
+                $streamid = $source['srt_streamid'] ?? '';
                 $passphrase = $source['srt_passphrase'] ?? '';
+                $pbkeylen = $source['srt_pbkeylen'] ?? 0;
                 $extraSettings[] = "mode={$mode}";
                 $extraSettings[] = "latency={$latency}";
+                if ($streamid) {
+                    $extraSettings[] = "streamid={$streamid}";
+                }
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                    if ($pbkeylen && $pbkeylen != '0') {
+                        $extraSettings[] = "pbkeylen={$pbkeylen}";
+                    }
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
@@ -1359,11 +1410,19 @@ function update_input($id, $data) {
             if ($type === 'srt') {
                 $mode = $source['srt_mode'] ?? 'caller';
                 $latency = $source['srt_latency'] ?? 200;
+                $streamid = $source['srt_streamid'] ?? '';
                 $passphrase = $source['srt_passphrase'] ?? '';
+                $pbkeylen = $source['srt_pbkeylen'] ?? 0;
                 $extraSettings[] = "mode={$mode}";
                 $extraSettings[] = "latency={$latency}";
+                if ($streamid) {
+                    $extraSettings[] = "streamid={$streamid}";
+                }
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                    if ($pbkeylen && $pbkeylen != '0') {
+                        $extraSettings[] = "pbkeylen={$pbkeylen}";
+                    }
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
