@@ -4,7 +4,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 
 ## Features
 
-- **Multi-Input Support**: UDP/Multicast, SRT, RTMP, and file-based inputs
+- **Multi-Input Support**: UDP/Multicast, SRT, HLS, RTMP, RIST, and file-based inputs
 - **Hardware Transcoding**: NVIDIA NVENC, Intel QuickSync, and software encoding
 - **Stream Multiplexing**: Combine multiple video/audio streams into MPTS
 - **Multiple Outputs**: UDP, SRT, RTMP, HLS output support
@@ -46,7 +46,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 
 | Component | Description |
 |-----------|-------------|
-| `cari-input` | Input stream handler with UDP/SRT/RTMP support |
+| `cari-input` | Input stream handler with UDP/SRT/HLS/RTMP support |
 | `cari-transcoder` | GStreamer-based video transcoding |
 | `cari-mux` | MPEG-TS multiplexer for combining streams |
 | `cari-output` | Output stream distribution |
@@ -54,6 +54,8 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | `cari-api` | FastAPI service for privileged operations |
 | `cari-avsync` | A/V sync monitor with 24-hour trending |
 | `udp_input` | UDP input tool with PID filtering and monitoring |
+| `srt_input` | SRT input tool with caller/listener modes and encryption |
+| `hls_input` | HLS input tool with bitrate/resolution selection |
 | `player_preview` | HLS preview generator using FFmpeg |
 
 ## Requirements
@@ -299,20 +301,38 @@ Current development branch: `claude/video-transcoder-gstreamer-YnBIH`
 ## Roadmap / TODO
 
 ### Input Types
-Building on the UDP input foundation, the following input types are planned:
+Building on the UDP input foundation:
 
-- [ ] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes
-- [ ] **HLS Input** - HTTP Live Streaming input support
-- [ ] **RIST Input** - Reliable Internet Stream Transport
+- [x] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes, encryption, streamid
+- [x] **HLS Input** - HTTP Live Streaming with live mode, bitrate/resolution selection
+- [ ] **RIST Input** - Reliable Internet Stream Transport (scanning supported, service WIP)
 
 ### Planned Features
-- [ ] Web UI for input configuration wizard
+- [x] Web UI for input configuration wizard with type-specific options
 - [ ] Transcoder profiles management
 - [ ] Output multiplexing configuration
 - [ ] System settings page
 - [ ] User authentication improvements
 
 ## Changelog
+
+### 2024-12-22
+
+**HLS Input Support**
+- New `hls_input` tool using TSDuck HLS plugin
+- Supports live mode (--live) for live HLS streams
+- Bitrate selection: auto, highest, lowest, max/min with value
+- Resolution selection: auto, highest, lowest
+- Full GUI support with HLS-specific options in web interface
+- Systemd service generation via Python API
+- Service control (start/stop/status) through PHP API
+- A/V sync monitoring support for HLS inputs
+
+**SRT Input Fixes**
+- Fixed `--transtype live --messageapi` options for proper SRT reception
+- Fixed log parsing for bitrate_monitor output format
+- Fixed service control from GUI (start/stop buttons now work)
+- Fixed service status detection in cari-avsync
 
 ### 2024-12-20
 

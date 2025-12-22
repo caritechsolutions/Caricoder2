@@ -50,6 +50,21 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
    - **Port**: UDP port (e.g., `10000`)
    - **Interface**: Network interface (optional)
 
+   **Source Settings (for SRT):**
+   - **Address**: SRT server address (e.g., `srt.server.com:9000`)
+   - **Mode**: Connection mode (Caller, Listener, Rendezvous)
+   - **Latency**: Buffer latency in milliseconds (default: 200)
+   - **Stream ID**: Optional identifier for multi-stream servers
+   - **Passphrase**: Optional encryption passphrase
+   - **Key Length**: Encryption key length (Auto, AES-128, AES-192, AES-256)
+
+   **Source Settings (for HLS):**
+   - **URL**: Full HLS playlist URL (e.g., `https://example.com/stream.m3u8`)
+   - **Live Mode**: Enable for live streams (default: Yes)
+   - **Bitrate Selection**: Auto, Highest, Lowest, or specify Max/Min value
+   - **Bitrate Value**: Target bitrate in kbps (for Max/Min modes)
+   - **Resolution**: Auto, Highest, or Lowest resolution variant
+
    **PID Configuration:**
    - **Video PID**: The MPEG-TS PID for video (e.g., `211`)
    - **Audio PID**: The MPEG-TS PID for audio (e.g., `221`)
