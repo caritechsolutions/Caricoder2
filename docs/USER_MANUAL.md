@@ -43,12 +43,33 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
 
    **Basic Settings:**
    - **Name**: A unique identifier for the input (e.g., "channel1", "bet", "rai")
-   - **Type**: Select the input type (UDP, SRT, RTMP, HLS, RIST)
+   - **Type**: Select the input type (UDP, SRT, RTMP, HLS, HTTP, RIST)
 
    **Source Settings (for UDP/Multicast):**
    - **Address**: Multicast address (e.g., `239.100.0.1`)
    - **Port**: UDP port (e.g., `10000`)
    - **Interface**: Network interface (optional)
+
+   **Source Settings (for SRT):**
+   - **Address**: SRT server address (e.g., `srt.server.com:9000`)
+   - **Mode**: Connection mode (Caller, Listener, Rendezvous)
+   - **Latency**: Buffer latency in milliseconds (default: 200)
+   - **Stream ID**: Optional identifier for multi-stream servers
+   - **Passphrase**: Optional encryption passphrase
+   - **Key Length**: Encryption key length (Auto, AES-128, AES-192, AES-256)
+
+   **Source Settings (for HLS):**
+   - **URL**: Full HLS playlist URL (e.g., `https://example.com/stream.m3u8`)
+   - **Live Mode**: Enable for live streams (default: Yes)
+   - **Bitrate Selection**: Auto, Highest, Lowest, or specify Max/Min value
+   - **Bitrate Value**: Target bitrate in kbps (for Max/Min modes)
+   - **Resolution**: Auto, Highest, or Lowest resolution variant
+
+   **Source Settings (for HTTP):**
+   - **URL**: Direct HTTP URL to MPEG-TS stream (e.g., `http://server:port/path/mpegts`)
+   - HTTP input is simpler than HLS - it receives MPEG-TS directly over HTTP
+   - No bitrate or resolution selection needed
+   - Uses TSDuck's HTTP plugin for reliable transport stream reception
 
    **PID Configuration:**
    - **Video PID**: The MPEG-TS PID for video (e.g., `211`)

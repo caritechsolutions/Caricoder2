@@ -352,10 +352,10 @@ function get_all_input_metrics() {
     foreach ($inputs as $input) {
         $id = $input['id'];
 
-        // Check if input is UDP or SRT type and has output config
+        // Check if input is UDP, SRT, HLS, or HTTP type and has output config
         $config = $input['config'] ?? [];
         $input_type = $config['general']['type'] ?? '';
-        if ($input_type !== 'udp' && $input_type !== 'srt') {
+        if ($input_type !== 'udp' && $input_type !== 'srt' && $input_type !== 'hls' && $input_type !== 'http') {
             continue;
         }
 
@@ -726,6 +726,187 @@ function generate_srt_input_service($id, $config) {
 }
 
 /**
+ * Generate systemd service for HLS input
+ */
+function generate_hls_input_service($id, $config) {
+    // Get source info
+    $source_url = '';
+    $hls_live = true;
+    $hls_bitrate_mode = 'auto';
+    $hls_bitrate_value = 0;
+    $hls_highest_resolution = false;
+    $hls_lowest_resolution = false;
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_url = $parts[1] ?? '';
+
+                // Parse extra settings from source string (type|url|weight|settings)
+                if (isset($parts[3])) {
+                    $settings = explode(',', $parts[3]);
+                    foreach ($settings as $setting) {
+                        $kv = explode('=', $setting, 2);
+                        if (count($kv) == 2) {
+                            switch ($kv[0]) {
+                                case 'live':
+                                    $hls_live = (bool)$kv[1];
+                                    break;
+                                case 'bitrate_mode':
+                                    $hls_bitrate_mode = $kv[1];
+                                    break;
+                                case 'bitrate_value':
+                                    $hls_bitrate_value = (int)$kv[1];
+                                    break;
+                                case 'highest_resolution':
+                                    $hls_highest_resolution = (bool)$kv[1];
+                                    break;
+                                case 'lowest_resolution':
+                                    $hls_lowest_resolution = (bool)$kv[1];
+                                    break;
+                            }
+                        }
+                    }
+                }
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
+    }
+
+    // Build PIDs list for monitoring
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
+    $name = $config['general']['name'] ?? $id;
+
+    // Call the API to create the service
+    $api_data = [
+        'id' => $id,
+        'source_url' => $source_url,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'live_mode' => $hls_live,
+        'bitrate_mode' => $hls_bitrate_mode,
+        'bitrate_value' => $hls_bitrate_value,
+        'highest_resolution' => $hls_highest_resolution,
+        'lowest_resolution' => $hls_lowest_resolution,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder HLS Input - {$name}"
+    ];
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/hls/create', 'POST', $api_data);
+
+    return $result;
+}
+
+/**
+ * Generate systemd service for HTTP input
+ */
+function generate_http_input_service($id, $config) {
+    // Get source info
+    $source_url = '';
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_url = $parts[1] ?? '';
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
+    }
+
+    // Build PIDs list for monitoring
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
+    $name = $config['general']['name'] ?? $id;
+
+    // Call the API to create the service
+    $api_data = [
+        'id' => $id,
+        'source_url' => $source_url,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder HTTP Input - {$name}"
+    ];
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/http/create', 'POST', $api_data);
+
+    return $result;
+}
+
+/**
  * Sanitize name to ID (lowercase, alphanumeric, hyphens)
  */
 function sanitize_name_to_id($name) {
@@ -788,17 +969,17 @@ function get_input_config($id) {
 
 /**
  * Scan source for PIDs using appropriate method based on source type.
- * Uses TSDuck for UDP, SRT, RIST streams.
- * Uses CariTranscoder API (ffprobe) for RTMP, HLS, and other HTTP streams.
+ * Uses TSDuck for UDP, SRT, RIST, HLS streams.
+ * Uses CariTranscoder API (ffprobe) for RTMP and other HTTP streams.
  */
 function scan_source_pids($source, $type = 'udp', $srt_options = []) {
-    // For transport stream based inputs (UDP, SRT, RIST), use TSDuck directly
-    if (in_array($type, ['udp', 'srt', 'rist', 'file'])) {
+    // For transport stream based inputs (UDP, SRT, RIST, HLS), use TSDuck directly
+    if (in_array($type, ['udp', 'srt', 'rist', 'file', 'hls'])) {
         $url = build_source_url($source, $type);
         return scan_with_tsduck($url, $type, $srt_options);
     }
 
-    // For other types (RTMP, HLS), use CariTranscoder API with ffprobe
+    // For other types (RTMP), use CariTranscoder API with ffprobe
     $api_data = [
         'stream_url' => $source,
         'stream_type' => $type
@@ -999,6 +1180,67 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
                 escapeshellarg($capture_file)
             );
         }
+    } elseif ($type === 'http') {
+        // HTTP input (direct MPEG-TS over HTTP) - use tsp with http plugin
+        $http_url = $url;
+
+        // Use temp multicast address for ffprobe
+        $temp_port = rand(20000, 29999);
+        $temp_udp = "239.10.10.10:{$temp_port}";
+
+        // Start tsp with HTTP input in background
+        $tsp_cmd = sprintf(
+            'timeout 15 tsp -I http %s -O ip %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($http_url),
+            escapeshellarg($temp_udp)
+        );
+
+        $tsp_pid = trim(shell_exec($tsp_cmd));
+
+        // Wait for HTTP stream to start
+        sleep(3);
+
+        // Now use ffprobe on the temp UDP
+        $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
+
+        // Kill tsp process
+        if ($tsp_pid) {
+            shell_exec("kill {$tsp_pid} 2>/dev/null");
+            shell_exec("pkill -P {$tsp_pid} 2>/dev/null");
+        }
+
+        return $ffprobe_result;
+    } elseif ($type === 'hls' || strpos($url, 'http://') === 0 || strpos($url, 'https://') === 0) {
+        // HLS input - use tsp with HLS plugin to output to temp UDP, then ffprobe
+        $hls_url = $url;
+
+        // Use temp multicast address for ffprobe
+        $temp_port = rand(20000, 29999);
+        $temp_udp = "239.10.10.10:{$temp_port}";
+
+        // Start tsp with HLS input in background
+        $tsp_cmd = sprintf(
+            'timeout 15 tsp -I hls %s --live -O ip %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($hls_url),
+            escapeshellarg($temp_udp)
+        );
+
+        $tsp_pid = trim(shell_exec($tsp_cmd));
+
+        // Wait for HLS to start streaming (HLS needs more time to download segments)
+        sleep(5);
+
+        // Now use ffprobe on the temp UDP
+        $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
+
+        // Kill tsp process
+        if ($tsp_pid) {
+            shell_exec("kill {$tsp_pid} 2>/dev/null");
+            // Also kill any child processes
+            shell_exec("pkill -P {$tsp_pid} 2>/dev/null");
+        }
+
+        return $ffprobe_result;
     } elseif ($type === 'file') {
         // For file input, just analyze directly without capture
         if (!file_exists($url)) {
@@ -1415,9 +1657,9 @@ function create_input($data) {
     if (empty($primaryAudio)) $primaryAudio = is_array($data['audio_pids'] ?? null) ? implode(',', $data['audio_pids']) : ($data['audio_pids'] ?? '');
     if (empty($primaryProgram)) $primaryProgram = $data['program_pid'] ?? '';
 
-    // Allocate output address and API port for UDP inputs
+    // Allocate output address and API port for UDP, SRT, HLS, and HTTP inputs
     $output_alloc = null;
-    if (in_array($primaryType, ['udp', 'srt'])) {
+    if (in_array($primaryType, ['udp', 'srt', 'hls', 'http'])) {
         $output_alloc = allocate_output_address();
         if (!$output_alloc) {
             return ['success' => false, 'error' => 'No available output addresses in pool'];
@@ -1485,6 +1727,23 @@ function create_input($data) {
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
                 $extraSettings[] = "loop={$loop}";
+            } elseif ($type === 'hls') {
+                $live = $source['hls_live'] ?? '1';
+                $bitrate_mode = $source['hls_bitrate_mode'] ?? 'auto';
+                $bitrate_value = $source['hls_bitrate_value'] ?? 0;
+                $highest_resolution = $source['hls_highest_resolution'] ?? '0';
+                $lowest_resolution = $source['hls_lowest_resolution'] ?? '0';
+                $extraSettings[] = "live={$live}";
+                $extraSettings[] = "bitrate_mode={$bitrate_mode}";
+                if ($bitrate_value > 0) {
+                    $extraSettings[] = "bitrate_value={$bitrate_value}";
+                }
+                if ($highest_resolution) {
+                    $extraSettings[] = "highest_resolution={$highest_resolution}";
+                }
+                if ($lowest_resolution) {
+                    $extraSettings[] = "lowest_resolution={$lowest_resolution}";
+                }
             }
 
             // Add per-source PIDs
@@ -1543,12 +1802,16 @@ function create_input($data) {
         // Set permissions to 664 so both owner and group (www-data) can read/write
         chmod($config_file, 0664);
 
-        // Generate systemd service for UDP inputs
+        // Generate systemd service for UDP, SRT, HLS, and HTTP inputs
         $service_result = null;
         if ($primaryType === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
         } elseif ($primaryType === 'srt') {
             $service_result = generate_srt_input_service($id, $config);
+        } elseif ($primaryType === 'hls') {
+            $service_result = generate_hls_input_service($id, $config);
+        } elseif ($primaryType === 'http') {
+            $service_result = generate_http_input_service($id, $config);
         }
 
         $response = [
@@ -1686,6 +1949,23 @@ function update_input($id, $data) {
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
                 $extraSettings[] = "loop={$loop}";
+            } elseif ($type === 'hls') {
+                $live = $source['hls_live'] ?? '1';
+                $bitrate_mode = $source['hls_bitrate_mode'] ?? 'auto';
+                $bitrate_value = $source['hls_bitrate_value'] ?? 0;
+                $highest_resolution = $source['hls_highest_resolution'] ?? '0';
+                $lowest_resolution = $source['hls_lowest_resolution'] ?? '0';
+                $extraSettings[] = "live={$live}";
+                $extraSettings[] = "bitrate_mode={$bitrate_mode}";
+                if ($bitrate_value > 0) {
+                    $extraSettings[] = "bitrate_value={$bitrate_value}";
+                }
+                if ($highest_resolution) {
+                    $extraSettings[] = "highest_resolution={$highest_resolution}";
+                }
+                if ($lowest_resolution) {
+                    $extraSettings[] = "lowest_resolution={$lowest_resolution}";
+                }
             }
 
             // Add per-source PIDs
@@ -1717,7 +1997,7 @@ function update_input($id, $data) {
     if ($result !== false) {
         $response = ['success' => true, 'message' => "Input updated successfully"];
 
-        // Regenerate systemd service for UDP and SRT inputs
+        // Regenerate systemd service for UDP, SRT, HLS, and HTTP inputs
         $type = $config['general']['type'] ?? 'udp';
         if ($type === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
@@ -1726,6 +2006,16 @@ function update_input($id, $data) {
             }
         } elseif ($type === 'srt') {
             $service_result = generate_srt_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
+        } elseif ($type === 'hls') {
+            $service_result = generate_hls_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
+        } elseif ($type === 'http') {
+            $service_result = generate_http_input_service($id, $config);
             if ($service_result && !$service_result['success']) {
                 $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
             }
@@ -1762,6 +2052,12 @@ function delete_input($id) {
     } elseif ($type === 'srt') {
         // Delete SRT input service (stops and removes service file)
         call_cari_api("/input/srt/{$id}", 'DELETE');
+    } elseif ($type === 'hls') {
+        // Delete HLS input service (stops and removes service file)
+        call_cari_api("/input/hls/{$id}", 'DELETE');
+    } elseif ($type === 'http') {
+        // Delete HTTP input service (stops and removes service file)
+        call_cari_api("/input/http/{$id}", 'DELETE');
     } else {
         // Stop other service types
         stop_input_service($id);
@@ -1816,6 +2112,24 @@ function start_input_service($id) {
         return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
     }
 
+    // HLS inputs use the HLS API endpoint
+    if ($type === 'hls') {
+        $result = call_cari_api("/input/hls/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
+    }
+
+    // HTTP inputs use the HTTP API endpoint
+    if ($type === 'http') {
+        $result = call_cari_api("/input/http/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
+    }
+
     // Other types use generic service control
     $service = "cari-input@{$id}";
     $result = call_cari_api('/service/control', 'POST', [
@@ -1853,6 +2167,24 @@ function stop_input_service($id) {
     // SRT inputs use the SRT API endpoint
     if ($type === 'srt') {
         $result = call_cari_api("/input/srt/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
+    }
+
+    // HLS inputs use the HLS API endpoint
+    if ($type === 'hls') {
+        $result = call_cari_api("/input/hls/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
+    }
+
+    // HTTP inputs use the HTTP API endpoint
+    if ($type === 'http') {
+        $result = call_cari_api("/input/http/{$id}/stop", 'POST');
         if (isset($result['success']) && $result['success']) {
             return ['success' => true, 'message' => "Input service stopped"];
         }

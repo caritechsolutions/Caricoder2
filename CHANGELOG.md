@@ -2,9 +2,36 @@
 
 All notable changes to CariTranscoder are documented in this file.
 
-## [Unreleased] - 2024-12-19
+## [Unreleased] - 2024-12-22
 
 ### Major Features
+
+#### HTTP Input Support (2024-12-22)
+- New `http_input` tool using TSDuck HTTP plugin for direct MPEG-TS over HTTP
+- Simple configuration - just URL and output settings
+- Full GUI support with HTTP input type option
+- Systemd service generation via Python API (cari-http-{id})
+- Service control (start/stop/status) through PHP and Python APIs
+- Service status detection in cari-avsync monitoring tool
+
+#### HLS Input Support (2024-12-22)
+- New `hls_input` tool using TSDuck HLS plugin
+- Live mode support for live HLS streams
+- Bitrate selection: auto, highest, lowest, max/min with specified value
+- Resolution selection: auto, highest, lowest
+- Full GUI support with HLS-specific options
+- Systemd service generation via Python API
+- Service control (start/stop/status) through PHP and Python APIs
+
+#### SRT Input Support (2024-12-22)
+- New `srt_input` tool using srt-live-transmit and tsp
+- Caller, Listener, and Rendezvous connection modes
+- Encryption support with passphrase and configurable key lengths
+- Stream ID support for multi-stream SRT servers
+- Full GUI support with SRT-specific options
+- Fixed `--transtype live --messageapi` for proper SRT reception
+
+### Major Features (Previous)
 
 #### Web Preview with HLS Player
 - Added live stream preview directly in the web interface
@@ -79,6 +106,12 @@ All notable changes to CariTranscoder are documented in this file.
 #### New Files
 - `api/main.py` - FastAPI service
 - `api/cari-api.service` - Systemd service file
+- `tools/http_input/http_input.c` - HTTP input tool using TSDuck HTTP plugin
+- `tools/http_input/Makefile` - Build configuration for http_input
+- `tools/hls_input/hls_input.c` - HLS input tool using TSDuck HLS plugin
+- `tools/hls_input/Makefile` - Build configuration for hls_input
+- `tools/srt_input/srt_input.c` - SRT input tool
+- `tools/srt_input/Makefile` - Build configuration for srt_input
 - `tools/player_preview/player_preview.c` - FFmpeg-based HLS generator
 - `tools/player_preview/old_player.c` - Backup of tsp-based version
 - `tools/udp_input/udp_input.c` - UDP input with PID filtering
@@ -128,10 +161,10 @@ echo "Web UI: http://$(hostname -I | awk '{print $1}'):8080"
 2. **MP2 Audio**: Some browsers may not support MP2 audio playback natively
 3. **Preview Startup**: First preview request may take 5-10 seconds while segments are generated
 
-## In Progress
+## Completed Features
 
 ### A/V Sync Monitor (cari-avsync)
-**Status:** 🔧 In Development
+**Status:** ✅ Complete
 
 A standalone service for monitoring audio/video synchronization across all pipeline stages.
 
@@ -164,7 +197,9 @@ A standalone service for monitoring audio/video synchronization across all pipel
 
 ## Roadmap
 
-- [ ] SRT input/output support in web UI
+- [x] SRT input support in web UI (completed 2024-12-22)
+- [x] HLS input support in web UI (completed 2024-12-22)
+- [ ] RIST input support (scanning supported, service WIP)
 - [ ] Hardware transcoding profiles (NVENC, QuickSync)
 - [ ] Multi-user support with role-based access
 - [ ] Recording and time-shift functionality

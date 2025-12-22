@@ -42,6 +42,7 @@ include __DIR__ . '/../templates/header.php';
                         <option value="rist">RIST</option>
                         <option value="rtmp">RTMP</option>
                         <option value="hls">HLS</option>
+                        <option value="http">HTTP</option>
                         <option value="file">File</option>
                     </select>
                 </div>
@@ -983,6 +984,7 @@ function addSource() {
                         <option value="rist">RIST</option>
                         <option value="rtmp">RTMP</option>
                         <option value="hls">HLS</option>
+                        <option value="http">HTTP</option>
                         <option value="file">File</option>
                     </select>
                 </div>
@@ -1130,6 +1132,11 @@ function updateSourceFields(sourceId) {
         case 'hls':
             urlLabel.textContent = 'HLS URL';
             urlInput.placeholder = 'https://example.com/stream.m3u8';
+            settingsDiv.style.display = 'none';
+            break;
+        case 'http':
+            urlLabel.textContent = 'HTTP URL';
+            urlInput.placeholder = 'http://server:port/path/mpegts';
             settingsDiv.style.display = 'none';
             break;
         case 'file':

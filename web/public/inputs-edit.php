@@ -309,6 +309,7 @@ function addSource(existingSource = null) {
                         <option value="rist" ${type === 'rist' ? 'selected' : ''}>RIST</option>
                         <option value="rtmp" ${type === 'rtmp' ? 'selected' : ''}>RTMP</option>
                         <option value="hls" ${type === 'hls' ? 'selected' : ''}>HLS</option>
+                        <option value="http" ${type === 'http' ? 'selected' : ''}>HTTP</option>
                         <option value="file" ${type === 'file' ? 'selected' : ''}>File</option>
                     </select>
                 </div>
@@ -323,7 +324,7 @@ function addSource(existingSource = null) {
             </div>
 
             <!-- Type-specific settings -->
-            <div class="source-type-settings" id="source-${sourcesCount}-settings" style="display:${type === 'srt' || type === 'rist' || type === 'file' ? 'block' : 'none'};">
+            <div class="source-type-settings" id="source-${sourcesCount}-settings" style="display:${type === 'srt' || type === 'rist' || type === 'file' || type === 'hls' ? 'block' : 'none'};">
                 <!-- SRT Settings -->
                 <div class="srt-settings" style="display:${type === 'srt' ? 'block' : 'none'};">
                     <div class="row">
@@ -395,6 +396,41 @@ function addSource(existingSource = null) {
                         </div>
                     </div>
                 </div>
+
+                <!-- HLS Settings -->
+                <div class="hls-settings" style="display:${type === 'hls' ? 'block' : 'none'};">
+                    <div class="row">
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Live Mode</label>
+                            <select class="form-select hls-live">
+                                <option value="1" ${(existingSource?.hls_live || existingSource?.live || '1') === '1' ? 'selected' : ''}>Yes - Live stream</option>
+                                <option value="0" ${(existingSource?.hls_live || existingSource?.live) === '0' ? 'selected' : ''}>No - VOD</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Bitrate Selection</label>
+                            <select class="form-select hls-bitrate-mode" onchange="updateHlsBitrateValue(${sourcesCount})">
+                                <option value="auto" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode || 'auto') === 'auto' ? 'selected' : ''}>Auto</option>
+                                <option value="highest" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode) === 'highest' ? 'selected' : ''}>Highest</option>
+                                <option value="lowest" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode) === 'lowest' ? 'selected' : ''}>Lowest</option>
+                                <option value="max" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode) === 'max' ? 'selected' : ''}>Max (specify)</option>
+                                <option value="min" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode) === 'min' ? 'selected' : ''}>Min (specify)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Bitrate Value (kbps)</label>
+                            <input type="number" class="form-control hls-bitrate-value" value="${existingSource?.hls_bitrate_value || existingSource?.bitrate_value || ''}" placeholder="0 = auto" ${(existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode || 'auto') !== 'max' && (existingSource?.hls_bitrate_mode || existingSource?.bitrate_mode || 'auto') !== 'min' ? 'disabled' : ''}>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Resolution</label>
+                            <select class="form-select hls-resolution">
+                                <option value="auto" ${!(existingSource?.hls_highest_resolution || existingSource?.highest_resolution) && !(existingSource?.hls_lowest_resolution || existingSource?.lowest_resolution) ? 'selected' : ''}>Auto</option>
+                                <option value="highest" ${(existingSource?.hls_highest_resolution || existingSource?.highest_resolution) === '1' ? 'selected' : ''}>Highest</option>
+                                <option value="lowest" ${(existingSource?.hls_lowest_resolution || existingSource?.lowest_resolution) === '1' ? 'selected' : ''}>Lowest</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- PID Configuration Status -->
@@ -432,6 +468,7 @@ function updateSourceFields(sourceId) {
     const srtSettings = card.querySelector('.srt-settings');
     const ristSettings = card.querySelector('.rist-settings');
     const fileSettings = card.querySelector('.file-settings');
+    const hlsSettings = card.querySelector('.hls-settings');
 
     const type = typeSelect.value;
 
@@ -439,6 +476,7 @@ function updateSourceFields(sourceId) {
     srtSettings.style.display = 'none';
     ristSettings.style.display = 'none';
     fileSettings.style.display = 'none';
+    hlsSettings.style.display = 'none';
 
     switch (type) {
         case 'udp':
@@ -466,6 +504,12 @@ function updateSourceFields(sourceId) {
         case 'hls':
             urlLabel.textContent = 'HLS URL';
             urlInput.placeholder = 'https://example.com/stream.m3u8';
+            settingsDiv.style.display = 'block';
+            hlsSettings.style.display = 'block';
+            break;
+        case 'http':
+            urlLabel.textContent = 'HTTP URL';
+            urlInput.placeholder = 'http://server:port/path/mpegts';
             settingsDiv.style.display = 'none';
             break;
         case 'file':
@@ -474,6 +518,20 @@ function updateSourceFields(sourceId) {
             settingsDiv.style.display = 'block';
             fileSettings.style.display = 'block';
             break;
+    }
+}
+
+function updateHlsBitrateValue(sourceId) {
+    const card = document.getElementById(`source-${sourceId}`);
+    const modeSelect = card.querySelector('.hls-bitrate-mode');
+    const valueInput = card.querySelector('.hls-bitrate-value');
+    const mode = modeSelect.value;
+
+    if (mode === 'max' || mode === 'min') {
+        valueInput.disabled = false;
+    } else {
+        valueInput.disabled = true;
+        valueInput.value = '';
     }
 }
 
@@ -784,6 +842,19 @@ async function handleSubmit(e) {
             } else if (type === 'file') {
                 const loopSelect = card.querySelector('.file-loop');
                 sourceData.file_loop = loopSelect ? loopSelect.value : '1';
+            } else if (type === 'hls') {
+                const liveSelect = card.querySelector('.hls-live');
+                const bitrateModeSelect = card.querySelector('.hls-bitrate-mode');
+                const bitrateValueInput = card.querySelector('.hls-bitrate-value');
+                const resolutionSelect = card.querySelector('.hls-resolution');
+
+                sourceData.hls_live = liveSelect ? liveSelect.value : '1';
+                sourceData.hls_bitrate_mode = bitrateModeSelect ? bitrateModeSelect.value : 'auto';
+                sourceData.hls_bitrate_value = bitrateValueInput ? bitrateValueInput.value : '';
+
+                const resolution = resolutionSelect ? resolutionSelect.value : 'auto';
+                sourceData.hls_highest_resolution = resolution === 'highest' ? '1' : '0';
+                sourceData.hls_lowest_resolution = resolution === 'lowest' ? '1' : '0';
             }
 
             // Add PID configuration

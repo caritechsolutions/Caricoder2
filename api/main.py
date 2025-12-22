@@ -134,6 +134,35 @@ class SRTInputService(BaseModel):
     description: Optional[str] = None
 
 
+class HLSInputService(BaseModel):
+    """Model for creating HLS input service"""
+    id: str
+    source_url: str  # HLS manifest URL
+    output_address: str
+    output_port: int
+    api_port: int
+    live_mode: bool = True
+    bitrate_mode: str = "auto"  # auto, highest, lowest, max, min
+    bitrate_value: int = 0  # For max/min modes (kbps)
+    highest_resolution: bool = False
+    lowest_resolution: bool = False
+    program: Optional[int] = None
+    pids: Optional[str] = None
+    description: Optional[str] = None
+
+
+class HTTPInputService(BaseModel):
+    """Model for creating HTTP input service"""
+    id: str
+    source_url: str  # HTTP URL for MPEG-TS stream
+    output_address: str
+    output_port: int
+    api_port: int
+    program: Optional[int] = None
+    pids: Optional[str] = None
+    description: Optional[str] = None
+
+
 class ServiceFile(BaseModel):
     """Model for generic service file creation"""
     service_name: str
@@ -350,6 +379,145 @@ LimitNPROC=4096
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cari-srt-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
+def generate_hls_input_service_file(service_data: HLSInputService) -> str:
+    """Generate systemd service file content for HLS input"""
+
+    # Unique log file for this input
+    log_file = f"/var/log/caritrans/hls-input-{service_data.id}.log"
+
+    # Build the command
+    cmd_parts = [
+        "/usr/local/bin/hls_input",
+        f"--url '{service_data.source_url}'",
+        f"--output {service_data.output_address}:{service_data.output_port}",
+        f"--api-port {service_data.api_port}",
+        f"--log-file {log_file}"
+    ]
+
+    if service_data.live_mode:
+        cmd_parts.append("--live")
+
+    # Bitrate selection
+    if service_data.bitrate_mode == "highest":
+        cmd_parts.append("--highest-bitrate")
+    elif service_data.bitrate_mode == "lowest":
+        cmd_parts.append("--lowest-bitrate")
+    elif service_data.bitrate_mode == "max" and service_data.bitrate_value > 0:
+        cmd_parts.append(f"--max-bitrate {service_data.bitrate_value}")
+    elif service_data.bitrate_mode == "min" and service_data.bitrate_value > 0:
+        cmd_parts.append(f"--min-bitrate {service_data.bitrate_value}")
+
+    # Resolution selection
+    if service_data.highest_resolution:
+        cmd_parts.append("--highest-resolution")
+    elif service_data.lowest_resolution:
+        cmd_parts.append("--lowest-resolution")
+
+    if service_data.program is not None:
+        cmd_parts.append(f"--program {service_data.program}")
+
+    if service_data.pids:
+        cmd_parts.append(f"--pids {service_data.pids}")
+
+    exec_start = " ".join(cmd_parts)
+    description = service_data.description or f"CariTranscoder HLS Input - {service_data.id}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main process
+ExecStart={exec_start}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-hls-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
+def generate_http_input_service_file(service_data: HTTPInputService) -> str:
+    """Generate systemd service file content for HTTP input"""
+
+    # Unique log file for this input
+    log_file = f"/var/log/caritrans/http-input-{service_data.id}.log"
+
+    # Build the command
+    cmd_parts = [
+        "/usr/local/bin/http_input",
+        f"--url '{service_data.source_url}'",
+        f"--output {service_data.output_address}:{service_data.output_port}",
+        f"--api-port {service_data.api_port}",
+        f"--log-file {log_file}"
+    ]
+
+    if service_data.program is not None:
+        cmd_parts.append(f"--program {service_data.program}")
+
+    if service_data.pids:
+        cmd_parts.append(f"--pids {service_data.pids}")
+
+    exec_start = " ".join(cmd_parts)
+    description = service_data.description or f"CariTranscoder HTTP Input - {service_data.id}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main process
+ExecStart={exec_start}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-http-{service_data.id}
 
 [Install]
 WantedBy=multi-user.target
@@ -707,6 +875,270 @@ async def restart_srt_input(input_id: str):
 async def srt_input_status(input_id: str):
     """Get status of a SRT input service"""
     service_name = f"cari-srt-{input_id}.service"
+    return get_service_status(service_name)
+
+
+# ----------------------------------------------------------------------------
+# HLS Input Service Management
+# ----------------------------------------------------------------------------
+
+@app.post("/input/hls/create")
+async def create_hls_input_service(service: HLSInputService):
+    """Create a systemd service file for HLS input"""
+
+    service_name = f"cari-hls-{service.id}"
+    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+
+    try:
+        # Generate service content
+        service_content = generate_hls_input_service_file(service)
+
+        # Write the service file
+        with open(service_file, 'w') as f:
+            f.write(service_content)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Created HLS input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "service_file": service_file,
+            "message": f"HLS input service '{service_name}' created successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create HLS service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/input/hls/{input_id}")
+async def delete_hls_input_service(input_id: str):
+    """Delete a HLS input service"""
+
+    service_name = f"cari-hls-{input_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+
+    try:
+        # Stop the service first
+        run_systemctl("stop", service_name)
+        run_systemctl("disable", service_name)
+
+        # Remove the service file
+        if os.path.exists(service_file):
+            os.remove(service_file)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Deleted HLS input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "message": f"HLS input service '{service_name}' deleted successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete HLS service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/input/hls/{input_id}/start")
+async def start_hls_input(input_id: str):
+    """Start a HLS input service"""
+    service_name = f"cari-hls-{input_id}.service"
+
+    # Check if service file exists
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        logger.error(f"HLS service file not found: {service_file}")
+        return {
+            "success": False,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    # Enable and start the service
+    run_systemctl("enable", service_name)
+    result = run_systemctl("start", service_name)
+    logger.info(f"Started HLS service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/hls/{input_id}/stop")
+async def stop_hls_input(input_id: str):
+    """Stop a HLS input service"""
+    service_name = f"cari-hls-{input_id}.service"
+
+    result = run_systemctl("stop", service_name)
+    logger.info(f"Stopped HLS service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/hls/{input_id}/restart")
+async def restart_hls_input(input_id: str):
+    """Restart a HLS input service"""
+    service_name = f"cari-hls-{input_id}.service"
+
+    result = run_systemctl("restart", service_name)
+    logger.info(f"Restarted HLS service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.get("/input/hls/{input_id}/status")
+async def hls_input_status(input_id: str):
+    """Get status of a HLS input service"""
+    service_name = f"cari-hls-{input_id}.service"
+    return get_service_status(service_name)
+
+
+# ----------------------------------------------------------------------------
+# HTTP Input Service Management
+# ----------------------------------------------------------------------------
+
+@app.post("/input/http/create")
+async def create_http_input_service(service: HTTPInputService):
+    """Create a systemd service file for HTTP input"""
+
+    service_name = f"cari-http-{service.id}"
+    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+
+    try:
+        # Generate service content
+        service_content = generate_http_input_service_file(service)
+
+        # Write the service file
+        with open(service_file, 'w') as f:
+            f.write(service_content)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Created HTTP input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "service_file": service_file,
+            "message": f"HTTP input service '{service_name}' created successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create HTTP service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/input/http/{input_id}")
+async def delete_http_input_service(input_id: str):
+    """Delete a HTTP input service"""
+
+    service_name = f"cari-http-{input_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+
+    try:
+        # Stop the service first
+        run_systemctl("stop", service_name)
+        run_systemctl("disable", service_name)
+
+        # Remove the service file
+        if os.path.exists(service_file):
+            os.remove(service_file)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Deleted HTTP input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "message": f"HTTP input service '{service_name}' deleted successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete HTTP service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/input/http/{input_id}/start")
+async def start_http_input(input_id: str):
+    """Start a HTTP input service"""
+    service_name = f"cari-http-{input_id}.service"
+
+    # Check if service file exists
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        logger.error(f"HTTP service file not found: {service_file}")
+        return {
+            "success": False,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    # Enable and start the service
+    run_systemctl("enable", service_name)
+    result = run_systemctl("start", service_name)
+    logger.info(f"Started HTTP service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/http/{input_id}/stop")
+async def stop_http_input(input_id: str):
+    """Stop a HTTP input service"""
+    service_name = f"cari-http-{input_id}.service"
+
+    result = run_systemctl("stop", service_name)
+    logger.info(f"Stopped HTTP service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/http/{input_id}/restart")
+async def restart_http_input(input_id: str):
+    """Restart a HTTP input service"""
+    service_name = f"cari-http-{input_id}.service"
+
+    result = run_systemctl("restart", service_name)
+    logger.info(f"Restarted HTTP service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.get("/input/http/{input_id}/status")
+async def http_input_status(input_id: str):
+    """Get status of a HTTP input service"""
+    service_name = f"cari-http-{input_id}.service"
     return get_service_status(service_name)
 
 
