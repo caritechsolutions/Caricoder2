@@ -232,12 +232,18 @@ void* log_monitor_thread(void *arg) {
         if (log) {
             fseek(log, last_pos, SEEK_SET);
             while (fgets(line, sizeof(line), log)) {
-                // Parse bitrate monitor output: "PID: 0x00XX (XXX), bitrate: XXX,XXX b/s"
+                // Parse bitrate monitor output format:
+                // "* bitrate_monitor: 2025/12/22 05:05:03, PID 0x00D3 (211) bitrate: 1,442,636 bits/s"
                 uint16_t pid;
                 uint32_t bitrate;
                 char *bitrate_str = strstr(line, "bitrate:");
-                if (bitrate_str && sscanf(line, "* PID: 0x%hx", &pid) == 1) {
-                    bitrate_str += 8;
+                char *pid_str = strstr(line, "PID 0x");
+
+                if (bitrate_str && pid_str && sscanf(pid_str, "PID 0x%hx", &pid) == 1) {
+                    bitrate_str += 8;  // Skip "bitrate:"
+                    // Skip whitespace
+                    while (*bitrate_str == ' ') bitrate_str++;
+
                     // Remove commas from bitrate
                     char clean_bitrate[32];
                     int j = 0;
@@ -255,6 +261,7 @@ void* log_monitor_thread(void *arg) {
                     PIDMonitor *m = find_monitor(pid);
                     if (m) {
                         add_bitrate_sample(m, time(NULL), bitrate);
+                        fprintf(stderr, "Bitrate update: PID %u = %u bps\n", pid, bitrate);
                     }
                     pthread_mutex_unlock(&g_ctx.lock);
                 }
