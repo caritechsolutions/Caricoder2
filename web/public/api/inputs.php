@@ -766,54 +766,71 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
-        // SRT input - use TSDuck SRT plugin for better control
+        // SRT input - use srt-live-transmit to output to temp UDP, then ffprobe
         $srt_addr = preg_replace('/^srt:\/\//', '', $url);
         $parts = explode(':', $srt_addr);
         $address = $parts[0] ?? '';
         $port = $parts[1] ?? 9000;
 
-        // Build TSDuck SRT command with all options
+        // Build SRT options
         $srt_mode = $srt_options['mode'] ?? 'caller';
         $srt_latency = $srt_options['latency'] ?? 200;
         $srt_streamid = $srt_options['streamid'] ?? '';
         $srt_passphrase = $srt_options['passphrase'] ?? '';
         $srt_pbkeylen = $srt_options['pbkeylen'] ?? 0;
 
-        $mode_flag = '--caller';
+        // Build SRT URL with query parameters
+        $srt_url = "srt://{$address}:{$port}";
+        $srt_params = [];
+
         if ($srt_mode === 'listener') {
-            $mode_flag = '--listener';
+            $srt_params[] = 'mode=listener';
         } elseif ($srt_mode === 'rendezvous') {
-            // Rendezvous uses both flags
-            $mode_flag = '--caller';
+            $srt_params[] = 'mode=rendezvous';
         }
+        // caller is default, no need to specify
 
-        $tsp_cmd = sprintf(
-            'timeout 8 tsp -I srt %s %s:%d --latency %d',
-            $mode_flag,
-            escapeshellarg($address),
-            (int)$port,
-            (int)$srt_latency
-        );
+        $srt_params[] = "latency={$srt_latency}";
 
-        // Add rendezvous flag if needed
-        if ($srt_mode === 'rendezvous') {
-            $tsp_cmd .= sprintf(' --listener %s:%d', escapeshellarg($address), (int)$port);
-        }
-
-        // Add streamid if provided
         if (!empty($srt_streamid)) {
-            $tsp_cmd .= sprintf(' --streamid %s', escapeshellarg($srt_streamid));
+            $srt_params[] = "streamid={$srt_streamid}";
         }
-
-        // Add encryption options if provided
         if (!empty($srt_passphrase)) {
-            $tsp_cmd .= sprintf(' --passphrase %s', escapeshellarg($srt_passphrase));
+            $srt_params[] = "passphrase={$srt_passphrase}";
             if (!empty($srt_pbkeylen) && $srt_pbkeylen != '0') {
-                $tsp_cmd .= sprintf(' --pbkeylen %d', (int)$srt_pbkeylen);
+                $srt_params[] = "pbkeylen={$srt_pbkeylen}";
             }
         }
 
-        $capture_cmd = $tsp_cmd . sprintf(' -O file %s 2>&1', escapeshellarg($capture_file));
+        if (!empty($srt_params)) {
+            $srt_url .= '?' . implode('&', $srt_params);
+        }
+
+        // Use temp multicast address for ffprobe
+        $temp_port = rand(20000, 29999);
+        $temp_udp = "udp://239.10.10.10:{$temp_port}";
+
+        // Start srt-live-transmit in background
+        $srt_cmd = sprintf(
+            'srt-live-transmit %s %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($srt_url),
+            escapeshellarg($temp_udp)
+        );
+
+        $srt_pid = trim(shell_exec($srt_cmd));
+
+        // Wait for connection and data
+        sleep(3);
+
+        // Now use ffprobe on the temp UDP
+        $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
+
+        // Kill srt-live-transmit
+        if ($srt_pid) {
+            shell_exec("kill {$srt_pid} 2>/dev/null");
+        }
+
+        return $ffprobe_result;
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
         // RIST input - prefer ristreceiver if available
         $rist_receiver = trim(shell_exec('which ristreceiver 2>/dev/null') ?:
