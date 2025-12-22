@@ -788,17 +788,17 @@ function get_input_config($id) {
 
 /**
  * Scan source for PIDs using appropriate method based on source type.
- * Uses TSDuck for UDP, SRT, RIST streams.
- * Uses CariTranscoder API (ffprobe) for RTMP, HLS, and other HTTP streams.
+ * Uses TSDuck for UDP, SRT, RIST, HLS streams.
+ * Uses CariTranscoder API (ffprobe) for RTMP and other HTTP streams.
  */
 function scan_source_pids($source, $type = 'udp', $srt_options = []) {
-    // For transport stream based inputs (UDP, SRT, RIST), use TSDuck directly
-    if (in_array($type, ['udp', 'srt', 'rist', 'file'])) {
+    // For transport stream based inputs (UDP, SRT, RIST, HLS), use TSDuck directly
+    if (in_array($type, ['udp', 'srt', 'rist', 'file', 'hls'])) {
         $url = build_source_url($source, $type);
         return scan_with_tsduck($url, $type, $srt_options);
     }
 
-    // For other types (RTMP, HLS), use CariTranscoder API with ffprobe
+    // For other types (RTMP), use CariTranscoder API with ffprobe
     $api_data = [
         'stream_url' => $source,
         'stream_type' => $type
@@ -999,6 +999,37 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
                 escapeshellarg($capture_file)
             );
         }
+    } elseif ($type === 'hls' || strpos($url, 'http://') === 0 || strpos($url, 'https://') === 0) {
+        // HLS input - use tsp with HLS plugin to output to temp UDP, then ffprobe
+        $hls_url = $url;
+
+        // Use temp multicast address for ffprobe
+        $temp_port = rand(20000, 29999);
+        $temp_udp = "239.10.10.10:{$temp_port}";
+
+        // Start tsp with HLS input in background
+        $tsp_cmd = sprintf(
+            'timeout 15 tsp -I hls %s --live -O ip %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($hls_url),
+            escapeshellarg($temp_udp)
+        );
+
+        $tsp_pid = trim(shell_exec($tsp_cmd));
+
+        // Wait for HLS to start streaming (HLS needs more time to download segments)
+        sleep(5);
+
+        // Now use ffprobe on the temp UDP
+        $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
+
+        // Kill tsp process
+        if ($tsp_pid) {
+            shell_exec("kill {$tsp_pid} 2>/dev/null");
+            // Also kill any child processes
+            shell_exec("pkill -P {$tsp_pid} 2>/dev/null");
+        }
+
+        return $ffprobe_result;
     } elseif ($type === 'file') {
         // For file input, just analyze directly without capture
         if (!file_exists($url)) {
