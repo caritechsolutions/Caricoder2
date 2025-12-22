@@ -352,9 +352,10 @@ function get_all_input_metrics() {
     foreach ($inputs as $input) {
         $id = $input['id'];
 
-        // Check if input is UDP type and has output config
+        // Check if input is UDP or SRT type and has output config
         $config = $input['config'] ?? [];
-        if (($config['general']['type'] ?? '') !== 'udp') {
+        $input_type = $config['general']['type'] ?? '';
+        if ($input_type !== 'udp' && $input_type !== 'srt') {
             continue;
         }
 
@@ -363,7 +364,7 @@ function get_all_input_metrics() {
             continue;
         }
 
-        // Query the udp_input API
+        // Query the input API (both udp_input and srt_input use same metrics format)
         $url = "http://127.0.0.1:{$api_port}/metrics";
         $ctx = stream_context_create([
             'http' => [
