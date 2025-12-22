@@ -319,6 +319,11 @@ void* tsp_manager_thread(void *arg) {
         argv[argc++] = "--latency";
         argv[argc++] = latency_str;
 
+        // Required SRT options for live streaming
+        argv[argc++] = "--transtype";
+        argv[argc++] = "live";
+        argv[argc++] = "--messageapi";
+
         // Optional: Stream ID
         if (g_ctx.streamid[0]) {
             argv[argc++] = "--streamid";
