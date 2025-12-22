@@ -326,6 +326,8 @@ Description={description}
 Documentation=https://github.com/caritechsolutions/caritranscoder
 After=network.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -339,8 +341,6 @@ ExecReload=/bin/kill -HUP $MAINPID
 # Restart behavior
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Resource limits
 LimitNOFILE=65535

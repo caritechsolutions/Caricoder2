@@ -1806,6 +1806,15 @@ function start_input_service($id) {
         return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
     }
 
+    // SRT inputs use the SRT API endpoint
+    if ($type === 'srt') {
+        $result = call_cari_api("/input/srt/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
+    }
+
     // Other types use generic service control
     $service = "cari-input@{$id}";
     $result = call_cari_api('/service/control', 'POST', [
@@ -1834,6 +1843,15 @@ function stop_input_service($id) {
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
         $result = call_cari_api("/input/udp/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
+    }
+
+    // SRT inputs use the SRT API endpoint
+    if ($type === 'srt') {
+        $result = call_cari_api("/input/srt/{$id}/stop", 'POST');
         if (isset($result['success']) && $result['success']) {
             return ['success' => true, 'message' => "Input service stopped"];
         }
