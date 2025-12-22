@@ -526,7 +526,7 @@ void* check_thread(void* arg) {
         for (int i = 0; i < g_ctx.input_count && g_ctx.running; i++) {
             InputStatus* input = &g_ctx.inputs[i];
 
-            input->running = is_service_running(input->id);
+            input->running = is_service_running(input->id, input->type);
 
             if (input->running) {
                 check_input_avsync(input);
