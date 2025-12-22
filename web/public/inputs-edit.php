@@ -327,20 +327,36 @@ function addSource(existingSource = null) {
                 <!-- SRT Settings -->
                 <div class="srt-settings" style="display:${type === 'srt' ? 'block' : 'none'};">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">SRT Mode</label>
                             <select class="form-select srt-mode">
-                                <option value="caller" ${(existingSource?.mode || 'caller') === 'caller' ? 'selected' : ''}>Caller</option>
-                                <option value="listener" ${existingSource?.mode === 'listener' ? 'selected' : ''}>Listener</option>
+                                <option value="caller" ${(existingSource?.srt_mode || existingSource?.mode || 'caller') === 'caller' ? 'selected' : ''}>Caller</option>
+                                <option value="listener" ${(existingSource?.srt_mode || existingSource?.mode) === 'listener' ? 'selected' : ''}>Listener</option>
+                                <option value="rendezvous" ${(existingSource?.srt_mode || existingSource?.mode) === 'rendezvous' ? 'selected' : ''}>Rendezvous</option>
                             </select>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">Latency (ms)</label>
-                            <input type="number" class="form-control srt-latency" value="${existingSource?.latency || 200}">
+                            <input type="number" class="form-control srt-latency" value="${existingSource?.srt_latency || existingSource?.latency || 200}" min="20" max="8000">
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-6 mb-2">
+                            <label class="form-label">Stream ID</label>
+                            <input type="text" class="form-control srt-streamid" value="${existingSource?.srt_streamid || existingSource?.streamid || ''}" placeholder="Optional - for multi-stream servers">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-2">
                             <label class="form-label">Passphrase</label>
-                            <input type="password" class="form-control srt-passphrase" value="${existingSource?.passphrase || ''}" placeholder="Optional">
+                            <input type="password" class="form-control srt-passphrase" value="${existingSource?.srt_passphrase || existingSource?.passphrase || ''}" placeholder="Optional - for encryption">
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Key Length</label>
+                            <select class="form-select srt-pbkeylen">
+                                <option value="0" ${(existingSource?.srt_pbkeylen || existingSource?.pbkeylen || '0') === '0' ? 'selected' : ''}>Auto</option>
+                                <option value="16" ${(existingSource?.srt_pbkeylen || existingSource?.pbkeylen) === '16' ? 'selected' : ''}>AES-128</option>
+                                <option value="24" ${(existingSource?.srt_pbkeylen || existingSource?.pbkeylen) === '24' ? 'selected' : ''}>AES-192</option>
+                                <option value="32" ${(existingSource?.srt_pbkeylen || existingSource?.pbkeylen) === '32' ? 'selected' : ''}>AES-256</option>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -530,6 +546,21 @@ async function scanConfiguredSource() {
         const formData = new FormData();
         formData.append('source', source);
         formData.append('type', type);
+
+        // Add SRT-specific options if this is an SRT source
+        if (type === 'srt') {
+            const modeSelect = card.querySelector('.srt-mode');
+            const latencyInput = card.querySelector('.srt-latency');
+            const streamidInput = card.querySelector('.srt-streamid');
+            const passphraseInput = card.querySelector('.srt-passphrase');
+            const pbkeylenSelect = card.querySelector('.srt-pbkeylen');
+
+            if (modeSelect) formData.append('srt_mode', modeSelect.value);
+            if (latencyInput) formData.append('srt_latency', latencyInput.value);
+            if (streamidInput && streamidInput.value) formData.append('srt_streamid', streamidInput.value);
+            if (passphraseInput && passphraseInput.value) formData.append('srt_passphrase', passphraseInput.value);
+            if (pbkeylenSelect && pbkeylenSelect.value != '0') formData.append('srt_pbkeylen', pbkeylenSelect.value);
+        }
 
         const response = await fetch('api/inputs.php?action=scan', {
             method: 'POST',
@@ -735,10 +766,14 @@ async function handleSubmit(e) {
             if (type === 'srt') {
                 const modeSelect = card.querySelector('.srt-mode');
                 const latencyInput = card.querySelector('.srt-latency');
+                const streamidInput = card.querySelector('.srt-streamid');
                 const passphraseInput = card.querySelector('.srt-passphrase');
+                const pbkeylenSelect = card.querySelector('.srt-pbkeylen');
                 sourceData.srt_mode = modeSelect ? modeSelect.value : 'caller';
                 sourceData.srt_latency = latencyInput ? latencyInput.value : 200;
+                sourceData.srt_streamid = streamidInput ? streamidInput.value : '';
                 sourceData.srt_passphrase = passphraseInput ? passphraseInput.value : '';
+                sourceData.srt_pbkeylen = pbkeylenSelect ? pbkeylenSelect.value : '0';
             } else if (type === 'rist') {
                 const profileSelect = card.querySelector('.rist-profile');
                 const bufferInput = card.querySelector('.rist-buffer');

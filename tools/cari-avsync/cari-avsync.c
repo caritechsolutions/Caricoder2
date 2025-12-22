@@ -211,9 +211,14 @@ int parse_config(const char* filepath, InputStatus* input) {
 }
 
 // Check if systemd service is running
-int is_service_running(const char* input_name) {
+int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}
+    if (strcmp(input_type, "srt") == 0) {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", input_name);
+    } else {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+    }
     return system(cmd) == 0;
 }
 
@@ -263,8 +268,9 @@ void discover_inputs(void) {
             if (input->address[0] && input->port > 0 &&
                 input->video_pid > 0 && input->audio_pid > 0) {
 
-                input->running = is_service_running(input->id);
-                printf("  Service cari-udp-%s: %s\n", input->id,
+                input->running = is_service_running(input->id, input->type);
+                const char* svc_prefix = (strcmp(input->type, "srt") == 0) ? "cari-srt" : "cari-udp";
+                printf("  Service %s-%s: %s\n", svc_prefix, input->id,
                        input->running ? "RUNNING" : "not running");
 
                 // Restore history if same input
@@ -520,7 +526,7 @@ void* check_thread(void* arg) {
         for (int i = 0; i < g_ctx.input_count && g_ctx.running; i++) {
             InputStatus* input = &g_ctx.inputs[i];
 
-            input->running = is_service_running(input->id);
+            input->running = is_service_running(input->id, input->type);
 
             if (input->running) {
                 check_input_avsync(input);
@@ -639,6 +645,7 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
         const char* error = "{\"error\":\"Method not allowed\"}";
         response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
         MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
         ret = MHD_queue_response(connection, MHD_HTTP_METHOD_NOT_ALLOWED, response);
         MHD_destroy_response(response);
         return ret;
@@ -648,6 +655,8 @@ static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
     if (!buf) {
         const char* error = "{\"error\":\"Out of memory\"}";
         response = MHD_create_response_from_buffer(strlen(error), (void*)error, MHD_RESPMEM_PERSISTENT);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
         ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
         MHD_destroy_response(response);
         return ret;
@@ -765,8 +774,159 @@ void save_data(void) {
 }
 
 void load_data(void) {
-    // TODO: Parse JSON and restore history/baselines
-    printf("Starting with fresh data (persistence loading not yet implemented)\n");
+    FILE* fp = fopen(DATA_FILE, "r");
+    if (!fp) {
+        printf("No saved data found at %s, starting fresh\n", DATA_FILE);
+        return;
+    }
+
+    // Read entire file
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (fsize <= 0 || fsize > 10 * 1024 * 1024) {  // Max 10MB
+        fclose(fp);
+        printf("Invalid data file size, starting fresh\n");
+        return;
+    }
+
+    char* data = malloc(fsize + 1);
+    if (!data) {
+        fclose(fp);
+        return;
+    }
+
+    size_t read_size = fread(data, 1, fsize, fp);
+    fclose(fp);
+    data[read_size] = '\0';
+
+    printf("Loading saved data from %s (%ld bytes)\n", DATA_FILE, fsize);
+
+    // Parse JSON manually - find each input
+    char* ptr = data;
+    int loaded_count = 0;
+
+    while ((ptr = strstr(ptr, "\"id\":\"")) != NULL) {
+        ptr += 6;  // Skip "id":"
+
+        // Extract ID
+        char id[64] = {0};
+        int i = 0;
+        while (*ptr && *ptr != '"' && i < 63) {
+            id[i++] = *ptr++;
+        }
+        id[i] = '\0';
+
+        if (strlen(id) == 0) continue;
+
+        // Find this input in our list
+        InputStatus* input = NULL;
+        for (int j = 0; j < g_ctx.input_count; j++) {
+            if (strcmp(g_ctx.inputs[j].id, id) == 0) {
+                input = &g_ctx.inputs[j];
+                break;
+            }
+        }
+
+        if (!input) {
+            // Input not found in current config, skip to next
+            continue;
+        }
+
+        // Find history array for this input
+        char* hist_start = strstr(ptr, "\"history\":[");
+        char* next_input = strstr(ptr, "},{\"id\":");  // Next input marker
+
+        if (!hist_start || (next_input && hist_start > next_input)) {
+            continue;  // No history for this input
+        }
+
+        hist_start += 11;  // Skip "history":[
+
+        pthread_mutex_lock(&input->lock);
+        input->history_count = 0;
+        input->history_index = 0;
+
+        // Parse each history entry
+        while (*hist_start && input->history_count < HISTORY_SIZE) {
+            if (*hist_start == ']') break;  // End of history array
+
+            // Find next history object
+            char* obj_start = strchr(hist_start, '{');
+            if (!obj_start) break;
+
+            char* obj_end = strchr(obj_start, '}');
+            if (!obj_end) break;
+
+            // Parse timestamp
+            char* ts = strstr(obj_start, "\"timestamp\":\"");
+            if (ts && ts < obj_end) {
+                ts += 13;
+                int k = 0;
+                while (*ts && *ts != '"' && k < 31) {
+                    input->history[input->history_count].timestamp[k++] = *ts++;
+                }
+                input->history[input->history_count].timestamp[k] = '\0';
+            }
+
+            // Parse a2v_mean_ms
+            char* a2v = strstr(obj_start, "\"a2v_mean_ms\":");
+            if (a2v && a2v < obj_end) {
+                a2v += 14;
+                input->history[input->history_count].a2v_avg_ms = atof(a2v);
+            }
+
+            // Parse v2a_mean_ms
+            char* v2a = strstr(obj_start, "\"v2a_mean_ms\":");
+            if (v2a && v2a < obj_end) {
+                v2a += 14;
+                input->history[input->history_count].v2a_avg_ms = atof(v2a);
+            }
+
+            // Parse a2v_samples
+            char* a2v_s = strstr(obj_start, "\"a2v_samples\":");
+            if (a2v_s && a2v_s < obj_end) {
+                a2v_s += 14;
+                input->history[input->history_count].a2v_count = atoi(a2v_s);
+            }
+
+            // Parse v2a_samples
+            char* v2a_s = strstr(obj_start, "\"v2a_samples\":");
+            if (v2a_s && v2a_s < obj_end) {
+                v2a_s += 14;
+                input->history[input->history_count].v2a_count = atoi(v2a_s);
+            }
+
+            // Parse status
+            char* status = strstr(obj_start, "\"status\":\"");
+            if (status && status < obj_end) {
+                status += 10;
+                int k = 0;
+                while (*status && *status != '"' && k < 15) {
+                    input->history[input->history_count].status[k++] = *status++;
+                }
+                input->history[input->history_count].status[k] = '\0';
+            }
+
+            input->history_count++;
+            hist_start = obj_end + 1;
+        }
+
+        // Set current to last history entry
+        if (input->history_count > 0) {
+            input->current = input->history[input->history_count - 1];
+            input->history_index = input->history_count % HISTORY_SIZE;
+        }
+
+        pthread_mutex_unlock(&input->lock);
+        loaded_count++;
+
+        printf("  Loaded %d history entries for %s\n", input->history_count, id);
+    }
+
+    free(data);
+    printf("Restored data for %d inputs\n", loaded_count);
 }
 
 void print_help(const char* prog) {
@@ -812,8 +972,8 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    load_data();
     discover_inputs();
+    load_data();
 
     struct MHD_Daemon* daemon = MHD_start_daemon(
         MHD_USE_SELECT_INTERNALLY,

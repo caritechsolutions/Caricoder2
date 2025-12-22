@@ -432,17 +432,68 @@ function getTypeBadgeColor($type) {
                     </div>
                 </div>
 
-                <!-- Graph Canvas -->
-                <div class="position-relative" style="height: 200px;">
-                    <canvas id="bitrateChart"></canvas>
+                <!-- Bitrate Graph Canvas -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-graph-up me-1"></i>Bitrate Monitor</strong>
+                        <small class="text-muted">
+                            <span id="graphStatus" class="badge bg-success">Live</span>
+                            Last update: <span id="graphLastUpdate">-</span>
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <div class="position-relative" style="height: 180px;">
+                            <canvas id="bitrateChart"></canvas>
+                        </div>
+                    </div>
                 </div>
 
-                <!-- Status Info -->
-                <div class="mt-3 d-flex justify-content-between align-items-center">
-                    <small class="text-muted">
-                        <span id="graphStatus" class="badge bg-success">Live</span>
-                        Last update: <span id="graphLastUpdate">-</span>
-                    </small>
+                <!-- A/V Sync Section -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-soundwave me-1"></i>A/V Sync Monitor</strong>
+                        <small class="text-muted">
+                            <span id="avsyncStatus" class="badge bg-secondary">Loading...</span>
+                            Updated: <span id="avsyncLastUpdate">-</span>
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <!-- A/V Sync Stats -->
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">A→V Mean</div>
+                                    <div class="stat-value" id="avsyncA2V">-</div>
+                                    <div class="stat-sublabel">Audio to Video gap</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">V→A Mean</div>
+                                    <div class="stat-value" id="avsyncV2A">-</div>
+                                    <div class="stat-sublabel">Video to Audio gap</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">Status</div>
+                                    <div class="stat-value" id="avsyncCurrentStatus">-</div>
+                                    <div class="stat-sublabel" id="avsyncSamples">- samples</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- A/V Sync Graph -->
+                        <div class="position-relative" style="height: 150px;">
+                            <canvas id="avsyncChart"></canvas>
+                        </div>
+                        <div class="text-center mt-2">
+                            <small class="text-muted">24-hour A/V sync history (polled every 5 minutes)</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Output Info -->
+                <div class="d-flex justify-content-end">
                     <small class="text-muted">
                         Output: <span id="graphOutputAddr" class="font-monospace">-</span>
                     </small>
@@ -684,6 +735,113 @@ function getTypeBadgeColor($type) {
     padding: 0.75rem;
     margin-top: 0.5rem;
 }
+
+/* ============ Enhanced Modal Styles ============ */
+
+/* Modal header with gradient */
+#previewModal .modal-header {
+    background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%);
+    color: white;
+    border-bottom: none;
+    padding: 1rem 1.5rem;
+}
+#previewModal .modal-header .modal-title {
+    font-weight: 600;
+}
+#previewModal .modal-header .btn-close {
+    filter: invert(1);
+    opacity: 0.8;
+}
+#previewModal .modal-header .btn-close:hover {
+    opacity: 1;
+}
+
+/* Modal body */
+#previewModal .modal-body {
+    background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+    padding: 1.5rem;
+}
+
+/* Modal footer */
+#previewModal .modal-footer {
+    background: #f8fafc;
+    border-top: 1px solid #e2e8f0;
+}
+
+/* Video container styling */
+#videoContainer {
+    border-radius: 0.75rem;
+    overflow: hidden;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* Stream info panel enhanced */
+#previewModal .card {
+    border: none;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    border-radius: 0.75rem;
+}
+#previewModal .card-header {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 0.875rem;
+}
+
+/* Bitrate stat cards */
+#previewModal .card.bg-light {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
+    border: 1px solid #e2e8f0;
+}
+
+/* ============ A/V Sync Styles ============ */
+
+.avsync-stat-card {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    border: 1px solid #e2e8f0;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+    transition: all 0.2s ease;
+}
+.avsync-stat-card:hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    transform: translateY(-1px);
+}
+.avsync-stat-card .stat-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+    margin-bottom: 0.25rem;
+}
+.avsync-stat-card .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+    color: #1e293b;
+}
+.avsync-stat-card .stat-sublabel {
+    font-size: 0.7rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+}
+
+/* A/V Sync status colors */
+.avsync-stat-card .stat-value.status-ok { color: #16a34a; }
+.avsync-stat-card .stat-value.status-warning { color: #d97706; }
+.avsync-stat-card .stat-value.status-error { color: #dc2626; }
+
+/* Status badges */
+.badge.avsync-ok {
+    background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%) !important;
+}
+.badge.avsync-warning {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important;
+}
+.badge.avsync-error {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
+}
 </style>
 
 <script>
@@ -845,20 +1003,36 @@ function addSource() {
                 <!-- SRT Settings -->
                 <div class="srt-settings" style="display:none;">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">SRT Mode</label>
                             <select class="form-select" name="sources[${sourcesCount - 1}][srt_mode]">
                                 <option value="caller">Caller</option>
                                 <option value="listener">Listener</option>
+                                <option value="rendezvous">Rendezvous</option>
                             </select>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">Latency (ms)</label>
-                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][srt_latency]" value="200">
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][srt_latency]" value="200" min="20" max="8000">
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-6 mb-2">
+                            <label class="form-label">Stream ID</label>
+                            <input type="text" class="form-control" name="sources[${sourcesCount - 1}][srt_streamid]" placeholder="Optional - for multi-stream servers">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-2">
                             <label class="form-label">Passphrase</label>
-                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][srt_passphrase]" placeholder="Optional">
+                            <input type="password" class="form-control" name="sources[${sourcesCount - 1}][srt_passphrase]" placeholder="Optional - for encryption">
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Key Length</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][srt_pbkeylen]">
+                                <option value="0">Auto</option>
+                                <option value="16">AES-128</option>
+                                <option value="24">AES-192</option>
+                                <option value="32">AES-256</option>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -1092,6 +1266,21 @@ async function scanConfiguredSource() {
         const formData = new FormData();
         formData.append('source', source);
         formData.append('type', type);
+
+        // Add SRT-specific options if this is an SRT source
+        if (type === 'srt') {
+            const modeSelect = card.querySelector('[name*="srt_mode"]');
+            const latencyInput = card.querySelector('[name*="srt_latency"]');
+            const streamidInput = card.querySelector('[name*="srt_streamid"]');
+            const passphraseInput = card.querySelector('[name*="srt_passphrase"]');
+            const pbkeylenSelect = card.querySelector('[name*="srt_pbkeylen"]');
+
+            if (modeSelect) formData.append('srt_mode', modeSelect.value);
+            if (latencyInput) formData.append('srt_latency', latencyInput.value);
+            if (streamidInput && streamidInput.value) formData.append('srt_streamid', streamidInput.value);
+            if (passphraseInput && passphraseInput.value) formData.append('srt_passphrase', passphraseInput.value);
+            if (pbkeylenSelect && pbkeylenSelect.value != '0') formData.append('srt_pbkeylen', pbkeylenSelect.value);
+        }
 
         const response = await fetch('api/inputs.php?action=scan', {
             method: 'POST',
@@ -1330,10 +1519,14 @@ async function handleFormSubmit(e) {
             if (type === 'srt') {
                 const modeSelect = card.querySelector('[name*="srt_mode"]');
                 const latencyInput = card.querySelector('[name*="srt_latency"]');
+                const streamidInput = card.querySelector('[name*="srt_streamid"]');
                 const passphraseInput = card.querySelector('[name*="srt_passphrase"]');
+                const pbkeylenSelect = card.querySelector('[name*="srt_pbkeylen"]');
                 sourceData.srt_mode = modeSelect ? modeSelect.value : 'caller';
                 sourceData.srt_latency = latencyInput ? latencyInput.value : 200;
+                sourceData.srt_streamid = streamidInput ? streamidInput.value : '';
                 sourceData.srt_passphrase = passphraseInput ? passphraseInput.value : '';
+                sourceData.srt_pbkeylen = pbkeylenSelect ? pbkeylenSelect.value : 0;
             } else if (type === 'rist') {
                 const profileSelect = card.querySelector('[name*="rist_profile"]');
                 const bufferInput = card.querySelector('[name*="rist_buffer"]');
@@ -1425,8 +1618,10 @@ function editInput(id) {
 
 let metricsInterval = null;
 let bitrateChart = null;
+let avsyncChart = null;
 let previewModal = null;
 let graphUpdateInterval = null;
+let avsyncUpdateInterval = null;
 let previewKeepaliveInterval = null;
 let previewStatusInterval = null;
 let hlsPlayer = null;
@@ -1594,6 +1789,89 @@ async function showPreview(inputId, inputName) {
     bitrateChart.data.datasets[1].data = [];
     bitrateChart.update();
 
+    // Initialize A/V sync chart if needed
+    if (!avsyncChart) {
+        const avsyncCtx = document.getElementById('avsyncChart').getContext('2d');
+        avsyncChart = new Chart(avsyncCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'A→V',
+                    data: [],
+                    borderColor: '#8b5cf6',
+                    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    pointBackgroundColor: '#8b5cf6'
+                }, {
+                    label: 'V→A',
+                    data: [],
+                    borderColor: '#06b6d4',
+                    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    pointBackgroundColor: '#06b6d4'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Offset (ms)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return value + ' ms';
+                            }
+                        }
+                    },
+                    x: {
+                        display: true,
+                        ticks: {
+                            maxTicksLimit: 8,
+                            maxRotation: 0
+                        }
+                    }
+                },
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return context.dataset.label + ': ' + context.raw.toFixed(1) + ' ms';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Clear existing A/V sync chart data
+    avsyncChart.data.labels = [];
+    avsyncChart.data.datasets[0].data = [];
+    avsyncChart.data.datasets[1].data = [];
+    avsyncChart.update();
+
+    // Reset A/V sync display
+    document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+    document.getElementById('avsyncStatus').textContent = 'Loading...';
+    document.getElementById('avsyncA2V').textContent = '-';
+    document.getElementById('avsyncV2A').textContent = '-';
+    document.getElementById('avsyncCurrentStatus').textContent = '-';
+    document.getElementById('avsyncSamples').textContent = '- samples';
+    document.getElementById('avsyncLastUpdate').textContent = '-';
+
     // Show modal
     if (!previewModal) {
         previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
@@ -1611,11 +1889,17 @@ async function showPreview(inputId, inputName) {
     // Load media info (don't await - let it load in background)
     loadMediaInfo(inputId);
 
-    // Load historical bitrate data
-    await loadBitrateHistory(inputId);
+    // Load historical bitrate data and A/V sync data in parallel
+    await Promise.all([
+        loadBitrateHistory(inputId),
+        loadAVSyncHistory(inputId)
+    ]);
 
     // Start live graph updates
     graphUpdateInterval = setInterval(() => updateBitrateGraph(inputId), 5000);
+
+    // Start A/V sync updates (every 5 minutes = 300000ms)
+    avsyncUpdateInterval = setInterval(() => loadAVSyncHistory(inputId), 300000);
 
     // Start keepalive (every 30 seconds)
     previewKeepaliveInterval = setInterval(() => sendPreviewKeepalive(inputId), 30000);
@@ -1740,6 +2024,10 @@ function cleanupPreview() {
     if (graphUpdateInterval) {
         clearInterval(graphUpdateInterval);
         graphUpdateInterval = null;
+    }
+    if (avsyncUpdateInterval) {
+        clearInterval(avsyncUpdateInterval);
+        avsyncUpdateInterval = null;
     }
     if (previewKeepaliveInterval) {
         clearInterval(previewKeepaliveInterval);
@@ -1998,6 +2286,116 @@ async function updateBitrateGraph(inputId) {
     }
 }
 
+// ============ A/V Sync Functions ============
+
+// Load A/V sync history from cari-avsync service
+async function loadAVSyncHistory(inputId) {
+    try {
+        document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+        document.getElementById('avsyncStatus').textContent = 'Loading...';
+
+        // Fetch from cari-avsync API
+        const response = await fetch(`http://${window.location.hostname}:8082/history/${inputId}`);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (!data.running) {
+            document.getElementById('avsyncStatus').className = 'badge bg-warning';
+            document.getElementById('avsyncStatus').textContent = 'Not Running';
+            document.getElementById('avsyncA2V').textContent = '-';
+            document.getElementById('avsyncV2A').textContent = '-';
+            document.getElementById('avsyncCurrentStatus').textContent = '-';
+            document.getElementById('avsyncSamples').textContent = 'Input not running';
+            return;
+        }
+
+        // Determine which data to show in stat cards
+        // Prefer current, fall back to last history entry
+        let displayData = null;
+        if (data.current && data.current.timestamp && data.current.timestamp.length > 0) {
+            displayData = data.current;
+        } else if (data.history && data.history.length > 0) {
+            displayData = data.history[data.history.length - 1];
+        }
+
+        // Update stat cards
+        if (displayData) {
+            const a2v = displayData.a2v_mean_ms;
+            const v2a = displayData.v2a_mean_ms;
+            const status = displayData.status;
+            const samples = displayData.a2v_samples || 0;
+
+            document.getElementById('avsyncA2V').textContent = a2v.toFixed(1) + ' ms';
+            document.getElementById('avsyncV2A').textContent = v2a.toFixed(1) + ' ms';
+
+            const statusEl = document.getElementById('avsyncCurrentStatus');
+            statusEl.textContent = status;
+            statusEl.className = 'stat-value status-' + status.toLowerCase();
+
+            document.getElementById('avsyncSamples').textContent = samples + ' samples';
+            document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp;
+
+            // Update status badge
+            const badge = document.getElementById('avsyncStatus');
+            if (status === 'OK') {
+                badge.className = 'badge avsync-ok';
+                badge.textContent = 'OK';
+            } else if (status === 'WARNING') {
+                badge.className = 'badge avsync-warning';
+                badge.textContent = 'WARNING';
+            } else if (status === 'ERROR') {
+                badge.className = 'badge avsync-error';
+                badge.textContent = 'ERROR';
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'No Data';
+            }
+        } else {
+            // No data available at all
+            document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+            document.getElementById('avsyncStatus').textContent = 'No Data';
+            document.getElementById('avsyncA2V').textContent = '-';
+            document.getElementById('avsyncV2A').textContent = '-';
+            document.getElementById('avsyncCurrentStatus').textContent = '-';
+            document.getElementById('avsyncSamples').textContent = 'No measurements yet';
+        }
+
+        // Update chart with history
+        if (data.history && data.history.length > 0) {
+            avsyncChart.data.labels = [];
+            avsyncChart.data.datasets[0].data = [];
+            avsyncChart.data.datasets[1].data = [];
+
+            for (const entry of data.history) {
+                // Format timestamp for display (HH:MM)
+                const ts = entry.timestamp;
+                const timePart = ts.includes(' ') ? ts.split(' ')[1] : ts;
+                const shortTime = timePart.substring(0, 5); // HH:MM
+
+                avsyncChart.data.labels.push(shortTime);
+                avsyncChart.data.datasets[0].data.push(entry.a2v_mean_ms);
+                avsyncChart.data.datasets[1].data.push(entry.v2a_mean_ms);
+            }
+
+            avsyncChart.update();
+        }
+
+    } catch (e) {
+        console.error('Failed to load A/V sync history:', e);
+        document.getElementById('avsyncStatus').className = 'badge bg-danger';
+        document.getElementById('avsyncStatus').textContent = 'Error';
+        document.getElementById('avsyncA2V').textContent = '-';
+        document.getElementById('avsyncV2A').textContent = '-';
+        document.getElementById('avsyncCurrentStatus').textContent = 'Unavailable';
+        document.getElementById('avsyncCurrentStatus').className = 'stat-value';
+        document.getElementById('avsyncSamples').textContent = 'Service not reachable';
+    }
+}
+
 // Start metrics polling on page load
 document.addEventListener('DOMContentLoaded', function() {
     // Fetch metrics immediately and then every 5 seconds
@@ -2009,6 +2407,7 @@ document.addEventListener('DOMContentLoaded', function() {
 window.addEventListener('beforeunload', function() {
     if (metricsInterval) clearInterval(metricsInterval);
     if (graphUpdateInterval) clearInterval(graphUpdateInterval);
+    if (avsyncUpdateInterval) clearInterval(avsyncUpdateInterval);
 });
 </script>
 

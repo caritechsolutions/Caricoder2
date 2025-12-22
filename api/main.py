@@ -116,6 +116,24 @@ class UDPInputService(BaseModel):
     description: Optional[str] = None
 
 
+class SRTInputService(BaseModel):
+    """Model for creating SRT input service"""
+    id: str
+    source_address: str
+    source_port: int
+    output_address: str
+    output_port: int
+    api_port: int
+    mode: str = "caller"  # caller, listener, rendezvous
+    latency: int = 120
+    streamid: Optional[str] = None
+    passphrase: Optional[str] = None
+    pbkeylen: int = 0  # 0, 16, 24, 32
+    program: Optional[int] = None
+    pids: Optional[str] = None
+    description: Optional[str] = None
+
+
 class ServiceFile(BaseModel):
     """Model for generic service file creation"""
     service_name: str
@@ -261,6 +279,77 @@ LimitNPROC=4096
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cari-udp-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
+def generate_srt_input_service_file(service_data: SRTInputService) -> str:
+    """Generate systemd service file content for SRT input"""
+
+    # Unique log file for this input
+    log_file = f"/var/log/caritrans/srt-input-{service_data.id}.log"
+
+    # Build the command
+    cmd_parts = [
+        "/usr/local/bin/srt_input",
+        f"--address {service_data.source_address}",
+        f"--port {service_data.source_port}",
+        f"--mode {service_data.mode}",
+        f"--latency {service_data.latency}",
+        f"--output {service_data.output_address}:{service_data.output_port}",
+        f"--api-port {service_data.api_port}",
+        f"--log-file {log_file}"
+    ]
+
+    if service_data.streamid:
+        cmd_parts.append(f"--streamid '{service_data.streamid}'")
+
+    if service_data.passphrase:
+        cmd_parts.append(f"--passphrase '{service_data.passphrase}'")
+        if service_data.pbkeylen > 0:
+            cmd_parts.append(f"--pbkeylen {service_data.pbkeylen}")
+
+    if service_data.program is not None:
+        cmd_parts.append(f"--program {service_data.program}")
+
+    if service_data.pids:
+        cmd_parts.append(f"--pids {service_data.pids}")
+
+    exec_start = " ".join(cmd_parts)
+    description = service_data.description or f"CariTranscoder SRT Input - {service_data.id}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main process
+ExecStart={exec_start}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-srt-{service_data.id}
 
 [Install]
 WantedBy=multi-user.target
@@ -486,6 +575,138 @@ async def restart_udp_input(input_id: str):
 async def udp_input_status(input_id: str):
     """Get status of a UDP input service"""
     service_name = f"cari-udp-{input_id}.service"
+    return get_service_status(service_name)
+
+
+# ----------------------------------------------------------------------------
+# SRT Input Service Management
+# ----------------------------------------------------------------------------
+
+@app.post("/input/srt/create")
+async def create_srt_input_service(service: SRTInputService):
+    """Create a systemd service file for SRT input"""
+
+    service_name = f"cari-srt-{service.id}"
+    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+
+    try:
+        # Generate service content
+        service_content = generate_srt_input_service_file(service)
+
+        # Write the service file directly (we're running as root)
+        with open(service_file, 'w') as f:
+            f.write(service_content)
+
+        logger.info(f"Created SRT service file: {service_file}")
+
+        # Reload systemd
+        daemon_reload()
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "service_file": service_file,
+            "message": f"Service file created: {service_file}"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create SRT service file: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/input/srt/{input_id}")
+async def delete_srt_input_service(input_id: str):
+    """Delete a SRT input service"""
+
+    service_name = f"cari-srt-{input_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+
+    try:
+        # Stop the service first
+        run_systemctl("stop", service_name)
+        run_systemctl("disable", service_name)
+
+        # Remove the service file
+        if os.path.exists(service_file):
+            os.remove(service_file)
+            logger.info(f"Deleted SRT service file: {service_file}")
+
+        # Reload systemd
+        daemon_reload()
+
+        return {
+            "success": True,
+            "message": f"Service {service_name} deleted"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete SRT service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/input/srt/{input_id}/start")
+async def start_srt_input(input_id: str):
+    """Start a SRT input service"""
+    service_name = f"cari-srt-{input_id}.service"
+
+    # Check if service file exists
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        logger.error(f"SRT service file not found: {service_file}")
+        return {
+            "success": False,
+            "service": service_name,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    # Enable and start
+    enable_result = run_systemctl("enable", service_name)
+    if not enable_result.get("success", False):
+        logger.error(f"Failed to enable SRT service: {enable_result}")
+
+    result = run_systemctl("start", service_name)
+    logger.info(f"Started SRT service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.post("/input/srt/{input_id}/stop")
+async def stop_srt_input(input_id: str):
+    """Stop a SRT input service"""
+    service_name = f"cari-srt-{input_id}.service"
+
+    result = run_systemctl("stop", service_name)
+    logger.info(f"Stopped SRT service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.post("/input/srt/{input_id}/restart")
+async def restart_srt_input(input_id: str):
+    """Restart a SRT input service"""
+    service_name = f"cari-srt-{input_id}.service"
+
+    result = run_systemctl("restart", service_name)
+    logger.info(f"Restarted SRT service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.get("/input/srt/{input_id}/status")
+async def srt_input_status(input_id: str):
+    """Get status of a SRT input service"""
+    service_name = f"cari-srt-{input_id}.service"
     return get_service_status(service_name)
 
 

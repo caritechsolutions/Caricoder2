@@ -174,9 +174,11 @@ function get_service_list($type) {
         // Get service status from systemd
         $status = 'stopped';
         $output = [];
-        // UDP inputs use cari-udp-{id} format, others use cari-{section}@{id}
+        // UDP inputs use cari-udp-{id} format, SRT inputs use cari-srt-{id}, others use cari-{section}@{id}
         if ($section === 'input' && $input_type === 'udp') {
             $service_name = "cari-udp-{$id}";
+        } elseif ($section === 'input' && $input_type === 'srt') {
+            $service_name = "cari-srt-{$id}";
         } else {
             $service_name = "cari-{$section}@{$id}";
         }

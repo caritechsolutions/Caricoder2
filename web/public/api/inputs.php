@@ -87,7 +87,19 @@ switch ($action) {
             json_response(['error' => 'Source URL required'], 400);
         }
 
-        $pids = scan_source_pids($source, $type);
+        // Collect SRT options if provided
+        $srt_options = [];
+        if ($type === 'srt') {
+            $srt_options = [
+                'mode' => $_POST['srt_mode'] ?? 'caller',
+                'latency' => $_POST['srt_latency'] ?? 200,
+                'streamid' => $_POST['srt_streamid'] ?? '',
+                'passphrase' => $_POST['srt_passphrase'] ?? '',
+                'pbkeylen' => $_POST['srt_pbkeylen'] ?? 0
+            ];
+        }
+
+        $pids = scan_source_pids($source, $type, $srt_options);
         json_response($pids);
         break;
 
@@ -340,9 +352,10 @@ function get_all_input_metrics() {
     foreach ($inputs as $input) {
         $id = $input['id'];
 
-        // Check if input is UDP type and has output config
+        // Check if input is UDP or SRT type and has output config
         $config = $input['config'] ?? [];
-        if (($config['general']['type'] ?? '') !== 'udp') {
+        $input_type = $config['general']['type'] ?? '';
+        if ($input_type !== 'udp' && $input_type !== 'srt') {
             continue;
         }
 
@@ -351,7 +364,7 @@ function get_all_input_metrics() {
             continue;
         }
 
-        // Query the udp_input API
+        // Query the input API (both udp_input and srt_input use same metrics format)
         $url = "http://127.0.0.1:{$api_port}/metrics";
         $ctx = stream_context_create([
             'http' => [
@@ -590,6 +603,129 @@ function generate_udp_input_service($id, $config) {
 }
 
 /**
+ * Generate systemd service for SRT input
+ */
+function generate_srt_input_service($id, $config) {
+    // Get source info
+    $source_url = '';
+    $srt_mode = 'caller';
+    $srt_latency = 200;
+    $srt_streamid = '';
+    $srt_passphrase = '';
+    $srt_pbkeylen = 0;
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_url = $parts[1] ?? '';
+
+                // Parse extra settings from source string (type|url|weight|settings)
+                if (isset($parts[3])) {
+                    $settings = explode(',', $parts[3]);
+                    foreach ($settings as $setting) {
+                        $kv = explode('=', $setting, 2);
+                        if (count($kv) == 2) {
+                            switch ($kv[0]) {
+                                case 'mode':
+                                    $srt_mode = $kv[1];
+                                    break;
+                                case 'latency':
+                                    $srt_latency = (int)$kv[1];
+                                    break;
+                                case 'streamid':
+                                    $srt_streamid = $kv[1];
+                                    break;
+                                case 'passphrase':
+                                    $srt_passphrase = $kv[1];
+                                    break;
+                                case 'pbkeylen':
+                                    $srt_pbkeylen = (int)$kv[1];
+                                    break;
+                            }
+                        }
+                    }
+                }
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Parse source URL (format: address:port)
+    $source_parts = explode(':', $source_url);
+    $input_addr = $source_parts[0];
+    $input_port = (int)($source_parts[1] ?? 9000);
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
+    }
+
+    // Build PIDs list for monitoring
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
+    $name = $config['general']['name'] ?? $id;
+
+    // Call the API to create the service
+    $api_data = [
+        'id' => $id,
+        'source_address' => $input_addr,
+        'source_port' => $input_port,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'mode' => $srt_mode,
+        'latency' => $srt_latency,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder SRT Input - {$name}"
+    ];
+
+    // Add optional SRT parameters
+    if (!empty($srt_streamid)) {
+        $api_data['streamid'] = $srt_streamid;
+    }
+    if (!empty($srt_passphrase)) {
+        $api_data['passphrase'] = $srt_passphrase;
+        if ($srt_pbkeylen > 0) {
+            $api_data['pbkeylen'] = $srt_pbkeylen;
+        }
+    }
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/srt/create', 'POST', $api_data);
+
+    return $result;
+}
+
+/**
  * Sanitize name to ID (lowercase, alphanumeric, hyphens)
  */
 function sanitize_name_to_id($name) {
@@ -651,12 +787,18 @@ function get_input_config($id) {
 }
 
 /**
- * Scan source for PIDs using CariTranscoder API (ffprobe-based)
- * Returns programs with their associated video and audio PIDs.
- * For MPTS streams, each program will have its own PIDs.
+ * Scan source for PIDs using appropriate method based on source type.
+ * Uses TSDuck for UDP, SRT, RIST streams.
+ * Uses CariTranscoder API (ffprobe) for RTMP, HLS, and other HTTP streams.
  */
-function scan_source_pids($source, $type = 'udp') {
-    // Call the CariTranscoder API for stream scanning
+function scan_source_pids($source, $type = 'udp', $srt_options = []) {
+    // For transport stream based inputs (UDP, SRT, RIST), use TSDuck directly
+    if (in_array($type, ['udp', 'srt', 'rist', 'file'])) {
+        $url = build_source_url($source, $type);
+        return scan_with_tsduck($url, $type, $srt_options);
+    }
+
+    // For other types (RTMP, HLS), use CariTranscoder API with ffprobe
     $api_data = [
         'stream_url' => $source,
         'stream_type' => $type
@@ -723,7 +865,7 @@ function build_source_url($source, $type) {
 /**
  * Scan using TSDuck (capture + tsanalyze)
  */
-function scan_with_tsduck($url, $type) {
+function scan_with_tsduck($url, $type, $srt_options = []) {
     $result = [
         'success' => false,
         'programs' => [],
@@ -748,38 +890,71 @@ function scan_with_tsduck($url, $type) {
             escapeshellarg($capture_file)
         );
     } elseif ($type === 'srt' || strpos($url, 'srt://') === 0) {
-        // SRT input - prefer srt-live-transmit if available
-        $srt_transmit = trim(shell_exec('which srt-live-transmit 2>/dev/null'));
+        // SRT input - use srt-live-transmit to output to temp UDP, then ffprobe
+        $srt_addr = preg_replace('/^srt:\/\//', '', $url);
+        $parts = explode(':', $srt_addr);
+        $address = $parts[0] ?? '';
+        $port = $parts[1] ?? 9000;
 
-        // Ensure URL has srt:// prefix
-        $srt_url = $url;
-        if (strpos($url, 'srt://') !== 0) {
-            $srt_url = 'srt://' . $url;
+        // Build SRT options
+        $srt_mode = $srt_options['mode'] ?? 'caller';
+        $srt_latency = $srt_options['latency'] ?? 200;
+        $srt_streamid = $srt_options['streamid'] ?? '';
+        $srt_passphrase = $srt_options['passphrase'] ?? '';
+        $srt_pbkeylen = $srt_options['pbkeylen'] ?? 0;
+
+        // Build SRT URL with query parameters
+        $srt_url = "srt://{$address}:{$port}";
+        $srt_params = [];
+
+        if ($srt_mode === 'listener') {
+            $srt_params[] = 'mode=listener';
+        } elseif ($srt_mode === 'rendezvous') {
+            $srt_params[] = 'mode=rendezvous';
+        }
+        // caller is default, no need to specify
+
+        $srt_params[] = "latency={$srt_latency}";
+
+        if (!empty($srt_streamid)) {
+            $srt_params[] = "streamid={$srt_streamid}";
+        }
+        if (!empty($srt_passphrase)) {
+            $srt_params[] = "passphrase={$srt_passphrase}";
+            if (!empty($srt_pbkeylen) && $srt_pbkeylen != '0') {
+                $srt_params[] = "pbkeylen={$srt_pbkeylen}";
+            }
         }
 
-        if ($srt_transmit) {
-            // Use srt-live-transmit to receive SRT and output to stdout, redirect to file
-            // file://con outputs to stdout which we redirect to the capture file
-            // stderr must go to /dev/null to avoid corrupting the TS capture
-            $capture_cmd = sprintf(
-                'timeout 8 srt-live-transmit %s file://con 2>/dev/null > %s',
-                escapeshellarg($srt_url),
-                escapeshellarg($capture_file)
-            );
-        } else {
-            // Fallback to TSDuck SRT plugin
-            $srt_addr = preg_replace('/^srt:\/\//', '', $url);
-            $parts = explode(':', $srt_addr);
-            $address = $parts[0] ?? '';
-            $port = $parts[1] ?? 9000;
-
-            $capture_cmd = sprintf(
-                'timeout 8 tsp -I srt --caller %s:%d -O file %s 2>&1',
-                escapeshellarg($address),
-                (int)$port,
-                escapeshellarg($capture_file)
-            );
+        if (!empty($srt_params)) {
+            $srt_url .= '?' . implode('&', $srt_params);
         }
+
+        // Use temp multicast address for ffprobe
+        $temp_port = rand(20000, 29999);
+        $temp_udp = "udp://239.10.10.10:{$temp_port}";
+
+        // Start srt-live-transmit in background
+        $srt_cmd = sprintf(
+            'srt-live-transmit %s %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($srt_url),
+            escapeshellarg($temp_udp)
+        );
+
+        $srt_pid = trim(shell_exec($srt_cmd));
+
+        // Wait for connection and data
+        sleep(3);
+
+        // Now use ffprobe on the temp UDP
+        $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
+
+        // Kill srt-live-transmit
+        if ($srt_pid) {
+            shell_exec("kill {$srt_pid} 2>/dev/null");
+        }
+
+        return $ffprobe_result;
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
         // RIST input - prefer ristreceiver if available
         $rist_receiver = trim(shell_exec('which ristreceiver 2>/dev/null') ?:
@@ -894,23 +1069,45 @@ function parse_tsduck_output($output, $result = null) {
             'programs' => [],
             'video_pids' => [],
             'audio_pids' => [],
+            'all_video_pids' => [],
+            'all_audio_pids' => [],
             'error' => null
         ];
     }
 
     $output_text = is_array($output) ? implode("\n", $output) : $output;
 
+    // Parse PMT PID: "PID: 0x0064 (100)" from PMT section
+    $pmt_pid = 0;
+    if (preg_match('/PMT.*?PID:\s*0x([0-9A-Fa-f]+)/i', $output_text, $pmt_match)) {
+        $pmt_pid = hexdec($pmt_match[1]);
+    } elseif (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+PMT/i', $output_text, $pmt_match)) {
+        $pmt_pid = hexdec($pmt_match[1]);
+    }
+
     // Parse service info: "Service: 0x03E8 (1000)" and "Service name: BET"
     if (preg_match('/Service:\s*0x([0-9A-Fa-f]+)\s*\((\d+)\)/', $output_text, $svc_match)) {
         $program = [
             'id' => (int)$svc_match[2],
-            'name' => 'Program ' . $svc_match[2]
+            'name' => 'Program ' . $svc_match[2],
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => [],
+            'audio_pids' => []
         ];
         // Try to get service name
         if (preg_match('/Service name:\s*([^,\n]+)/i', $output_text, $name_match)) {
             $program['name'] = trim($name_match[1]);
         }
         $result['programs'][] = $program;
+    } elseif ($pmt_pid > 0) {
+        // If we have a PMT but no service info, create a basic program entry
+        $result['programs'][] = [
+            'id' => 1,
+            'name' => 'Program 1',
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => [],
+            'audio_pids' => []
+        ];
     }
 
     // Parse PIDs from lines like:
@@ -982,6 +1179,30 @@ function parse_tsduck_output($output, $result = null) {
         }
     }
 
+    // Copy PIDs to all_* arrays for compatibility
+    $result['all_video_pids'] = $result['video_pids'];
+    $result['all_audio_pids'] = $result['audio_pids'];
+
+    // If we found PIDs but no program, create a default program
+    if (empty($result['programs']) && (!empty($result['video_pids']) || !empty($result['audio_pids']))) {
+        // Try to find PMT PID from the raw output
+        $pmt_pid = 100;  // Default PMT PID
+        if (preg_match('/\|\s*0x([0-9A-Fa-f]+)\s+PMT/i', $output_text, $pmt_match)) {
+            $pmt_pid = hexdec($pmt_match[1]);
+        }
+        $result['programs'][] = [
+            'id' => 1,
+            'name' => 'Program 1',
+            'pmt_pid' => $pmt_pid,
+            'video_pids' => $result['video_pids'],
+            'audio_pids' => $result['audio_pids']
+        ];
+    } elseif (!empty($result['programs'])) {
+        // Add PIDs to the first program if exists (for SPTS, all PIDs belong to the single program)
+        $result['programs'][0]['video_pids'] = $result['video_pids'];
+        $result['programs'][0]['audio_pids'] = $result['audio_pids'];
+    }
+
     $result['success'] = !empty($result['video_pids']) || !empty($result['audio_pids']);
     if (!$result['success']) {
         $result['error'] = 'No video or audio PIDs found in stream';
@@ -1000,15 +1221,24 @@ function scan_with_ffprobe($url, $type = null) {
         'programs' => [],
         'video_pids' => [],
         'audio_pids' => [],
+        'all_video_pids' => [],
+        'all_audio_pids' => [],
         'error' => null
     ];
 
-    // Adjust timeout based on type - HLS may need longer
-    $timeout = ($type === 'hls') ? 15 : 10;
+    // Adjust timeout based on type - UDP multicast and HLS may need longer
+    $timeout = (in_array($type, ['hls', 'udp'])) ? 15 : 10;
+
+    // For UDP multicast, use analyzeduration to get more data
+    $analyze_opts = '';
+    if ($type === 'udp' || strpos($url, 'udp://') === 0) {
+        $analyze_opts = '-analyzeduration 5000000 -probesize 5000000';
+    }
 
     $cmd = sprintf(
-        'timeout %d ffprobe -v quiet -show_programs -show_streams -print_format json %s 2>/dev/null',
+        'timeout %d ffprobe -v quiet %s -show_programs -show_streams -print_format json %s 2>/dev/null',
         $timeout,
+        $analyze_opts,
         escapeshellarg($url)
     );
 
@@ -1026,26 +1256,60 @@ function scan_with_ffprobe($url, $type = null) {
         return $result;
     }
 
-    // Parse programs
+    // Parse programs first - they contain pmt_pid and stream mappings
+    $program_streams = [];  // Map program_id -> streams
     if (isset($json['programs'])) {
         foreach ($json['programs'] as $program) {
-            $result['programs'][] = [
-                'id' => $program['program_id'] ?? 0,
-                'name' => $program['tags']['service_name'] ?? ('Program ' . ($program['program_id'] ?? 0))
+            $prog_id = $program['program_id'] ?? 0;
+            $pmt_pid = $program['pmt_pid'] ?? 0;
+
+            $prog_entry = [
+                'id' => $prog_id,
+                'pmt_pid' => $pmt_pid,
+                'name' => $program['tags']['service_name'] ?? ('Program ' . $prog_id),
+                'video_pids' => [],
+                'audio_pids' => []
             ];
+
+            // Collect stream indices for this program
+            if (isset($program['streams'])) {
+                foreach ($program['streams'] as $stream) {
+                    $stream_index = $stream['index'] ?? null;
+                    if ($stream_index !== null) {
+                        $program_streams[$stream_index] = count($result['programs']);
+                    }
+                }
+            }
+
+            $result['programs'][] = $prog_entry;
         }
     }
 
     // Parse streams
     if (isset($json['streams'])) {
         foreach ($json['streams'] as $stream) {
-            $pid = $stream['id'] ?? null;
-            if ($pid && strpos($pid, '0x') === 0) {
-                $pid = hexdec($pid);
+            // Get PID - check multiple possible fields
+            $pid = null;
+            if (isset($stream['id'])) {
+                $pid = $stream['id'];
+                if (is_string($pid) && strpos($pid, '0x') === 0) {
+                    $pid = hexdec($pid);
+                }
+            }
+            // Also check for 'stream_id' used in some formats
+            if ($pid === null && isset($stream['stream_id'])) {
+                $pid = $stream['stream_id'];
+            }
+            // Fall back to index if no PID found
+            if ($pid === null) {
+                $pid = $stream['index'] ?? 0;
             }
 
+            $stream_index = $stream['index'] ?? null;
+            $prog_index = isset($program_streams[$stream_index]) ? $program_streams[$stream_index] : 0;
+
             if ($stream['codec_type'] === 'video') {
-                $result['video_pids'][] = [
+                $vid_entry = [
                     'pid' => (int)$pid,
                     'codec' => strtoupper($stream['codec_name'] ?? 'unknown'),
                     'width' => $stream['width'] ?? 0,
@@ -1056,8 +1320,14 @@ function scan_with_ffprobe($url, $type = null) {
                         $stream['height'] ?? 0
                     )
                 ];
+                $result['video_pids'][] = $vid_entry;
+
+                // Add to program if we have programs
+                if (!empty($result['programs']) && isset($result['programs'][$prog_index])) {
+                    $result['programs'][$prog_index]['video_pids'][] = $vid_entry;
+                }
             } elseif ($stream['codec_type'] === 'audio') {
-                $result['audio_pids'][] = [
+                $aud_entry = [
                     'pid' => (int)$pid,
                     'codec' => strtoupper($stream['codec_name'] ?? 'unknown'),
                     'language' => $stream['tags']['language'] ?? 'und',
@@ -1069,8 +1339,29 @@ function scan_with_ffprobe($url, $type = null) {
                         $stream['channels'] ?? 2
                     )
                 ];
+                $result['audio_pids'][] = $aud_entry;
+
+                // Add to program if we have programs
+                if (!empty($result['programs']) && isset($result['programs'][$prog_index])) {
+                    $result['programs'][$prog_index]['audio_pids'][] = $aud_entry;
+                }
             }
         }
+    }
+
+    // Copy to all_* arrays for compatibility
+    $result['all_video_pids'] = $result['video_pids'];
+    $result['all_audio_pids'] = $result['audio_pids'];
+
+    // If we found PIDs but no programs, create a default program
+    if (empty($result['programs']) && (!empty($result['video_pids']) || !empty($result['audio_pids']))) {
+        $result['programs'][] = [
+            'id' => 1,
+            'pmt_pid' => 100,
+            'name' => 'Program 1',
+            'video_pids' => $result['video_pids'],
+            'audio_pids' => $result['audio_pids']
+        ];
     }
 
     $result['success'] = !empty($result['video_pids']) || !empty($result['audio_pids']);
@@ -1126,7 +1417,7 @@ function create_input($data) {
 
     // Allocate output address and API port for UDP inputs
     $output_alloc = null;
-    if ($primaryType === 'udp') {
+    if (in_array($primaryType, ['udp', 'srt'])) {
         $output_alloc = allocate_output_address();
         if (!$output_alloc) {
             return ['success' => false, 'error' => 'No available output addresses in pool'];
@@ -1168,11 +1459,19 @@ function create_input($data) {
             if ($type === 'srt') {
                 $mode = $source['srt_mode'] ?? 'caller';
                 $latency = $source['srt_latency'] ?? 200;
+                $streamid = $source['srt_streamid'] ?? '';
                 $passphrase = $source['srt_passphrase'] ?? '';
+                $pbkeylen = $source['srt_pbkeylen'] ?? 0;
                 $extraSettings[] = "mode={$mode}";
                 $extraSettings[] = "latency={$latency}";
+                if ($streamid) {
+                    $extraSettings[] = "streamid={$streamid}";
+                }
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                    if ($pbkeylen && $pbkeylen != '0') {
+                        $extraSettings[] = "pbkeylen={$pbkeylen}";
+                    }
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
@@ -1248,6 +1547,8 @@ function create_input($data) {
         $service_result = null;
         if ($primaryType === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
+        } elseif ($primaryType === 'srt') {
+            $service_result = generate_srt_input_service($id, $config);
         }
 
         $response = [
@@ -1359,11 +1660,19 @@ function update_input($id, $data) {
             if ($type === 'srt') {
                 $mode = $source['srt_mode'] ?? 'caller';
                 $latency = $source['srt_latency'] ?? 200;
+                $streamid = $source['srt_streamid'] ?? '';
                 $passphrase = $source['srt_passphrase'] ?? '';
+                $pbkeylen = $source['srt_pbkeylen'] ?? 0;
                 $extraSettings[] = "mode={$mode}";
                 $extraSettings[] = "latency={$latency}";
+                if ($streamid) {
+                    $extraSettings[] = "streamid={$streamid}";
+                }
                 if ($passphrase) {
                     $extraSettings[] = "passphrase={$passphrase}";
+                    if ($pbkeylen && $pbkeylen != '0') {
+                        $extraSettings[] = "pbkeylen={$pbkeylen}";
+                    }
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
@@ -1408,10 +1717,15 @@ function update_input($id, $data) {
     if ($result !== false) {
         $response = ['success' => true, 'message' => "Input updated successfully"];
 
-        // Regenerate systemd service for UDP inputs
+        // Regenerate systemd service for UDP and SRT inputs
         $type = $config['general']['type'] ?? 'udp';
         if ($type === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
+        } elseif ($type === 'srt') {
+            $service_result = generate_srt_input_service($id, $config);
             if ($service_result && !$service_result['success']) {
                 $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
             }
@@ -1445,6 +1759,9 @@ function delete_input($id) {
     if ($type === 'udp') {
         // Delete UDP input service (stops and removes service file)
         call_cari_api("/input/udp/{$id}", 'DELETE');
+    } elseif ($type === 'srt') {
+        // Delete SRT input service (stops and removes service file)
+        call_cari_api("/input/srt/{$id}", 'DELETE');
     } else {
         // Stop other service types
         stop_input_service($id);
@@ -1490,6 +1807,15 @@ function start_input_service($id) {
         return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
     }
 
+    // SRT inputs use the SRT API endpoint
+    if ($type === 'srt') {
+        $result = call_cari_api("/input/srt/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
+    }
+
     // Other types use generic service control
     $service = "cari-input@{$id}";
     $result = call_cari_api('/service/control', 'POST', [
@@ -1518,6 +1844,15 @@ function stop_input_service($id) {
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
         $result = call_cari_api("/input/udp/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
+    }
+
+    // SRT inputs use the SRT API endpoint
+    if ($type === 'srt') {
+        $result = call_cari_api("/input/srt/{$id}/stop", 'POST');
         if (isset($result['success']) && $result['success']) {
             return ['success' => true, 'message' => "Input service stopped"];
         }
