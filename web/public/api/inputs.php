@@ -1097,15 +1097,24 @@ function scan_with_ffprobe($url, $type = null) {
         'programs' => [],
         'video_pids' => [],
         'audio_pids' => [],
+        'all_video_pids' => [],
+        'all_audio_pids' => [],
         'error' => null
     ];
 
-    // Adjust timeout based on type - HLS may need longer
-    $timeout = ($type === 'hls') ? 15 : 10;
+    // Adjust timeout based on type - UDP multicast and HLS may need longer
+    $timeout = (in_array($type, ['hls', 'udp'])) ? 15 : 10;
+
+    // For UDP multicast, use analyzeduration to get more data
+    $analyze_opts = '';
+    if ($type === 'udp' || strpos($url, 'udp://') === 0) {
+        $analyze_opts = '-analyzeduration 5000000 -probesize 5000000';
+    }
 
     $cmd = sprintf(
-        'timeout %d ffprobe -v quiet -show_programs -show_streams -print_format json %s 2>/dev/null',
+        'timeout %d ffprobe -v quiet %s -show_programs -show_streams -print_format json %s 2>/dev/null',
         $timeout,
+        $analyze_opts,
         escapeshellarg($url)
     );
 
@@ -1123,26 +1132,60 @@ function scan_with_ffprobe($url, $type = null) {
         return $result;
     }
 
-    // Parse programs
+    // Parse programs first - they contain pmt_pid and stream mappings
+    $program_streams = [];  // Map program_id -> streams
     if (isset($json['programs'])) {
         foreach ($json['programs'] as $program) {
-            $result['programs'][] = [
-                'id' => $program['program_id'] ?? 0,
-                'name' => $program['tags']['service_name'] ?? ('Program ' . ($program['program_id'] ?? 0))
+            $prog_id = $program['program_id'] ?? 0;
+            $pmt_pid = $program['pmt_pid'] ?? 0;
+
+            $prog_entry = [
+                'id' => $prog_id,
+                'pmt_pid' => $pmt_pid,
+                'name' => $program['tags']['service_name'] ?? ('Program ' . $prog_id),
+                'video_pids' => [],
+                'audio_pids' => []
             ];
+
+            // Collect stream indices for this program
+            if (isset($program['streams'])) {
+                foreach ($program['streams'] as $stream) {
+                    $stream_index = $stream['index'] ?? null;
+                    if ($stream_index !== null) {
+                        $program_streams[$stream_index] = count($result['programs']);
+                    }
+                }
+            }
+
+            $result['programs'][] = $prog_entry;
         }
     }
 
     // Parse streams
     if (isset($json['streams'])) {
         foreach ($json['streams'] as $stream) {
-            $pid = $stream['id'] ?? null;
-            if ($pid && strpos($pid, '0x') === 0) {
-                $pid = hexdec($pid);
+            // Get PID - check multiple possible fields
+            $pid = null;
+            if (isset($stream['id'])) {
+                $pid = $stream['id'];
+                if (is_string($pid) && strpos($pid, '0x') === 0) {
+                    $pid = hexdec($pid);
+                }
+            }
+            // Also check for 'stream_id' used in some formats
+            if ($pid === null && isset($stream['stream_id'])) {
+                $pid = $stream['stream_id'];
+            }
+            // Fall back to index if no PID found
+            if ($pid === null) {
+                $pid = $stream['index'] ?? 0;
             }
 
+            $stream_index = $stream['index'] ?? null;
+            $prog_index = isset($program_streams[$stream_index]) ? $program_streams[$stream_index] : 0;
+
             if ($stream['codec_type'] === 'video') {
-                $result['video_pids'][] = [
+                $vid_entry = [
                     'pid' => (int)$pid,
                     'codec' => strtoupper($stream['codec_name'] ?? 'unknown'),
                     'width' => $stream['width'] ?? 0,
@@ -1153,8 +1196,14 @@ function scan_with_ffprobe($url, $type = null) {
                         $stream['height'] ?? 0
                     )
                 ];
+                $result['video_pids'][] = $vid_entry;
+
+                // Add to program if we have programs
+                if (!empty($result['programs']) && isset($result['programs'][$prog_index])) {
+                    $result['programs'][$prog_index]['video_pids'][] = $vid_entry;
+                }
             } elseif ($stream['codec_type'] === 'audio') {
-                $result['audio_pids'][] = [
+                $aud_entry = [
                     'pid' => (int)$pid,
                     'codec' => strtoupper($stream['codec_name'] ?? 'unknown'),
                     'language' => $stream['tags']['language'] ?? 'und',
@@ -1166,8 +1215,29 @@ function scan_with_ffprobe($url, $type = null) {
                         $stream['channels'] ?? 2
                     )
                 ];
+                $result['audio_pids'][] = $aud_entry;
+
+                // Add to program if we have programs
+                if (!empty($result['programs']) && isset($result['programs'][$prog_index])) {
+                    $result['programs'][$prog_index]['audio_pids'][] = $aud_entry;
+                }
             }
         }
+    }
+
+    // Copy to all_* arrays for compatibility
+    $result['all_video_pids'] = $result['video_pids'];
+    $result['all_audio_pids'] = $result['audio_pids'];
+
+    // If we found PIDs but no programs, create a default program
+    if (empty($result['programs']) && (!empty($result['video_pids']) || !empty($result['audio_pids']))) {
+        $result['programs'][] = [
+            'id' => 1,
+            'pmt_pid' => 100,
+            'name' => 'Program 1',
+            'video_pids' => $result['video_pids'],
+            'audio_pids' => $result['audio_pids']
+        ];
     }
 
     $result['success'] = !empty($result['video_pids']) || !empty($result['audio_pids']);
