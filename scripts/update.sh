@@ -272,6 +272,19 @@ build_tools() {
         fi
     fi
 
+    # Build hls_input
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/hls_input" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/hls_input"
+        log_info "Building hls_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "hls_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build hls_input"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
