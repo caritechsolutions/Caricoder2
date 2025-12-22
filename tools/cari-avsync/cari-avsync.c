@@ -211,9 +211,14 @@ int parse_config(const char* filepath, InputStatus* input) {
 }
 
 // Check if systemd service is running
-int is_service_running(const char* input_name) {
+int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}
+    if (strcmp(input_type, "srt") == 0) {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", input_name);
+    } else {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+    }
     return system(cmd) == 0;
 }
 
@@ -263,8 +268,9 @@ void discover_inputs(void) {
             if (input->address[0] && input->port > 0 &&
                 input->video_pid > 0 && input->audio_pid > 0) {
 
-                input->running = is_service_running(input->id);
-                printf("  Service cari-udp-%s: %s\n", input->id,
+                input->running = is_service_running(input->id, input->type);
+                const char* svc_prefix = (strcmp(input->type, "srt") == 0) ? "cari-srt" : "cari-udp";
+                printf("  Service %s-%s: %s\n", svc_prefix, input->id,
                        input->running ? "RUNNING" : "not running");
 
                 // Restore history if same input
