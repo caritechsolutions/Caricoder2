@@ -383,10 +383,25 @@ void* tsp_manager_thread(void *arg) {
         argv[argc++] = output_arg;
         argv[argc] = NULL;
 
-        // Log the command
+        // Log the command (quote args with special characters for copy-paste testing)
         fprintf(stderr, "Starting tsp:");
         for (int i = 0; argv[i]; i++) {
-            fprintf(stderr, " %s", argv[i]);
+            // Check if argument needs quoting (contains special shell characters)
+            int needs_quote = 0;
+            for (const char *p = argv[i]; *p; p++) {
+                if (*p == '#' || *p == '!' || *p == ' ' || *p == '\'' ||
+                    *p == '"' || *p == '$' || *p == '&' || *p == '*' ||
+                    *p == '?' || *p == '[' || *p == ']' || *p == '|' ||
+                    *p == ';' || *p == '<' || *p == '>' || *p == '`') {
+                    needs_quote = 1;
+                    break;
+                }
+            }
+            if (needs_quote) {
+                fprintf(stderr, " '%s'", argv[i]);
+            } else {
+                fprintf(stderr, " %s", argv[i]);
+            }
         }
         fprintf(stderr, "\n");
 
