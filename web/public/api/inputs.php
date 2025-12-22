@@ -602,6 +602,129 @@ function generate_udp_input_service($id, $config) {
 }
 
 /**
+ * Generate systemd service for SRT input
+ */
+function generate_srt_input_service($id, $config) {
+    // Get source info
+    $source_url = '';
+    $srt_mode = 'caller';
+    $srt_latency = 200;
+    $srt_streamid = '';
+    $srt_passphrase = '';
+    $srt_pbkeylen = 0;
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_url = $parts[1] ?? '';
+
+                // Parse extra settings from source string (type|url|weight|settings)
+                if (isset($parts[3])) {
+                    $settings = explode(',', $parts[3]);
+                    foreach ($settings as $setting) {
+                        $kv = explode('=', $setting, 2);
+                        if (count($kv) == 2) {
+                            switch ($kv[0]) {
+                                case 'mode':
+                                    $srt_mode = $kv[1];
+                                    break;
+                                case 'latency':
+                                    $srt_latency = (int)$kv[1];
+                                    break;
+                                case 'streamid':
+                                    $srt_streamid = $kv[1];
+                                    break;
+                                case 'passphrase':
+                                    $srt_passphrase = $kv[1];
+                                    break;
+                                case 'pbkeylen':
+                                    $srt_pbkeylen = (int)$kv[1];
+                                    break;
+                            }
+                        }
+                    }
+                }
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Parse source URL (format: address:port)
+    $source_parts = explode(':', $source_url);
+    $input_addr = $source_parts[0];
+    $input_port = (int)($source_parts[1] ?? 9000);
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
+    }
+
+    // Build PIDs list for monitoring
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
+    $name = $config['general']['name'] ?? $id;
+
+    // Call the API to create the service
+    $api_data = [
+        'id' => $id,
+        'source_address' => $input_addr,
+        'source_port' => $input_port,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'mode' => $srt_mode,
+        'latency' => $srt_latency,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder SRT Input - {$name}"
+    ];
+
+    // Add optional SRT parameters
+    if (!empty($srt_streamid)) {
+        $api_data['streamid'] = $srt_streamid;
+    }
+    if (!empty($srt_passphrase)) {
+        $api_data['passphrase'] = $srt_passphrase;
+        if ($srt_pbkeylen > 0) {
+            $api_data['pbkeylen'] = $srt_pbkeylen;
+        }
+    }
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/srt/create', 'POST', $api_data);
+
+    return $result;
+}
+
+/**
  * Sanitize name to ID (lowercase, alphanumeric, hyphens)
  */
 function sanitize_name_to_id($name) {
@@ -1293,7 +1416,7 @@ function create_input($data) {
 
     // Allocate output address and API port for UDP inputs
     $output_alloc = null;
-    if ($primaryType === 'udp') {
+    if (in_array($primaryType, ['udp', 'srt'])) {
         $output_alloc = allocate_output_address();
         if (!$output_alloc) {
             return ['success' => false, 'error' => 'No available output addresses in pool'];
@@ -1423,6 +1546,8 @@ function create_input($data) {
         $service_result = null;
         if ($primaryType === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
+        } elseif ($primaryType === 'srt') {
+            $service_result = generate_srt_input_service($id, $config);
         }
 
         $response = [
@@ -1591,10 +1716,15 @@ function update_input($id, $data) {
     if ($result !== false) {
         $response = ['success' => true, 'message' => "Input updated successfully"];
 
-        // Regenerate systemd service for UDP inputs
+        // Regenerate systemd service for UDP and SRT inputs
         $type = $config['general']['type'] ?? 'udp';
         if ($type === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
+        } elseif ($type === 'srt') {
+            $service_result = generate_srt_input_service($id, $config);
             if ($service_result && !$service_result['success']) {
                 $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
             }
@@ -1628,6 +1758,9 @@ function delete_input($id) {
     if ($type === 'udp') {
         // Delete UDP input service (stops and removes service file)
         call_cari_api("/input/udp/{$id}", 'DELETE');
+    } elseif ($type === 'srt') {
+        // Delete SRT input service (stops and removes service file)
+        call_cari_api("/input/srt/{$id}", 'DELETE');
     } else {
         // Stop other service types
         stop_input_service($id);
