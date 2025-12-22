@@ -6,6 +6,14 @@ All notable changes to CariTranscoder are documented in this file.
 
 ### Major Features
 
+#### HTTP Input Support (2024-12-22)
+- New `http_input` tool using TSDuck HTTP plugin for direct MPEG-TS over HTTP
+- Simple configuration - just URL and output settings
+- Full GUI support with HTTP input type option
+- Systemd service generation via Python API (cari-http-{id})
+- Service control (start/stop/status) through PHP and Python APIs
+- Service status detection in cari-avsync monitoring tool
+
 #### HLS Input Support (2024-12-22)
 - New `hls_input` tool using TSDuck HLS plugin
 - Live mode support for live HLS streams
@@ -98,6 +106,12 @@ All notable changes to CariTranscoder are documented in this file.
 #### New Files
 - `api/main.py` - FastAPI service
 - `api/cari-api.service` - Systemd service file
+- `tools/http_input/http_input.c` - HTTP input tool using TSDuck HTTP plugin
+- `tools/http_input/Makefile` - Build configuration for http_input
+- `tools/hls_input/hls_input.c` - HLS input tool using TSDuck HLS plugin
+- `tools/hls_input/Makefile` - Build configuration for hls_input
+- `tools/srt_input/srt_input.c` - SRT input tool
+- `tools/srt_input/Makefile` - Build configuration for srt_input
 - `tools/player_preview/player_preview.c` - FFmpeg-based HLS generator
 - `tools/player_preview/old_player.c` - Backup of tsp-based version
 - `tools/udp_input/udp_input.c` - UDP input with PID filtering

@@ -309,6 +309,7 @@ function addSource(existingSource = null) {
                         <option value="rist" ${type === 'rist' ? 'selected' : ''}>RIST</option>
                         <option value="rtmp" ${type === 'rtmp' ? 'selected' : ''}>RTMP</option>
                         <option value="hls" ${type === 'hls' ? 'selected' : ''}>HLS</option>
+                        <option value="http" ${type === 'http' ? 'selected' : ''}>HTTP</option>
                         <option value="file" ${type === 'file' ? 'selected' : ''}>File</option>
                     </select>
                 </div>
@@ -505,6 +506,11 @@ function updateSourceFields(sourceId) {
             urlInput.placeholder = 'https://example.com/stream.m3u8';
             settingsDiv.style.display = 'block';
             hlsSettings.style.display = 'block';
+            break;
+        case 'http':
+            urlLabel.textContent = 'HTTP URL';
+            urlInput.placeholder = 'http://server:port/path/mpegts';
+            settingsDiv.style.display = 'none';
             break;
         case 'file':
             urlLabel.textContent = 'File Path';

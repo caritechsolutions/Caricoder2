@@ -285,6 +285,19 @@ build_tools() {
         fi
     fi
 
+    # Build http_input
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/http_input" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/http_input"
+        log_info "Building http_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "http_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build http_input"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 

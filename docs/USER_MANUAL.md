@@ -43,7 +43,7 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
 
    **Basic Settings:**
    - **Name**: A unique identifier for the input (e.g., "channel1", "bet", "rai")
-   - **Type**: Select the input type (UDP, SRT, RTMP, HLS, RIST)
+   - **Type**: Select the input type (UDP, SRT, RTMP, HLS, HTTP, RIST)
 
    **Source Settings (for UDP/Multicast):**
    - **Address**: Multicast address (e.g., `239.100.0.1`)
@@ -64,6 +64,12 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
    - **Bitrate Selection**: Auto, Highest, Lowest, or specify Max/Min value
    - **Bitrate Value**: Target bitrate in kbps (for Max/Min modes)
    - **Resolution**: Auto, Highest, or Lowest resolution variant
+
+   **Source Settings (for HTTP):**
+   - **URL**: Direct HTTP URL to MPEG-TS stream (e.g., `http://server:port/path/mpegts`)
+   - HTTP input is simpler than HLS - it receives MPEG-TS directly over HTTP
+   - No bitrate or resolution selection needed
+   - Uses TSDuck's HTTP plugin for reliable transport stream reception
 
    **PID Configuration:**
    - **Video PID**: The MPEG-TS PID for video (e.g., `211`)
