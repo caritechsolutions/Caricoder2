@@ -912,7 +912,7 @@ function generate_http_input_service($id, $config) {
 function generate_rist_input_service($id, $config) {
     // Get source info and RIST settings from source string
     $source_url = '';
-    $buffer_size = 100;
+    $buffer_size = 0;  // Default: no buffer option (let ristreceiver use its default)
     $profile = 1;  // Default: main
     $secret = '';
     $encryption_type = 0;

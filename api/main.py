@@ -170,7 +170,7 @@ class RISTInputService(BaseModel):
     output_address: str
     output_port: int
     api_port: int
-    buffer_size: int = 100  # Buffer size for retransmissions (ms)
+    buffer_size: int = 0  # Buffer size for retransmissions (ms), 0 = use ristreceiver default
     secret: Optional[str] = None  # Encryption secret
     encryption_type: int = 0  # 0=disabled, 128=AES-128, 256=AES-256
     profile: int = 1  # 0=simple, 1=main, 2=advanced
@@ -553,10 +553,12 @@ def generate_rist_input_service_file(service_data: RISTInputService) -> str:
         f"--url '{service_data.source_url}'",
         f"--output {service_data.output_address}:{service_data.output_port}",
         f"--api-port {service_data.api_port}",
-        f"--log-file {log_file}",
-        f"--buffer {service_data.buffer_size}",
-        f"--profile {service_data.profile}"
+        f"--log-file {log_file}"
     ]
+
+    # Only add buffer if explicitly set (> 0)
+    if service_data.buffer_size > 0:
+        cmd_parts.append(f"--buffer {service_data.buffer_size}")
 
     if service_data.secret:
         cmd_parts.append(f"--secret '{service_data.secret}'")
