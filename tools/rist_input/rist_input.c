@@ -241,7 +241,7 @@ void* pipeline_manager_thread(void *arg) {
         // Build ristreceiver command string for tsp -I fork
         char rist_cmd[2048];
         int cmd_len = snprintf(rist_cmd, sizeof(rist_cmd),
-            "ristreceiver -i %s -o stdout://",
+            "ristreceiver -i %s -v 3 -o stdout://",
             g_ctx.rist_url);
 
         if (g_ctx.buffer_size > 0) {
@@ -397,7 +397,7 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         int offset = snprintf(response, sizeof(response),
             "{\"url\":\"%s\",\"output\":\"%s:%d\",\"running\":%s,\"pids\":[",
             g_ctx.rist_url, g_ctx.output_addr, g_ctx.output_port,
-            g_ctx.rist_child > 0 ? "true" : "false");
+            g_ctx.tsp_child > 0 ? "true" : "false");
 
         for (int i = 0; i < g_ctx.monitor_count; i++) {
             PIDMonitor *m = &g_ctx.monitors[i];
