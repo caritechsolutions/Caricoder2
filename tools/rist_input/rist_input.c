@@ -428,6 +428,22 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         offset += snprintf(response + offset, sizeof(response) - offset, "]}");
 
         pthread_mutex_unlock(&g_ctx.lock);
+    } else if (strcmp(url, "/metrics") == 0) {
+        pthread_mutex_lock(&g_ctx.lock);
+
+        int offset = snprintf(response, sizeof(response), "{\"status\":\"running\",\"pids\":{");
+
+        for (int i = 0; i < g_ctx.monitor_count; i++) {
+            PIDMonitor *m = &g_ctx.monitors[i];
+            offset += snprintf(response + offset, sizeof(response) - offset,
+                "%s\"%u\":{\"pid\":%u,\"name\":\"%s\",\"current_bitrate\":%u,\"last_update\":%ld,\"sample_count\":%d}",
+                i > 0 ? "," : "",
+                m->pid, m->pid, m->name, m->current_bitrate, m->last_update, m->history_count);
+        }
+
+        offset += snprintf(response + offset, sizeof(response) - offset, "}}");
+
+        pthread_mutex_unlock(&g_ctx.lock);
     } else if (strncmp(url, "/history/", 9) == 0) {
         uint16_t pid = atoi(url + 9);
 
