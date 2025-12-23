@@ -375,7 +375,7 @@ function addSource(existingSource = null) {
                         </div>
                         <div class="col-md-4 mb-2">
                             <label class="form-label">Buffer (ms)</label>
-                            <input type="number" class="form-control rist-buffer" value="${existingSource?.rist_buffer || 1000}">
+                            <input type="number" class="form-control rist-buffer" value="${existingSource?.rist_buffer || 0}" placeholder="0 = auto">
                         </div>
                         <div class="col-md-4 mb-2">
                             <label class="form-label">Secret (optional)</label>
@@ -837,7 +837,7 @@ async function handleSubmit(e) {
                 const bufferInput = card.querySelector('.rist-buffer');
                 const secretInput = card.querySelector('.rist-secret');
                 sourceData.rist_profile = profileSelect ? profileSelect.value : 'main';
-                sourceData.rist_buffer = bufferInput ? bufferInput.value : 1000;
+                sourceData.rist_buffer = bufferInput ? bufferInput.value : 0;
                 sourceData.rist_secret = secretInput ? secretInput.value : '';
             } else if (type === 'file') {
                 const loopSelect = card.querySelector('.file-loop');

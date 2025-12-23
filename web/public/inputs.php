@@ -1052,7 +1052,7 @@ function addSource() {
                         </div>
                         <div class="col-md-3 mb-2">
                             <label class="form-label">Buffer (ms)</label>
-                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="100">
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="0" placeholder="0 = auto">
                         </div>
                         <div class="col-md-3 mb-2">
                             <label class="form-label">Encryption</label>
@@ -1547,7 +1547,7 @@ async function handleFormSubmit(e) {
                 const bufferInput = card.querySelector('[name*="rist_buffer"]');
                 const secretInput = card.querySelector('[name*="rist_secret"]');
                 sourceData.rist_profile = profileSelect ? profileSelect.value : 'main';
-                sourceData.rist_buffer = bufferInput ? bufferInput.value : 1000;
+                sourceData.rist_buffer = bufferInput ? bufferInput.value : 0;
                 sourceData.rist_secret = secretInput ? secretInput.value : '';
             } else if (type === 'file') {
                 const loopSelect = card.querySelector('[name*="file_loop"]');

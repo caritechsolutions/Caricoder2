@@ -1819,11 +1819,13 @@ function create_input($data) {
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
-                $buffer = $source['rist_buffer'] ?? 100;
+                $buffer = (int)($source['rist_buffer'] ?? 0);
                 $secret = $source['rist_secret'] ?? '';
                 $encryption = $source['rist_encryption'] ?? 0;
                 $extraSettings[] = "profile={$profile}";
-                $extraSettings[] = "buffer={$buffer}";
+                if ($buffer > 0) {
+                    $extraSettings[] = "buffer={$buffer}";
+                }
                 if ($secret) {
                     $extraSettings[] = "secret={$secret}";
                     $extraSettings[] = "encryption={$encryption}";
@@ -2045,11 +2047,13 @@ function update_input($id, $data) {
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
-                $buffer = $source['rist_buffer'] ?? 100;
+                $buffer = (int)($source['rist_buffer'] ?? 0);
                 $secret = $source['rist_secret'] ?? '';
                 $encryption = $source['rist_encryption'] ?? 0;
                 $extraSettings[] = "profile={$profile}";
-                $extraSettings[] = "buffer={$buffer}";
+                if ($buffer > 0) {
+                    $extraSettings[] = "buffer={$buffer}";
+                }
                 if ($secret) {
                     $extraSettings[] = "secret={$secret}";
                     $extraSettings[] = "encryption={$encryption}";
