@@ -511,6 +511,58 @@ build_tools() {
         fi
     fi
 
+    # Build srt_input
+    if [[ -d "$INSTALL_DIR/tools/srt_input" ]]; then
+        cd "$INSTALL_DIR/tools/srt_input"
+        log_info "Building srt_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "srt_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build srt_input"
+        fi
+    fi
+
+    # Build hls_input
+    if [[ -d "$INSTALL_DIR/tools/hls_input" ]]; then
+        cd "$INSTALL_DIR/tools/hls_input"
+        log_info "Building hls_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "hls_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build hls_input"
+        fi
+    fi
+
+    # Build http_input
+    if [[ -d "$INSTALL_DIR/tools/http_input" ]]; then
+        cd "$INSTALL_DIR/tools/http_input"
+        log_info "Building http_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "http_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build http_input"
+        fi
+    fi
+
+    # Build rist_input
+    if [[ -d "$INSTALL_DIR/tools/rist_input" ]]; then
+        cd "$INSTALL_DIR/tools/rist_input"
+        log_info "Building rist_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "rist_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build rist_input"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
