@@ -347,7 +347,7 @@ void* pipeline_manager_thread(void *arg) {
 
             argv[argc++] = "tsp";
             argv[argc++] = "-I";
-            argv[argc++] = "fork";
+            argv[argc++] = "file";  // Read from stdin (piped from ristreceiver)
 
             // Filter plugin
             argv[argc++] = "-P";
@@ -412,7 +412,7 @@ void* pipeline_manager_thread(void *arg) {
         close(pipefd[0]);
 
         // Log the pipeline
-        fprintf(stderr, "Pipeline: ristreceiver -i %s -o stdout:// | tsp -I fork ... -O ip %s:%d\n",
+        fprintf(stderr, "Pipeline: ristreceiver -i %s -o stdout:// | tsp -I file ... -O ip %s:%d\n",
                 g_ctx.rist_url, g_ctx.output_addr, g_ctx.output_port);
 
         // Wait for either process to exit
