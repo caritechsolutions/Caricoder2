@@ -20,6 +20,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include "getopt-shim.h"
 #include "pthread-shim.h"
 #include <stdbool.h>
@@ -109,7 +112,8 @@ static struct option long_options[] = {
 
 const char help_str[] = "Usage: %s [OPTIONS] \nWhere OPTIONS are:\n"
 "       -i | --inputurl  rist://...             * | Comma separated list of input rist URLs                  |\n"
-"       -o | --outputurl udp://... or rtp://... * | Comma separated list of output udp or rtp URLs           |\n"
+"       -o | --outputurl udp://... or rtp://... * | Comma separated list of output udp, rtp, or stdout URLs  |\n"
+"                                                 | Use stdout:// or - for raw MPEG-TS output to stdout      |\n"
 #ifdef USE_TUN
 "                                                 | Use tun://@ to write udp data to a tun device defined    |\n"
 "                                                 | using the -t option                                      |\n"
@@ -168,6 +172,7 @@ struct rist_callback_object {
 	int mpeg[MAX_OUTPUT_COUNT];
 	struct rist_udp_config *udp_config[MAX_OUTPUT_COUNT];
 	uint16_t i_seqnum[MAX_OUTPUT_COUNT];
+	bool is_stdout[MAX_OUTPUT_COUNT];  // Track stdout outputs
 	struct rist_ctx *receiver_ctx;
 #ifdef USE_TUN
 	int tun;
@@ -284,7 +289,14 @@ static int cb_recv(void *arg, struct rist_data_block *b)
 					payload = (uint8_t *)b->payload;
 					payload_len = b->payload_len;
 				}
-				int ret = udpsocket_send(callback_object->mpeg[i], payload, payload_len);
+				int ret;
+				if (callback_object->is_stdout[i]) {
+					// Write to stdout
+					ret = (int)write(callback_object->mpeg[i], payload, payload_len);
+				} else {
+					// Send to UDP socket
+					ret = udpsocket_send(callback_object->mpeg[i], payload, payload_len);
+				}
 				if (udp_config->rtp)
 					free(payload);
 				if (ret <= 0 && errno != ECONNREFUSED)
@@ -558,6 +570,7 @@ int main(int argc, char *argv[])
 	{
 		callback_object.mpeg[i] = 0;
 		callback_object.udp_config[i] = NULL;
+		callback_object.is_stdout[i] = false;
 	}
 #ifdef _WIN32
 #define STDERR_FILENO 2
@@ -876,6 +889,22 @@ int main(int argc, char *argv[])
 
 		if (!outputtoken)
 			break;
+
+		// Check for stdout output (stdout:// or just -)
+		if (strcmp(outputtoken, "-") == 0 || strcmp(outputtoken, "stdout://") == 0 ||
+		    strncmp(outputtoken, "stdout://", 9) == 0) {
+			rist_log(&logging_settings, RIST_LOG_INFO, "Output set to stdout\n");
+			callback_object.mpeg[i] = STDOUT_FILENO;
+			callback_object.is_stdout[i] = true;
+			// Create a minimal udp_config for stdout (stream_id=0 means accept all)
+			struct rist_udp_config *udp_config = calloc(1, sizeof(struct rist_udp_config));
+			udp_config->stream_id = 0;
+			udp_config->rtp = false;
+			callback_object.udp_config[i] = udp_config;
+			atleast_one_socket_opened = true;
+			outputtoken = strtok_r(NULL, ",", &saveptr2);
+			continue;
+		}
 
 		// First parse extra parameters (?miface=lo&stream-id=1971) and separate the address
 		// We are using the rist_parse_address function to create a config object that does not really
