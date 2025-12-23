@@ -307,7 +307,7 @@ void* pipeline_manager_thread(void *arg) {
             argv[argc++] = "tsp";
             argv[argc++] = "-v";  // Verbose for debugging
             argv[argc++] = "--buffer-size-mb";
-            argv[argc++] = "5";   // Balance between fast startup and buffering
+            argv[argc++] = "1";   // Small buffer for fast startup
             argv[argc++] = "-I";
             argv[argc++] = "fork";
             argv[argc++] = "--format";
