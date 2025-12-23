@@ -213,13 +213,15 @@ int parse_config(const char* filepath, InputStatus* input) {
 // Check if systemd service is running
 int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
-    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}
+    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}, RIST uses cari-rist-{name}
     if (strcmp(input_type, "srt") == 0) {
         snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", input_name);
     } else if (strcmp(input_type, "hls") == 0) {
         snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", input_name);
     } else if (strcmp(input_type, "http") == 0) {
         snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", input_name);
+    } else if (strcmp(input_type, "rist") == 0) {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", input_name);
     } else {
         snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
     }
@@ -277,6 +279,7 @@ void discover_inputs(void) {
                 if (strcmp(input->type, "srt") == 0) svc_prefix = "cari-srt";
                 else if (strcmp(input->type, "hls") == 0) svc_prefix = "cari-hls";
                 else if (strcmp(input->type, "http") == 0) svc_prefix = "cari-http";
+                else if (strcmp(input->type, "rist") == 0) svc_prefix = "cari-rist";
                 printf("  Service %s-%s: %s\n", svc_prefix, input->id,
                        input->running ? "RUNNING" : "not running");
 

@@ -1042,7 +1042,7 @@ function addSource() {
                 <!-- RIST Settings -->
                 <div class="rist-settings" style="display:none;">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">RIST Profile</label>
                             <select class="form-select" name="sources[${sourcesCount - 1}][rist_profile]">
                                 <option value="simple">Simple</option>
@@ -1050,12 +1050,20 @@ function addSource() {
                                 <option value="advanced">Advanced</option>
                             </select>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">Buffer (ms)</label>
-                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="1000">
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="100">
                         </div>
-                        <div class="col-md-4 mb-2">
-                            <label class="form-label">Secret (optional)</label>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Encryption</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][rist_encryption]">
+                                <option value="0">None</option>
+                                <option value="128">AES-128</option>
+                                <option value="256">AES-256</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Secret</label>
                             <input type="password" class="form-control" name="sources[${sourcesCount - 1}][rist_secret]" placeholder="Encryption key">
                         </div>
                     </div>
