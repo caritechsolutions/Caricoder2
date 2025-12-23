@@ -255,10 +255,10 @@ void* pipeline_manager_thread(void *arg) {
 
     while (g_ctx.running) {
         // Build ristreceiver command string for tsp -I fork
-        // Use -v 0 to suppress ristreceiver log output
+        // Redirect ristreceiver stderr to /dev/null to suppress its log output
         char rist_cmd[2048];
         int cmd_len = snprintf(rist_cmd, sizeof(rist_cmd),
-            "ristreceiver -i %s -v 0 -o stdout://",
+            "ristreceiver -i %s",
             g_ctx.rist_url);
 
         if (g_ctx.buffer_size > 0) {
@@ -276,8 +276,9 @@ void* pipeline_manager_thread(void *arg) {
                 " -e %d", g_ctx.encryption_type);
         }
 
-        // Keep ristreceiver command minimal - only add options when needed
-        // The working command is just: ristreceiver -i rist://... -o stdout://
+        // Add output and redirect stderr to suppress ristreceiver logging
+        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+            " -o stdout:// 2>/dev/null");
 
         fprintf(stderr, "Starting pipeline: tsp -I fork \"%s\" ...\n", rist_cmd);
 
