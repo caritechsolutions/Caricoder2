@@ -328,13 +328,13 @@ rebuild_librist() {
     local REBUILD_RIST="n"
     local NEEDS_REBUILD=false
 
-    # Check if ristreceiver exists and supports stdout (required for rist_input)
+    # Check if ristreceiver exists and supports stdout:// output (required for rist_input)
     if ! command -v ristreceiver &> /dev/null && [[ ! -f /usr/local/bin/ristreceiver ]]; then
         NEEDS_REBUILD=true
         log_info "ristreceiver not found, rebuild required"
-    elif ! ristreceiver --help 2>&1 | grep -q "stdout"; then
+    elif ! ristreceiver --help 2>&1 | grep -q "stdout://"; then
         NEEDS_REBUILD=true
-        log_info "ristreceiver missing stdout support, rebuild required"
+        log_info "ristreceiver missing stdout:// output support, rebuild required"
     fi
 
     if [[ "$AUTO_CONFIRM" = false ]]; then
