@@ -196,32 +196,48 @@ void* log_parser_thread(void *arg) {
         if (log) {
             fseek(log, last_pos, SEEK_SET);
             while (fgets(line, sizeof(line), log)) {
-                // Parse bitrate_monitor output: "* PID 257 (0x0101): 1,234,567 b/s"
+                // Parse tsp bitrate_monitor output format:
+                // "* bitrate_monitor: 2025/12/23 06:31:56, PID 0x00D3 (211) bitrate: 2,730,361 bits/s"
                 uint16_t pid;
-                char bitrate_str[64];
-                if (sscanf(line, "* PID %hu (%*[^)]): %63[^b]b/s", &pid, bitrate_str) == 2) {
-                    uint32_t bitrate = 0;
 
-                    // Remove commas from bitrate
-                    char clean_bitrate[32];
-                    int j = 0;
-                    for (int i = 0; bitrate_str[i] && j < 31; i++) {
-                        if (bitrate_str[i] >= '0' && bitrate_str[i] <= '9') {
-                            clean_bitrate[j++] = bitrate_str[i];
-                        } else if (bitrate_str[i] == ' ' || bitrate_str[i] == 'b') {
-                            break;
+                // Look for bitrate_monitor line and extract PID and bitrate
+                char *pid_start = strstr(line, ") bitrate:");
+                char *dec_pid = NULL;
+
+                if (pid_start && strstr(line, "* bitrate_monitor:")) {
+                    // Find the decimal PID in parentheses before ") bitrate:"
+                    char *p = pid_start - 1;
+                    while (p > line && *p != '(') p--;
+                    if (*p == '(') {
+                        dec_pid = p + 1;
+                        pid = (uint16_t)atoi(dec_pid);
+
+                        // Extract bitrate value after "bitrate: "
+                        char *br_start = pid_start + 10;  // Skip ") bitrate:"
+                        while (*br_start == ' ') br_start++;
+
+                        // Copy digits and commas until 'b' or space
+                        int j = 0;
+                        char clean_bitrate[32];
+                        for (int i = 0; br_start[i] && j < 31; i++) {
+                            if (br_start[i] >= '0' && br_start[i] <= '9') {
+                                clean_bitrate[j++] = br_start[i];
+                            } else if (br_start[i] == ',') {
+                                continue;  // Skip commas
+                            } else {
+                                break;  // Stop at space or 'b'
+                            }
                         }
-                    }
-                    clean_bitrate[j] = '\0';
-                    bitrate = atoi(clean_bitrate);
+                        clean_bitrate[j] = '\0';
+                        uint32_t bitrate = atoi(clean_bitrate);
 
-                    pthread_mutex_lock(&g_ctx.lock);
-                    PIDMonitor *m = find_monitor(pid);
-                    if (m) {
-                        add_bitrate_sample(m, time(NULL), bitrate);
-                        fprintf(stderr, "Bitrate update: PID %u = %u bps\n", pid, bitrate);
+                        pthread_mutex_lock(&g_ctx.lock);
+                        PIDMonitor *m = find_monitor(pid);
+                        if (m && bitrate > 0) {
+                            add_bitrate_sample(m, time(NULL), bitrate);
+                        }
+                        pthread_mutex_unlock(&g_ctx.lock);
                     }
-                    pthread_mutex_unlock(&g_ctx.lock);
                 }
             }
             last_pos = ftell(log);
@@ -239,9 +255,10 @@ void* pipeline_manager_thread(void *arg) {
 
     while (g_ctx.running) {
         // Build ristreceiver command string for tsp -I fork
+        // Use -v 0 to suppress ristreceiver log output
         char rist_cmd[2048];
         int cmd_len = snprintf(rist_cmd, sizeof(rist_cmd),
-            "ristreceiver -i %s -v 3 -o stdout://",
+            "ristreceiver -i %s -v 0 -o stdout://",
             g_ctx.rist_url);
 
         if (g_ctx.buffer_size > 0) {
