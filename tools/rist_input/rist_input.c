@@ -238,96 +238,41 @@ void* pipeline_manager_thread(void *arg) {
     (void)arg;
 
     while (g_ctx.running) {
-        int pipefd[2];
-        if (pipe(pipefd) == -1) {
-            perror("pipe failed");
-            sleep(2);
-            continue;
+        // Build ristreceiver command string for tsp -I fork
+        char rist_cmd[2048];
+        int cmd_len = snprintf(rist_cmd, sizeof(rist_cmd),
+            "ristreceiver -i %s -o stdout://",
+            g_ctx.rist_url);
+
+        if (g_ctx.buffer_size > 0) {
+            cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+                " -b %d", g_ctx.buffer_size);
         }
 
-        // Fork ristreceiver process
-        pid_t rist_pid = fork();
-        if (rist_pid == 0) {
-            // Child process - ristreceiver
-            prctl(PR_SET_PDEATHSIG, SIGKILL);
-
-            // Close read end of pipe
-            close(pipefd[0]);
-
-            // Redirect stdout to pipe write end
-            dup2(pipefd[1], STDOUT_FILENO);
-            close(pipefd[1]);
-
-            // Build ristreceiver arguments
-            char *argv[32];
-            int argc = 0;
-            static char buffer_str[16];
-            static char encryption_str[16];
-            static char profile_str[16];
-
-            argv[argc++] = "ristreceiver";
-            argv[argc++] = "-i";
-            argv[argc++] = g_ctx.rist_url;
-            argv[argc++] = "-o";
-            argv[argc++] = "stdout://";
-
-            if (g_ctx.buffer_size > 0) {
-                snprintf(buffer_str, sizeof(buffer_str), "%d", g_ctx.buffer_size);
-                argv[argc++] = "-b";
-                argv[argc++] = buffer_str;
-            }
-
-            if (g_ctx.secret[0]) {
-                argv[argc++] = "-s";
-                argv[argc++] = g_ctx.secret;
-            }
-
-            if (g_ctx.encryption_type > 0) {
-                snprintf(encryption_str, sizeof(encryption_str), "%d", g_ctx.encryption_type);
-                argv[argc++] = "-e";
-                argv[argc++] = encryption_str;
-            }
-
-            snprintf(profile_str, sizeof(profile_str), "%d", g_ctx.profile);
-            argv[argc++] = "-p";
-            argv[argc++] = profile_str;
-
-            // Suppress stats output
-            argv[argc++] = "-S";
-            argv[argc++] = "0";
-
-            // Quiet logging (errors only)
-            argv[argc++] = "-v";
-            argv[argc++] = "3";
-
-            argv[argc] = NULL;
-
-            execvp("ristreceiver", argv);
-            perror("execvp ristreceiver failed");
-            _exit(1);
-        } else if (rist_pid < 0) {
-            perror("fork ristreceiver failed");
-            close(pipefd[0]);
-            close(pipefd[1]);
-            sleep(2);
-            continue;
+        if (g_ctx.secret[0]) {
+            cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+                " -s %s", g_ctx.secret);
         }
 
-        g_ctx.rist_child = rist_pid;
-        fprintf(stderr, "ristreceiver started with PID %d\n", rist_pid);
+        if (g_ctx.encryption_type > 0) {
+            cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+                " -e %d", g_ctx.encryption_type);
+        }
 
-        // Close write end of pipe in parent
-        close(pipefd[1]);
+        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+            " -p %d", g_ctx.profile);
 
-        // Fork tsp process
+        // Suppress stats and quiet logging
+        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+            " -S 0 -v 3");
+
+        fprintf(stderr, "Starting pipeline: tsp -I fork \"%s\" ...\n", rist_cmd);
+
+        // Fork tsp process (tsp will fork ristreceiver internally via -I fork)
         pid_t tsp_pid = fork();
         if (tsp_pid == 0) {
             // Child process - tsp
             prctl(PR_SET_PDEATHSIG, SIGKILL);
-
-            // Redirect stdin from pipe read end
-            dup2(pipefd[0], STDIN_FILENO);
-            close(pipefd[0]);
 
             // Redirect stderr to log file
             FILE *log = fopen(g_ctx.log_file, "a");
@@ -346,8 +291,12 @@ void* pipeline_manager_thread(void *arg) {
             snprintf(output_arg, sizeof(output_arg), "%s:%d", g_ctx.output_addr, g_ctx.output_port);
 
             argv[argc++] = "tsp";
+            argv[argc++] = "-v";  // Verbose for debugging
             argv[argc++] = "-I";
-            argv[argc++] = "file";  // Read from stdin (piped from ristreceiver)
+            argv[argc++] = "fork";
+            argv[argc++] = "--format";
+            argv[argc++] = "TS";
+            argv[argc++] = rist_cmd;  // The ristreceiver command
 
             // Filter plugin
             argv[argc++] = "-P";
@@ -397,52 +346,26 @@ void* pipeline_manager_thread(void *arg) {
             _exit(1);
         } else if (tsp_pid < 0) {
             perror("fork tsp failed");
-            close(pipefd[0]);
-            kill(rist_pid, SIGTERM);
-            waitpid(rist_pid, NULL, 0);
-            g_ctx.rist_child = 0;
             sleep(2);
             continue;
         }
 
         g_ctx.tsp_child = tsp_pid;
+        g_ctx.rist_child = 0;  // tsp manages ristreceiver internally
         fprintf(stderr, "tsp started with PID %d\n", tsp_pid);
 
-        // Close read end of pipe in parent
-        close(pipefd[0]);
-
-        // Log the pipeline
-        fprintf(stderr, "Pipeline: ristreceiver -i %s -o stdout:// | tsp -I file ... -O ip %s:%d\n",
-                g_ctx.rist_url, g_ctx.output_addr, g_ctx.output_port);
-
-        // Wait for either process to exit
+        // Wait for tsp to exit
         int status;
-        pid_t exited_pid = wait(&status);
-
-        // Kill the other process
-        if (exited_pid == rist_pid) {
-            g_ctx.rist_child = 0;
-            if (g_ctx.tsp_child > 0) {
-                kill(g_ctx.tsp_child, SIGTERM);
-                waitpid(g_ctx.tsp_child, NULL, 0);
-                g_ctx.tsp_child = 0;
-            }
-        } else if (exited_pid == tsp_pid) {
-            g_ctx.tsp_child = 0;
-            if (g_ctx.rist_child > 0) {
-                kill(g_ctx.rist_child, SIGTERM);
-                waitpid(g_ctx.rist_child, NULL, 0);
-                g_ctx.rist_child = 0;
-            }
-        }
+        waitpid(tsp_pid, &status, 0);
+        g_ctx.tsp_child = 0;
 
         if (g_ctx.running) {
             if (WIFEXITED(status)) {
-                fprintf(stderr, "Process %d exited with code %d, restarting pipeline...\n",
-                        exited_pid, WEXITSTATUS(status));
+                fprintf(stderr, "tsp exited with code %d, restarting pipeline...\n",
+                        WEXITSTATUS(status));
             } else if (WIFSIGNALED(status)) {
-                fprintf(stderr, "Process %d killed by signal %d, restarting pipeline...\n",
-                        exited_pid, WTERMSIG(status));
+                fprintf(stderr, "tsp killed by signal %d, restarting pipeline...\n",
+                        WTERMSIG(status));
             }
             sleep(2);
         }
