@@ -259,12 +259,8 @@ void* pipeline_manager_thread(void *arg) {
                 " -e %d", g_ctx.encryption_type);
         }
 
-        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
-            " -p %d", g_ctx.profile);
-
-        // Suppress stats and quiet logging
-        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
-            " -S 0 -v 3");
+        // Keep ristreceiver command minimal - only add options when needed
+        // The working command is just: ristreceiver -i rist://... -o stdout://
 
         fprintf(stderr, "Starting pipeline: tsp -I fork \"%s\" ...\n", rist_cmd);
 
