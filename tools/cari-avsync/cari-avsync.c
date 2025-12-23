@@ -210,20 +210,45 @@ int parse_config(const char* filepath, InputStatus* input) {
     return 0;
 }
 
+// Sanitize name to ID format (lowercase, alphanumeric and hyphens only)
+void sanitize_to_id(const char* name, char* id, size_t id_size) {
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j < id_size - 1; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') {
+            id[j++] = c + 32;  // lowercase
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            id[j++] = c;
+        } else if (c == ' ' || c == '_' || c == '-') {
+            if (j > 0 && id[j-1] != '-') {
+                id[j++] = '-';
+            }
+        }
+    }
+    // Remove trailing hyphen
+    while (j > 0 && id[j-1] == '-') j--;
+    id[j] = '\0';
+}
+
 // Check if systemd service is running
 int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
+    char sanitized_name[128];
+
+    // Sanitize name to match systemd service naming
+    sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
+
     // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}, RIST uses cari-rist-{name}
     if (strcmp(input_type, "srt") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
     } else if (strcmp(input_type, "hls") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
     } else if (strcmp(input_type, "http") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
     } else if (strcmp(input_type, "rist") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
     }
     return system(cmd) == 0;
 }
