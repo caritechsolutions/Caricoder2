@@ -53,6 +53,15 @@ if (isset($config['sources'])) {
                     if (count($kv) == 2) {
                         if ($kv[0] === 'audio_pids') {
                             $source['audio_pids'] = explode(';', $kv[1]);
+                        } elseif ($kv[0] === 'buffer') {
+                            // Map buffer to rist_buffer for JS compatibility
+                            $source['rist_buffer'] = $kv[1];
+                        } elseif ($kv[0] === 'profile') {
+                            $source['rist_profile'] = $kv[1];
+                        } elseif ($kv[0] === 'secret') {
+                            $source['rist_secret'] = $kv[1];
+                        } elseif ($kv[0] === 'encryption') {
+                            $source['rist_encryption'] = $kv[1];
                         } else {
                             $source[$kv[0]] = $kv[1];
                         }

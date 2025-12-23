@@ -923,21 +923,24 @@ function generate_rist_input_service($id, $config) {
                 $parts = explode('|', $value);
                 $source_url = $parts[1] ?? '';
 
-                // Parse RIST settings from extra settings (parts[3] onwards)
-                for ($i = 3; $i < count($parts); $i++) {
-                    if (strpos($parts[$i], 'profile=') === 0) {
-                        $profile_str = substr($parts[$i], 8);
-                        // Convert string profile to numeric (0=simple, 1=main, 2=advanced)
-                        if ($profile_str === 'simple') $profile = 0;
-                        elseif ($profile_str === 'main') $profile = 1;
-                        elseif ($profile_str === 'advanced') $profile = 2;
-                        else $profile = (int)$profile_str;
-                    } elseif (strpos($parts[$i], 'buffer=') === 0) {
-                        $buffer_size = (int)substr($parts[$i], 7);
-                    } elseif (strpos($parts[$i], 'secret=') === 0) {
-                        $secret = substr($parts[$i], 7);
-                    } elseif (strpos($parts[$i], 'encryption=') === 0) {
-                        $encryption_type = (int)substr($parts[$i], 11);
+                // Parse RIST settings from extra settings (parts[3] is comma-separated key=value pairs)
+                if (isset($parts[3])) {
+                    $extras = explode(',', $parts[3]);
+                    foreach ($extras as $extra) {
+                        if (strpos($extra, 'profile=') === 0) {
+                            $profile_str = substr($extra, 8);
+                            // Convert string profile to numeric (0=simple, 1=main, 2=advanced)
+                            if ($profile_str === 'simple') $profile = 0;
+                            elseif ($profile_str === 'main') $profile = 1;
+                            elseif ($profile_str === 'advanced') $profile = 2;
+                            else $profile = (int)$profile_str;
+                        } elseif (strpos($extra, 'buffer=') === 0) {
+                            $buffer_size = (int)substr($extra, 7);
+                        } elseif (strpos($extra, 'secret=') === 0) {
+                            $secret = substr($extra, 7);
+                        } elseif (strpos($extra, 'encryption=') === 0) {
+                            $encryption_type = (int)substr($extra, 11);
+                        }
                     }
                 }
                 break; // Use primary source
