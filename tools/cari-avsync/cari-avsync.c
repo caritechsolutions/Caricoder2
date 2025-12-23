@@ -58,6 +58,7 @@ typedef struct {
 // Single measurement result - just the means with timestamp
 typedef struct {
     char timestamp[32];
+    time_t unix_ts;         // Unix timestamp for browser conversion
     double a2v_avg_ms;      // Audio→Video mean gap
     double v2a_avg_ms;      // Video→Audio mean gap
     int a2v_count;          // Sample count used
@@ -504,8 +505,9 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
         result->v2a_count = 1;
     }
 
-    // Set timestamp
+    // Set timestamp (both Unix for browser conversion and formatted for display)
     time_t now = time(NULL);
+    result->unix_ts = now;
     struct tm* tm = localtime(&now);
     strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
 
@@ -603,6 +605,7 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
     return snprintf(buf, buf_size,
         "{"
         "\"timestamp\":\"%s\","
+        "\"unix_ts\":%ld,"
         "\"a2v_mean_ms\":%.2f,"
         "\"v2a_mean_ms\":%.2f,"
         "\"a2v_samples\":%d,"
@@ -610,6 +613,7 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
         "\"status\":\"%s\""
         "}",
         result->timestamp,
+        (long)result->unix_ts,
         result->a2v_avg_ms,
         result->v2a_avg_ms,
         result->a2v_count,
