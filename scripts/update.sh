@@ -324,15 +324,29 @@ rebuild_librist() {
         return 0
     fi
 
-    # Check if ristreceiver needs rebuild (always rebuild to get latest changes)
+    # Check if ristreceiver needs rebuild
     local REBUILD_RIST="n"
+    local NEEDS_REBUILD=false
+
+    # Check if ristreceiver exists and supports stdout (required for rist_input)
+    if ! command -v ristreceiver &> /dev/null && [[ ! -f /usr/local/bin/ristreceiver ]]; then
+        NEEDS_REBUILD=true
+        log_info "ristreceiver not found, rebuild required"
+    elif ! ristreceiver --help 2>&1 | grep -q "stdout"; then
+        NEEDS_REBUILD=true
+        log_info "ristreceiver missing stdout support, rebuild required"
+    fi
+
     if [[ "$AUTO_CONFIRM" = false ]]; then
         if [[ -t 0 ]]; then
+            if [[ "$NEEDS_REBUILD" = true ]]; then
+                log_info "librist rebuild is recommended"
+            fi
             read -p "Do you want to rebuild librist/ristreceiver? (y/N): " REBUILD_RIST
         fi
     else
-        # In auto mode, only rebuild if ristreceiver doesn't exist
-        if ! command -v ristreceiver &> /dev/null && [[ ! -f /usr/local/bin/ristreceiver ]]; then
+        # In auto mode, rebuild if needed
+        if [[ "$NEEDS_REBUILD" = true ]]; then
             REBUILD_RIST="y"
         fi
     fi
