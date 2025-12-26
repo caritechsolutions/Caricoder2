@@ -253,8 +253,16 @@ void* log_monitor_thread(void *arg) {
     char line[MAX_LOG_LINE];
     FILE *log = NULL;
     long last_pos = 0;
+    time_t last_stats_truncate = time(NULL);
 
     while (g_ctx.running) {
+        // Truncate SRT stats file every 60 seconds to prevent unbounded growth
+        time_t now = time(NULL);
+        if (now - last_stats_truncate >= 60) {
+            FILE *sf = fopen(g_ctx.srt_stats_file, "w");
+            if (sf) fclose(sf);
+            last_stats_truncate = now;
+        }
         if (!log) {
             log = fopen(g_ctx.log_file, "r");
             if (log) {
