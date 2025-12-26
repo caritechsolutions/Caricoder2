@@ -86,7 +86,7 @@ install_dependencies() {
         curl \
         wget
 
-    # GStreamer
+    # GStreamer core and plugins
     apt-get install -y \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
@@ -95,6 +95,19 @@ install_dependencies() {
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-tools
+
+    # GStreamer libav (provides avdec_h264, avdec_ac3, avdec_eac3, avenc_* etc.)
+    apt-get install -y gstreamer1.0-libav || true
+
+    # Additional GStreamer codec plugins
+    apt-get install -y \
+        gstreamer1.0-x264 \
+        gstreamer1.0-vaapi \
+        gstreamer1.0-fdkaac || true
+
+    # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
+    apt-get install -y \
+        libgstreamer-plugins-bad1.0-dev || true
 
     # FFmpeg (for stream analysis and fallback transcoding)
     apt-get install -y ffmpeg

@@ -178,6 +178,28 @@ update_php_api() {
     fi
 }
 
+# Install/update GStreamer plugins
+update_gstreamer_plugins() {
+    log_step "Updating GStreamer plugins..."
+
+    apt-get update -qq
+
+    # GStreamer libav (provides avdec_h264, avdec_ac3, avdec_eac3, avenc_* etc.)
+    apt-get install -y gstreamer1.0-libav || true
+
+    # Additional GStreamer codec plugins
+    apt-get install -y \
+        gstreamer1.0-x264 \
+        gstreamer1.0-vaapi \
+        gstreamer1.0-fdkaac || true
+
+    # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
+    apt-get install -y \
+        libgstreamer-plugins-bad1.0-dev || true
+
+    log_info "GStreamer plugins updated"
+}
+
 # Optionally rebuild C applications
 rebuild_apps() {
     log_step "Checking if rebuild is needed..."
@@ -652,6 +674,7 @@ main() {
     download_latest
     update_web
     update_php_api
+    update_gstreamer_plugins
     rebuild_apps
     build_tools
     rebuild_librist
