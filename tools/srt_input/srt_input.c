@@ -637,55 +637,83 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
             return ret;
         }
 
-        // Read entire file
+        // Read only the last line of the stats file (most recent stats)
+        // The file grows with one JSON line per stats interval
         char stats_json[8192];
-        size_t bytes_read = fread(stats_json, 1, sizeof(stats_json) - 1, fp);
+        char line[8192];
+        stats_json[0] = '\0';
+
+        while (fgets(line, sizeof(line), fp) != NULL) {
+            // Keep only the last non-empty line
+            if (strlen(line) > 1) {
+                strncpy(stats_json, line, sizeof(stats_json) - 1);
+                stats_json[sizeof(stats_json) - 1] = '\0';
+            }
+        }
         fclose(fp);
-        stats_json[bytes_read] = '\0';
 
         // Parse key values from the JSON
-        // srt-live-transmit outputs stats with fields like:
-        // "msRTT", "mbpsBandwidth", "pktSent", "pktRecv", "pktSndLoss", "pktRcvLoss", etc.
+        // srt-live-transmit outputs nested JSON like:
+        // {"link":{"rtt":1.225,"bandwidth":7.32},"recv":{"packets":135,"packetsLost":0,"bytes":182472},"send":{"packets":0,...}}
         double rtt = 0, bandwidth = 0;
         long long pkt_sent = 0, pkt_recv = 0, pkt_snd_loss = 0, pkt_rcv_loss = 0;
         long long pkt_retrans = 0, pkt_rcv_drop = 0, pkt_snd_drop = 0;
         long long bytes_sent = 0, bytes_recv = 0;
 
-        // Simple JSON value extraction (look for "key": value patterns)
-        char *p;
+        char *p, *link_section, *recv_section, *send_section;
 
-        if ((p = strstr(stats_json, "\"msRTT\":")) != NULL) {
-            sscanf(p + 8, "%lf", &rtt);
+        // Find the sections
+        link_section = strstr(stats_json, "\"link\":");
+        recv_section = strstr(stats_json, "\"recv\":");
+        send_section = strstr(stats_json, "\"send\":");
+
+        // Parse link section: {"rtt":X,"bandwidth":X}
+        if (link_section != NULL) {
+            if ((p = strstr(link_section, "\"rtt\":")) != NULL) {
+                sscanf(p + 6, "%lf", &rtt);
+            }
+            if ((p = strstr(link_section, "\"bandwidth\":")) != NULL) {
+                sscanf(p + 12, "%lf", &bandwidth);
+            }
         }
-        if ((p = strstr(stats_json, "\"mbpsBandwidth\":")) != NULL) {
-            sscanf(p + 16, "%lf", &bandwidth);
+
+        // Parse recv section: {"packets":X,"packetsLost":X,"packetsDropped":X,"bytes":X,...}
+        if (recv_section != NULL) {
+            if ((p = strstr(recv_section, "\"packets\":")) != NULL) {
+                sscanf(p + 10, "%lld", &pkt_recv);
+            }
+            if ((p = strstr(recv_section, "\"packetsLost\":")) != NULL) {
+                sscanf(p + 14, "%lld", &pkt_rcv_loss);
+            }
+            if ((p = strstr(recv_section, "\"packetsDropped\":")) != NULL) {
+                sscanf(p + 17, "%lld", &pkt_rcv_drop);
+            }
+            if ((p = strstr(recv_section, "\"packetsRetransmitted\":")) != NULL) {
+                sscanf(p + 23, "%lld", &pkt_retrans);
+            }
+            if ((p = strstr(recv_section, "\"bytes\":")) != NULL) {
+                sscanf(p + 8, "%lld", &bytes_recv);
+            }
         }
-        if ((p = strstr(stats_json, "\"pktSent\":")) != NULL) {
-            sscanf(p + 10, "%lld", &pkt_sent);
-        }
-        if ((p = strstr(stats_json, "\"pktRecv\":")) != NULL) {
-            sscanf(p + 10, "%lld", &pkt_recv);
-        }
-        if ((p = strstr(stats_json, "\"pktSndLoss\":")) != NULL) {
-            sscanf(p + 13, "%lld", &pkt_snd_loss);
-        }
-        if ((p = strstr(stats_json, "\"pktRcvLoss\":")) != NULL) {
-            sscanf(p + 13, "%lld", &pkt_rcv_loss);
-        }
-        if ((p = strstr(stats_json, "\"pktRetrans\":")) != NULL) {
-            sscanf(p + 13, "%lld", &pkt_retrans);
-        }
-        if ((p = strstr(stats_json, "\"pktRcvDrop\":")) != NULL) {
-            sscanf(p + 13, "%lld", &pkt_rcv_drop);
-        }
-        if ((p = strstr(stats_json, "\"pktSndDrop\":")) != NULL) {
-            sscanf(p + 13, "%lld", &pkt_snd_drop);
-        }
-        if ((p = strstr(stats_json, "\"byteSent\":")) != NULL) {
-            sscanf(p + 11, "%lld", &bytes_sent);
-        }
-        if ((p = strstr(stats_json, "\"byteRecv\":")) != NULL) {
-            sscanf(p + 11, "%lld", &bytes_recv);
+
+        // Parse send section: {"packets":X,"packetsLost":X,"packetsDropped":X,"bytes":X,...}
+        if (send_section != NULL) {
+            // Need to be careful not to match recv section values
+            // send section comes before recv in the JSON
+            char *send_end = recv_section ? recv_section : stats_json + strlen(stats_json);
+
+            if ((p = strstr(send_section, "\"packets\":")) != NULL && p < send_end) {
+                sscanf(p + 10, "%lld", &pkt_sent);
+            }
+            if ((p = strstr(send_section, "\"packetsLost\":")) != NULL && p < send_end) {
+                sscanf(p + 14, "%lld", &pkt_snd_loss);
+            }
+            if ((p = strstr(send_section, "\"packetsDropped\":")) != NULL && p < send_end) {
+                sscanf(p + 17, "%lld", &pkt_snd_drop);
+            }
+            if ((p = strstr(send_section, "\"bytes\":")) != NULL && p < send_end) {
+                sscanf(p + 8, "%lld", &bytes_sent);
+            }
         }
 
         // Build our response JSON
