@@ -172,6 +172,7 @@ static int detect_stream_with_ffprobe(void);
 
 /* Full transcoding pipeline functions */
 static int create_transcode_pipeline(void);
+static void print_pipeline_description(void);
 static GstElement *create_video_bin(void);
 static GstElement *create_audio_bin(void);
 static void on_transcode_pad_added(GstElement *element, GstPad *pad, gpointer data);
@@ -1653,6 +1654,70 @@ static GstElement *create_audio_bin(void) {
 }
 
 /*
+ * Print the equivalent gst-launch pipeline for debugging
+ */
+static void print_pipeline_description(void) {
+    const char *in_video_parser = get_video_parser_name(g_ctx.stream_info.video_codec);
+    const char *in_video_decoder = get_video_decoder_name(g_ctx.stream_info.video_codec);
+    const char *in_audio_parser = get_audio_parser_name(g_ctx.stream_info.audio_codec);
+    const char *in_audio_decoder = get_audio_decoder_name(g_ctx.stream_info.audio_codec);
+
+    const char *out_video_encoder = NULL;
+    const char *out_video_parser = NULL;
+    const char *out_audio_encoder = NULL;
+
+    switch (g_ctx.video_out_codec) {
+        case VIDEO_CODEC_H264:
+            out_video_encoder = "x264enc";
+            out_video_parser = "h264parse";
+            break;
+        case VIDEO_CODEC_H265:
+            out_video_encoder = "x265enc";
+            out_video_parser = "h265parse";
+            break;
+        case VIDEO_CODEC_MPEG2:
+            out_video_encoder = "mpeg2enc";
+            out_video_parser = "mpegvideoparse";
+            break;
+        default:
+            out_video_encoder = "unknown";
+            out_video_parser = "unknown";
+    }
+
+    switch (g_ctx.audio_out_codec) {
+        case AUDIO_CODEC_AAC:
+            out_audio_encoder = "voaacenc";
+            break;
+        case AUDIO_CODEC_AC3:
+            out_audio_encoder = "avenc_ac3";
+            break;
+        case AUDIO_CODEC_MP2:
+            out_audio_encoder = "twolamemp2enc";
+            break;
+        default:
+            out_audio_encoder = "unknown";
+    }
+
+    fprintf(stderr, "\n=== Equivalent gst-launch pipeline ===\n");
+    fprintf(stderr, "gst-launch-1.0 -v \\\n");
+    fprintf(stderr, "  udpsrc uri=udp://%s:%d ! queue ! tsparse ! tsdemux name=demux \\\n",
+            g_ctx.input_address, g_ctx.input_port);
+    fprintf(stderr, "  demux. ! queue ! %s ! %s ! videoconvert ! %s bitrate=%d ! %s ! mux. \\\n",
+            in_video_parser ? in_video_parser : "ERROR_NO_PARSER",
+            in_video_decoder ? in_video_decoder : "ERROR_NO_DECODER",
+            out_video_encoder,
+            g_ctx.video_bitrate / 1000,
+            out_video_parser);
+    fprintf(stderr, "  demux. ! queue ! %s ! %s ! audioconvert ! audioresample ! %s bitrate=%d ! mux. \\\n",
+            in_audio_parser ? in_audio_parser : "ERROR_NO_PARSER",
+            in_audio_decoder ? in_audio_decoder : "ERROR_NO_DECODER",
+            out_audio_encoder,
+            g_ctx.audio_bitrate);
+    fprintf(stderr, "  mpegtsmux name=mux ! fdsink fd=1\n");
+    fprintf(stderr, "=======================================\n\n");
+}
+
+/*
  * Create full transcoding pipeline
  * UDP -> tsdemux -> video_bin/audio_bin -> mpegtsmux -> fdsink (stdout)
  */
@@ -1682,6 +1747,9 @@ static int create_transcode_pipeline(void) {
             g_ctx.video_bitrate,
             audio_codec_to_string(g_ctx.audio_out_codec),
             g_ctx.audio_bitrate);
+
+    /* Print pipeline description for debugging */
+    print_pipeline_description();
 
     /* Create pipeline */
     g_ctx.pipeline = gst_pipeline_new("transcode-pipeline");
@@ -1730,8 +1798,8 @@ static int create_transcode_pipeline(void) {
     g_object_set(fdsink, "fd", 1, NULL);  /* fd 1 = stdout */
     g_object_set(fdsink, "sync", FALSE, NULL);
 
-    /* Add source elements */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, NULL);
+    /* Add source elements AND mux/fdsink to pipeline (mux must be added before linking) */
+    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, fdsink, NULL);
 
     /* Link source chain */
     if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
@@ -1789,9 +1857,7 @@ static int create_transcode_pipeline(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Add mux and sink */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline), mux, fdsink, NULL);
-
+    /* Link mux to fdsink (already added to pipeline above) */
     if (!gst_element_link(mux, fdsink)) {
         fprintf(stderr, "Error: Failed to link mux to fdsink\n");
         return -1;
