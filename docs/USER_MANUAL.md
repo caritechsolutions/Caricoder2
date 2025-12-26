@@ -60,16 +60,23 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
 
    **Source Settings (for HLS):**
    - **URL**: Full HLS playlist URL (e.g., `https://example.com/stream.m3u8`)
-   - **Live Mode**: Enable for live streams (default: Yes)
-   - **Bitrate Selection**: Auto, Highest, Lowest, or specify Max/Min value
-   - **Bitrate Value**: Target bitrate in kbps (for Max/Min modes)
-   - **Resolution**: Auto, Highest, or Lowest resolution variant
+   - HLS streams are received via ffmpeg for reliable playback
+   - ffmpeg remuxes the stream with automatic PID assignment (video=256, audio=257)
+   - Use the **Scan** button to discover PIDs before saving
 
    **Source Settings (for HTTP):**
    - **URL**: Direct HTTP URL to MPEG-TS stream (e.g., `http://server:port/path/mpegts`)
    - HTTP input is simpler than HLS - it receives MPEG-TS directly over HTTP
    - No bitrate or resolution selection needed
    - Uses TSDuck's HTTP plugin for reliable transport stream reception
+
+   **Source Settings (for RIST):**
+   - **Address**: RIST server address (e.g., `239.0.0.1:5000` or `server.com:5000`)
+   - **Profile**: RIST profile - Simple, Main (default), or Advanced
+   - **Buffer**: Buffer size in milliseconds for retransmissions (0 = disabled for low latency)
+   - **Encryption**: Encryption type - Disabled, AES-128, or AES-256
+   - **Secret**: Encryption passphrase (required if encryption is enabled)
+   - RIST provides reliable transport with automatic retransmission of lost packets
 
    **PID Configuration:**
    - **Video PID**: The MPEG-TS PID for video (e.g., `211`)

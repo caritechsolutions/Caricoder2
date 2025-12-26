@@ -56,7 +56,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | `udp_input` | UDP input tool with PID filtering and monitoring |
 | `srt_input` | SRT input tool with caller/listener modes and encryption |
 | `rist_input` | RIST input tool with Simple/Main/Advanced profiles and encryption |
-| `hls_input` | HLS input tool with bitrate/resolution selection |
+| `hls_input` | HLS input tool using ffmpeg for reliable stream reception |
 | `player_preview` | HLS preview generator using FFmpeg |
 
 ## Requirements
@@ -307,7 +307,7 @@ Building on the UDP input foundation:
 - [x] **UDP Input** - Multicast/unicast with PID filtering and real-time monitoring
 - [x] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes, encryption, streamid
 - [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control
-- [ ] **HLS Input** - HTTP Live Streaming (partial - stability issues, needs GStreamer pipeline rewrite)
+- [x] **HLS Input** - HTTP Live Streaming via ffmpeg with automatic PID discovery
 
 ### Planned Features
 - [x] Web UI for input configuration wizard with type-specific options
@@ -336,9 +336,17 @@ Building on the UDP input foundation:
 - Fixed timezone mismatch between A/V sync and bandwidth graph
 - Both now display timestamps in browser-local timezone
 
+**HLS Input Rewrite**
+- Replaced TSDuck HLS plugin with ffmpeg for improved stability
+- Uses `tsp -I fork` with `ffmpeg -re -i URL -c copy -f mpegts pipe:1`
+- ffmpeg handles HLS edge cases more reliably (chunked transfers, redirects, authentication)
+- Automatic PID discovery via ffmpeg remuxing (video=256, audio=257, etc.)
+- Scanning updated to use ffmpeg for consistent PID detection
+- Same architecture as RIST input for maintainability
+
 ### 2024-12-22
 
-**HLS Input Support**
+**HLS Input Support (Initial - replaced by ffmpeg in 2024-12-26)**
 - New `hls_input` tool using TSDuck HLS plugin
 - Supports live mode (--live) for live HLS streams
 - Bitrate selection: auto, highest, lowest, max/min with value
