@@ -88,7 +88,7 @@ void print_help(const char *prog) {
     printf("\nGeneral Options:\n");
     printf("  --log-file FILE              Log file path (default: /tmp/rist_input.log)\n");
     printf("  --api-port PORT              REST API port (default: 8080)\n");
-    printf("  --rist-metrics-port PORT     RIST metrics port (default: api-port + 1000)\n");
+    printf("  --rist-metrics-port PORT     RIST metrics port (default: api-port + 2000)\n");
     printf("  --stall-timeout SECONDS      Stall timeout (default: 30)\n");
     printf("  --history-hours HOURS        History retention (default: 24)\n");
     printf("  --help                       Show this help\n");
@@ -711,8 +711,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Set default rist_metrics_port if not specified
+    // Use api_port + 2000 to avoid conflict with player_preview (which uses api_port + 1000)
     if (g_ctx.rist_metrics_port == 0) {
-        g_ctx.rist_metrics_port = g_ctx.api_port + 1000;
+        g_ctx.rist_metrics_port = g_ctx.api_port + 2000;
     }
 
     // Initialize monitors
