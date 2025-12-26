@@ -1229,11 +1229,12 @@ static void print_detected_info(void) {
 
 /*
  * Get GStreamer decoder element name for input video codec
+ * Uses libav decoders (gstreamer1.0-libav) to match Python implementation
  */
 static const char *get_video_decoder_name(VideoCodec codec) {
     switch (codec) {
         case VIDEO_CODEC_H264:  return "avdec_h264";
-        case VIDEO_CODEC_H265:  return "libde265dec";    /* de265 decoder (avdec_h265 not available) */
+        case VIDEO_CODEC_H265:  return "avdec_h265";
         case VIDEO_CODEC_MPEG2: return "avdec_mpeg2video";
         default:                return NULL;
     }
@@ -1253,10 +1254,11 @@ static const char *get_video_parser_name(VideoCodec codec) {
 
 /*
  * Get GStreamer decoder element name for input audio codec
+ * Uses libav decoders (gstreamer1.0-libav) to match Python implementation
  */
 static const char *get_audio_decoder_name(AudioCodec codec) {
     switch (codec) {
-        case AUDIO_CODEC_AAC:   return "faad";           /* FAAD decoder (avdec_aac not available) */
+        case AUDIO_CODEC_AAC:   return "avdec_aac";
         case AUDIO_CODEC_AC3:   return "avdec_ac3";
         case AUDIO_CODEC_EAC3:  return "avdec_eac3";
         case AUDIO_CODEC_MP2:   return "avdec_mp2float";
@@ -1408,27 +1410,26 @@ static GstElement *create_video_bin(void) {
         return NULL;
     }
 
-    /* Configure encoder */
+    /* Configure encoder - match Python settings exactly */
     if (g_ctx.video_out_codec == VIDEO_CODEC_H264) {
+        /* x264enc: tune=zerolatency (0x4), speed-preset=superfast (2) */
         g_object_set(encoder,
                      "bitrate", g_ctx.video_bitrate / 1000,  /* x264enc uses kbps */
                      "key-int-max", g_ctx.keyframe_interval,
-                     "bframes", g_ctx.bframes,
-                     "speed-preset", g_ctx.video_preset,  /* enum matches our preset enum */
-                     "tune", 0x4,  /* zerolatency */
+                     "speed-preset", 2,  /* superfast */
+                     "tune", 0x00000004,  /* zerolatency */
                      NULL);
     } else if (g_ctx.video_out_codec == VIDEO_CODEC_H265) {
         g_object_set(encoder,
                      "bitrate", g_ctx.video_bitrate / 1000,
                      "key-int-max", g_ctx.keyframe_interval,
-                     "speed-preset", g_ctx.video_preset,
+                     "speed-preset", 2,  /* superfast */
                      "tune", 4,  /* zerolatency */
                      NULL);
     } else if (g_ctx.video_out_codec == VIDEO_CODEC_MPEG2) {
         g_object_set(encoder,
                      "bitrate", g_ctx.video_bitrate,
                      "gop-size", g_ctx.keyframe_interval,
-                     "max-bframes", g_ctx.bframes,
                      NULL);
     }
 
@@ -1537,38 +1538,29 @@ static GstElement *create_audio_bin(void) {
         return NULL;
     }
 
-    /* Configure queue */
+    /* Configure queue - match Python settings */
     g_object_set(queue,
+                 "leaky", 1,  /* downstream */
                  "max-size-buffers", 0,
-                 "max-size-time", (guint64)5000000000,
+                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
                  "max-size-bytes", 0,
                  NULL);
 
-    /* Create encoder based on output codec */
+    /* Create encoder based on output codec - use avenc_* to match Python */
     const char *encoder_name = NULL;
 
     switch (g_ctx.audio_out_codec) {
         case AUDIO_CODEC_AAC:
-            /* Try fdkaacenc first, fall back to voaacenc */
-            encoder = gst_element_factory_make("fdkaacenc", "audio_encoder");
-            if (!encoder) {
-                encoder = gst_element_factory_make("voaacenc", "audio_encoder");
-            }
-            if (!encoder) {
-                encoder = gst_element_factory_make("avenc_aac", "audio_encoder");
-            }
-            encoder_name = "aac encoder";
+            encoder = gst_element_factory_make("avenc_aac", "audio_encoder");
+            encoder_name = "avenc_aac";
             break;
         case AUDIO_CODEC_AC3:
             encoder = gst_element_factory_make("avenc_ac3", "audio_encoder");
             encoder_name = "avenc_ac3";
             break;
         case AUDIO_CODEC_MP2:
-            encoder = gst_element_factory_make("twolame", "audio_encoder");
-            if (!encoder) {
-                encoder = gst_element_factory_make("avenc_mp2", "audio_encoder");
-            }
-            encoder_name = "mp2 encoder";
+            encoder = gst_element_factory_make("avenc_mp2", "audio_encoder");
+            encoder_name = "avenc_mp2";
             break;
         default:
             fprintf(stderr, "Error: Unsupported output audio codec\n");
@@ -1687,13 +1679,13 @@ static void print_pipeline_description(void) {
 
     switch (g_ctx.audio_out_codec) {
         case AUDIO_CODEC_AAC:
-            out_audio_encoder = "voaacenc";
+            out_audio_encoder = "avenc_aac";
             break;
         case AUDIO_CODEC_AC3:
             out_audio_encoder = "avenc_ac3";
             break;
         case AUDIO_CODEC_MP2:
-            out_audio_encoder = "twolamemp2enc";
+            out_audio_encoder = "avenc_mp2";
             break;
         default:
             out_audio_encoder = "unknown";
@@ -1701,20 +1693,28 @@ static void print_pipeline_description(void) {
 
     fprintf(stderr, "\n=== Equivalent gst-launch pipeline ===\n");
     fprintf(stderr, "gst-launch-1.0 -v \\\n");
-    fprintf(stderr, "  udpsrc uri=udp://%s:%d ! queue ! tsparse ! tsdemux name=demux \\\n",
+    fprintf(stderr, "  udpsrc uri=udp://%s:%d buffer-size=2097152 ! \\\n",
             g_ctx.input_address, g_ctx.input_port);
-    fprintf(stderr, "  demux. ! queue ! %s ! %s ! videoconvert ! %s bitrate=%d ! %s ! mux. \\\n",
+    fprintf(stderr, "  queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
+    fprintf(stderr, "  tsparse ! tsdemux name=demux \\\n");
+    fprintf(stderr, "  demux. ! queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
+    fprintf(stderr, "    %s ! %s ! videoconvert ! \\\n",
             in_video_parser ? in_video_parser : "ERROR_NO_PARSER",
-            in_video_decoder ? in_video_decoder : "ERROR_NO_DECODER",
+            in_video_decoder ? in_video_decoder : "ERROR_NO_DECODER");
+    fprintf(stderr, "    %s tune=zerolatency speed-preset=superfast bitrate=%d key-int-max=%d ! mux. \\\n",
             out_video_encoder,
             g_ctx.video_bitrate / 1000,
-            out_video_parser);
-    fprintf(stderr, "  demux. ! queue ! %s ! %s ! audioconvert ! audioresample ! %s bitrate=%d ! mux. \\\n",
+            g_ctx.keyframe_interval);
+    fprintf(stderr, "  demux. ! queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
+    fprintf(stderr, "    %s ! %s ! audioconvert ! audioresample ! \\\n",
             in_audio_parser ? in_audio_parser : "ERROR_NO_PARSER",
-            in_audio_decoder ? in_audio_decoder : "ERROR_NO_DECODER",
+            in_audio_decoder ? in_audio_decoder : "ERROR_NO_DECODER");
+    fprintf(stderr, "    %s bitrate=%d ! mux. \\\n",
             out_audio_encoder,
             g_ctx.audio_bitrate);
-    fprintf(stderr, "  mpegtsmux name=mux ! fdsink fd=1\n");
+    fprintf(stderr, "  mpegtsmux name=mux ! \\\n");
+    fprintf(stderr, "  queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
+    fprintf(stderr, "  queue ! tcpserversink host=0.0.0.0 port=8888 sync=true async=true\n");
     fprintf(stderr, "=======================================\n\n");
 }
 
@@ -1725,7 +1725,7 @@ static void print_pipeline_description(void) {
 static int create_transcode_pipeline(void) {
     GstElement *udpsrc, *queue, *tsparse, *tsdemux;
     GstElement *video_bin = NULL, *audio_bin = NULL;
-    GstElement *mux, *fdsink;
+    GstElement *mux;
     GstElement *video_null = NULL, *audio_null = NULL;
     char uri[256];
 
@@ -1779,38 +1779,43 @@ static int create_transcode_pipeline(void) {
         g_object_set(udpsrc, "multicast-iface", g_ctx.input_interface, NULL);
     }
 
-    /* Configure queue */
+    /* Configure input queue - match Python settings */
     g_object_set(queue,
+                 "leaky", 1,  /* downstream */
                  "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,
+                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
                  "max-size-bytes", 0,
                  NULL);
 
-    /* Create output elements */
+    /* Create output elements - match working gst-launch pipeline */
     mux = gst_element_factory_make("mpegtsmux", "mux");
-    GstElement *out_queue = gst_element_factory_make("queue", "output_queue");
-    fdsink = gst_element_factory_make("fdsink", "fdsink");
+    GstElement *out_queue1 = gst_element_factory_make("queue", "output_queue1");
+    GstElement *out_queue2 = gst_element_factory_make("queue", "output_queue2");
+    GstElement *tcpsink = gst_element_factory_make("tcpserversink", "tcpsink");
 
-    if (!mux || !out_queue || !fdsink) {
+    if (!mux || !out_queue1 || !out_queue2 || !tcpsink) {
         fprintf(stderr, "Error: Failed to create mux/sink elements\n");
         return -1;
     }
 
-    /* Configure output queue - match working gst-launch settings */
-    g_object_set(out_queue,
-                 "max-size-time", (guint64)500000000000,  /* 500 seconds */
-                 "max-size-buffers", 1000000,
-                 "max-size-bytes", 0,
+    /* Configure output queue1 - match Python settings */
+    g_object_set(out_queue1,
                  "leaky", 1,  /* downstream */
+                 "max-size-buffers", 0,
+                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
+                 "max-size-bytes", 0,
                  NULL);
 
-    /* Configure fdsink to output to stdout */
-    g_object_set(fdsink, "fd", 1, NULL);  /* fd 1 = stdout */
-    g_object_set(fdsink, "sync", FALSE, NULL);
-    g_object_set(fdsink, "async", FALSE, NULL);
+    /* Configure tcpserversink for testing - match Python sync settings */
+    g_object_set(tcpsink,
+                 "host", "0.0.0.0",
+                 "port", 8888,
+                 "sync", TRUE,
+                 "async", TRUE,
+                 NULL);
 
-    /* Add source elements AND mux/queue/fdsink to pipeline (mux must be added before linking) */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, out_queue, fdsink, NULL);
+    /* Add source elements AND mux/queues/tcpsink to pipeline (mux must be added before linking) */
+    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, out_queue1, out_queue2, tcpsink, NULL);
 
     /* Link source chain */
     if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
@@ -1868,9 +1873,9 @@ static int create_transcode_pipeline(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Link mux -> output_queue -> fdsink */
-    if (!gst_element_link_many(mux, out_queue, fdsink, NULL)) {
-        fprintf(stderr, "Error: Failed to link mux to fdsink\n");
+    /* Link mux -> output_queue1 -> output_queue2 -> tcpsink */
+    if (!gst_element_link_many(mux, out_queue1, out_queue2, tcpsink, NULL)) {
+        fprintf(stderr, "Error: Failed to link mux to tcpsink\n");
         return -1;
     }
 
