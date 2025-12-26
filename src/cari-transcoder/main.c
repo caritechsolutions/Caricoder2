@@ -1232,7 +1232,7 @@ static void print_detected_info(void) {
 static const char *get_video_decoder_name(VideoCodec codec) {
     switch (codec) {
         case VIDEO_CODEC_H264:  return "avdec_h264";
-        case VIDEO_CODEC_H265:  return "avdec_h265";
+        case VIDEO_CODEC_H265:  return "libde265dec";    /* de265 decoder (avdec_h265 not available) */
         case VIDEO_CODEC_MPEG2: return "avdec_mpeg2video";
         default:                return NULL;
     }
@@ -1255,7 +1255,7 @@ static const char *get_video_parser_name(VideoCodec codec) {
  */
 static const char *get_audio_decoder_name(AudioCodec codec) {
     switch (codec) {
-        case AUDIO_CODEC_AAC:   return "avdec_aac";
+        case AUDIO_CODEC_AAC:   return "faad";           /* FAAD decoder (avdec_aac not available) */
         case AUDIO_CODEC_AC3:   return "avdec_ac3";
         case AUDIO_CODEC_EAC3:  return "avdec_eac3";
         case AUDIO_CODEC_MP2:   return "avdec_mp2float";
