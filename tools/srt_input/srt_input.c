@@ -150,6 +150,28 @@ int parse_pids(const char *pids_str) {
     return count;
 }
 
+// URL-encode a string for safe inclusion in URLs
+// Encodes special characters like #, !, space, etc.
+void url_encode(const char *src, char *dst, size_t dst_size) {
+    const char *hex = "0123456789ABCDEF";
+    size_t i = 0;
+
+    while (*src && i < dst_size - 4) {  // -4 for potential %XX + null
+        char c = *src;
+        // Characters that need encoding in URLs
+        if (c == '#' || c == '!' || c == ' ' || c == '%' || c == '&' ||
+            c == '=' || c == '?' || c == '+' || c == '\'' || c == '"') {
+            dst[i++] = '%';
+            dst[i++] = hex[(c >> 4) & 0x0F];
+            dst[i++] = hex[c & 0x0F];
+        } else {
+            dst[i++] = c;
+        }
+        src++;
+    }
+    dst[i] = '\0';
+}
+
 void init_context() {
     memset(&g_ctx, 0, sizeof(g_ctx));
     strcpy(g_ctx.input_id, "default");
@@ -332,10 +354,12 @@ void* tsp_manager_thread(void *arg) {
         srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
             "&latency=%d&transtype=live", g_ctx.latency);
 
-        // Optional: Stream ID
+        // Optional: Stream ID (URL-encode to handle special characters like #!)
         if (g_ctx.streamid[0]) {
+            char encoded_streamid[512];
+            url_encode(g_ctx.streamid, encoded_streamid, sizeof(encoded_streamid));
             srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
-                "&streamid=%s", g_ctx.streamid);
+                "&streamid=%s", encoded_streamid);
         }
 
         // Optional: Encryption
@@ -356,6 +380,8 @@ void* tsp_manager_thread(void *arg) {
 
         // Build tsp command using fork input
         argv[argc++] = "tsp";
+        argv[argc++] = "--buffer-size-mb";
+        argv[argc++] = "1";
         argv[argc++] = "-I";
         argv[argc++] = "fork";
         argv[argc++] = srt_cmd;
