@@ -165,6 +165,7 @@ static int create_detection_pipeline(void);
 static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data);
 static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
 static void print_detected_info(void);
+static GstPadProbeReturn on_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data);
 
 /* Full transcoding pipeline functions */
 static int create_transcode_pipeline(void);
@@ -631,6 +632,163 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
 }
 
 /*
+ * Helper to parse video caps into stream info
+ */
+static void parse_video_caps(GstCaps *caps) {
+    if (!caps || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
+        return;
+    }
+
+    GstStructure *str = gst_caps_get_structure(caps, 0);
+    const gchar *name = gst_structure_get_name(str);
+
+    if (!g_str_has_prefix(name, "video/")) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_ctx.lock);
+
+    /* Parse video codec */
+    if (g_strcmp0(name, "video/x-h264") == 0) {
+        g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
+    } else if (g_strcmp0(name, "video/x-h265") == 0) {
+        g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
+    } else if (g_strcmp0(name, "video/mpeg") == 0) {
+        gint mpegversion = 0;
+        gst_structure_get_int(str, "mpegversion", &mpegversion);
+        if (mpegversion == 2) {
+            g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
+        }
+    }
+
+    gst_structure_get_int(str, "width", &g_ctx.stream_info.video_width);
+    gst_structure_get_int(str, "height", &g_ctx.stream_info.video_height);
+
+    gint fps_num = 0, fps_den = 1;
+    if (gst_structure_get_fraction(str, "framerate", &fps_num, &fps_den)) {
+        g_ctx.stream_info.video_fps_num = fps_num;
+        g_ctx.stream_info.video_fps_den = fps_den;
+    }
+
+    const gchar *interlace_mode = gst_structure_get_string(str, "interlace-mode");
+    g_ctx.stream_info.video_interlaced =
+        (interlace_mode && g_strcmp0(interlace_mode, "progressive") != 0);
+
+    const gchar *profile = gst_structure_get_string(str, "profile");
+    if (profile) {
+        strncpy(g_ctx.stream_info.video_profile, profile,
+                sizeof(g_ctx.stream_info.video_profile) - 1);
+    }
+
+    g_ctx.stream_info.video_detected = TRUE;
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
+                video_codec_to_string(g_ctx.stream_info.video_codec),
+                g_ctx.stream_info.video_width,
+                g_ctx.stream_info.video_height,
+                g_ctx.stream_info.video_fps_num,
+                g_ctx.stream_info.video_fps_den,
+                g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
+    }
+
+    pthread_mutex_unlock(&g_ctx.lock);
+}
+
+/*
+ * Helper to parse audio caps into stream info
+ */
+static void parse_audio_caps(GstCaps *caps) {
+    if (!caps || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
+        return;
+    }
+
+    GstStructure *str = gst_caps_get_structure(caps, 0);
+    const gchar *name = gst_structure_get_name(str);
+
+    if (!g_str_has_prefix(name, "audio/")) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_ctx.lock);
+
+    /* Parse audio codec */
+    if (g_strcmp0(name, "audio/mpeg") == 0) {
+        gint mpegversion = 0;
+        gst_structure_get_int(str, "mpegversion", &mpegversion);
+        if (mpegversion == 4 || mpegversion == 2) {
+            g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
+        } else if (mpegversion == 1) {
+            gint layer = 0;
+            gst_structure_get_int(str, "layer", &layer);
+            if (layer == 2) {
+                g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
+            }
+        }
+    } else if (g_strcmp0(name, "audio/x-ac3") == 0) {
+        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
+    } else if (g_strcmp0(name, "audio/x-eac3") == 0) {
+        g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
+    }
+
+    gst_structure_get_int(str, "channels", &g_ctx.stream_info.audio_channels);
+    gst_structure_get_int(str, "rate", &g_ctx.stream_info.audio_sample_rate);
+
+    g_ctx.stream_info.audio_detected = TRUE;
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
+                audio_codec_to_string(g_ctx.stream_info.audio_codec),
+                g_ctx.stream_info.audio_channels,
+                g_ctx.stream_info.audio_sample_rate);
+    }
+
+    pthread_mutex_unlock(&g_ctx.lock);
+}
+
+/*
+ * Pad probe to capture caps when they become available/change
+ * This catches the full caps including width/height/framerate
+ */
+static GstPadProbeReturn on_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data) {
+    gboolean is_video = GPOINTER_TO_INT(data);
+    GstEvent *event;
+
+    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
+        event = GST_PAD_PROBE_INFO_EVENT(info);
+
+        if (GST_EVENT_TYPE(event) == GST_EVENT_CAPS) {
+            GstCaps *caps = NULL;
+            gst_event_parse_caps(event, &caps);
+
+            if (g_ctx.debug && caps) {
+                gchar *caps_str = gst_caps_to_string(caps);
+                fprintf(stderr, "Caps event on %s: %s\n", GST_PAD_NAME(pad), caps_str);
+                g_free(caps_str);
+            }
+
+            if (is_video) {
+                parse_video_caps(caps);
+            } else {
+                parse_audio_caps(caps);
+            }
+
+            /* Check if we have both streams with full info */
+            if (g_ctx.detect_only &&
+                g_ctx.stream_info.video_detected &&
+                g_ctx.stream_info.audio_detected &&
+                g_ctx.stream_info.video_width > 0 &&
+                g_ctx.stream_info.audio_sample_rate > 0) {
+                /* We have complete info, schedule quit */
+                g_timeout_add(200, quit_main_loop_cb, g_ctx.main_loop);
+            }
+        }
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
+/*
  * Callback when tsdemux adds a new pad (video or audio stream found)
  */
 static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data) {
@@ -656,94 +814,46 @@ static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data) 
         g_free(caps_str);
     }
 
-    pthread_mutex_lock(&g_ctx.lock);
+    GstElement *sink = NULL;
+    gboolean is_video = FALSE;
 
     if (g_str_has_prefix(name, "video/")) {
-        /* Parse video caps */
-        if (g_strcmp0(name, "video/x-h264") == 0) {
-            g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
-        } else if (g_strcmp0(name, "video/x-h265") == 0) {
-            g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
-        } else if (g_strcmp0(name, "video/mpeg") == 0) {
-            gint mpegversion = 0;
-            gst_structure_get_int(str, "mpegversion", &mpegversion);
-            if (mpegversion == 2) {
-                g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
-            }
-        }
-
-        gst_structure_get_int(str, "width", &g_ctx.stream_info.video_width);
-        gst_structure_get_int(str, "height", &g_ctx.stream_info.video_height);
-
-        gint fps_num = 0, fps_den = 1;
-        if (gst_structure_get_fraction(str, "framerate", &fps_num, &fps_den)) {
-            g_ctx.stream_info.video_fps_num = fps_num;
-            g_ctx.stream_info.video_fps_den = fps_den;
-        }
-
-        const gchar *interlace_mode = gst_structure_get_string(str, "interlace-mode");
-        g_ctx.stream_info.video_interlaced =
-            (interlace_mode && g_strcmp0(interlace_mode, "progressive") != 0);
-
-        const gchar *profile = gst_structure_get_string(str, "profile");
-        if (profile) {
-            strncpy(g_ctx.stream_info.video_profile, profile,
-                    sizeof(g_ctx.stream_info.video_profile) - 1);
-        }
-
-        g_ctx.stream_info.video_detected = TRUE;
-
-        if (g_ctx.debug) {
-            fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
-                    video_codec_to_string(g_ctx.stream_info.video_codec),
-                    g_ctx.stream_info.video_width,
-                    g_ctx.stream_info.video_height,
-                    g_ctx.stream_info.video_fps_num,
-                    g_ctx.stream_info.video_fps_den,
-                    g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
-        }
-
+        sink = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "fakesink_v");
+        is_video = TRUE;
+        /* Initial parse of video caps */
+        parse_video_caps(caps);
     } else if (g_str_has_prefix(name, "audio/")) {
-        /* Parse audio caps */
-        if (g_strcmp0(name, "audio/mpeg") == 0) {
-            gint mpegversion = 0;
-            gst_structure_get_int(str, "mpegversion", &mpegversion);
-            if (mpegversion == 4 || mpegversion == 2) {
-                g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
-            } else if (mpegversion == 1) {
-                gint layer = 0;
-                gst_structure_get_int(str, "layer", &layer);
-                if (layer == 2) {
-                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
-                }
-            }
-        } else if (g_strcmp0(name, "audio/x-ac3") == 0) {
-            g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
-        } else if (g_strcmp0(name, "audio/x-eac3") == 0) {
-            g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
-        }
-
-        gst_structure_get_int(str, "channels", &g_ctx.stream_info.audio_channels);
-        gst_structure_get_int(str, "rate", &g_ctx.stream_info.audio_sample_rate);
-
-        g_ctx.stream_info.audio_detected = TRUE;
-
-        if (g_ctx.debug) {
-            fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
-                    audio_codec_to_string(g_ctx.stream_info.audio_codec),
-                    g_ctx.stream_info.audio_channels,
-                    g_ctx.stream_info.audio_sample_rate);
-        }
+        sink = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "fakesink_a");
+        is_video = FALSE;
+        /* Initial parse of audio caps */
+        parse_audio_caps(caps);
     }
 
-    pthread_mutex_unlock(&g_ctx.lock);
+    if (sink) {
+        GstPad *sink_pad = gst_element_get_static_pad(sink, "sink");
 
-    /* Check if we have both streams detected in detect-only mode */
-    if (g_ctx.detect_only &&
-        g_ctx.stream_info.video_detected &&
-        g_ctx.stream_info.audio_detected) {
-        /* Give it a moment to stabilize, then quit */
-        g_timeout_add(500, quit_main_loop_cb, g_ctx.main_loop);
+        if (sink_pad && !gst_pad_is_linked(sink_pad)) {
+            /* Add a probe to capture caps events for full stream info */
+            gst_pad_add_probe(pad,
+                              GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                              on_caps_probe,
+                              GINT_TO_POINTER(is_video),
+                              NULL);
+
+            /* Link the pad to the fakesink */
+            GstPadLinkReturn link_ret = gst_pad_link(pad, sink_pad);
+            if (link_ret != GST_PAD_LINK_OK) {
+                fprintf(stderr, "Warning: Failed to link %s pad: %d\n",
+                        is_video ? "video" : "audio", link_ret);
+            } else if (g_ctx.debug) {
+                fprintf(stderr, "Linked %s pad to fakesink\n", is_video ? "video" : "audio");
+            }
+        }
+
+        if (sink_pad) {
+            gst_object_unref(sink_pad);
+        }
+        gst_object_unref(sink);
     }
 
     gst_caps_unref(caps);
