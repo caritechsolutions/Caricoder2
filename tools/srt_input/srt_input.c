@@ -643,6 +643,11 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         char line[8192];
         stats_json[0] = '\0';
 
+        // Get file size for truncation decision
+        fseek(fp, 0, SEEK_END);
+        long file_size = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+
         while (fgets(line, sizeof(line), fp) != NULL) {
             // Keep only the last non-empty line
             if (strlen(line) > 1) {
@@ -651,6 +656,17 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
             }
         }
         fclose(fp);
+
+        // Truncate file if it exceeds 50KB to prevent unbounded growth
+        // srt-live-transmit will continue appending from the beginning
+        if (file_size > 50 * 1024 && strlen(stats_json) > 0) {
+            FILE *wf = fopen(g_ctx.srt_stats_file, "w");
+            if (wf) {
+                // Write last line back so we don't lose current stats
+                fputs(stats_json, wf);
+                fclose(wf);
+            }
+        }
 
         // Parse key values from the JSON
         // srt-live-transmit outputs nested JSON like:
