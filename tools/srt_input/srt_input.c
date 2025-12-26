@@ -20,6 +20,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define MAX_PIDS 32
 #define HISTORY_SIZE 17280  // 24 hours * 60 min * 60 sec / 5 sec per sample
@@ -65,6 +68,7 @@ typedef struct {
     char input_id[64];          // Input identifier for unique file names
     char log_file[256];
     char srt_stats_file[256];   // Path to srt-live-transmit stats JSON file
+    char srt_stats_pipe[256];   // Named pipe for stats (avoids file position issues)
     int api_port;
     uint16_t program_pid;
     uint16_t pids[MAX_PIDS];
@@ -177,6 +181,7 @@ void init_context() {
     strcpy(g_ctx.input_id, "default");
     strcpy(g_ctx.log_file, "/tmp/srt_input.log");
     strcpy(g_ctx.srt_stats_file, "/tmp/srt-input-stats.json");
+    strcpy(g_ctx.srt_stats_pipe, "/tmp/srt-input-stats.pipe");
     g_ctx.api_port = 8080;
     g_ctx.stall_timeout = 30;
     g_ctx.history_hours = 24;
@@ -216,6 +221,9 @@ void cleanup_stats_file() {
     if (g_ctx.srt_stats_file[0]) {
         unlink(g_ctx.srt_stats_file);
     }
+    if (g_ctx.srt_stats_pipe[0]) {
+        unlink(g_ctx.srt_stats_pipe);
+    }
 }
 
 void signal_handler(int sig) {
@@ -248,21 +256,58 @@ void add_bitrate_sample(PIDMonitor *m, time_t ts, uint32_t bitrate) {
     g_ctx.last_data_received = time(NULL);
 }
 
+// Stats pipe reader thread - reads from named pipe and writes to JSON file
+// Each line from pipe overwrites the file (no accumulation, no sparse file issues)
+void* stats_pipe_reader_thread(void *arg) {
+    (void)arg;
+    char line[8192];
+
+    fprintf(stderr, "Stats pipe reader started, reading from: %s\n", g_ctx.srt_stats_pipe);
+
+    while (g_ctx.running) {
+        // Open the pipe for reading (blocks until writer connects)
+        int fd = open(g_ctx.srt_stats_pipe, O_RDONLY);
+        if (fd < 0) {
+            if (g_ctx.running) {
+                fprintf(stderr, "Failed to open stats pipe: %s\n", strerror(errno));
+                sleep(1);
+            }
+            continue;
+        }
+
+        FILE *pipe_fp = fdopen(fd, "r");
+        if (!pipe_fp) {
+            close(fd);
+            continue;
+        }
+
+        // Read lines from pipe and write each one to the stats file (overwriting)
+        while (g_ctx.running && fgets(line, sizeof(line), pipe_fp)) {
+            // Skip empty lines
+            if (strlen(line) <= 1) continue;
+
+            // Overwrite the stats file with this line
+            FILE *stats_fp = fopen(g_ctx.srt_stats_file, "w");
+            if (stats_fp) {
+                fputs(line, stats_fp);
+                fclose(stats_fp);
+            }
+        }
+
+        fclose(pipe_fp);
+    }
+
+    fprintf(stderr, "Stats pipe reader stopped\n");
+    return NULL;
+}
+
 void* log_monitor_thread(void *arg) {
     (void)arg;
     char line[MAX_LOG_LINE];
     FILE *log = NULL;
     long last_pos = 0;
-    time_t last_stats_truncate = time(NULL);
 
     while (g_ctx.running) {
-        // Truncate SRT stats file every 60 seconds to prevent unbounded growth
-        time_t now = time(NULL);
-        if (now - last_stats_truncate >= 60) {
-            FILE *sf = fopen(g_ctx.srt_stats_file, "w");
-            if (sf) fclose(sf);
-            last_stats_truncate = now;
-        }
         if (!log) {
             log = fopen(g_ctx.log_file, "r");
             if (log) {
@@ -381,9 +426,10 @@ void* tsp_manager_thread(void *arg) {
         // Build the srt-live-transmit command
         // Output to stdout (file://con), enable stats in JSON format
         // -s:500 = stats every 500 packets (~1 second at typical bitrates)
+        // Stats go to named pipe to avoid file position/sparse file issues
         snprintf(srt_cmd, sizeof(srt_cmd),
             "srt-live-transmit '%s' file://con -s:500 -pf:json -statsout:%s 2>/dev/null",
-            srt_url, g_ctx.srt_stats_file);
+            srt_url, g_ctx.srt_stats_pipe);
 
         // Build tsp command using fork input
         argv[argc++] = "tsp";
@@ -839,9 +885,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Set stats file path based on input_id
+    // Set stats file and pipe paths based on input_id
     snprintf(g_ctx.srt_stats_file, sizeof(g_ctx.srt_stats_file),
         "/tmp/srt-input-%s-stats.json", g_ctx.input_id);
+    snprintf(g_ctx.srt_stats_pipe, sizeof(g_ctx.srt_stats_pipe),
+        "/tmp/srt-input-%s-stats.pipe", g_ctx.input_id);
 
     // Initialize monitors from PIDs
     init_monitors();
@@ -850,10 +898,17 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    // Clear/create log file and clean up old stats file
+    // Clear/create log file and clean up old stats file/pipe
     FILE *lf = fopen(g_ctx.log_file, "w");
     if (lf) fclose(lf);
     cleanup_stats_file();
+
+    // Remove old pipe if it exists and create new one
+    unlink(g_ctx.srt_stats_pipe);
+    if (mkfifo(g_ctx.srt_stats_pipe, 0666) < 0) {
+        fprintf(stderr, "WARNING: Failed to create stats pipe %s: %s\n",
+            g_ctx.srt_stats_pipe, strerror(errno));
+    }
 
     fprintf(stderr, "SRT Input Monitor Starting\n");
     fprintf(stderr, "Input ID: %s\n", g_ctx.input_id);
@@ -876,7 +931,12 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
     fprintf(stderr, "Log File: %s\n", g_ctx.log_file);
     fprintf(stderr, "SRT Stats File: %s\n", g_ctx.srt_stats_file);
+    fprintf(stderr, "SRT Stats Pipe: %s\n", g_ctx.srt_stats_pipe);
     fprintf(stderr, "Stall Timeout: %d seconds\n", g_ctx.stall_timeout);
+
+    // Start stats pipe reader thread (must start before tsp so it's ready to read)
+    pthread_t stats_thread;
+    pthread_create(&stats_thread, NULL, stats_pipe_reader_thread, NULL);
 
     // Start tsp manager thread
     pthread_t tsp_thread;
