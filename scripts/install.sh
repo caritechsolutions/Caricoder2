@@ -24,7 +24,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/video-transcoder-gstreamer-YnBIH"
+BRANCH="claude/setup-caritranscoder-j6OYk"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
@@ -560,6 +560,19 @@ build_tools() {
             log_info "rist_input installed to /usr/local/bin/"
         else
             log_warn "Failed to build rist_input"
+        fi
+    fi
+
+    # Build cari-transcoder (GStreamer-based transcoder)
+    if [[ -d "$INSTALL_DIR/src/cari-transcoder" ]]; then
+        cd "$INSTALL_DIR/src/cari-transcoder"
+        log_info "Building cari-transcoder..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder (GStreamer dev packages may be missing)"
         fi
     fi
 

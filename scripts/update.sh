@@ -27,8 +27,8 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-# Updated: 2024-12-20 22:40
-BRANCH="claude/av-sync-monitor-Y57VM"
+# Updated: 2024-12-26
+BRANCH="claude/setup-caritranscoder-j6OYk"
 
 # Parse arguments
 AUTO_CONFIRM=false
@@ -308,6 +308,19 @@ build_tools() {
             log_info "rist_input installed to /usr/local/bin/"
         else
             log_warn "Failed to build rist_input"
+        fi
+    fi
+
+    # Build cari-transcoder (GStreamer-based transcoder)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-transcoder" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-transcoder"
+        log_info "Building cari-transcoder..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder (GStreamer dev packages may be missing)"
         fi
     fi
 
