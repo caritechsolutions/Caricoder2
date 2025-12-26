@@ -158,10 +158,10 @@ static VideoCodec parse_video_codec(const char *str);
 static AudioCodec parse_audio_codec(const char *str);
 static ProcessingMode parse_mode(const char *str);
 static VideoPreset parse_preset(const char *str);
-static const char *preset_to_string(VideoPreset preset);
+static const char *preset_to_string(VideoPreset preset) __attribute__((unused));
 
-/* Detection pipeline functions */
-static int create_detection_pipeline(void);
+/* Detection pipeline functions (unused - kept for future use) */
+static int create_detection_pipeline(void) __attribute__((unused));
 static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data);
 static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
 static void print_detected_info(void);
@@ -1584,51 +1584,37 @@ static GstElement *create_audio_bin(void) {
         g_object_set(encoder, "bitrate", g_ctx.audio_bitrate / 1000, NULL);  /* twolame uses kbps */
     }
 
-    /* Add capsfilter for sample rate and channels if needed */
-    if (g_ctx.audio_samplerate > 0 || g_ctx.audio_channels > 0) {
-        capsfilter = gst_element_factory_make("capsfilter", "audio_caps");
-        if (capsfilter) {
-            GstCaps *caps = gst_caps_new_simple("audio/x-raw",
-                                                "format", G_TYPE_STRING, "S16LE",
-                                                NULL);
-            if (g_ctx.audio_samplerate > 0) {
-                gst_caps_set_simple(caps, "rate", G_TYPE_INT, g_ctx.audio_samplerate, NULL);
-            }
-            if (g_ctx.audio_channels > 0) {
-                gst_caps_set_simple(caps, "channels", G_TYPE_INT, g_ctx.audio_channels, NULL);
-            }
-            g_object_set(capsfilter, "caps", caps, NULL);
-            gst_caps_unref(caps);
-        }
-    }
-
-    /* Add elements to bin */
-    gst_bin_add_many(GST_BIN(bin), queue, parser, decoder, convert, resample, NULL);
+    /* Add capsfilter before encoder - avenc_aac REQUIRES S16LE format input */
+    /* Always create capsfilter to ensure proper audio format negotiation */
+    capsfilter = gst_element_factory_make("capsfilter", "audio_caps");
     if (capsfilter) {
-        gst_bin_add(GST_BIN(bin), capsfilter);
-    }
-    gst_bin_add(GST_BIN(bin), encoder);
+        GstCaps *caps = gst_caps_new_simple("audio/x-raw",
+                                            "format", G_TYPE_STRING, "S16LE",
+                                            NULL);
+        /* Add sample rate if specified, otherwise default to 48000 */
+        int samplerate = (g_ctx.audio_samplerate > 0) ? g_ctx.audio_samplerate : 48000;
+        gst_caps_set_simple(caps, "rate", G_TYPE_INT, samplerate, NULL);
 
-    /* Link elements */
-    if (!gst_element_link_many(queue, parser, decoder, convert, resample, NULL)) {
-        fprintf(stderr, "Error: Failed to link audio decode chain\n");
+        /* Add channels if specified, otherwise default to 2 (stereo) */
+        int channels = (g_ctx.audio_channels > 0) ? g_ctx.audio_channels : 2;
+        gst_caps_set_simple(caps, "channels", G_TYPE_INT, channels, NULL);
+
+        g_object_set(capsfilter, "caps", caps, NULL);
+        gst_caps_unref(caps);
+    } else {
+        fprintf(stderr, "Error: Failed to create audio capsfilter\n");
         gst_object_unref(bin);
         return NULL;
     }
 
-    GstElement *last = resample;
+    /* Add elements to bin */
+    gst_bin_add_many(GST_BIN(bin), queue, parser, decoder, convert, resample,
+                     capsfilter, encoder, NULL);
 
-    if (capsfilter) {
-        if (!gst_element_link(last, capsfilter)) {
-            fprintf(stderr, "Error: Failed to link audio capsfilter\n");
-            gst_object_unref(bin);
-            return NULL;
-        }
-        last = capsfilter;
-    }
-
-    if (!gst_element_link(last, encoder)) {
-        fprintf(stderr, "Error: Failed to link audio encoder\n");
+    /* Link elements: queue -> parser -> decoder -> convert -> resample -> capsfilter -> encoder */
+    if (!gst_element_link_many(queue, parser, decoder, convert, resample,
+                               capsfilter, encoder, NULL)) {
+        fprintf(stderr, "Error: Failed to link audio chain\n");
         gst_object_unref(bin);
         return NULL;
     }
@@ -1656,25 +1642,20 @@ static void print_pipeline_description(void) {
     const char *in_audio_decoder = get_audio_decoder_name(g_ctx.stream_info.audio_codec);
 
     const char *out_video_encoder = NULL;
-    const char *out_video_parser = NULL;
     const char *out_audio_encoder = NULL;
 
     switch (g_ctx.video_out_codec) {
         case VIDEO_CODEC_H264:
             out_video_encoder = "x264enc";
-            out_video_parser = "h264parse";
             break;
         case VIDEO_CODEC_H265:
             out_video_encoder = "x265enc";
-            out_video_parser = "h265parse";
             break;
         case VIDEO_CODEC_MPEG2:
             out_video_encoder = "mpeg2enc";
-            out_video_parser = "mpegvideoparse";
             break;
         default:
             out_video_encoder = "unknown";
-            out_video_parser = "unknown";
     }
 
     switch (g_ctx.audio_out_codec) {
@@ -1833,7 +1814,7 @@ static int create_transcode_pipeline(void) {
 
         /* Link video bin to muxer */
         GstPad *video_src = gst_element_get_static_pad(video_bin, "src");
-        GstPad *mux_video = gst_element_get_request_pad(mux, "sink_%d");
+        GstPad *mux_video = gst_element_request_pad_simple(mux, "sink_%d");
         if (gst_pad_link(video_src, mux_video) != GST_PAD_LINK_OK) {
             fprintf(stderr, "Error: Failed to link video to muxer\n");
             gst_object_unref(video_src);
@@ -1858,7 +1839,7 @@ static int create_transcode_pipeline(void) {
 
         /* Link audio bin to muxer */
         GstPad *audio_src = gst_element_get_static_pad(audio_bin, "src");
-        GstPad *mux_audio = gst_element_get_request_pad(mux, "sink_%d");
+        GstPad *mux_audio = gst_element_request_pad_simple(mux, "sink_%d");
         if (gst_pad_link(audio_src, mux_audio) != GST_PAD_LINK_OK) {
             fprintf(stderr, "Error: Failed to link audio to muxer\n");
             gst_object_unref(audio_src);

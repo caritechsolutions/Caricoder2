@@ -100,10 +100,9 @@ install_dependencies() {
     apt-get install -y gstreamer1.0-libav || true
 
     # Additional GStreamer codec plugins
-    apt-get install -y \
-        gstreamer1.0-x264 \
-        gstreamer1.0-vaapi \
-        gstreamer1.0-fdkaac || true
+    # Note: x264 encoder is already in gstreamer1.0-plugins-ugly
+    # Note: AAC encoder is in gstreamer1.0-libav (avenc_aac)
+    apt-get install -y gstreamer1.0-vaapi || true
 
     # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
     apt-get install -y \
