@@ -1749,7 +1749,7 @@ static int create_transcode_pipeline(void) {
 
         /* Link video bin to muxer */
         GstPad *video_src = gst_element_get_static_pad(video_bin, "src");
-        GstPad *mux_video = gst_element_request_pad_simple(mux, "sink_%d");
+        GstPad *mux_video = gst_element_get_request_pad(mux, "sink_%d");
         if (gst_pad_link(video_src, mux_video) != GST_PAD_LINK_OK) {
             fprintf(stderr, "Error: Failed to link video to muxer\n");
             gst_object_unref(video_src);
@@ -1774,7 +1774,7 @@ static int create_transcode_pipeline(void) {
 
         /* Link audio bin to muxer */
         GstPad *audio_src = gst_element_get_static_pad(audio_bin, "src");
-        GstPad *mux_audio = gst_element_request_pad_simple(mux, "sink_%d");
+        GstPad *mux_audio = gst_element_get_request_pad(mux, "sink_%d");
         if (gst_pad_link(audio_src, mux_audio) != GST_PAD_LINK_OK) {
             fprintf(stderr, "Error: Failed to link audio to muxer\n");
             gst_object_unref(audio_src);
