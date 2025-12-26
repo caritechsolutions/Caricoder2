@@ -580,6 +580,86 @@ function getTypeBadgeColor($type) {
                     </div>
                 </div>
 
+                <!-- SRT Stats Section (only shown for SRT inputs) -->
+                <div class="card mb-3" id="srtStatsCard" style="display: none;">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-broadcast me-1"></i>SRT Statistics</strong>
+                        <small class="text-muted">
+                            <span id="srtStatsStatus" class="badge bg-secondary">Loading...</span>
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <!-- RTT and Bandwidth -->
+                            <div class="col-md-4">
+                                <div class="srt-stat-card">
+                                    <div class="stat-label">RTT</div>
+                                    <div class="stat-value" id="srtRtt">-</div>
+                                    <div class="stat-sublabel">Round-trip time</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="srt-stat-card">
+                                    <div class="stat-label">Bandwidth</div>
+                                    <div class="stat-value" id="srtBandwidth">-</div>
+                                    <div class="stat-sublabel">Available bandwidth</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="srt-stat-card">
+                                    <div class="stat-label">Data Recv</div>
+                                    <div class="stat-value" id="srtBytesRecv">-</div>
+                                    <div class="stat-sublabel">Total received</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Packet Statistics -->
+                        <div class="row">
+                            <div class="col-12">
+                                <h6 class="text-muted mb-2"><i class="bi bi-box-seam me-1"></i>Packet Statistics</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Received</span>
+                                            <span class="packet-value text-success" id="srtPktRecv">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Recv Loss</span>
+                                            <span class="packet-value text-danger" id="srtPktRcvLoss">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Retrans</span>
+                                            <span class="packet-value text-info" id="srtPktRetrans">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Recv Drop</span>
+                                            <span class="packet-value text-warning" id="srtPktRcvDrop">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Sent</span>
+                                            <span class="packet-value text-secondary" id="srtPktSent">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="srt-packet-stat">
+                                            <span class="packet-label">Send Loss</span>
+                                            <span class="packet-value text-danger" id="srtPktSndLoss">-</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Output Info -->
                 <div class="d-flex justify-content-end">
                     <small class="text-muted">
@@ -990,6 +1070,61 @@ function getTypeBadgeColor($type) {
 .rist-quality-good { color: #16a34a !important; }
 .rist-quality-warning { color: #d97706 !important; }
 .rist-quality-error { color: #dc2626 !important; }
+
+/* ============ SRT Stats Styles ============ */
+
+.srt-stat-card {
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    border: 1px solid #fbbf24;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+    transition: all 0.2s ease;
+}
+.srt-stat-card:hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    transform: translateY(-1px);
+}
+.srt-stat-card .stat-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #92400e;
+    margin-bottom: 0.25rem;
+}
+.srt-stat-card .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+    color: #78350f;
+}
+.srt-stat-card .stat-sublabel {
+    font-size: 0.7rem;
+    color: #b45309;
+    margin-top: 0.25rem;
+}
+
+.srt-packet-stat {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+    text-align: center;
+}
+.srt-packet-stat .packet-label {
+    display: block;
+    font-size: 0.7rem;
+    color: #92400e;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.srt-packet-stat .packet-value {
+    display: block;
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+}
 </style>
 
 <script>
@@ -1791,6 +1926,7 @@ let currentPreviewId = null;
 let currentInputType = null;
 let currentInputApiPort = null;
 let ristStatsInterval = null;
+let srtStatsInterval = null;
 
 // Format bitrate to human readable
 function formatBitrate(bps) {
@@ -2060,6 +2196,26 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
         ristStatsCard.style.display = 'none';
     }
 
+    // Show/hide SRT stats section based on input type
+    const srtStatsCard = document.getElementById('srtStatsCard');
+    if (inputType === 'srt') {
+        srtStatsCard.style.display = 'block';
+        // Reset SRT stats display
+        document.getElementById('srtStatsStatus').className = 'badge bg-secondary';
+        document.getElementById('srtStatsStatus').textContent = 'Loading...';
+        document.getElementById('srtRtt').textContent = '-';
+        document.getElementById('srtBandwidth').textContent = '-';
+        document.getElementById('srtBytesRecv').textContent = '-';
+        document.getElementById('srtPktRecv').textContent = '-';
+        document.getElementById('srtPktRcvLoss').textContent = '-';
+        document.getElementById('srtPktRetrans').textContent = '-';
+        document.getElementById('srtPktRcvDrop').textContent = '-';
+        document.getElementById('srtPktSent').textContent = '-';
+        document.getElementById('srtPktSndLoss').textContent = '-';
+    } else {
+        srtStatsCard.style.display = 'none';
+    }
+
     // Show modal
     if (!previewModal) {
         previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
@@ -2097,6 +2253,13 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
         await loadRistStats(apiPort);
         // Update RIST stats every 5 seconds
         ristStatsInterval = setInterval(() => loadRistStats(apiPort), 5000);
+    }
+
+    // Load and start SRT stats updates if input type is SRT
+    if (inputType === 'srt' && apiPort) {
+        await loadSrtStats(apiPort);
+        // Update SRT stats every 5 seconds
+        srtStatsInterval = setInterval(() => loadSrtStats(apiPort), 5000);
     }
 
     // Clean up when modal closes
@@ -2235,6 +2398,10 @@ function cleanupPreview() {
     if (ristStatsInterval) {
         clearInterval(ristStatsInterval);
         ristStatsInterval = null;
+    }
+    if (srtStatsInterval) {
+        clearInterval(srtStatsInterval);
+        srtStatsInterval = null;
     }
 
     // Destroy HLS player
@@ -2621,6 +2788,85 @@ function formatNumber(num) {
     return num.toString();
 }
 
+// Load SRT stats from srt_input API
+async function loadSrtStats(apiPort) {
+    try {
+        const srtStatsUrl = `http://${window.location.hostname}:${apiPort}/srt-stats`;
+
+        const response = await fetch(srtStatsUrl);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.error) {
+            document.getElementById('srtStatsStatus').className = 'badge bg-warning';
+            document.getElementById('srtStatsStatus').textContent = 'No Data';
+            return;
+        }
+
+        // Update RTT with color coding
+        const rttEl = document.getElementById('srtRtt');
+        rttEl.textContent = data.rtt_ms.toFixed(1) + ' ms';
+        rttEl.className = 'stat-value';
+        if (data.rtt_ms <= 50) {
+            rttEl.classList.add('srt-quality-good');
+        } else if (data.rtt_ms <= 150) {
+            rttEl.classList.add('srt-quality-warning');
+        } else {
+            rttEl.classList.add('srt-quality-error');
+        }
+
+        // Update bandwidth
+        document.getElementById('srtBandwidth').textContent = data.bandwidth_mbps.toFixed(2) + ' Mbps';
+
+        // Update bytes received (format as MB/GB)
+        const bytesRecv = data.bytes?.received || 0;
+        if (bytesRecv >= 1073741824) {
+            document.getElementById('srtBytesRecv').textContent = (bytesRecv / 1073741824).toFixed(2) + ' GB';
+        } else if (bytesRecv >= 1048576) {
+            document.getElementById('srtBytesRecv').textContent = (bytesRecv / 1048576).toFixed(2) + ' MB';
+        } else {
+            document.getElementById('srtBytesRecv').textContent = (bytesRecv / 1024).toFixed(2) + ' KB';
+        }
+
+        // Packet stats
+        document.getElementById('srtPktRecv').textContent = formatNumber(data.packets?.received || 0);
+        document.getElementById('srtPktRcvLoss').textContent = formatNumber(data.packets?.recv_loss || 0);
+        document.getElementById('srtPktRetrans').textContent = formatNumber(data.packets?.retransmitted || 0);
+        document.getElementById('srtPktRcvDrop').textContent = formatNumber(data.packets?.recv_dropped || 0);
+        document.getElementById('srtPktSent').textContent = formatNumber(data.packets?.sent || 0);
+        document.getElementById('srtPktSndLoss').textContent = formatNumber(data.packets?.send_loss || 0);
+
+        // Update status badge based on packet loss ratio
+        const recvLoss = data.packets?.recv_loss || 0;
+        const recvTotal = data.packets?.received || 1;
+        const lossRatio = recvLoss / recvTotal;
+
+        const badge = document.getElementById('srtStatsStatus');
+        if (lossRatio === 0) {
+            badge.className = 'badge bg-success';
+            badge.textContent = 'Excellent';
+        } else if (lossRatio < 0.001) {
+            badge.className = 'badge bg-success';
+            badge.textContent = 'Good';
+        } else if (lossRatio < 0.01) {
+            badge.className = 'badge bg-warning';
+            badge.textContent = 'Fair';
+        } else {
+            badge.className = 'badge bg-danger';
+            badge.textContent = 'Poor';
+        }
+
+    } catch (e) {
+        console.error('Failed to load SRT stats:', e);
+        document.getElementById('srtStatsStatus').className = 'badge bg-secondary';
+        document.getElementById('srtStatsStatus').textContent = 'Unavailable';
+    }
+}
+
 // Load RIST stats from rist_input API
 async function loadRistStats(apiPort) {
     try {
@@ -2702,6 +2948,7 @@ window.addEventListener('beforeunload', function() {
     if (graphUpdateInterval) clearInterval(graphUpdateInterval);
     if (avsyncUpdateInterval) clearInterval(avsyncUpdateInterval);
     if (ristStatsInterval) clearInterval(ristStatsInterval);
+    if (srtStatsInterval) clearInterval(srtStatsInterval);
 });
 </script>
 

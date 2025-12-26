@@ -340,6 +340,7 @@ def generate_srt_input_service_file(service_data: SRTInputService) -> str:
     # Build the command
     cmd_parts = [
         "/usr/local/bin/srt_input",
+        f"--id {service_data.id}",
         f"--address {service_data.source_address}",
         f"--port {service_data.source_port}",
         f"--mode {service_data.mode}",

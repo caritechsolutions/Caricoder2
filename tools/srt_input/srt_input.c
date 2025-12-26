@@ -62,7 +62,9 @@ typedef struct {
     int output_port;
 
     // Common settings
+    char input_id[64];          // Input identifier for unique file names
     char log_file[256];
+    char srt_stats_file[256];   // Path to srt-live-transmit stats JSON file
     int api_port;
     uint16_t program_pid;
     uint16_t pids[MAX_PIDS];
@@ -111,6 +113,7 @@ void print_help(const char *prog) {
     printf("  --program PID                Program/PMT PID (required)\n");
     printf("  --pids PID1,PID2,...         Video/audio PIDs to monitor (required)\n");
     printf("\nGeneral Options:\n");
+    printf("  --id ID                      Input identifier for unique file names\n");
     printf("  --log-file FILE              Log file path (default: /tmp/srt_input.log)\n");
     printf("  --api-port PORT              REST API port (default: 8080)\n");
     printf("  --stall-timeout SECONDS      Stall timeout (default: 30)\n");
@@ -149,7 +152,9 @@ int parse_pids(const char *pids_str) {
 
 void init_context() {
     memset(&g_ctx, 0, sizeof(g_ctx));
+    strcpy(g_ctx.input_id, "default");
     strcpy(g_ctx.log_file, "/tmp/srt_input.log");
+    strcpy(g_ctx.srt_stats_file, "/tmp/srt-input-stats.json");
     g_ctx.api_port = 8080;
     g_ctx.stall_timeout = 30;
     g_ctx.history_hours = 24;
@@ -185,10 +190,17 @@ void kill_tsp_child() {
     }
 }
 
+void cleanup_stats_file() {
+    if (g_ctx.srt_stats_file[0]) {
+        unlink(g_ctx.srt_stats_file);
+    }
+}
+
 void signal_handler(int sig) {
     fprintf(stderr, "Received signal %d, shutting down...\n", sig);
     g_ctx.running = 0;
     kill_tsp_child();
+    cleanup_stats_file();
 }
 
 PIDMonitor* find_monitor(uint16_t pid) {
@@ -285,67 +297,68 @@ void* tsp_manager_thread(void *arg) {
         int argc = 0;
 
         // Static strings for arguments that need to persist
-        static char srt_arg[256];
-        static char latency_str[16];
-        static char pbkeylen_str[16];
+        static char srt_cmd[2048];
         static char output_arg[128];
         static char pid_args[MAX_PIDS + 4][16];
         static char monitor_pids[MAX_PIDS][16];
 
         snprintf(output_arg, sizeof(output_arg), "%s:%d", g_ctx.output_addr, g_ctx.output_port);
-        snprintf(latency_str, sizeof(latency_str), "%d", g_ctx.latency);
-        snprintf(pbkeylen_str, sizeof(pbkeylen_str), "%d", g_ctx.pbkeylen);
 
-        argv[argc++] = "tsp";
-        argv[argc++] = "-I";
-        argv[argc++] = "srt";
+        // Build the SRT URL with all options
+        // Format: srt://host:port?mode=caller&latency=120&transtype=live&...
+        int srt_url_len = 0;
+        char srt_url[1024];
+
+        srt_url_len = snprintf(srt_url, sizeof(srt_url), "srt://%s:%d?",
+            g_ctx.srt_address, g_ctx.srt_port);
 
         // SRT connection mode
         switch (g_ctx.srt_mode) {
             case SRT_MODE_CALLER:
-                snprintf(srt_arg, sizeof(srt_arg), "%s:%d", g_ctx.srt_address, g_ctx.srt_port);
-                argv[argc++] = "--caller";
-                argv[argc++] = srt_arg;
+                srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                    "mode=caller");
                 break;
             case SRT_MODE_LISTENER:
-                snprintf(srt_arg, sizeof(srt_arg), "%s:%d", g_ctx.srt_address, g_ctx.srt_port);
-                argv[argc++] = "--listener";
-                argv[argc++] = srt_arg;
+                srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                    "mode=listener");
                 break;
             case SRT_MODE_RENDEZVOUS:
-                // Rendezvous requires both --caller and --listener
-                snprintf(srt_arg, sizeof(srt_arg), "%s:%d", g_ctx.srt_address, g_ctx.srt_port);
-                argv[argc++] = "--caller";
-                argv[argc++] = srt_arg;
-                argv[argc++] = "--listener";
-                argv[argc++] = srt_arg;
+                srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                    "mode=rendezvous");
                 break;
         }
 
         // Latency
-        argv[argc++] = "--latency";
-        argv[argc++] = latency_str;
-
-        // Required SRT options for live streaming
-        argv[argc++] = "--transtype";
-        argv[argc++] = "live";
-        argv[argc++] = "--messageapi";
+        srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+            "&latency=%d&transtype=live", g_ctx.latency);
 
         // Optional: Stream ID
         if (g_ctx.streamid[0]) {
-            argv[argc++] = "--streamid";
-            argv[argc++] = g_ctx.streamid;
+            srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                "&streamid=%s", g_ctx.streamid);
         }
 
         // Optional: Encryption
         if (g_ctx.passphrase[0]) {
-            argv[argc++] = "--passphrase";
-            argv[argc++] = g_ctx.passphrase;
+            srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                "&passphrase=%s", g_ctx.passphrase);
             if (g_ctx.pbkeylen > 0) {
-                argv[argc++] = "--pbkeylen";
-                argv[argc++] = pbkeylen_str;
+                srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
+                    "&pbkeylen=%d", g_ctx.pbkeylen);
             }
         }
+
+        // Build the srt-live-transmit command
+        // Output to stdout (file://con), enable stats in JSON format
+        snprintf(srt_cmd, sizeof(srt_cmd),
+            "srt-live-transmit '%s' file://con -s:100 -pf:json -statsout:%s 2>/dev/null",
+            srt_url, g_ctx.srt_stats_file);
+
+        // Build tsp command using fork input
+        argv[argc++] = "tsp";
+        argv[argc++] = "-I";
+        argv[argc++] = "fork";
+        argv[argc++] = srt_cmd;
 
         // Filter plugin
         argv[argc++] = "-P";
@@ -581,6 +594,109 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         return ret;
     }
 
+    // SRT statistics from srt-live-transmit stats file
+    if (strcmp(url, "/srt-stats") == 0) {
+        char response[8192];
+
+        // Read the stats file
+        FILE *fp = fopen(g_ctx.srt_stats_file, "r");
+        if (!fp) {
+            snprintf(response, sizeof(response),
+                "{\"error\":\"Stats file not available\",\"file\":\"%s\"}",
+                g_ctx.srt_stats_file);
+            struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
+                strlen(response), (void *)response, MHD_RESPMEM_MUST_COPY);
+            MHD_add_response_header(mhd_response, "Content-Type", "application/json");
+            MHD_add_response_header(mhd_response, "Access-Control-Allow-Origin", "*");
+            int ret = MHD_queue_response(connection, MHD_HTTP_OK, mhd_response);
+            MHD_destroy_response(mhd_response);
+            return ret;
+        }
+
+        // Read entire file
+        char stats_json[8192];
+        size_t bytes_read = fread(stats_json, 1, sizeof(stats_json) - 1, fp);
+        fclose(fp);
+        stats_json[bytes_read] = '\0';
+
+        // Parse key values from the JSON
+        // srt-live-transmit outputs stats with fields like:
+        // "msRTT", "mbpsBandwidth", "pktSent", "pktRecv", "pktSndLoss", "pktRcvLoss", etc.
+        double rtt = 0, bandwidth = 0;
+        long long pkt_sent = 0, pkt_recv = 0, pkt_snd_loss = 0, pkt_rcv_loss = 0;
+        long long pkt_retrans = 0, pkt_rcv_drop = 0, pkt_snd_drop = 0;
+        long long bytes_sent = 0, bytes_recv = 0;
+
+        // Simple JSON value extraction (look for "key": value patterns)
+        char *p;
+
+        if ((p = strstr(stats_json, "\"msRTT\":")) != NULL) {
+            sscanf(p + 8, "%lf", &rtt);
+        }
+        if ((p = strstr(stats_json, "\"mbpsBandwidth\":")) != NULL) {
+            sscanf(p + 16, "%lf", &bandwidth);
+        }
+        if ((p = strstr(stats_json, "\"pktSent\":")) != NULL) {
+            sscanf(p + 10, "%lld", &pkt_sent);
+        }
+        if ((p = strstr(stats_json, "\"pktRecv\":")) != NULL) {
+            sscanf(p + 10, "%lld", &pkt_recv);
+        }
+        if ((p = strstr(stats_json, "\"pktSndLoss\":")) != NULL) {
+            sscanf(p + 13, "%lld", &pkt_snd_loss);
+        }
+        if ((p = strstr(stats_json, "\"pktRcvLoss\":")) != NULL) {
+            sscanf(p + 13, "%lld", &pkt_rcv_loss);
+        }
+        if ((p = strstr(stats_json, "\"pktRetrans\":")) != NULL) {
+            sscanf(p + 13, "%lld", &pkt_retrans);
+        }
+        if ((p = strstr(stats_json, "\"pktRcvDrop\":")) != NULL) {
+            sscanf(p + 13, "%lld", &pkt_rcv_drop);
+        }
+        if ((p = strstr(stats_json, "\"pktSndDrop\":")) != NULL) {
+            sscanf(p + 13, "%lld", &pkt_snd_drop);
+        }
+        if ((p = strstr(stats_json, "\"byteSent\":")) != NULL) {
+            sscanf(p + 11, "%lld", &bytes_sent);
+        }
+        if ((p = strstr(stats_json, "\"byteRecv\":")) != NULL) {
+            sscanf(p + 11, "%lld", &bytes_recv);
+        }
+
+        // Build our response JSON
+        snprintf(response, sizeof(response),
+            "{"
+            "\"rtt_ms\":%.2f,"
+            "\"bandwidth_mbps\":%.2f,"
+            "\"packets\":{"
+                "\"sent\":%lld,"
+                "\"received\":%lld,"
+                "\"send_loss\":%lld,"
+                "\"recv_loss\":%lld,"
+                "\"retransmitted\":%lld,"
+                "\"send_dropped\":%lld,"
+                "\"recv_dropped\":%lld"
+            "},"
+            "\"bytes\":{"
+                "\"sent\":%lld,"
+                "\"received\":%lld"
+            "}"
+            "}",
+            rtt, bandwidth,
+            pkt_sent, pkt_recv, pkt_snd_loss, pkt_rcv_loss,
+            pkt_retrans, pkt_snd_drop, pkt_rcv_drop,
+            bytes_sent, bytes_recv);
+
+        struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
+            strlen(response), (void *)response, MHD_RESPMEM_MUST_COPY);
+        MHD_add_response_header(mhd_response, "Content-Type", "application/json");
+        MHD_add_response_header(mhd_response, "Access-Control-Allow-Origin", "*");
+        int ret = MHD_queue_response(connection, MHD_HTTP_OK, mhd_response);
+        MHD_destroy_response(mhd_response);
+        return ret;
+    }
+
     const char *response = "{\"error\":\"not found\"}";
     struct MHD_Response *mhd_response = MHD_create_response_from_buffer(
         strlen(response), (void *)response, MHD_RESPMEM_MUST_COPY);
@@ -625,6 +741,8 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--program") == 0 && i + 1 < argc) {
             g_ctx.program_pid = atoi(argv[++i]);
             has_program = 1;
+        } else if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
+            strncpy(g_ctx.input_id, argv[++i], sizeof(g_ctx.input_id) - 1);
         } else if (strcmp(argv[i], "--log-file") == 0 && i + 1 < argc) {
             strncpy(g_ctx.log_file, argv[++i], sizeof(g_ctx.log_file) - 1);
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
@@ -660,6 +778,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Set stats file path based on input_id
+    snprintf(g_ctx.srt_stats_file, sizeof(g_ctx.srt_stats_file),
+        "/tmp/srt-input-%s-stats.json", g_ctx.input_id);
+
     // Initialize monitors from PIDs
     init_monitors();
 
@@ -667,11 +789,13 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    // Clear/create log file
+    // Clear/create log file and clean up old stats file
     FILE *lf = fopen(g_ctx.log_file, "w");
     if (lf) fclose(lf);
+    cleanup_stats_file();
 
     fprintf(stderr, "SRT Input Monitor Starting\n");
+    fprintf(stderr, "Input ID: %s\n", g_ctx.input_id);
     fprintf(stderr, "SRT Mode: %s\n", srt_mode_to_string(g_ctx.srt_mode));
     fprintf(stderr, "SRT Address: %s:%d\n", g_ctx.srt_address, g_ctx.srt_port);
     fprintf(stderr, "SRT Latency: %d ms\n", g_ctx.latency);
@@ -690,6 +814,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "(%d PIDs)\n", g_ctx.pid_count);
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
     fprintf(stderr, "Log File: %s\n", g_ctx.log_file);
+    fprintf(stderr, "SRT Stats File: %s\n", g_ctx.srt_stats_file);
     fprintf(stderr, "Stall Timeout: %d seconds\n", g_ctx.stall_timeout);
 
     // Start tsp manager thread
@@ -714,7 +839,7 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "HTTP server started on port %d\n", g_ctx.api_port);
-    fprintf(stderr, "Endpoints: GET /metrics, GET /metrics/history, GET /health, GET /status\n");
+    fprintf(stderr, "Endpoints: GET /metrics, GET /metrics/history, GET /health, GET /status, GET /srt-stats\n");
 
     // Main loop
     while (g_ctx.running) {
@@ -732,6 +857,7 @@ int main(int argc, char *argv[]) {
     // Cleanup
     fprintf(stderr, "Shutting down...\n");
     kill_tsp_child();
+    cleanup_stats_file();
     MHD_stop_daemon(daemon);
     pthread_cancel(log_thread);
     pthread_join(tsp_thread, NULL);
