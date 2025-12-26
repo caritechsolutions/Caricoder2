@@ -122,7 +122,7 @@ include __DIR__ . '/../templates/header.php';
                             <div class="bitrate-cell" id="bitrate-<?php echo $input['id']; ?>">
                                 <?php if ($apiPort): ?>
                                 <span class="bitrate-video">-</span> / <span class="bitrate-audio">-</span>
-                                <button class="btn btn-link btn-sm p-0 ms-2 preview-btn" onclick="showPreview('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>')" title="Preview stream">
+                                <button class="btn btn-link btn-sm p-0 ms-2 preview-btn" onclick="showPreview('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>', '<?php echo strtolower($input['type'] ?? 'udp'); ?>', <?php echo $apiPort ?? 'null'; ?>)" title="Preview stream">
                                     <i class="bi bi-play-circle"></i>
                                 </button>
                                 <?php else: ?>
@@ -493,6 +493,93 @@ function getTypeBadgeColor($type) {
                     </div>
                 </div>
 
+                <!-- RIST Stats Section (only shown for RIST inputs) -->
+                <div class="card mb-3" id="ristStatsCard" style="display: none;">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-activity me-1"></i>RIST Statistics</strong>
+                        <small class="text-muted">
+                            <span id="ristStatsStatus" class="badge bg-secondary">Loading...</span>
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <!-- Quality and Peers -->
+                            <div class="col-md-3">
+                                <div class="rist-stat-card">
+                                    <div class="stat-label">Quality</div>
+                                    <div class="stat-value" id="ristQuality">-</div>
+                                    <div class="stat-sublabel">Link quality %</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="rist-stat-card">
+                                    <div class="stat-label">Peers</div>
+                                    <div class="stat-value" id="ristPeers">-</div>
+                                    <div class="stat-sublabel">Connected senders</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="rist-stat-card">
+                                    <div class="stat-label">RTT</div>
+                                    <div class="stat-value" id="ristRtt">-</div>
+                                    <div class="stat-sublabel">Round-trip time</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="rist-stat-card">
+                                    <div class="stat-label">Retry BW</div>
+                                    <div class="stat-value" id="ristRetryBw">-</div>
+                                    <div class="stat-sublabel">Recovery overhead</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Packet Statistics -->
+                        <div class="row">
+                            <div class="col-12">
+                                <h6 class="text-muted mb-2"><i class="bi bi-box-seam me-1"></i>Packet Statistics</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">Received</span>
+                                            <span class="packet-value text-success" id="ristReceived">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">Missing</span>
+                                            <span class="packet-value text-warning" id="ristMissing">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">Recovered</span>
+                                            <span class="packet-value text-info" id="ristRecovered">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">Lost</span>
+                                            <span class="packet-value text-danger" id="ristLost">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">Reordered</span>
+                                            <span class="packet-value text-secondary" id="ristReordered">-</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="rist-packet-stat">
+                                            <span class="packet-label">1st Retry</span>
+                                            <span class="packet-value text-info" id="ristRecovered1">-</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Output Info -->
                 <div class="d-flex justify-content-end">
                     <small class="text-muted">
@@ -843,6 +930,66 @@ function getTypeBadgeColor($type) {
 .badge.avsync-error {
     background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
 }
+
+/* ============ RIST Stats Styles ============ */
+
+.rist-stat-card {
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+    border: 1px solid #bae6fd;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+    transition: all 0.2s ease;
+}
+.rist-stat-card:hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    transform: translateY(-1px);
+}
+.rist-stat-card .stat-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #0369a1;
+    margin-bottom: 0.25rem;
+}
+.rist-stat-card .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+    color: #0c4a6e;
+}
+.rist-stat-card .stat-sublabel {
+    font-size: 0.7rem;
+    color: #7dd3fc;
+    margin-top: 0.25rem;
+}
+
+.rist-packet-stat {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+    text-align: center;
+}
+.rist-packet-stat .packet-label {
+    display: block;
+    font-size: 0.7rem;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.rist-packet-stat .packet-value {
+    display: block;
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+}
+
+/* RIST quality colors */
+.rist-quality-good { color: #16a34a !important; }
+.rist-quality-warning { color: #d97706 !important; }
+.rist-quality-error { color: #dc2626 !important; }
 </style>
 
 <script>
@@ -1641,6 +1788,9 @@ let previewKeepaliveInterval = null;
 let previewStatusInterval = null;
 let hlsPlayer = null;
 let currentPreviewId = null;
+let currentInputType = null;
+let currentInputApiPort = null;
+let ristStatsInterval = null;
 
 // Format bitrate to human readable
 function formatBitrate(bps) {
@@ -1720,8 +1870,10 @@ function updateInputMetrics(inputId, metrics) {
 }
 
 // Show preview modal
-async function showPreview(inputId, inputName) {
+async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null) {
     currentPreviewId = inputId;
+    currentInputType = inputType;
+    currentInputApiPort = apiPort;
     document.getElementById('previewInputId').value = inputId;
     document.getElementById('previewInputName').textContent = inputName;
 
@@ -1887,6 +2039,27 @@ async function showPreview(inputId, inputName) {
     document.getElementById('avsyncSamples').textContent = '- samples';
     document.getElementById('avsyncLastUpdate').textContent = '-';
 
+    // Show/hide RIST stats section based on input type
+    const ristStatsCard = document.getElementById('ristStatsCard');
+    if (inputType === 'rist') {
+        ristStatsCard.style.display = 'block';
+        // Reset RIST stats display
+        document.getElementById('ristStatsStatus').className = 'badge bg-secondary';
+        document.getElementById('ristStatsStatus').textContent = 'Loading...';
+        document.getElementById('ristQuality').textContent = '-';
+        document.getElementById('ristPeers').textContent = '-';
+        document.getElementById('ristRtt').textContent = '-';
+        document.getElementById('ristRetryBw').textContent = '-';
+        document.getElementById('ristReceived').textContent = '-';
+        document.getElementById('ristMissing').textContent = '-';
+        document.getElementById('ristRecovered').textContent = '-';
+        document.getElementById('ristLost').textContent = '-';
+        document.getElementById('ristReordered').textContent = '-';
+        document.getElementById('ristRecovered1').textContent = '-';
+    } else {
+        ristStatsCard.style.display = 'none';
+    }
+
     // Show modal
     if (!previewModal) {
         previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
@@ -1918,6 +2091,13 @@ async function showPreview(inputId, inputName) {
 
     // Start keepalive (every 30 seconds)
     previewKeepaliveInterval = setInterval(() => sendPreviewKeepalive(inputId), 30000);
+
+    // Load and start RIST stats updates if input type is RIST
+    if (inputType === 'rist' && apiPort) {
+        await loadRistStats(apiPort);
+        // Update RIST stats every 5 seconds
+        ristStatsInterval = setInterval(() => loadRistStats(apiPort), 5000);
+    }
 
     // Clean up when modal closes
     document.getElementById('previewModal').addEventListener('hidden.bs.modal', function() {
@@ -2052,6 +2232,10 @@ function cleanupPreview() {
         clearInterval(previewStatusInterval);
         previewStatusInterval = null;
     }
+    if (ristStatsInterval) {
+        clearInterval(ristStatsInterval);
+        ristStatsInterval = null;
+    }
 
     // Destroy HLS player
     if (hlsPlayer) {
@@ -2068,6 +2252,8 @@ function cleanupPreview() {
     }
 
     currentPreviewId = null;
+    currentInputType = null;
+    currentInputApiPort = null;
 }
 
 // Load media info via ffprobe
@@ -2424,6 +2610,85 @@ async function loadAVSyncHistory(inputId) {
     }
 }
 
+// ============ RIST Stats Functions ============
+
+// Format large numbers with K/M/G suffixes
+function formatNumber(num) {
+    if (!num || num === 0) return '0';
+    if (num >= 1000000000) return (num / 1000000000).toFixed(2) + 'G';
+    if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+    return num.toString();
+}
+
+// Load RIST stats from rist_input API
+async function loadRistStats(apiPort) {
+    try {
+        // RIST metrics port is apiPort + 1000 (default scheme)
+        const ristStatsUrl = `http://${window.location.hostname}:${apiPort}/rist-stats`;
+
+        const response = await fetch(ristStatsUrl);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.error) {
+            document.getElementById('ristStatsStatus').className = 'badge bg-warning';
+            document.getElementById('ristStatsStatus').textContent = 'No Data';
+            return;
+        }
+
+        // Update quality with color coding
+        const qualityEl = document.getElementById('ristQuality');
+        qualityEl.textContent = data.quality.toFixed(1) + '%';
+        qualityEl.className = 'stat-value';
+        if (data.quality >= 99) {
+            qualityEl.classList.add('rist-quality-good');
+        } else if (data.quality >= 95) {
+            qualityEl.classList.add('rist-quality-warning');
+        } else {
+            qualityEl.classList.add('rist-quality-error');
+        }
+
+        // Update other stats
+        document.getElementById('ristPeers').textContent = data.peers;
+        document.getElementById('ristRtt').textContent = data.timing.rtt_ms.toFixed(1) + ' ms';
+        document.getElementById('ristRetryBw').textContent = formatBitrate(data.retry_bandwidth_bps);
+
+        // Packet stats
+        document.getElementById('ristReceived').textContent = formatNumber(data.packets.received);
+        document.getElementById('ristMissing').textContent = formatNumber(data.packets.missing);
+        document.getElementById('ristRecovered').textContent = formatNumber(data.packets.recovered);
+        document.getElementById('ristLost').textContent = formatNumber(data.packets.lost);
+        document.getElementById('ristReordered').textContent = formatNumber(data.packets.reordered);
+        document.getElementById('ristRecovered1').textContent = formatNumber(data.packets.recovered_one_retry);
+
+        // Update status badge based on quality
+        const badge = document.getElementById('ristStatsStatus');
+        if (data.quality >= 99) {
+            badge.className = 'badge bg-success';
+            badge.textContent = 'Excellent';
+        } else if (data.quality >= 95) {
+            badge.className = 'badge bg-warning';
+            badge.textContent = 'Good';
+        } else if (data.quality >= 90) {
+            badge.className = 'badge bg-warning';
+            badge.textContent = 'Fair';
+        } else {
+            badge.className = 'badge bg-danger';
+            badge.textContent = 'Poor';
+        }
+
+    } catch (e) {
+        console.error('Failed to load RIST stats:', e);
+        document.getElementById('ristStatsStatus').className = 'badge bg-secondary';
+        document.getElementById('ristStatsStatus').textContent = 'Unavailable';
+    }
+}
+
 // Start metrics polling on page load
 document.addEventListener('DOMContentLoaded', function() {
     // Fetch metrics immediately and then every 5 seconds
@@ -2436,6 +2701,7 @@ window.addEventListener('beforeunload', function() {
     if (metricsInterval) clearInterval(metricsInterval);
     if (graphUpdateInterval) clearInterval(graphUpdateInterval);
     if (avsyncUpdateInterval) clearInterval(avsyncUpdateInterval);
+    if (ristStatsInterval) clearInterval(ristStatsInterval);
 });
 </script>
 

@@ -55,6 +55,7 @@ typedef struct {
     // Common settings
     char log_file[256];
     int api_port;
+    int rist_metrics_port;      // Port for ristreceiver Prometheus metrics
     uint16_t program_pid;
     uint16_t pids[MAX_PIDS];
     int pid_count;
@@ -87,6 +88,7 @@ void print_help(const char *prog) {
     printf("\nGeneral Options:\n");
     printf("  --log-file FILE              Log file path (default: /tmp/rist_input.log)\n");
     printf("  --api-port PORT              REST API port (default: 8080)\n");
+    printf("  --rist-metrics-port PORT     RIST metrics port (default: api-port + 1000)\n");
     printf("  --stall-timeout SECONDS      Stall timeout (default: 30)\n");
     printf("  --history-hours HOURS        History retention (default: 24)\n");
     printf("  --help                       Show this help\n");
@@ -121,6 +123,7 @@ void init_context() {
     memset(&g_ctx, 0, sizeof(g_ctx));
     strcpy(g_ctx.log_file, "/tmp/rist_input.log");
     g_ctx.api_port = 8080;
+    g_ctx.rist_metrics_port = 0;  // Will default to api_port + 1000 if not set
     g_ctx.stall_timeout = 30;
     g_ctx.history_hours = 24;
     g_ctx.last_data_received = time(NULL);
@@ -275,6 +278,14 @@ void* pipeline_manager_thread(void *arg) {
             cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
                 " -e %d", g_ctx.encryption_type);
         }
+
+        // Add RIST profile
+        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+            " -p %d", g_ctx.profile);
+
+        // Enable RIST metrics HTTP endpoint for stats
+        cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
+            " -M --metrics-http --metrics-port=%d", g_ctx.rist_metrics_port);
 
         // Add output and redirect stderr to suppress ristreceiver logging
         cmd_len += snprintf(rist_cmd + cmd_len, sizeof(rist_cmd) - cmd_len,
@@ -531,6 +542,95 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         }
 
         pthread_mutex_unlock(&g_ctx.lock);
+    } else if (strcmp(url, "/rist-stats") == 0) {
+        // Fetch RIST metrics from ristreceiver's Prometheus endpoint
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "curl -s --connect-timeout 2 http://localhost:%d/metrics 2>/dev/null",
+                 g_ctx.rist_metrics_port);
+
+        FILE *fp = popen(cmd, "r");
+        if (!fp) {
+            snprintf(response, sizeof(response), "{\"error\":\"Failed to fetch RIST metrics\"}");
+            status_code = MHD_HTTP_INTERNAL_SERVER_ERROR;
+        } else {
+            char line[512];
+            double quality = 100.0;
+            int peers = 0;
+            double bandwidth_bps = 0;
+            double retry_bandwidth_bps = 0;
+            int64_t sent = 0, received = 0, missing = 0, reordered = 0;
+            int64_t recovered = 0, recovered_one_retry = 0, lost = 0;
+            double min_iat = 0, cur_iat = 0, max_iat = 0, rtt = 0;
+            int found_data = 0;
+
+            while (fgets(line, sizeof(line), fp)) {
+                if (line[0] == '#') continue;
+
+                char *brace = strchr(line, '{');
+                if (!brace) continue;
+
+                *brace = '\0';
+                char *name = line;
+                char *value_str = strrchr(brace + 1, '}');
+                if (value_str) {
+                    value_str++;
+                    while (*value_str == ' ') value_str++;
+                    double value = atof(value_str);
+                    found_data = 1;
+
+                    if (strcmp(name, "rist_client_flow_quality") == 0) quality = value;
+                    else if (strcmp(name, "rist_client_flow_peers") == 0) peers = (int)value;
+                    else if (strcmp(name, "rist_client_flow_bandwidth_bps") == 0) bandwidth_bps = value;
+                    else if (strcmp(name, "rist_client_flow_retry_bandwidth_bps") == 0) retry_bandwidth_bps = value;
+                    else if (strcmp(name, "rist_client_flow_sent_packets_total") == 0) sent = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_received_packets_total") == 0) received = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_missing_packets_total") == 0) missing = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_reordered_packets_total") == 0) reordered = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_recovered_packets_total") == 0) recovered = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_recovered_one_retry_packets_total") == 0) recovered_one_retry = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_lost_packets_total") == 0) lost = (int64_t)value;
+                    else if (strcmp(name, "rist_client_flow_min_iat_seconds") == 0) min_iat = value;
+                    else if (strcmp(name, "rist_client_flow_cur_iat_seconds") == 0) cur_iat = value;
+                    else if (strcmp(name, "rist_client_flow_max_iat_seconds") == 0) max_iat = value;
+                    else if (strcmp(name, "rist_client_flow_rtt_seconds") == 0) rtt = value;
+                }
+            }
+            pclose(fp);
+
+            if (found_data) {
+                snprintf(response, sizeof(response),
+                    "{"
+                    "\"quality\":%.2f,"
+                    "\"peers\":%d,"
+                    "\"bandwidth_bps\":%.0f,"
+                    "\"retry_bandwidth_bps\":%.0f,"
+                    "\"packets\":{"
+                        "\"sent\":%ld,"
+                        "\"received\":%ld,"
+                        "\"missing\":%ld,"
+                        "\"reordered\":%ld,"
+                        "\"recovered\":%ld,"
+                        "\"recovered_one_retry\":%ld,"
+                        "\"lost\":%ld"
+                    "},"
+                    "\"timing\":{"
+                        "\"min_iat_ms\":%.2f,"
+                        "\"cur_iat_ms\":%.2f,"
+                        "\"max_iat_ms\":%.2f,"
+                        "\"rtt_ms\":%.2f"
+                    "}"
+                    "}",
+                    quality, peers, bandwidth_bps, retry_bandwidth_bps,
+                    (long)sent, (long)received, (long)missing, (long)reordered,
+                    (long)recovered, (long)recovered_one_retry, (long)lost,
+                    min_iat * 1000, cur_iat * 1000, max_iat * 1000, rtt * 1000);
+            } else {
+                snprintf(response, sizeof(response),
+                    "{\"error\":\"No RIST metrics available\",\"metrics_port\":%d}",
+                    g_ctx.rist_metrics_port);
+                status_code = MHD_HTTP_SERVICE_UNAVAILABLE;
+            }
+        }
     } else {
         snprintf(response, sizeof(response), "{\"error\":\"Not found\"}");
         status_code = MHD_HTTP_NOT_FOUND;
@@ -576,6 +676,8 @@ int main(int argc, char *argv[]) {
             strncpy(g_ctx.log_file, argv[++i], sizeof(g_ctx.log_file) - 1);
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
             g_ctx.api_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--rist-metrics-port") == 0 && i + 1 < argc) {
+            g_ctx.rist_metrics_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--stall-timeout") == 0 && i + 1 < argc) {
             g_ctx.stall_timeout = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--history-hours") == 0 && i + 1 < argc) {
@@ -608,6 +710,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Set default rist_metrics_port if not specified
+    if (g_ctx.rist_metrics_port == 0) {
+        g_ctx.rist_metrics_port = g_ctx.api_port + 1000;
+    }
+
     // Initialize monitors
     init_monitors();
 
@@ -633,6 +740,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "  RIST URL: %s\n", g_ctx.rist_url);
     fprintf(stderr, "  Output: %s:%d\n", g_ctx.output_addr, g_ctx.output_port);
     fprintf(stderr, "  API Port: %d\n", g_ctx.api_port);
+    fprintf(stderr, "  RIST Metrics Port: %d\n", g_ctx.rist_metrics_port);
     fprintf(stderr, "  Profile: %d\n", g_ctx.profile);
     if (g_ctx.secret[0]) {
         fprintf(stderr, "  Encryption: AES-%d\n", g_ctx.encryption_type > 0 ? g_ctx.encryption_type : 128);
