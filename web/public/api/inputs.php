@@ -1316,33 +1316,34 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
 
         return $ffprobe_result;
     } elseif ($type === 'hls' || strpos($url, 'http://') === 0 || strpos($url, 'https://') === 0) {
-        // HLS input - use tsp with HLS plugin to output to temp UDP, then ffprobe
+        // HLS input - use ffmpeg to output to temp UDP, then ffprobe
+        // ffmpeg remuxes HLS to MPEG-TS with predictable PIDs (256, 257, etc.)
         $hls_url = $url;
 
         // Use temp multicast address for ffprobe
         $temp_port = rand(20000, 29999);
-        $temp_udp = "239.10.10.10:{$temp_port}";
+        $temp_udp = "udp://239.10.10.10:{$temp_port}";
 
-        // Start tsp with HLS input in background
-        $tsp_cmd = sprintf(
-            'timeout 15 tsp -I hls %s --live -O ip %s > /dev/null 2>&1 & echo $!',
+        // Start ffmpeg with HLS input in background, output to temp UDP
+        $ffmpeg_cmd = sprintf(
+            'timeout 15 ffmpeg -re -i %s -c copy -f mpegts %s > /dev/null 2>&1 & echo $!',
             escapeshellarg($hls_url),
             escapeshellarg($temp_udp)
         );
 
-        $tsp_pid = trim(shell_exec($tsp_cmd));
+        $ffmpeg_pid = trim(shell_exec($ffmpeg_cmd));
 
-        // Wait for HLS to start streaming (HLS needs more time to download segments)
+        // Wait for ffmpeg to start streaming (HLS needs time to download segments)
         sleep(5);
 
         // Now use ffprobe on the temp UDP
         $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
 
-        // Kill tsp process
-        if ($tsp_pid) {
-            shell_exec("kill {$tsp_pid} 2>/dev/null");
+        // Kill ffmpeg process
+        if ($ffmpeg_pid) {
+            shell_exec("kill {$ffmpeg_pid} 2>/dev/null");
             // Also kill any child processes
-            shell_exec("pkill -P {$tsp_pid} 2>/dev/null");
+            shell_exec("pkill -P {$ffmpeg_pid} 2>/dev/null");
         }
 
         return $ffprobe_result;

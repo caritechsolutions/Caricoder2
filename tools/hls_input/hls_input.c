@@ -274,127 +274,19 @@ void* tsp_manager_thread(void *arg) {
     (void)arg;
 
     while (g_ctx.running) {
-        // Build argument array for execvp
-        char *argv[128];
-        int argc = 0;
+        // Build ffmpeg command to receive HLS and output to stdout
+        // ffmpeg -re -i "URL" -c copy -f mpegts pipe:1 2>/dev/null
+        char ffmpeg_cmd[2048];
+        snprintf(ffmpeg_cmd, sizeof(ffmpeg_cmd),
+            "ffmpeg -re -i \"%s\" -c copy -f mpegts pipe:1 2>/dev/null",
+            g_ctx.hls_url);
 
-        // Static strings for arguments that need to persist
-        static char bitrate_str[32];
-        static char output_arg[128];
-        static char pid_args[MAX_PIDS + 4][16];
-        static char monitor_pids[MAX_PIDS][16];
+        fprintf(stderr, "Starting pipeline: tsp -I fork \"%s\" ...\n", ffmpeg_cmd);
 
-        snprintf(output_arg, sizeof(output_arg), "%s:%d", g_ctx.output_addr, g_ctx.output_port);
-
-        argv[argc++] = "tsp";
-        argv[argc++] = "-I";
-        argv[argc++] = "hls";
-        argv[argc++] = g_ctx.hls_url;
-
-        // Live mode
-        if (g_ctx.live_mode) {
-            argv[argc++] = "--live";
-        }
-
-        // Bitrate selection
-        switch (g_ctx.bitrate_mode) {
-            case HLS_BITRATE_HIGHEST:
-                argv[argc++] = "--highest-bitrate";
-                break;
-            case HLS_BITRATE_LOWEST:
-                argv[argc++] = "--lowest-bitrate";
-                break;
-            case HLS_BITRATE_MAX:
-                snprintf(bitrate_str, sizeof(bitrate_str), "%d", g_ctx.bitrate_value * 1000);
-                argv[argc++] = "--max-bitrate";
-                argv[argc++] = bitrate_str;
-                break;
-            case HLS_BITRATE_MIN:
-                snprintf(bitrate_str, sizeof(bitrate_str), "%d", g_ctx.bitrate_value * 1000);
-                argv[argc++] = "--min-bitrate";
-                argv[argc++] = bitrate_str;
-                break;
-            default:
-                break;
-        }
-
-        // Resolution selection
-        if (g_ctx.use_highest_resolution) {
-            argv[argc++] = "--highest-resolution";
-        } else if (g_ctx.use_lowest_resolution) {
-            argv[argc++] = "--lowest-resolution";
-        }
-
-        // Filter plugin
-        argv[argc++] = "-P";
-        argv[argc++] = "filter";
-
-        int pid_idx = 0;
-
-        // Add PIDs 0, 17, program
-        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "0");
-        argv[argc++] = "-p";
-        argv[argc++] = pid_args[pid_idx++];
-
-        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "17");
-        argv[argc++] = "-p";
-        argv[argc++] = pid_args[pid_idx++];
-
-        snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.program_pid);
-        argv[argc++] = "-p";
-        argv[argc++] = pid_args[pid_idx++];
-
-        // Add video/audio PIDs to filter
-        for (int i = 0; i < g_ctx.pid_count; i++) {
-            snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.pids[i]);
-            argv[argc++] = "-p";
-            argv[argc++] = pid_args[pid_idx++];
-        }
-
-        // Add bitrate_monitor plugins for video/audio PIDs
-        for (int i = 0; i < g_ctx.pid_count; i++) {
-            snprintf(monitor_pids[i], sizeof(monitor_pids[i]), "%u", g_ctx.pids[i]);
-            argv[argc++] = "-P";
-            argv[argc++] = "bitrate_monitor";
-            argv[argc++] = "--pid";
-            argv[argc++] = monitor_pids[i];
-            argv[argc++] = "--periodic-bitrate";
-            argv[argc++] = "5";
-        }
-
-        // Output plugin (UDP)
-        argv[argc++] = "-O";
-        argv[argc++] = "ip";
-        argv[argc++] = output_arg;
-        argv[argc] = NULL;
-
-        // Log the command (quote args with special characters for copy-paste testing)
-        fprintf(stderr, "Starting tsp:");
-        for (int i = 0; argv[i]; i++) {
-            // Check if argument needs quoting (contains special shell characters)
-            int needs_quote = 0;
-            for (const char *p = argv[i]; *p; p++) {
-                if (*p == '#' || *p == '!' || *p == ' ' || *p == '\'' ||
-                    *p == '"' || *p == '$' || *p == '&' || *p == '*' ||
-                    *p == '?' || *p == '[' || *p == ']' || *p == '|' ||
-                    *p == ';' || *p == '<' || *p == '>' || *p == '`' ||
-                    *p == ':' || *p == '/') {
-                    needs_quote = 1;
-                    break;
-                }
-            }
-            if (needs_quote) {
-                fprintf(stderr, " '%s'", argv[i]);
-            } else {
-                fprintf(stderr, " %s", argv[i]);
-            }
-        }
-        fprintf(stderr, "\n");
-
-        // Fork and exec
-        pid_t pid = fork();
-        if (pid == 0) {
-            // Child process
+        // Fork tsp process (tsp will fork ffmpeg internally via -I fork)
+        pid_t tsp_pid = fork();
+        if (tsp_pid == 0) {
+            // Child process - tsp
             prctl(PR_SET_PDEATHSIG, SIGKILL);
 
             // Redirect stderr to log file
@@ -404,27 +296,92 @@ void* tsp_manager_thread(void *arg) {
                 fclose(log);
             }
 
+            // Build tsp arguments
+            char *argv[128];
+            int argc = 0;
+            static char output_arg[128];
+            static char pid_args[MAX_PIDS + 4][16];
+            static char monitor_pids[MAX_PIDS][16];
+
+            snprintf(output_arg, sizeof(output_arg), "%s:%d", g_ctx.output_addr, g_ctx.output_port);
+
+            argv[argc++] = "tsp";
+            argv[argc++] = "--buffer-size-mb";
+            argv[argc++] = "1";   // Small buffer for fast startup
+            argv[argc++] = "-I";
+            argv[argc++] = "fork";
+            argv[argc++] = "--format";
+            argv[argc++] = "TS";
+            argv[argc++] = ffmpeg_cmd;  // The ffmpeg command
+
+            // Filter plugin
+            argv[argc++] = "-P";
+            argv[argc++] = "filter";
+
+            int pid_idx = 0;
+
+            // Add PIDs 0, 17, program
+            snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "0");
+            argv[argc++] = "-p";
+            argv[argc++] = pid_args[pid_idx++];
+
+            snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "17");
+            argv[argc++] = "-p";
+            argv[argc++] = pid_args[pid_idx++];
+
+            snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.program_pid);
+            argv[argc++] = "-p";
+            argv[argc++] = pid_args[pid_idx++];
+
+            // Add video/audio PIDs to filter
+            for (int i = 0; i < g_ctx.pid_count; i++) {
+                snprintf(pid_args[pid_idx], sizeof(pid_args[pid_idx]), "%u", g_ctx.pids[i]);
+                argv[argc++] = "-p";
+                argv[argc++] = pid_args[pid_idx++];
+            }
+
+            // Add bitrate_monitor plugins for video/audio PIDs
+            for (int i = 0; i < g_ctx.pid_count; i++) {
+                snprintf(monitor_pids[i], sizeof(monitor_pids[i]), "%u", g_ctx.pids[i]);
+                argv[argc++] = "-P";
+                argv[argc++] = "bitrate_monitor";
+                argv[argc++] = "--pid";
+                argv[argc++] = monitor_pids[i];
+                argv[argc++] = "--periodic-bitrate";
+                argv[argc++] = "5";
+            }
+
+            // Output plugin (UDP)
+            argv[argc++] = "-O";
+            argv[argc++] = "ip";
+            argv[argc++] = output_arg;
+            argv[argc] = NULL;
+
             execvp("tsp", argv);
             perror("execvp tsp failed");
             _exit(1);
-        } else if (pid > 0) {
-            g_ctx.tsp_child = pid;
-            fprintf(stderr, "tsp started with PID %d\n", pid);
+        } else if (tsp_pid < 0) {
+            perror("fork tsp failed");
+            sleep(2);
+            continue;
+        }
 
-            int status;
-            waitpid(pid, &status, 0);
-            g_ctx.tsp_child = 0;
+        g_ctx.tsp_child = tsp_pid;
+        fprintf(stderr, "tsp started with PID %d\n", tsp_pid);
 
-            if (g_ctx.running) {
-                if (WIFEXITED(status)) {
-                    fprintf(stderr, "tsp exited with code %d, restarting...\n", WEXITSTATUS(status));
-                } else if (WIFSIGNALED(status)) {
-                    fprintf(stderr, "tsp killed by signal %d, restarting...\n", WTERMSIG(status));
-                }
-                sleep(2);
+        // Wait for tsp to exit
+        int status;
+        waitpid(tsp_pid, &status, 0);
+        g_ctx.tsp_child = 0;
+
+        if (g_ctx.running) {
+            if (WIFEXITED(status)) {
+                fprintf(stderr, "tsp exited with code %d, restarting pipeline...\n",
+                        WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                fprintf(stderr, "tsp killed by signal %d, restarting pipeline...\n",
+                        WTERMSIG(status));
             }
-        } else {
-            perror("fork failed");
             sleep(2);
         }
     }
