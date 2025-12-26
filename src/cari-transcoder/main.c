@@ -1368,10 +1368,11 @@ static GstElement *create_video_bin(void) {
         return NULL;
     }
 
-    /* Configure queue */
+    /* Configure queue - match Python settings exactly */
     g_object_set(queue,
+                 "leaky", 1,  /* downstream */
                  "max-size-buffers", 0,
-                 "max-size-time", (guint64)5000000000,  /* 5 seconds */
+                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
                  "max-size-bytes", 0,
                  NULL);
 
@@ -1787,19 +1788,29 @@ static int create_transcode_pipeline(void) {
 
     /* Create output elements */
     mux = gst_element_factory_make("mpegtsmux", "mux");
+    GstElement *out_queue = gst_element_factory_make("queue", "output_queue");
     fdsink = gst_element_factory_make("fdsink", "fdsink");
 
-    if (!mux || !fdsink) {
+    if (!mux || !out_queue || !fdsink) {
         fprintf(stderr, "Error: Failed to create mux/sink elements\n");
         return -1;
     }
 
+    /* Configure output queue - match working gst-launch settings */
+    g_object_set(out_queue,
+                 "max-size-time", (guint64)500000000000,  /* 500 seconds */
+                 "max-size-buffers", 1000000,
+                 "max-size-bytes", 0,
+                 "leaky", 1,  /* downstream */
+                 NULL);
+
     /* Configure fdsink to output to stdout */
     g_object_set(fdsink, "fd", 1, NULL);  /* fd 1 = stdout */
     g_object_set(fdsink, "sync", FALSE, NULL);
+    g_object_set(fdsink, "async", FALSE, NULL);
 
-    /* Add source elements AND mux/fdsink to pipeline (mux must be added before linking) */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, fdsink, NULL);
+    /* Add source elements AND mux/queue/fdsink to pipeline (mux must be added before linking) */
+    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, out_queue, fdsink, NULL);
 
     /* Link source chain */
     if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
@@ -1857,8 +1868,8 @@ static int create_transcode_pipeline(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Link mux to fdsink (already added to pipeline above) */
-    if (!gst_element_link(mux, fdsink)) {
+    /* Link mux -> output_queue -> fdsink */
+    if (!gst_element_link_many(mux, out_queue, fdsink, NULL)) {
         fprintf(stderr, "Error: Failed to link mux to fdsink\n");
         return -1;
     }
