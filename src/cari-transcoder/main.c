@@ -167,6 +167,9 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
 static void print_detected_info(void);
 static GstPadProbeReturn on_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data);
 
+/* FFprobe-based detection */
+static int detect_stream_with_ffprobe(void);
+
 /* Full transcoding pipeline functions */
 static int create_transcode_pipeline(void);
 
@@ -860,6 +863,271 @@ static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data) 
 }
 
 /*
+ * Simple JSON string value extractor
+ * Finds "key": "value" and returns the value (caller must free)
+ */
+static char *json_get_string(const char *json, const char *key) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t') pos++;
+
+    if (*pos != '"') return NULL;
+    pos++;
+
+    const char *end = strchr(pos, '"');
+    if (!end) return NULL;
+
+    size_t len = end - pos;
+    char *result = malloc(len + 1);
+    if (result) {
+        memcpy(result, pos, len);
+        result[len] = '\0';
+    }
+    return result;
+}
+
+/*
+ * Simple JSON integer value extractor
+ * Finds "key": 123 and returns the integer value
+ */
+static int json_get_int(const char *json, const char *key) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return 0;
+
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t') pos++;
+
+    return atoi(pos);
+}
+
+/*
+ * Detect stream using ffprobe (more reliable than GStreamer for format detection)
+ */
+static int detect_stream_with_ffprobe(void) {
+    char cmd[512];
+    char url[256];
+    FILE *fp;
+    char *output = NULL;
+    size_t output_size = 0;
+    size_t output_capacity = 32768;
+    int ret = -1;
+
+    /* Build URL */
+    snprintf(url, sizeof(url), "udp://@%s:%d", g_ctx.input_address, g_ctx.input_port);
+
+    /* Build ffprobe command */
+    snprintf(cmd, sizeof(cmd),
+             "ffprobe -v quiet -print_format json -show_streams "
+             "-analyzeduration 5000000 -probesize 5000000 -i \"%s\" 2>/dev/null",
+             url);
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Running: %s\n", cmd);
+    }
+
+    fprintf(stderr, "Detecting stream at %s:%d using ffprobe...\n",
+            g_ctx.input_address, g_ctx.input_port);
+
+    fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "Error: Failed to run ffprobe\n");
+        return -1;
+    }
+
+    /* Read all output */
+    output = malloc(output_capacity);
+    if (!output) {
+        pclose(fp);
+        return -1;
+    }
+
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        size_t len = strlen(buffer);
+        if (output_size + len >= output_capacity) {
+            output_capacity *= 2;
+            char *new_output = realloc(output, output_capacity);
+            if (!new_output) {
+                free(output);
+                pclose(fp);
+                return -1;
+            }
+            output = new_output;
+        }
+        memcpy(output + output_size, buffer, len);
+        output_size += len;
+    }
+    output[output_size] = '\0';
+
+    int status = pclose(fp);
+    if (status != 0) {
+        fprintf(stderr, "Error: ffprobe failed (status %d)\n", status);
+        free(output);
+        return -1;
+    }
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "FFprobe output (%zu bytes):\n%s\n", output_size, output);
+    }
+
+    /* Parse streams - look for video and audio codec_type sections */
+    const char *stream_pos = output;
+    while ((stream_pos = strstr(stream_pos, "\"codec_type\"")) != NULL) {
+        /* Find the start of this stream object (search backwards for {) */
+        const char *stream_start = stream_pos;
+        int brace_count = 0;
+        while (stream_start > output) {
+            stream_start--;
+            if (*stream_start == '{') {
+                brace_count++;
+                if (brace_count == 1) break;
+            } else if (*stream_start == '}') {
+                brace_count--;
+            }
+        }
+
+        /* Find the end of this stream object */
+        const char *stream_end = stream_pos;
+        brace_count = 0;
+        while (*stream_end) {
+            if (*stream_end == '{') brace_count++;
+            else if (*stream_end == '}') {
+                brace_count--;
+                if (brace_count < 0) break;
+            }
+            stream_end++;
+        }
+
+        /* Extract this stream's JSON */
+        size_t stream_len = stream_end - stream_start + 1;
+        char *stream_json = malloc(stream_len + 1);
+        if (!stream_json) break;
+        memcpy(stream_json, stream_start, stream_len);
+        stream_json[stream_len] = '\0';
+
+        /* Check codec type */
+        char *codec_type = json_get_string(stream_json, "codec_type");
+        if (codec_type) {
+            if (strcmp(codec_type, "video") == 0 && !g_ctx.stream_info.video_detected) {
+                /* Parse video info */
+                char *codec_name = json_get_string(stream_json, "codec_name");
+                if (codec_name) {
+                    if (strcasecmp(codec_name, "h264") == 0 || strcasecmp(codec_name, "avc") == 0) {
+                        g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
+                    } else if (strcasecmp(codec_name, "hevc") == 0 || strcasecmp(codec_name, "h265") == 0) {
+                        g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
+                    } else if (strcasecmp(codec_name, "mpeg2video") == 0) {
+                        g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
+                    }
+                    free(codec_name);
+                }
+
+                g_ctx.stream_info.video_width = json_get_int(stream_json, "width");
+                g_ctx.stream_info.video_height = json_get_int(stream_json, "height");
+
+                /* Parse framerate (r_frame_rate is "num/den") */
+                char *fps = json_get_string(stream_json, "r_frame_rate");
+                if (fps) {
+                    if (sscanf(fps, "%d/%d", &g_ctx.stream_info.video_fps_num,
+                               &g_ctx.stream_info.video_fps_den) != 2) {
+                        g_ctx.stream_info.video_fps_num = 0;
+                        g_ctx.stream_info.video_fps_den = 1;
+                    }
+                    free(fps);
+                }
+
+                /* Check for interlaced (field_order != "progressive") */
+                char *field_order = json_get_string(stream_json, "field_order");
+                if (field_order) {
+                    g_ctx.stream_info.video_interlaced =
+                        (strcmp(field_order, "progressive") != 0 &&
+                         strcmp(field_order, "unknown") != 0);
+                    free(field_order);
+                }
+
+                /* Profile */
+                char *profile = json_get_string(stream_json, "profile");
+                if (profile) {
+                    strncpy(g_ctx.stream_info.video_profile, profile,
+                            sizeof(g_ctx.stream_info.video_profile) - 1);
+                    free(profile);
+                }
+
+                g_ctx.stream_info.video_detected = TRUE;
+
+                if (g_ctx.debug) {
+                    fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
+                            video_codec_to_string(g_ctx.stream_info.video_codec),
+                            g_ctx.stream_info.video_width,
+                            g_ctx.stream_info.video_height,
+                            g_ctx.stream_info.video_fps_num,
+                            g_ctx.stream_info.video_fps_den,
+                            g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
+                }
+
+            } else if (strcmp(codec_type, "audio") == 0 && !g_ctx.stream_info.audio_detected) {
+                /* Parse audio info */
+                char *codec_name = json_get_string(stream_json, "codec_name");
+                if (codec_name) {
+                    if (strcasecmp(codec_name, "aac") == 0) {
+                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
+                    } else if (strcasecmp(codec_name, "ac3") == 0) {
+                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
+                    } else if (strcasecmp(codec_name, "eac3") == 0) {
+                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
+                    } else if (strcasecmp(codec_name, "mp2") == 0) {
+                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
+                    }
+                    free(codec_name);
+                }
+
+                g_ctx.stream_info.audio_channels = json_get_int(stream_json, "channels");
+
+                /* Sample rate might be a string */
+                char *sample_rate_str = json_get_string(stream_json, "sample_rate");
+                if (sample_rate_str) {
+                    g_ctx.stream_info.audio_sample_rate = atoi(sample_rate_str);
+                    free(sample_rate_str);
+                }
+                if (g_ctx.stream_info.audio_sample_rate == 0) {
+                    g_ctx.stream_info.audio_sample_rate = json_get_int(stream_json, "sample_rate");
+                }
+
+                g_ctx.stream_info.audio_detected = TRUE;
+
+                if (g_ctx.debug) {
+                    fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
+                            audio_codec_to_string(g_ctx.stream_info.audio_codec),
+                            g_ctx.stream_info.audio_channels,
+                            g_ctx.stream_info.audio_sample_rate);
+                }
+            }
+            free(codec_type);
+        }
+
+        free(stream_json);
+        stream_pos++;  /* Move past current match */
+    }
+
+    if (g_ctx.stream_info.video_detected || g_ctx.stream_info.audio_detected) {
+        ret = 0;
+    } else {
+        fprintf(stderr, "Error: No streams detected\n");
+    }
+
+    free(output);
+    return ret;
+}
+
+/*
  * Create detection-only pipeline
  * udpsrc -> queue -> tsparse -> tsdemux -> (pads inspected via callback)
  */
@@ -993,23 +1261,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Initialize GStreamer */
-    gst_init(&argc, &argv);
-
     /* Set up signal handlers */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    /* For detect-only mode, use ffprobe (more reliable) */
+    if (g_ctx.detect_only) {
+        ret = detect_stream_with_ffprobe();
+        if (ret == 0) {
+            print_detected_info();
+        }
+        pthread_mutex_destroy(&g_ctx.lock);
+        return ret != 0 ? 1 : 0;
+    }
+
+    /* Initialize GStreamer for transcoding */
+    gst_init(&argc, &argv);
+
     /* Create main loop */
     g_ctx.main_loop = g_main_loop_new(NULL, FALSE);
 
-    /* Create pipeline */
-    if (g_ctx.detect_only) {
-        ret = create_detection_pipeline();
-    } else {
-        ret = create_transcode_pipeline();
-    }
+    /* Create transcoding pipeline */
+    ret = create_transcode_pipeline();
 
     if (ret != 0) {
         cleanup();
@@ -1028,22 +1302,7 @@ int main(int argc, char *argv[]) {
     gettimeofday(&g_ctx.start_time, NULL);
 
     /* Run main loop */
-    if (g_ctx.detect_only) {
-        /* Set a timeout for detection (10 seconds max) */
-        g_timeout_add_seconds(10, quit_main_loop_cb, g_ctx.main_loop);
-    }
-
     g_main_loop_run(g_ctx.main_loop);
-
-    /* Print results for detect-only mode */
-    if (g_ctx.detect_only) {
-        if (g_ctx.stream_info.video_detected || g_ctx.stream_info.audio_detected) {
-            print_detected_info();
-        } else {
-            fprintf(stderr, "Error: No streams detected within timeout\n");
-            ret = 1;
-        }
-    }
 
     /* Cleanup */
     cleanup();
