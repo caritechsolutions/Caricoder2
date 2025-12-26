@@ -354,12 +354,10 @@ void* tsp_manager_thread(void *arg) {
         srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
             "&latency=%d&transtype=live", g_ctx.latency);
 
-        // Optional: Stream ID (URL-encode to handle special characters like #!)
+        // Optional: Stream ID (raw - single quotes in command protect special chars)
         if (g_ctx.streamid[0]) {
-            char encoded_streamid[512];
-            url_encode(g_ctx.streamid, encoded_streamid, sizeof(encoded_streamid));
             srt_url_len += snprintf(srt_url + srt_url_len, sizeof(srt_url) - srt_url_len,
-                "&streamid=%s", encoded_streamid);
+                "&streamid=%s", g_ctx.streamid);
         }
 
         // Optional: Encryption
