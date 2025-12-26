@@ -1,439 +1,942 @@
 /*
- * CariTranscoder - Transcoder Application
- * Copyright (c) 2024 CariTech Solutions
+ * CariTranscoder - GStreamer-based Video/Audio Transcoder
  *
- * Reads from input ring buffer, transcodes video/audio, outputs to ring buffer.
+ * Receives MPEG-TS via UDP, transcodes video/audio using GStreamer,
+ * and outputs to stdout for piping to tsp.
+ *
+ * Copyright (c) 2024 CariTech Solutions
  */
 
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <signal.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <errno.h>
+#include <sys/time.h>
 #include <gst/gst.h>
-#include <gst/app/gstappsrc.h>
-#include <gst/app/gstappsink.h>
 
-#include "config.h"
-#include "logging.h"
-#include "ring_buffer.h"
-#include "ts_packet.h"
-#include "license.h"
+/* Version */
+#define VERSION "1.0.0"
 
-/* Transcoder state */
+/* Defaults */
+#define DEFAULT_API_PORT 9200
+#define DEFAULT_VIDEO_BITRATE 5000000
+#define DEFAULT_AUDIO_BITRATE 128000
+#define DEFAULT_KEYFRAME_INTERVAL 60
+#define DEFAULT_BFRAMES 2
+#define DEFAULT_AUDIO_SAMPLERATE 48000
+
+/* Codec types */
+typedef enum {
+    VIDEO_CODEC_UNKNOWN = 0,
+    VIDEO_CODEC_H264,
+    VIDEO_CODEC_H265,
+    VIDEO_CODEC_MPEG2
+} VideoCodec;
+
+typedef enum {
+    AUDIO_CODEC_UNKNOWN = 0,
+    AUDIO_CODEC_AAC,
+    AUDIO_CODEC_AC3,
+    AUDIO_CODEC_EAC3,
+    AUDIO_CODEC_MP2
+} AudioCodec;
+
+/* Processing modes */
+typedef enum {
+    MODE_TRANSCODE = 0,
+    MODE_PASSTHROUGH,
+    MODE_DROP
+} ProcessingMode;
+
+/* Video presets */
+typedef enum {
+    PRESET_ULTRAFAST = 0,
+    PRESET_SUPERFAST,
+    PRESET_VERYFAST,
+    PRESET_FASTER,
+    PRESET_FAST,
+    PRESET_MEDIUM,
+    PRESET_SLOW,
+    PRESET_SLOWER,
+    PRESET_VERYSLOW
+} VideoPreset;
+
+/* Detected stream information */
 typedef struct {
-    /* Configuration */
-    config_t config;
-    char config_file[256];
-    char id[64];
-    char name[128];
-
-    /* Video settings */
-    char video_mode[32];        /* transcode, passthrough, drop */
-    char video_codec[32];       /* h264, h265, mpeg2, etc. */
-    char encoder_type[32];      /* auto, software, nvenc, vaapi, qsv */
-    int video_bitrate;
+    /* Video */
+    VideoCodec video_codec;
     int video_width;
     int video_height;
+    int video_fps_num;
+    int video_fps_den;
+    gboolean video_interlaced;
+    char video_profile[32];
 
-    /* Audio settings */
-    char audio_mode[32];
-    char audio_codec[32];
+    /* Audio */
+    AudioCodec audio_codec;
+    int audio_channels;
+    int audio_sample_rate;
+
+    /* Detection state */
+    gboolean video_detected;
+    gboolean audio_detected;
+} StreamInfo;
+
+/* Application context */
+typedef struct {
+    /* Input settings */
+    char input_address[64];
+    int input_port;
+    char input_interface[32];
+
+    /* Video output settings */
+    ProcessingMode video_mode;
+    VideoCodec video_out_codec;
+    int video_bitrate;
+    VideoPreset video_preset;
+    char video_profile[32];
+    int keyframe_interval;
+    int bframes;
+
+    /* Scaling settings */
+    int scale_width;
+    int scale_height;
+    gboolean deinterlace;
+    int out_fps_num;
+    int out_fps_den;
+
+    /* Audio output settings */
+    ProcessingMode audio_mode;
+    AudioCodec audio_out_codec;
     int audio_bitrate;
+    int audio_channels;  /* 0=passthrough, 1=mono, 2=stereo, 6=5.1 */
+    int audio_samplerate;
 
-    /* Buffers */
-    char input_buffer_name[128];
-    char output_buffer_name[128];
-    ring_buffer_t *input_buffer;
-    ring_buffer_t *output_buffer;
+    /* General settings */
+    int api_port;
+    char log_file[256];
+    gboolean debug;
+    gboolean detect_only;
+    gboolean dump_pipeline;
+
+    /* Runtime state */
+    volatile int running;
+    StreamInfo stream_info;
 
     /* GStreamer */
     GstElement *pipeline;
-    GstElement *appsrc;
-    GstElement *appsink;
     GMainLoop *main_loop;
 
-    /* Reader thread */
-    pthread_t reader_thread;
-    volatile int reader_running;
+    /* Threading */
+    pthread_mutex_t lock;
 
     /* Statistics */
-    uint64_t frames_in;
-    uint64_t frames_out;
     uint64_t packets_in;
     uint64_t packets_out;
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+    uint64_t frames_encoded;
+    struct timeval start_time;
+} AppContext;
 
-    /* State */
-    volatile int running;
-    license_info_t license;
-} transcoder_state_t;
+/* Global context */
+static AppContext g_ctx;
 
-static transcoder_state_t g_state = {0};
+/* Forward declarations */
+static void signal_handler(int signum);
+static void print_help(const char *prog);
+static int parse_args(int argc, char *argv[]);
+static const char *video_codec_to_string(VideoCodec codec);
+static const char *audio_codec_to_string(AudioCodec codec);
+static VideoCodec parse_video_codec(const char *str);
+static AudioCodec parse_audio_codec(const char *str);
+static ProcessingMode parse_mode(const char *str);
+static VideoPreset parse_preset(const char *str);
+static const char *preset_to_string(VideoPreset preset);
 
-/* Signal handler */
+/* Detection pipeline functions */
+static int create_detection_pipeline(void);
+static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data);
+static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
+static void print_detected_info(void);
+
+/* Full transcoding pipeline functions */
+static int create_transcode_pipeline(void);
+
+/*
+ * Signal handler
+ */
 static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        CARI_LOG_INFO("Received signal %d, shutting down...", signum);
-        g_state.running = 0;
-        g_state.reader_running = 0;
-        if (g_state.main_loop) {
-            g_main_loop_quit(g_state.main_loop);
+        fprintf(stderr, "\nReceived signal %d, shutting down...\n", signum);
+        g_ctx.running = 0;
+        if (g_ctx.main_loop) {
+            g_main_loop_quit(g_ctx.main_loop);
         }
     }
 }
 
-/* Load configuration */
-static int load_config(transcoder_state_t *state) {
-    if (config_load(&state->config, state->config_file) != 0) {
-        CARI_LOG_ERROR("Failed to load configuration");
-        return -1;
-    }
+/*
+ * Print help message
+ */
+static void print_help(const char *prog) {
+    printf("CariTranscoder v%s - GStreamer Video/Audio Transcoder\n\n", VERSION);
+    printf("Usage: %s --input ADDRESS:PORT [options]\n\n", prog);
 
-    strncpy(state->id,
-            config_get_string(&state->config, "transcoder", "id", "transcode-001"),
-            sizeof(state->id) - 1);
+    printf("INPUT OPTIONS:\n");
+    printf("  --input ADDRESS:PORT       UDP multicast input (required)\n");
+    printf("  --input-interface IFACE    Network interface for multicast\n");
+    printf("\n");
 
-    strncpy(state->name,
-            config_get_string(&state->config, "transcoder", "name", "Unnamed"),
-            sizeof(state->name) - 1);
+    printf("VIDEO OPTIONS:\n");
+    printf("  --video-mode MODE          transcode|passthrough|drop (default: transcode)\n");
+    printf("  --video-codec CODEC        h264|h265|mpeg2 (output codec, default: h264)\n");
+    printf("  --video-bitrate BPS        Target bitrate in bps (default: 5000000)\n");
+    printf("  --video-preset PRESET      ultrafast|superfast|veryfast|faster|fast|\n");
+    printf("                             medium|slow|slower|veryslow (default: medium)\n");
+    printf("  --video-profile PROFILE    baseline|main|high for H.264 (default: main)\n");
+    printf("  --keyframe-interval FRAMES GOP size in frames (default: 60)\n");
+    printf("  --bframes COUNT            Number of B-frames (default: 2)\n");
+    printf("\n");
 
-    /* Video settings */
-    strncpy(state->video_mode,
-            config_get_string(&state->config, "video", "mode", "transcode"),
-            sizeof(state->video_mode) - 1);
+    printf("SCALING OPTIONS:\n");
+    printf("  --scale WIDTHxHEIGHT       Output resolution (e.g., 1280x720)\n");
+    printf("  --deinterlace              Enable deinterlacing\n");
+    printf("  --fps NUM/DEN              Output framerate (e.g., 30/1 or 30000/1001)\n");
+    printf("\n");
 
-    strncpy(state->video_codec,
-            config_get_string(&state->config, "video", "codec", "h265"),
-            sizeof(state->video_codec) - 1);
+    printf("AUDIO OPTIONS:\n");
+    printf("  --audio-mode MODE          transcode|passthrough|drop (default: transcode)\n");
+    printf("  --audio-codec CODEC        aac|ac3|mp2 (default: aac)\n");
+    printf("  --audio-bitrate BPS        Audio bitrate in bps (default: 128000)\n");
+    printf("  --audio-channels MODE      1|2|6|passthrough (default: 2/stereo)\n");
+    printf("  --audio-samplerate HZ      Sample rate (default: 48000)\n");
+    printf("\n");
 
-    strncpy(state->encoder_type,
-            config_get_string(&state->config, "video", "encoder", "auto"),
-            sizeof(state->encoder_type) - 1);
+    printf("GENERAL OPTIONS:\n");
+    printf("  --api-port PORT            REST API port for stats (default: 9200)\n");
+    printf("  --log-file PATH            Log file path\n");
+    printf("  --debug                    Enable debug logging\n");
+    printf("  --detect-only              Detect stream info and exit (JSON output)\n");
+    printf("  --dump-pipeline            Print pipeline graph and exit\n");
+    printf("  --help                     Show this help\n");
+    printf("\n");
 
-    state->video_bitrate = config_get_int(&state->config, "video", "bitrate", 8000000);
-    state->video_width = config_get_int(&state->config, "video_scaling", "width", 0);
-    state->video_height = config_get_int(&state->config, "video_scaling", "height", 0);
+    printf("EXAMPLES:\n");
+    printf("  Detect stream format:\n");
+    printf("    %s --input 239.100.0.1:5000 --detect-only\n\n", prog);
 
-    /* Audio settings */
-    strncpy(state->audio_mode,
-            config_get_string(&state->config, "audio", "mode", "transcode"),
-            sizeof(state->audio_mode) - 1);
+    printf("  Transcode H.264 to H.265 at 5 Mbps:\n");
+    printf("    %s --input 239.100.0.1:5000 --video-codec h265 --video-bitrate 5000000 \\\n", prog);
+    printf("        | tsp -I file - -P regulate --bitrate 6000000 -O ip 239.100.0.2:5000\n\n");
 
-    strncpy(state->audio_codec,
-            config_get_string(&state->config, "audio", "codec", "aac"),
-            sizeof(state->audio_codec) - 1);
+    printf("  Scale to 720p with deinterlacing:\n");
+    printf("    %s --input 239.100.0.1:5000 --scale 1280x720 --deinterlace \\\n", prog);
+    printf("        --video-bitrate 3000000 | tsp ...\n\n");
 
-    state->audio_bitrate = config_get_int(&state->config, "audio", "bitrate", 192000);
-
-    /* Buffer names */
-    strncpy(state->input_buffer_name,
-            config_get_string(&state->config, "input", "buffer_name", ""),
-            sizeof(state->input_buffer_name) - 1);
-
-    strncpy(state->output_buffer_name,
-            config_get_string(&state->config, "output", "buffer_name", state->id),
-            sizeof(state->output_buffer_name) - 1);
-
-    CARI_LOG_INFO("Configured: %s (%s)", state->name, state->id);
-    CARI_LOG_INFO("Video: %s -> %s @ %d bps", state->video_mode, state->video_codec, state->video_bitrate);
-    CARI_LOG_INFO("Audio: %s -> %s @ %d bps", state->audio_mode, state->audio_codec, state->audio_bitrate);
-
-    return 0;
+    printf("  Passthrough video, transcode audio to AAC:\n");
+    printf("    %s --input 239.100.0.1:5000 --video-mode passthrough \\\n", prog);
+    printf("        --audio-codec aac --audio-bitrate 128000 | tsp ...\n");
 }
 
-/* Get encoder element name */
-static const char* get_encoder_element(transcoder_state_t *state) {
-    if (strcmp(state->video_codec, "h264") == 0) {
-        if (strcmp(state->encoder_type, "nvenc") == 0) return "nvh264enc";
-        if (strcmp(state->encoder_type, "vaapi") == 0) return "vaapih264enc";
-        if (strcmp(state->encoder_type, "qsv") == 0) return "qsvh264enc";
-        return "x264enc";
-    } else if (strcmp(state->video_codec, "h265") == 0) {
-        if (strcmp(state->encoder_type, "nvenc") == 0) return "nvh265enc";
-        if (strcmp(state->encoder_type, "vaapi") == 0) return "vaapih265enc";
-        if (strcmp(state->encoder_type, "qsv") == 0) return "qsvh265enc";
-        return "x265enc";
-    } else if (strcmp(state->video_codec, "mpeg2") == 0) {
-        return "mpeg2enc";
-    }
-    return "x264enc";
+/*
+ * Initialize context with defaults
+ */
+static void init_context(void) {
+    memset(&g_ctx, 0, sizeof(g_ctx));
+
+    /* Input defaults */
+    g_ctx.input_port = 0;
+
+    /* Video defaults */
+    g_ctx.video_mode = MODE_TRANSCODE;
+    g_ctx.video_out_codec = VIDEO_CODEC_H264;
+    g_ctx.video_bitrate = DEFAULT_VIDEO_BITRATE;
+    g_ctx.video_preset = PRESET_MEDIUM;
+    strcpy(g_ctx.video_profile, "main");
+    g_ctx.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL;
+    g_ctx.bframes = DEFAULT_BFRAMES;
+
+    /* Scaling defaults (0 = no scaling) */
+    g_ctx.scale_width = 0;
+    g_ctx.scale_height = 0;
+    g_ctx.deinterlace = FALSE;
+    g_ctx.out_fps_num = 0;
+    g_ctx.out_fps_den = 1;
+
+    /* Audio defaults */
+    g_ctx.audio_mode = MODE_TRANSCODE;
+    g_ctx.audio_out_codec = AUDIO_CODEC_AAC;
+    g_ctx.audio_bitrate = DEFAULT_AUDIO_BITRATE;
+    g_ctx.audio_channels = 2;  /* Stereo */
+    g_ctx.audio_samplerate = DEFAULT_AUDIO_SAMPLERATE;
+
+    /* General defaults */
+    g_ctx.api_port = DEFAULT_API_PORT;
+    g_ctx.debug = FALSE;
+    g_ctx.detect_only = FALSE;
+    g_ctx.dump_pipeline = FALSE;
+    g_ctx.running = 1;
+
+    pthread_mutex_init(&g_ctx.lock, NULL);
 }
 
-/* Reader thread - reads from input buffer and feeds appsrc */
-static void* reader_thread_func(void *arg) {
-    transcoder_state_t *state = (transcoder_state_t *)arg;
-    ts_packet_raw_t packets[7]; /* Read 7 packets at a time (1316 bytes) */
-
-    CARI_LOG_DEBUG("Reader thread started");
-
-    while (state->reader_running) {
-        int count = ring_buffer_read_batch(state->input_buffer, packets, 7);
-
-        if (count > 0) {
-            /* Push to appsrc */
-            GstBuffer *buffer = gst_buffer_new_allocate(NULL, count * TS_PACKET_SIZE, NULL);
-            GstMapInfo map;
-
-            if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
-                memcpy(map.data, packets, count * TS_PACKET_SIZE);
-                gst_buffer_unmap(buffer, &map);
-
-                GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(state->appsrc), buffer);
-                if (ret != GST_FLOW_OK) {
-                    CARI_LOG_WARNING("Failed to push buffer to appsrc");
-                }
-                state->packets_in += count;
-            } else {
-                gst_buffer_unref(buffer);
-            }
-
-            ring_buffer_heartbeat(state->input_buffer);
-        } else {
-            /* No data, wait a bit */
-            usleep(1000);
-        }
-    }
-
-    CARI_LOG_DEBUG("Reader thread stopped");
-    return NULL;
-}
-
-/* Callback for new samples from appsink */
-static GstFlowReturn on_new_sample(GstAppSink *appsink, gpointer user_data) {
-    transcoder_state_t *state = (transcoder_state_t *)user_data;
-    GstSample *sample = gst_app_sink_pull_sample(appsink);
-
-    if (!sample) return GST_FLOW_ERROR;
-
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    GstMapInfo map;
-
-    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        /* Write to output buffer */
-        size_t offset = 0;
-        while (offset + TS_PACKET_SIZE <= map.size) {
-            ts_packet_raw_t *packet = (ts_packet_raw_t *)(map.data + offset);
-            if (ts_packet_valid(packet)) {
-                ring_buffer_write(state->output_buffer, packet);
-                state->packets_out++;
-            }
-            offset += TS_PACKET_SIZE;
-        }
-        ring_buffer_heartbeat(state->output_buffer);
-        gst_buffer_unmap(buffer, &map);
-    }
-
-    state->frames_out++;
-    gst_sample_unref(sample);
-    return GST_FLOW_OK;
-}
-
-/* Build transcoding pipeline */
-static int build_pipeline(transcoder_state_t *state) {
-    GError *error = NULL;
-    char pipeline_str[4096];
-    const char *encoder = get_encoder_element(state);
-
-    /* Build pipeline based on modes */
-    if (strcmp(state->video_mode, "passthrough") == 0 &&
-        strcmp(state->audio_mode, "passthrough") == 0) {
-        /* Full passthrough */
-        snprintf(pipeline_str, sizeof(pipeline_str),
-                 "appsrc name=src ! tsparse ! appsink name=sink");
-    } else {
-        /* Transcoding pipeline */
-        char video_branch[1024] = "";
-        char audio_branch[512] = "";
-
-        if (strcmp(state->video_mode, "transcode") == 0) {
-            /* Video transcoding */
-            char scale_str[128] = "";
-            if (state->video_width > 0 && state->video_height > 0) {
-                snprintf(scale_str, sizeof(scale_str),
-                         "videoscale ! video/x-raw,width=%d,height=%d ! ",
-                         state->video_width, state->video_height);
-            }
-
-            snprintf(video_branch, sizeof(video_branch),
-                     "tsdemux name=demux ! queue ! h264parse ! avdec_h264 ! "
-                     "%s%s bitrate=%d ! h264parse ! queue ! mux.",
-                     scale_str, encoder, state->video_bitrate / 1000);
-        } else if (strcmp(state->video_mode, "passthrough") == 0) {
-            snprintf(video_branch, sizeof(video_branch),
-                     "tsdemux name=demux ! queue ! h264parse ! mux.");
-        }
-
-        if (strcmp(state->audio_mode, "transcode") == 0) {
-            const char *audio_enc = "faac";
-            if (strcmp(state->audio_codec, "ac3") == 0) audio_enc = "avenc_ac3";
-            else if (strcmp(state->audio_codec, "mp2") == 0) audio_enc = "twolame";
-
-            snprintf(audio_branch, sizeof(audio_branch),
-                     "demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! "
-                     "%s bitrate=%d ! aacparse ! queue ! mux.",
-                     audio_enc, state->audio_bitrate);
-        } else if (strcmp(state->audio_mode, "passthrough") == 0) {
-            snprintf(audio_branch, sizeof(audio_branch),
-                     "demux. ! queue ! aacparse ! mux.");
-        }
-
-        snprintf(pipeline_str, sizeof(pipeline_str),
-                 "appsrc name=src format=time ! tsparse ! %s %s "
-                 "mpegtsmux name=mux ! appsink name=sink",
-                 video_branch, audio_branch);
-    }
-
-    CARI_LOG_DEBUG("Pipeline: %s", pipeline_str);
-
-    state->pipeline = gst_parse_launch(pipeline_str, &error);
-    if (!state->pipeline) {
-        CARI_LOG_ERROR("Failed to create pipeline: %s", error ? error->message : "unknown");
-        if (error) g_error_free(error);
-        return -1;
-    }
-
-    state->appsrc = gst_bin_get_by_name(GST_BIN(state->pipeline), "src");
-    state->appsink = gst_bin_get_by_name(GST_BIN(state->pipeline), "sink");
-
-    if (!state->appsrc || !state->appsink) {
-        CARI_LOG_ERROR("Failed to get appsrc/appsink");
-        return -1;
-    }
-
-    /* Configure appsrc */
-    g_object_set(state->appsrc,
-                 "stream-type", 0, /* GST_APP_STREAM_TYPE_STREAM */
-                 "format", GST_FORMAT_TIME,
-                 "is-live", TRUE,
-                 NULL);
-
-    /* Configure appsink */
-    g_object_set(state->appsink,
-                 "emit-signals", TRUE,
-                 "sync", FALSE,
-                 NULL);
-
-    g_signal_connect(state->appsink, "new-sample", G_CALLBACK(on_new_sample), state);
-
-    return 0;
-}
-
-static void print_usage(const char *prog) {
-    printf("CariTranscoder Transcoder - v1.0.0\n");
-    printf("Usage: %s -c <config_file> [options]\n", prog);
-    printf("Options:\n");
-    printf("  -c, --config FILE   Configuration file\n");
-    printf("  -d, --debug         Enable debug logging\n");
-    printf("  -h, --help          Show help\n");
-}
-
-int main(int argc, char *argv[]) {
-    int opt, debug = 0;
-    const char *config_file = NULL;
-
+/*
+ * Parse command line arguments
+ */
+static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
-        {"config", required_argument, 0, 'c'},
-        {"debug", no_argument, 0, 'd'},
-        {"help", no_argument, 0, 'h'},
+        /* Input */
+        {"input",              required_argument, 0, 'i'},
+        {"input-interface",    required_argument, 0, 'I'},
+
+        /* Video */
+        {"video-mode",         required_argument, 0, 'V'},
+        {"video-codec",        required_argument, 0, 'c'},
+        {"video-bitrate",      required_argument, 0, 'b'},
+        {"video-preset",       required_argument, 0, 'p'},
+        {"video-profile",      required_argument, 0, 'P'},
+        {"keyframe-interval",  required_argument, 0, 'k'},
+        {"bframes",            required_argument, 0, 'B'},
+
+        /* Scaling */
+        {"scale",              required_argument, 0, 's'},
+        {"deinterlace",        no_argument,       0, 'D'},
+        {"fps",                required_argument, 0, 'f'},
+
+        /* Audio */
+        {"audio-mode",         required_argument, 0, 'A'},
+        {"audio-codec",        required_argument, 0, 'C'},
+        {"audio-bitrate",      required_argument, 0, 'a'},
+        {"audio-channels",     required_argument, 0, 'n'},
+        {"audio-samplerate",   required_argument, 0, 'r'},
+
+        /* General */
+        {"api-port",           required_argument, 0, 'x'},
+        {"log-file",           required_argument, 0, 'l'},
+        {"debug",              no_argument,       0, 'd'},
+        {"detect-only",        no_argument,       0, 'O'},
+        {"dump-pipeline",      no_argument,       0, 'G'},
+        {"help",               no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "c:dh", long_options, NULL)) != -1) {
+    int opt;
+    int option_index = 0;
+    char *colon;
+
+    while ((opt = getopt_long(argc, argv, "i:I:V:c:b:p:P:k:B:s:Df:A:C:a:n:r:x:l:dOGh",
+                              long_options, &option_index)) != -1) {
         switch (opt) {
-            case 'c': config_file = optarg; break;
-            case 'd': debug = 1; break;
-            case 'h': print_usage(argv[0]); return 0;
-            default: print_usage(argv[0]); return 1;
+            /* Input */
+            case 'i':  /* --input */
+                colon = strchr(optarg, ':');
+                if (!colon) {
+                    fprintf(stderr, "Error: Input must be in ADDRESS:PORT format\n");
+                    return -1;
+                }
+                *colon = '\0';
+                strncpy(g_ctx.input_address, optarg, sizeof(g_ctx.input_address) - 1);
+                g_ctx.input_port = atoi(colon + 1);
+                break;
+
+            case 'I':  /* --input-interface */
+                strncpy(g_ctx.input_interface, optarg, sizeof(g_ctx.input_interface) - 1);
+                break;
+
+            /* Video */
+            case 'V':  /* --video-mode */
+                g_ctx.video_mode = parse_mode(optarg);
+                break;
+
+            case 'c':  /* --video-codec */
+                g_ctx.video_out_codec = parse_video_codec(optarg);
+                if (g_ctx.video_out_codec == VIDEO_CODEC_UNKNOWN) {
+                    fprintf(stderr, "Error: Unknown video codec '%s'\n", optarg);
+                    return -1;
+                }
+                break;
+
+            case 'b':  /* --video-bitrate */
+                g_ctx.video_bitrate = atoi(optarg);
+                break;
+
+            case 'p':  /* --video-preset */
+                g_ctx.video_preset = parse_preset(optarg);
+                break;
+
+            case 'P':  /* --video-profile */
+                strncpy(g_ctx.video_profile, optarg, sizeof(g_ctx.video_profile) - 1);
+                break;
+
+            case 'k':  /* --keyframe-interval */
+                g_ctx.keyframe_interval = atoi(optarg);
+                break;
+
+            case 'B':  /* --bframes */
+                g_ctx.bframes = atoi(optarg);
+                break;
+
+            /* Scaling */
+            case 's':  /* --scale WIDTHxHEIGHT */
+                if (sscanf(optarg, "%dx%d", &g_ctx.scale_width, &g_ctx.scale_height) != 2) {
+                    fprintf(stderr, "Error: Scale must be in WIDTHxHEIGHT format\n");
+                    return -1;
+                }
+                break;
+
+            case 'D':  /* --deinterlace */
+                g_ctx.deinterlace = TRUE;
+                break;
+
+            case 'f':  /* --fps NUM/DEN */
+                if (sscanf(optarg, "%d/%d", &g_ctx.out_fps_num, &g_ctx.out_fps_den) != 2) {
+                    /* Try just a number */
+                    g_ctx.out_fps_num = atoi(optarg);
+                    g_ctx.out_fps_den = 1;
+                }
+                break;
+
+            /* Audio */
+            case 'A':  /* --audio-mode */
+                g_ctx.audio_mode = parse_mode(optarg);
+                break;
+
+            case 'C':  /* --audio-codec */
+                g_ctx.audio_out_codec = parse_audio_codec(optarg);
+                if (g_ctx.audio_out_codec == AUDIO_CODEC_UNKNOWN) {
+                    fprintf(stderr, "Error: Unknown audio codec '%s'\n", optarg);
+                    return -1;
+                }
+                break;
+
+            case 'a':  /* --audio-bitrate */
+                g_ctx.audio_bitrate = atoi(optarg);
+                break;
+
+            case 'n':  /* --audio-channels */
+                if (strcasecmp(optarg, "passthrough") == 0) {
+                    g_ctx.audio_channels = 0;
+                } else if (strcasecmp(optarg, "mono") == 0) {
+                    g_ctx.audio_channels = 1;
+                } else if (strcasecmp(optarg, "stereo") == 0) {
+                    g_ctx.audio_channels = 2;
+                } else if (strcasecmp(optarg, "5.1") == 0) {
+                    g_ctx.audio_channels = 6;
+                } else {
+                    g_ctx.audio_channels = atoi(optarg);
+                }
+                break;
+
+            case 'r':  /* --audio-samplerate */
+                g_ctx.audio_samplerate = atoi(optarg);
+                break;
+
+            /* General */
+            case 'x':  /* --api-port */
+                g_ctx.api_port = atoi(optarg);
+                break;
+
+            case 'l':  /* --log-file */
+                strncpy(g_ctx.log_file, optarg, sizeof(g_ctx.log_file) - 1);
+                break;
+
+            case 'd':  /* --debug */
+                g_ctx.debug = TRUE;
+                break;
+
+            case 'O':  /* --detect-only */
+                g_ctx.detect_only = TRUE;
+                break;
+
+            case 'G':  /* --dump-pipeline */
+                g_ctx.dump_pipeline = TRUE;
+                break;
+
+            case 'h':  /* --help */
+                print_help(argv[0]);
+                exit(0);
+
+            default:
+                return -1;
         }
     }
 
-    if (!config_file) {
-        fprintf(stderr, "Error: Configuration file required\n");
-        return 1;
+    /* Validate required options */
+    if (g_ctx.input_port == 0) {
+        fprintf(stderr, "Error: --input ADDRESS:PORT is required\n");
+        return -1;
     }
 
-    /* Initialize logging */
-    log_config_t log_cfg = LOG_CONFIG_DEFAULT;
-    strncpy(log_cfg.ident, "cari-transcoder", sizeof(log_cfg.ident));
-    if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
-    log_init(&log_cfg);
+    return 0;
+}
 
-    CARI_LOG_INFO("CariTranscoder Transcoder starting...");
+/*
+ * Codec and mode conversion functions
+ */
+static const char *video_codec_to_string(VideoCodec codec) {
+    switch (codec) {
+        case VIDEO_CODEC_H264:  return "h264";
+        case VIDEO_CODEC_H265:  return "h265";
+        case VIDEO_CODEC_MPEG2: return "mpeg2";
+        default:                return "unknown";
+    }
+}
 
-    strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
+static const char *audio_codec_to_string(AudioCodec codec) {
+    switch (codec) {
+        case AUDIO_CODEC_AAC:   return "aac";
+        case AUDIO_CODEC_AC3:   return "ac3";
+        case AUDIO_CODEC_EAC3:  return "eac3";
+        case AUDIO_CODEC_MP2:   return "mp2";
+        default:                return "unknown";
+    }
+}
 
-    if (load_config(&g_state) != 0) return 1;
+static VideoCodec parse_video_codec(const char *str) {
+    if (strcasecmp(str, "h264") == 0 || strcasecmp(str, "avc") == 0)
+        return VIDEO_CODEC_H264;
+    if (strcasecmp(str, "h265") == 0 || strcasecmp(str, "hevc") == 0)
+        return VIDEO_CODEC_H265;
+    if (strcasecmp(str, "mpeg2") == 0 || strcasecmp(str, "mpeg2video") == 0)
+        return VIDEO_CODEC_MPEG2;
+    return VIDEO_CODEC_UNKNOWN;
+}
 
-    /* Setup signals */
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
+static AudioCodec parse_audio_codec(const char *str) {
+    if (strcasecmp(str, "aac") == 0)
+        return AUDIO_CODEC_AAC;
+    if (strcasecmp(str, "ac3") == 0)
+        return AUDIO_CODEC_AC3;
+    if (strcasecmp(str, "eac3") == 0 || strcasecmp(str, "e-ac3") == 0)
+        return AUDIO_CODEC_EAC3;
+    if (strcasecmp(str, "mp2") == 0)
+        return AUDIO_CODEC_MP2;
+    return AUDIO_CODEC_UNKNOWN;
+}
+
+static ProcessingMode parse_mode(const char *str) {
+    if (strcasecmp(str, "passthrough") == 0 || strcasecmp(str, "copy") == 0)
+        return MODE_PASSTHROUGH;
+    if (strcasecmp(str, "drop") == 0 || strcasecmp(str, "none") == 0)
+        return MODE_DROP;
+    return MODE_TRANSCODE;
+}
+
+static VideoPreset parse_preset(const char *str) {
+    if (strcasecmp(str, "ultrafast") == 0) return PRESET_ULTRAFAST;
+    if (strcasecmp(str, "superfast") == 0) return PRESET_SUPERFAST;
+    if (strcasecmp(str, "veryfast") == 0)  return PRESET_VERYFAST;
+    if (strcasecmp(str, "faster") == 0)    return PRESET_FASTER;
+    if (strcasecmp(str, "fast") == 0)      return PRESET_FAST;
+    if (strcasecmp(str, "medium") == 0)    return PRESET_MEDIUM;
+    if (strcasecmp(str, "slow") == 0)      return PRESET_SLOW;
+    if (strcasecmp(str, "slower") == 0)    return PRESET_SLOWER;
+    if (strcasecmp(str, "veryslow") == 0)  return PRESET_VERYSLOW;
+    return PRESET_MEDIUM;
+}
+
+static const char *preset_to_string(VideoPreset preset) {
+    switch (preset) {
+        case PRESET_ULTRAFAST: return "ultrafast";
+        case PRESET_SUPERFAST: return "superfast";
+        case PRESET_VERYFAST:  return "veryfast";
+        case PRESET_FASTER:    return "faster";
+        case PRESET_FAST:      return "fast";
+        case PRESET_MEDIUM:    return "medium";
+        case PRESET_SLOW:      return "slow";
+        case PRESET_SLOWER:    return "slower";
+        case PRESET_VERYSLOW:  return "veryslow";
+        default:               return "medium";
+    }
+}
+
+/*
+ * Timeout callback to quit main loop
+ */
+static gboolean quit_main_loop_cb(gpointer data) {
+    GMainLoop *loop = (GMainLoop *)data;
+    g_main_loop_quit(loop);
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * GStreamer bus message handler
+ */
+static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
+    (void)bus;
+    (void)data;
+
+    switch (GST_MESSAGE_TYPE(msg)) {
+        case GST_MESSAGE_ERROR: {
+            GError *err = NULL;
+            gchar *debug = NULL;
+            gst_message_parse_error(msg, &err, &debug);
+            fprintf(stderr, "Error from %s: %s\n",
+                    GST_OBJECT_NAME(msg->src), err->message);
+            if (debug) {
+                fprintf(stderr, "Debug: %s\n", debug);
+            }
+            g_error_free(err);
+            g_free(debug);
+            g_ctx.running = 0;
+            if (g_ctx.main_loop) {
+                g_main_loop_quit(g_ctx.main_loop);
+            }
+            break;
+        }
+
+        case GST_MESSAGE_WARNING: {
+            GError *err = NULL;
+            gchar *debug = NULL;
+            gst_message_parse_warning(msg, &err, &debug);
+            fprintf(stderr, "Warning from %s: %s\n",
+                    GST_OBJECT_NAME(msg->src), err->message);
+            g_error_free(err);
+            g_free(debug);
+            break;
+        }
+
+        case GST_MESSAGE_EOS:
+            fprintf(stderr, "End of stream\n");
+            g_ctx.running = 0;
+            if (g_ctx.main_loop) {
+                g_main_loop_quit(g_ctx.main_loop);
+            }
+            break;
+
+        case GST_MESSAGE_STATE_CHANGED:
+            if (GST_MESSAGE_SRC(msg) == GST_OBJECT(g_ctx.pipeline)) {
+                GstState old_state, new_state, pending_state;
+                gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
+                if (g_ctx.debug) {
+                    fprintf(stderr, "Pipeline state: %s -> %s\n",
+                            gst_element_state_get_name(old_state),
+                            gst_element_state_get_name(new_state));
+                }
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    return TRUE;
+}
+
+/*
+ * Callback when tsdemux adds a new pad (video or audio stream found)
+ */
+static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data) {
+    (void)element;
+    (void)data;
+
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        caps = gst_pad_query_caps(pad, NULL);
+    }
+
+    if (!caps) {
+        fprintf(stderr, "Warning: Could not get caps for pad %s\n", GST_PAD_NAME(pad));
+        return;
+    }
+
+    GstStructure *str = gst_caps_get_structure(caps, 0);
+    const gchar *name = gst_structure_get_name(str);
+
+    if (g_ctx.debug) {
+        gchar *caps_str = gst_caps_to_string(caps);
+        fprintf(stderr, "Pad added: %s, caps: %s\n", GST_PAD_NAME(pad), caps_str);
+        g_free(caps_str);
+    }
+
+    pthread_mutex_lock(&g_ctx.lock);
+
+    if (g_str_has_prefix(name, "video/")) {
+        /* Parse video caps */
+        if (g_strcmp0(name, "video/x-h264") == 0) {
+            g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
+        } else if (g_strcmp0(name, "video/x-h265") == 0) {
+            g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
+        } else if (g_strcmp0(name, "video/mpeg") == 0) {
+            gint mpegversion = 0;
+            gst_structure_get_int(str, "mpegversion", &mpegversion);
+            if (mpegversion == 2) {
+                g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
+            }
+        }
+
+        gst_structure_get_int(str, "width", &g_ctx.stream_info.video_width);
+        gst_structure_get_int(str, "height", &g_ctx.stream_info.video_height);
+
+        gint fps_num = 0, fps_den = 1;
+        if (gst_structure_get_fraction(str, "framerate", &fps_num, &fps_den)) {
+            g_ctx.stream_info.video_fps_num = fps_num;
+            g_ctx.stream_info.video_fps_den = fps_den;
+        }
+
+        const gchar *interlace_mode = gst_structure_get_string(str, "interlace-mode");
+        g_ctx.stream_info.video_interlaced =
+            (interlace_mode && g_strcmp0(interlace_mode, "progressive") != 0);
+
+        const gchar *profile = gst_structure_get_string(str, "profile");
+        if (profile) {
+            strncpy(g_ctx.stream_info.video_profile, profile,
+                    sizeof(g_ctx.stream_info.video_profile) - 1);
+        }
+
+        g_ctx.stream_info.video_detected = TRUE;
+
+        if (g_ctx.debug) {
+            fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
+                    video_codec_to_string(g_ctx.stream_info.video_codec),
+                    g_ctx.stream_info.video_width,
+                    g_ctx.stream_info.video_height,
+                    g_ctx.stream_info.video_fps_num,
+                    g_ctx.stream_info.video_fps_den,
+                    g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
+        }
+
+    } else if (g_str_has_prefix(name, "audio/")) {
+        /* Parse audio caps */
+        if (g_strcmp0(name, "audio/mpeg") == 0) {
+            gint mpegversion = 0;
+            gst_structure_get_int(str, "mpegversion", &mpegversion);
+            if (mpegversion == 4 || mpegversion == 2) {
+                g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
+            } else if (mpegversion == 1) {
+                gint layer = 0;
+                gst_structure_get_int(str, "layer", &layer);
+                if (layer == 2) {
+                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
+                }
+            }
+        } else if (g_strcmp0(name, "audio/x-ac3") == 0) {
+            g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
+        } else if (g_strcmp0(name, "audio/x-eac3") == 0) {
+            g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
+        }
+
+        gst_structure_get_int(str, "channels", &g_ctx.stream_info.audio_channels);
+        gst_structure_get_int(str, "rate", &g_ctx.stream_info.audio_sample_rate);
+
+        g_ctx.stream_info.audio_detected = TRUE;
+
+        if (g_ctx.debug) {
+            fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
+                    audio_codec_to_string(g_ctx.stream_info.audio_codec),
+                    g_ctx.stream_info.audio_channels,
+                    g_ctx.stream_info.audio_sample_rate);
+        }
+    }
+
+    pthread_mutex_unlock(&g_ctx.lock);
+
+    /* Check if we have both streams detected in detect-only mode */
+    if (g_ctx.detect_only &&
+        g_ctx.stream_info.video_detected &&
+        g_ctx.stream_info.audio_detected) {
+        /* Give it a moment to stabilize, then quit */
+        g_timeout_add(500, quit_main_loop_cb, g_ctx.main_loop);
+    }
+
+    gst_caps_unref(caps);
+}
+
+/*
+ * Create detection-only pipeline
+ * udpsrc -> queue -> tsparse -> tsdemux -> (pads inspected via callback)
+ */
+static int create_detection_pipeline(void) {
+    GstElement *udpsrc, *queue, *tsparse, *tsdemux, *fakesink_v, *fakesink_a;
+    char uri[256];
+
+    g_ctx.pipeline = gst_pipeline_new("detection-pipeline");
+    if (!g_ctx.pipeline) {
+        fprintf(stderr, "Error: Failed to create pipeline\n");
+        return -1;
+    }
+
+    /* Create elements */
+    udpsrc = gst_element_factory_make("udpsrc", "udpsrc");
+    queue = gst_element_factory_make("queue", "queue");
+    tsparse = gst_element_factory_make("tsparse", "tsparse");
+    tsdemux = gst_element_factory_make("tsdemux", "tsdemux");
+    fakesink_v = gst_element_factory_make("fakesink", "fakesink_v");
+    fakesink_a = gst_element_factory_make("fakesink", "fakesink_a");
+
+    if (!udpsrc || !queue || !tsparse || !tsdemux || !fakesink_v || !fakesink_a) {
+        fprintf(stderr, "Error: Failed to create GStreamer elements\n");
+        fprintf(stderr, "  udpsrc=%p queue=%p tsparse=%p tsdemux=%p\n",
+                (void*)udpsrc, (void*)queue, (void*)tsparse, (void*)tsdemux);
+        return -1;
+    }
+
+    /* Configure udpsrc */
+    snprintf(uri, sizeof(uri), "udp://%s:%d", g_ctx.input_address, g_ctx.input_port);
+    g_object_set(udpsrc, "uri", uri, NULL);
+    g_object_set(udpsrc, "buffer-size", 2097152, NULL);  /* 2MB buffer */
+
+    if (g_ctx.input_interface[0]) {
+        g_object_set(udpsrc, "multicast-iface", g_ctx.input_interface, NULL);
+    }
+
+    /* Configure queue */
+    g_object_set(queue,
+                 "leaky", 1,  /* downstream */
+                 "max-size-buffers", 0,
+                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
+                 "max-size-bytes", 0,
+                 NULL);
+
+    /* Add all elements to pipeline */
+    gst_bin_add_many(GST_BIN(g_ctx.pipeline),
+                     udpsrc, queue, tsparse, tsdemux, fakesink_v, fakesink_a, NULL);
+
+    /* Link static elements: udpsrc -> queue -> tsparse -> tsdemux */
+    if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
+        fprintf(stderr, "Error: Failed to link elements\n");
+        return -1;
+    }
+
+    /* Connect to pad-added signal for dynamic linking */
+    g_signal_connect(tsdemux, "pad-added", G_CALLBACK(on_demux_pad_added), NULL);
+
+    /* Set up bus watch */
+    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(g_ctx.pipeline));
+    gst_bus_add_watch(bus, on_bus_message, NULL);
+    gst_object_unref(bus);
+
+    fprintf(stderr, "Detecting stream at %s:%d...\n",
+            g_ctx.input_address, g_ctx.input_port);
+
+    return 0;
+}
+
+/*
+ * Print detected stream info as JSON
+ */
+static void print_detected_info(void) {
+    printf("{\n");
+    printf("  \"video\": {\n");
+    printf("    \"codec\": \"%s\",\n", video_codec_to_string(g_ctx.stream_info.video_codec));
+    printf("    \"width\": %d,\n", g_ctx.stream_info.video_width);
+    printf("    \"height\": %d,\n", g_ctx.stream_info.video_height);
+    printf("    \"framerate\": \"%d/%d\",\n",
+           g_ctx.stream_info.video_fps_num, g_ctx.stream_info.video_fps_den);
+    printf("    \"interlaced\": %s,\n", g_ctx.stream_info.video_interlaced ? "true" : "false");
+    printf("    \"profile\": \"%s\"\n", g_ctx.stream_info.video_profile);
+    printf("  },\n");
+    printf("  \"audio\": {\n");
+    printf("    \"codec\": \"%s\",\n", audio_codec_to_string(g_ctx.stream_info.audio_codec));
+    printf("    \"channels\": %d,\n", g_ctx.stream_info.audio_channels);
+    printf("    \"sample_rate\": %d\n", g_ctx.stream_info.audio_sample_rate);
+    printf("  }\n");
+    printf("}\n");
+}
+
+/*
+ * Create full transcoding pipeline (placeholder for Phase 2)
+ */
+static int create_transcode_pipeline(void) {
+    fprintf(stderr, "Full transcoding pipeline not yet implemented\n");
+    fprintf(stderr, "Use --detect-only to verify stream detection works\n");
+    return -1;
+}
+
+/*
+ * Cleanup resources
+ */
+static void cleanup(void) {
+    if (g_ctx.pipeline) {
+        gst_element_set_state(g_ctx.pipeline, GST_STATE_NULL);
+        gst_object_unref(g_ctx.pipeline);
+        g_ctx.pipeline = NULL;
+    }
+
+    if (g_ctx.main_loop) {
+        g_main_loop_unref(g_ctx.main_loop);
+        g_ctx.main_loop = NULL;
+    }
+
+    pthread_mutex_destroy(&g_ctx.lock);
+}
+
+/*
+ * Main entry point
+ */
+int main(int argc, char *argv[]) {
+    int ret = 0;
+
+    /* Initialize context */
+    init_context();
+
+    /* Parse arguments */
+    if (parse_args(argc, argv) != 0) {
+        print_help(argv[0]);
+        return 1;
+    }
 
     /* Initialize GStreamer */
     gst_init(&argc, &argv);
 
-    /* Open input buffer */
-    g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, NULL, false);
-    if (!g_state.input_buffer) {
-        CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
+    /* Set up signal handlers */
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Create main loop */
+    g_ctx.main_loop = g_main_loop_new(NULL, FALSE);
+
+    /* Create pipeline */
+    if (g_ctx.detect_only) {
+        ret = create_detection_pipeline();
+    } else {
+        ret = create_transcode_pipeline();
+    }
+
+    if (ret != 0) {
+        cleanup();
         return 1;
     }
 
-    /* Create output buffer */
-    ring_buffer_options_t rb_opts = RING_BUFFER_OPTIONS_DEFAULT;
-    g_state.output_buffer = ring_buffer_open(g_state.output_buffer_name, &rb_opts, true);
-    if (!g_state.output_buffer) {
-        CARI_LOG_ERROR("Failed to create output buffer");
-        ring_buffer_close(g_state.input_buffer, false);
+    /* Start pipeline */
+    GstStateChangeReturn state_ret = gst_element_set_state(g_ctx.pipeline, GST_STATE_PLAYING);
+    if (state_ret == GST_STATE_CHANGE_FAILURE) {
+        fprintf(stderr, "Error: Failed to start pipeline\n");
+        cleanup();
         return 1;
     }
 
-    /* Build pipeline */
-    if (build_pipeline(&g_state) != 0) {
-        ring_buffer_close(g_state.input_buffer, false);
-        ring_buffer_close(g_state.output_buffer, true);
-        return 1;
+    /* Record start time */
+    gettimeofday(&g_ctx.start_time, NULL);
+
+    /* Run main loop */
+    if (g_ctx.detect_only) {
+        /* Set a timeout for detection (10 seconds max) */
+        g_timeout_add_seconds(10, quit_main_loop_cb, g_ctx.main_loop);
     }
 
-    /* Start reader thread */
-    g_state.reader_running = 1;
-    pthread_create(&g_state.reader_thread, NULL, reader_thread_func, &g_state);
+    g_main_loop_run(g_ctx.main_loop);
 
-    /* Create and run main loop */
-    g_state.main_loop = g_main_loop_new(NULL, FALSE);
-
-    if (gst_element_set_state(g_state.pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        CARI_LOG_ERROR("Failed to start pipeline");
-        g_state.reader_running = 0;
-        pthread_join(g_state.reader_thread, NULL);
-        return 1;
+    /* Print results for detect-only mode */
+    if (g_ctx.detect_only) {
+        if (g_ctx.stream_info.video_detected || g_ctx.stream_info.audio_detected) {
+            print_detected_info();
+        } else {
+            fprintf(stderr, "Error: No streams detected within timeout\n");
+            ret = 1;
+        }
     }
-
-    g_state.running = 1;
-    CARI_LOG_INFO("Transcoder %s started", g_state.id);
-
-    g_main_loop_run(g_state.main_loop);
 
     /* Cleanup */
-    CARI_LOG_INFO("Shutting down...");
+    cleanup();
 
-    g_state.reader_running = 0;
-    pthread_join(g_state.reader_thread, NULL);
-
-    gst_element_set_state(g_state.pipeline, GST_STATE_NULL);
-    gst_object_unref(g_state.pipeline);
-    g_main_loop_unref(g_state.main_loop);
-
-    CARI_LOG_INFO("Stats: %lu packets in, %lu packets out, %lu frames",
-             g_state.packets_in, g_state.packets_out, g_state.frames_out);
-
-    ring_buffer_close(g_state.input_buffer, false);
-    ring_buffer_close(g_state.output_buffer, true);
-    config_free(&g_state.config);
-    log_shutdown();
-
-    return 0;
+    return ret;
 }
