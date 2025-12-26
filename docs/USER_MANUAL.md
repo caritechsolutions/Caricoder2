@@ -53,12 +53,26 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
    - **Interface**: Network interface (optional)
 
    **Source Settings (for SRT):**
-   - **Address**: SRT server address (e.g., `srt.server.com:9000`)
-   - **Mode**: Connection mode (Caller, Listener, Rendezvous)
-   - **Latency**: Buffer latency in milliseconds (default: 200)
+   - **Address**: SRT server address (e.g., `192.168.1.100` or `srt.server.com`)
+   - **Port**: SRT port (e.g., `9000`)
+   - **Mode**: Connection mode:
+     - **Caller**: Connects to a remote SRT listener (most common)
+     - **Listener**: Waits for incoming SRT connections
+     - **Rendezvous**: Both sides connect simultaneously
+   - **Latency**: Buffer latency in milliseconds (default: 120)
+     - Higher values improve reliability on lossy networks
+     - Lower values reduce delay but may cause drops
    - **Stream ID**: Optional identifier for multi-stream servers
-   - **Passphrase**: Optional encryption passphrase
-   - **Key Length**: Encryption key length (Auto, AES-128, AES-192, AES-256)
+     - Used by server to route to correct stream
+     - Example: `#!::r=channelname` (Haivision format)
+   - **Passphrase**: Optional AES encryption passphrase (10-79 characters)
+   - **Key Length**: Encryption key length (0=disabled, 16=AES-128, 24=AES-192, 32=AES-256)
+
+   **SRT Technical Details:**
+   - Uses `srt-live-transmit` for reliable stream reception
+   - Stats collected via named pipe to avoid file growth issues
+   - Live statistics available via `/srt-stats` API endpoint
+   - Automatic reconnection on connection loss
 
    **Source Settings (for HLS):**
    - **URL**: Full HLS playlist URL (e.g., `https://example.com/stream.m3u8`)
@@ -160,6 +174,17 @@ The preview modal displays:
 - Retry bandwidth overhead
 - Packet statistics: received, missing, recovered, lost, reordered, 1st retry
 - Updates every 5 seconds
+
+**SRT Statistics (SRT inputs only)**
+- Round-trip time (RTT) in milliseconds - connection latency indicator
+- Estimated bandwidth in Mbps - available link capacity
+- Packet statistics:
+  - Packets received and sent
+  - Packets lost in transit
+  - Packets dropped (arrived too late)
+  - Packets retransmitted (recovered)
+- Byte counters for total data transferred
+- Updates every ~1 second
 
 ---
 
@@ -308,6 +333,51 @@ If A/V sync values are consistently high:
 
 3. **Restart the input**
    - Stop and restart the input from the web interface
+
+### SRT Input Not Connecting
+
+1. **Check service status**
+   ```bash
+   systemctl status cari-srt-INPUTNAME
+   journalctl -u cari-srt-INPUTNAME -f
+   ```
+
+2. **Test SRT connection manually**
+   ```bash
+   srt-live-transmit 'srt://ADDRESS:PORT?mode=caller' file://con | hexdump -C | head
+   ```
+
+3. **Verify Stream ID format**
+   - Some servers require specific Stream ID formats
+   - Common format: `#!::r=streamname`
+   - Check server documentation for requirements
+
+4. **Check firewall/network**
+   - SRT uses UDP on the configured port
+   - Ensure firewall allows UDP traffic
+
+### SRT Stats Not Showing
+
+1. **Check stats file exists**
+   ```bash
+   ls -la /tmp/srt-input-*-stats.json
+   cat /tmp/srt-input-INPUTNAME-stats.json
+   ```
+
+2. **Check stats pipe exists**
+   ```bash
+   ls -la /tmp/srt-input-*-stats.pipe
+   ```
+
+3. **Test stats API endpoint**
+   ```bash
+   curl http://localhost:API_PORT/srt-stats
+   ```
+
+4. **Check srt_input logs**
+   ```bash
+   journalctl -u cari-srt-INPUTNAME | grep -i stats
+   ```
 
 ---
 

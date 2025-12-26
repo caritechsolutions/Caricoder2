@@ -244,6 +244,53 @@ curl http://localhost:8082/history/bet
 }
 ```
 
+### SRT Stats API (Input API Port)
+
+For SRT inputs, the `srt_input` tool provides real-time SRT connection statistics via the `/srt-stats` endpoint.
+
+```bash
+# Get SRT stats (replace PORT with the input's api_port)
+curl http://localhost:PORT/srt-stats
+```
+
+**Architecture:**
+- `srt-live-transmit` outputs stats to a named pipe (`/tmp/srt-input-{id}-stats.pipe`)
+- A reader thread consumes from the pipe and writes to JSON file
+- Each stats line overwrites the file (no accumulation, constant small size)
+- Avoids sparse file issues from srt-live-transmit's file position tracking
+
+**Example Response:**
+```json
+{
+  "rtt_ms": 1.25,
+  "bandwidth_mbps": 7.32,
+  "packets": {
+    "sent": 0,
+    "received": 1350,
+    "send_loss": 0,
+    "recv_loss": 0,
+    "retransmitted": 0,
+    "send_dropped": 0,
+    "recv_dropped": 0
+  },
+  "bytes": {
+    "sent": 0,
+    "received": 1824720
+  }
+}
+```
+
+**Stats Fields:**
+| Field | Description |
+|-------|-------------|
+| `rtt_ms` | Round-trip time in milliseconds |
+| `bandwidth_mbps` | Estimated available bandwidth |
+| `packets.received` | Total packets received |
+| `packets.recv_loss` | Packets lost in transit |
+| `packets.recv_dropped` | Packets dropped (late arrival) |
+| `packets.retransmitted` | Packets recovered via retransmission |
+| `bytes.received` | Total bytes received |
+
 ## Troubleshooting
 
 ### Preview not working
@@ -306,6 +353,7 @@ Each input is assigned a base `api_port` (configured during input creation, typi
 **Input API (`api_port`):**
 - Health check, metrics, bitrate history
 - Endpoints: `/health`, `/status`, `/metrics`, `/metrics/history`
+- For SRT: also serves `/srt-stats` (RTT, bandwidth, packet stats)
 - For RIST: also serves `/rist-stats` (fetches from ristreceiver)
 
 **Player Preview (`api_port + 1000`):**
@@ -373,6 +421,19 @@ Building on the UDP input foundation:
 ## Changelog
 
 ### 2024-12-26
+
+**SRT Live Statistics**
+- Added `/srt-stats` endpoint to `srt_input` tool for real-time SRT connection monitoring
+- Uses named pipe architecture to avoid file buffering/sparse file issues
+- srt-live-transmit writes stats to named pipe, reader thread writes to JSON file
+- GUI displays SRT-specific stats during preview (SRT inputs only):
+  - Round-trip time (RTT) in milliseconds
+  - Estimated bandwidth in Mbps
+  - Packet statistics: sent, received, lost, dropped, retransmitted
+  - Byte counters for sent and received data
+- Stats file stays small (single line) - each update overwrites previous
+- Files named by input ID: `/tmp/srt-input-{id}-stats.json`
+- Auto-updates every ~1 second while stream is running
 
 **RIST Input Support**
 - New `rist_input` tool using vendored librist with ristreceiver
