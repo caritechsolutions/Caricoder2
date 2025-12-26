@@ -10,6 +10,8 @@ This manual provides step-by-step instructions for using CariTranscoder to manag
 4. [Bitrate Monitoring](#bitrate-monitoring)
 5. [A/V Sync Monitoring](#av-sync-monitoring)
 6. [Troubleshooting](#troubleshooting)
+7. [Port Reference](#port-reference)
+8. [Best Practices](#best-practices)
 
 ---
 
@@ -51,12 +53,26 @@ The dashboard provides an overview of all configured inputs, transcoders, and ou
    - **Interface**: Network interface (optional)
 
    **Source Settings (for SRT):**
-   - **Address**: SRT server address (e.g., `srt.server.com:9000`)
-   - **Mode**: Connection mode (Caller, Listener, Rendezvous)
-   - **Latency**: Buffer latency in milliseconds (default: 200)
+   - **Address**: SRT server address (e.g., `192.168.1.100` or `srt.server.com`)
+   - **Port**: SRT port (e.g., `9000`)
+   - **Mode**: Connection mode:
+     - **Caller**: Connects to a remote SRT listener (most common)
+     - **Listener**: Waits for incoming SRT connections
+     - **Rendezvous**: Both sides connect simultaneously
+   - **Latency**: Buffer latency in milliseconds (default: 120)
+     - Higher values improve reliability on lossy networks
+     - Lower values reduce delay but may cause drops
    - **Stream ID**: Optional identifier for multi-stream servers
-   - **Passphrase**: Optional encryption passphrase
-   - **Key Length**: Encryption key length (Auto, AES-128, AES-192, AES-256)
+     - Used by server to route to correct stream
+     - Example: `#!::r=channelname` (Haivision format)
+   - **Passphrase**: Optional AES encryption passphrase (10-79 characters)
+   - **Key Length**: Encryption key length (0=disabled, 16=AES-128, 24=AES-192, 32=AES-256)
+
+   **SRT Technical Details:**
+   - Uses `srt-live-transmit` for reliable stream reception
+   - Stats collected via named pipe to avoid file growth issues
+   - Live statistics available via `/srt-stats` API endpoint
+   - Automatic reconnection on connection loss
 
    **Source Settings (for HLS):**
    - **URL**: Full HLS playlist URL (e.g., `https://example.com/stream.m3u8`)
@@ -150,6 +166,25 @@ The preview modal displays:
 - Status indicator (OK/WARNING/ERROR)
 - 24-hour history graph
 - Updates every 5 minutes
+
+**RIST Statistics (RIST inputs only)**
+- Link quality percentage with color-coded status (green ≥99%, yellow ≥95%, red <95%)
+- Connected peers count
+- Round-trip time (RTT) in milliseconds
+- Retry bandwidth overhead
+- Packet statistics: received, missing, recovered, lost, reordered, 1st retry
+- Updates every 5 seconds
+
+**SRT Statistics (SRT inputs only)**
+- Round-trip time (RTT) in milliseconds - connection latency indicator
+- Estimated bandwidth in Mbps - available link capacity
+- Packet statistics:
+  - Packets received and sent
+  - Packets lost in transit
+  - Packets dropped (arrived too late)
+  - Packets retransmitted (recovered)
+- Byte counters for total data transferred
+- Updates every ~1 second
 
 ---
 
@@ -299,6 +334,51 @@ If A/V sync values are consistently high:
 3. **Restart the input**
    - Stop and restart the input from the web interface
 
+### SRT Input Not Connecting
+
+1. **Check service status**
+   ```bash
+   systemctl status cari-srt-INPUTNAME
+   journalctl -u cari-srt-INPUTNAME -f
+   ```
+
+2. **Test SRT connection manually**
+   ```bash
+   srt-live-transmit 'srt://ADDRESS:PORT?mode=caller' file://con | hexdump -C | head
+   ```
+
+3. **Verify Stream ID format**
+   - Some servers require specific Stream ID formats
+   - Common format: `#!::r=streamname`
+   - Check server documentation for requirements
+
+4. **Check firewall/network**
+   - SRT uses UDP on the configured port
+   - Ensure firewall allows UDP traffic
+
+### SRT Stats Not Showing
+
+1. **Check stats file exists**
+   ```bash
+   ls -la /tmp/srt-input-*-stats.json
+   cat /tmp/srt-input-INPUTNAME-stats.json
+   ```
+
+2. **Check stats pipe exists**
+   ```bash
+   ls -la /tmp/srt-input-*-stats.pipe
+   ```
+
+3. **Test stats API endpoint**
+   ```bash
+   curl http://localhost:API_PORT/srt-stats
+   ```
+
+4. **Check srt_input logs**
+   ```bash
+   journalctl -u cari-srt-INPUTNAME | grep -i stats
+   ```
+
 ---
 
 ## Command Reference
@@ -344,6 +424,40 @@ curl http://localhost:8082/health
 | `/etc/caritrans/outputs/` | Output configurations |
 | `/var/log/caritrans/` | Log files |
 | `/var/lib/caritrans/` | Data files |
+
+---
+
+## Port Reference
+
+CariTranscoder uses several ports. Each input has a base `api_port` (assigned during creation) with additional ports derived from it.
+
+### System Ports
+
+| Port | Service | Description |
+|------|---------|-------------|
+| 8080 | Web UI | Nginx web interface |
+| 8000 | CariTrans API | FastAPI for privileged operations |
+| 8082 | A/V Sync | cari-avsync monitor service |
+
+### Per-Input Ports
+
+| Offset | Port Example | Service |
+|--------|--------------|---------|
+| +0 | 9100 | Input API (health, metrics, history) |
+| +1000 | 10100 | Player Preview (HLS generation) |
+| +2000 | 11100 | RIST Metrics (RIST inputs only) |
+
+**Example:** If your input has `api_port=9105`:
+- Input API: `http://localhost:9105/metrics`
+- Preview API: `http://localhost:10105/status`
+- RIST Stats: `http://localhost:9105/rist-stats` (fetches from port 11105 internally)
+
+### Checking Port Usage
+
+```bash
+# See all ports in use by CariTranscoder
+ss -tlnp | grep -E '(8000|8080|8082|9[0-9]{3}|1[01][0-9]{3})'
+```
 
 ---
 

@@ -244,6 +244,53 @@ curl http://localhost:8082/history/bet
 }
 ```
 
+### SRT Stats API (Input API Port)
+
+For SRT inputs, the `srt_input` tool provides real-time SRT connection statistics via the `/srt-stats` endpoint.
+
+```bash
+# Get SRT stats (replace PORT with the input's api_port)
+curl http://localhost:PORT/srt-stats
+```
+
+**Architecture:**
+- `srt-live-transmit` outputs stats to a named pipe (`/tmp/srt-input-{id}-stats.pipe`)
+- A reader thread consumes from the pipe and writes to JSON file
+- Each stats line overwrites the file (no accumulation, constant small size)
+- Avoids sparse file issues from srt-live-transmit's file position tracking
+
+**Example Response:**
+```json
+{
+  "rtt_ms": 1.25,
+  "bandwidth_mbps": 7.32,
+  "packets": {
+    "sent": 0,
+    "received": 1350,
+    "send_loss": 0,
+    "recv_loss": 0,
+    "retransmitted": 0,
+    "send_dropped": 0,
+    "recv_dropped": 0
+  },
+  "bytes": {
+    "sent": 0,
+    "received": 1824720
+  }
+}
+```
+
+**Stats Fields:**
+| Field | Description |
+|-------|-------------|
+| `rtt_ms` | Round-trip time in milliseconds |
+| `bandwidth_mbps` | Estimated available bandwidth |
+| `packets.received` | Total packets received |
+| `packets.recv_loss` | Packets lost in transit |
+| `packets.recv_dropped` | Packets dropped (late arrival) |
+| `packets.retransmitted` | Packets recovered via retransmission |
+| `bytes.received` | Total bytes received |
+
 ## Troubleshooting
 
 ### Preview not working
@@ -281,6 +328,60 @@ journalctl -u cari-api -f
 systemctl restart nginx php7.4-fpm cari-api
 ```
 
+## Port Usage
+
+CariTranscoder uses several ports for its services and input monitoring. Understanding the port scheme helps avoid conflicts.
+
+### System Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Nginx Web UI | 8080 | Main web interface |
+| CariTrans API | 8000 | FastAPI service for privileged operations |
+| A/V Sync Monitor | 8082 | cari-avsync REST API |
+
+### Per-Input Port Scheme
+
+Each input is assigned a base `api_port` (configured during input creation, typically starting at 9100). The following ports are derived from it:
+
+| Service | Port | Example (api_port=9105) |
+|---------|------|-------------------------|
+| Input API | `api_port` | 9105 |
+| Player Preview | `api_port + 1000` | 10105 |
+| RIST Metrics | `api_port + 2000` | 11105 (RIST only) |
+
+**Input API (`api_port`):**
+- Health check, metrics, bitrate history
+- Endpoints: `/health`, `/status`, `/metrics`, `/metrics/history`
+- For SRT: also serves `/srt-stats` (RTT, bandwidth, packet stats)
+- For RIST: also serves `/rist-stats` (fetches from ristreceiver)
+
+**Player Preview (`api_port + 1000`):**
+- FFmpeg HLS preview generation
+- Endpoints: `/health`, `/status`, `/keepalive`
+- Started on-demand when preview modal opens
+
+**RIST Metrics (`api_port + 2000`):**
+- ristreceiver Prometheus metrics endpoint
+- Only used for RIST inputs
+- Provides quality, peers, RTT, packet stats
+
+### Example Port Allocation
+
+For a system with 3 inputs:
+
+| Input | Type | api_port | Preview Port | RIST Metrics |
+|-------|------|----------|--------------|--------------|
+| bet | UDP | 9100 | 10100 | - |
+| news | SRT | 9101 | 10101 | - |
+| live | RIST | 9102 | 10102 | 11102 |
+
+### Avoiding Conflicts
+
+- Always use unique `api_port` values for each input
+- Ensure ports in range `api_port` to `api_port + 2000` are available
+- Check for conflicts with other services on the system
+
 ## Development
 
 ### Building from source
@@ -306,8 +407,9 @@ Building on the UDP input foundation:
 
 - [x] **UDP Input** - Multicast/unicast with PID filtering and real-time monitoring
 - [x] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes, encryption, streamid
-- [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control
+- [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control, live statistics
 - [x] **HLS Input** - HTTP Live Streaming via ffmpeg with automatic PID discovery
+- [x] **HTTP/TS Input** - Direct MPEG-TS over HTTP using TSDuck HTTP plugin
 
 ### Planned Features
 - [x] Web UI for input configuration wizard with type-specific options
@@ -320,6 +422,19 @@ Building on the UDP input foundation:
 
 ### 2024-12-26
 
+**SRT Live Statistics**
+- Added `/srt-stats` endpoint to `srt_input` tool for real-time SRT connection monitoring
+- Uses named pipe architecture to avoid file buffering/sparse file issues
+- srt-live-transmit writes stats to named pipe, reader thread writes to JSON file
+- GUI displays SRT-specific stats during preview (SRT inputs only):
+  - Round-trip time (RTT) in milliseconds
+  - Estimated bandwidth in Mbps
+  - Packet statistics: sent, received, lost, dropped, retransmitted
+  - Byte counters for sent and received data
+- Stats file stays small (single line) - each update overwrites previous
+- Files named by input ID: `/tmp/srt-input-{id}-stats.json`
+- Auto-updates every ~1 second while stream is running
+
 **RIST Input Support**
 - New `rist_input` tool using vendored librist with ristreceiver
 - Supports Simple, Main, and Advanced RIST profiles
@@ -329,6 +444,23 @@ Building on the UDP input foundation:
 - Full GUI support with RIST-specific options in web interface
 - Systemd service generation via Python API
 - A/V sync monitoring support for RIST inputs
+
+**RIST Live Statistics**
+- Added `/rist-stats` endpoint to fetch ristreceiver Prometheus metrics
+- GUI displays RIST-specific stats during preview (RIST inputs only):
+  - Link quality percentage with color-coded status
+  - Connected peers count
+  - Round-trip time (RTT)
+  - Retry bandwidth overhead
+  - Packet statistics: received, missing, recovered, lost, reordered
+- Auto-updates every 5 seconds while preview is open
+- Uses ristreceiver's built-in Prometheus metrics HTTP endpoint
+
+**HTTP/TS Input Support**
+- New HTTP input type for direct MPEG-TS over HTTP
+- Uses TSDuck's HTTP plugin (`tsp -I http`)
+- Simpler alternative to HLS for servers providing raw transport streams
+- Full GUI support with HTTP-specific options
 
 **A/V Sync Monitor Fixes**
 - Fixed service detection for RIST and other inputs with spaces/special chars
