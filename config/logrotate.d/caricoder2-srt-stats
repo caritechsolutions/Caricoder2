@@ -10,7 +10,7 @@
 
 /tmp/srt-input-*-stats.json {
     size 1M
-    rotate 2
+    rotate 0
     copytruncate
     missingok
     notifempty
