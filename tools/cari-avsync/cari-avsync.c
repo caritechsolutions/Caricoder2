@@ -58,6 +58,7 @@ typedef struct {
 // Single measurement result - just the means with timestamp
 typedef struct {
     char timestamp[32];
+    time_t unix_ts;         // Unix timestamp for browser conversion
     double a2v_avg_ms;      // Audio→Video mean gap
     double v2a_avg_ms;      // Video→Audio mean gap
     int a2v_count;          // Sample count used
@@ -210,18 +211,45 @@ int parse_config(const char* filepath, InputStatus* input) {
     return 0;
 }
 
+// Sanitize name to ID format (lowercase, alphanumeric and hyphens only)
+void sanitize_to_id(const char* name, char* id, size_t id_size) {
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j < id_size - 1; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') {
+            id[j++] = c + 32;  // lowercase
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            id[j++] = c;
+        } else if (c == ' ' || c == '_' || c == '-') {
+            if (j > 0 && id[j-1] != '-') {
+                id[j++] = '-';
+            }
+        }
+    }
+    // Remove trailing hyphen
+    while (j > 0 && id[j-1] == '-') j--;
+    id[j] = '\0';
+}
+
 // Check if systemd service is running
 int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
-    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}
+    char sanitized_name[128];
+
+    // Sanitize name to match systemd service naming
+    sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
+
+    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}, RIST uses cari-rist-{name}
     if (strcmp(input_type, "srt") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
     } else if (strcmp(input_type, "hls") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
     } else if (strcmp(input_type, "http") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
+    } else if (strcmp(input_type, "rist") == 0) {
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", input_name);
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
     }
     return system(cmd) == 0;
 }
@@ -277,6 +305,7 @@ void discover_inputs(void) {
                 if (strcmp(input->type, "srt") == 0) svc_prefix = "cari-srt";
                 else if (strcmp(input->type, "hls") == 0) svc_prefix = "cari-hls";
                 else if (strcmp(input->type, "http") == 0) svc_prefix = "cari-http";
+                else if (strcmp(input->type, "rist") == 0) svc_prefix = "cari-rist";
                 printf("  Service %s-%s: %s\n", svc_prefix, input->id,
                        input->running ? "RUNNING" : "not running");
 
@@ -476,8 +505,9 @@ int measure_avsync(InputStatus* input, MeasurementResult* result) {
         result->v2a_count = 1;
     }
 
-    // Set timestamp
+    // Set timestamp (both Unix for browser conversion and formatted for display)
     time_t now = time(NULL);
+    result->unix_ts = now;
     struct tm* tm = localtime(&now);
     strftime(result->timestamp, sizeof(result->timestamp), "%Y-%m-%d %H:%M:%S", tm);
 
@@ -575,6 +605,7 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
     return snprintf(buf, buf_size,
         "{"
         "\"timestamp\":\"%s\","
+        "\"unix_ts\":%ld,"
         "\"a2v_mean_ms\":%.2f,"
         "\"v2a_mean_ms\":%.2f,"
         "\"a2v_samples\":%d,"
@@ -582,6 +613,7 @@ int build_result_json(MeasurementResult* result, char* buf, size_t buf_size) {
         "\"status\":\"%s\""
         "}",
         result->timestamp,
+        (long)result->unix_ts,
         result->a2v_avg_ms,
         result->v2a_avg_ms,
         result->a2v_count,

@@ -273,44 +273,40 @@ install_tsduck() {
     fi
 }
 
-# Install librist from source (for ristreceiver)
+# Install librist from local source (for ristreceiver)
 install_librist() {
-    log_step "Installing librist (RIST library)..."
+    log_step "Installing librist (RIST library) from local source..."
 
-    if command -v ristreceiver &> /dev/null; then
-        log_info "librist already installed: $(ristreceiver --help 2>&1 | head -1 || echo 'installed')"
-        return 0
-    fi
-
-    # Also check /usr/local/bin
-    if [[ -f /usr/local/bin/ristreceiver ]]; then
-        log_info "librist already installed to /usr/local/bin"
-        return 0
+    # Check if local librist source exists
+    if [[ ! -d "$INSTALL_DIR/librist-master" ]]; then
+        log_warn "librist source not found at $INSTALL_DIR/librist-master"
+        log_warn "RIST support will not be available"
+        return 1
     fi
 
     cd /tmp
 
-    # Clean up any existing librist directory
-    if [[ -d "librist" ]]; then
-        log_info "Removing existing librist directory..."
-        rm -rf librist
+    # Clean up any existing librist build directory
+    if [[ -d "librist-build" ]]; then
+        log_info "Removing existing librist build directory..."
+        rm -rf librist-build
     fi
 
-    log_info "Cloning librist from VideoLAN..."
-    if ! git clone https://code.videolan.org/rist/librist.git; then
-        log_warn "Failed to clone librist repository"
-        log_warn "RIST scanning will not be available"
-        return 1
-    fi
+    # Copy source to temp build directory
+    log_info "Copying librist source to build directory..."
+    cp -r "$INSTALL_DIR/librist-master" librist-build
 
-    cd librist
+    cd librist-build
+
+    # Clean any previous build artifacts
+    rm -rf build
 
     log_info "Building librist with meson/ninja..."
 
     # Configure with meson
     if ! meson setup build; then
         log_warn "Meson setup failed"
-        cd /tmp && rm -rf librist
+        cd /tmp && rm -rf librist-build
         return 1
     fi
 
@@ -318,14 +314,14 @@ install_librist() {
     cd build
     if ! ninja; then
         log_warn "Ninja build failed"
-        cd /tmp && rm -rf librist
+        cd /tmp && rm -rf librist-build
         return 1
     fi
 
     # Install
     if ! ninja install; then
         log_warn "Ninja install failed"
-        cd /tmp && rm -rf librist
+        cd /tmp && rm -rf librist-build
         return 1
     fi
 
@@ -334,7 +330,7 @@ install_librist() {
 
     # Cleanup
     cd /tmp
-    rm -rf librist
+    rm -rf librist-build
 
     # Verify installation
     if command -v ristreceiver &> /dev/null; then
@@ -343,7 +339,7 @@ install_librist() {
         log_info "librist installed to /usr/local/bin"
     else
         log_warn "ristreceiver not found in PATH after install"
-        log_warn "RIST scanning may not work"
+        log_warn "RIST support may not work"
     fi
 }
 
@@ -512,6 +508,58 @@ build_tools() {
             log_info "cari-avsync installed to /usr/local/bin/"
         else
             log_warn "Failed to build cari-avsync"
+        fi
+    fi
+
+    # Build srt_input
+    if [[ -d "$INSTALL_DIR/tools/srt_input" ]]; then
+        cd "$INSTALL_DIR/tools/srt_input"
+        log_info "Building srt_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "srt_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build srt_input"
+        fi
+    fi
+
+    # Build hls_input
+    if [[ -d "$INSTALL_DIR/tools/hls_input" ]]; then
+        cd "$INSTALL_DIR/tools/hls_input"
+        log_info "Building hls_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "hls_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build hls_input"
+        fi
+    fi
+
+    # Build http_input
+    if [[ -d "$INSTALL_DIR/tools/http_input" ]]; then
+        cd "$INSTALL_DIR/tools/http_input"
+        log_info "Building http_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "http_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build http_input"
+        fi
+    fi
+
+    # Build rist_input
+    if [[ -d "$INSTALL_DIR/tools/rist_input" ]]; then
+        cd "$INSTALL_DIR/tools/rist_input"
+        log_info "Building rist_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "rist_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build rist_input"
         fi
     fi
 

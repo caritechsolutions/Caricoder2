@@ -298,7 +298,116 @@ build_tools() {
         fi
     fi
 
+    # Build rist_input
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/rist_input" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/rist_input"
+        log_info "Building rist_input..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "rist_input installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build rist_input"
+        fi
+    fi
+
     log_info "Tools build completed"
+}
+
+# Rebuild librist from local source (if needed)
+rebuild_librist() {
+    log_step "Checking librist installation..."
+
+    # Check if librist source exists in the update
+    if [[ ! -d "$TEMP_DIR/caritrans_latest/librist-master" ]]; then
+        log_info "librist source not found in update, skipping"
+        return 0
+    fi
+
+    # Check if ristreceiver needs rebuild
+    local REBUILD_RIST="n"
+    local NEEDS_REBUILD=false
+
+    # Check if ristreceiver exists and supports stdout:// output (required for rist_input)
+    if ! command -v ristreceiver &> /dev/null && [[ ! -f /usr/local/bin/ristreceiver ]]; then
+        NEEDS_REBUILD=true
+        log_info "ristreceiver not found, rebuild required"
+    elif ! ristreceiver --help 2>&1 | grep -q "stdout://"; then
+        NEEDS_REBUILD=true
+        log_info "ristreceiver missing stdout:// output support, rebuild required"
+    fi
+
+    if [[ "$AUTO_CONFIRM" = false ]]; then
+        if [[ -t 0 ]]; then
+            if [[ "$NEEDS_REBUILD" = true ]]; then
+                log_info "librist rebuild is recommended"
+            fi
+            read -p "Do you want to rebuild librist/ristreceiver? (y/N): " REBUILD_RIST
+        fi
+    else
+        # In auto mode, rebuild if needed
+        if [[ "$NEEDS_REBUILD" = true ]]; then
+            REBUILD_RIST="y"
+        fi
+    fi
+
+    if [[ ! "$REBUILD_RIST" =~ ^[Yy]$ ]]; then
+        log_info "Skipping librist rebuild"
+        return 0
+    fi
+
+    log_info "Rebuilding librist from local source..."
+
+    cd /tmp
+
+    # Clean up any existing librist build directory
+    if [[ -d "librist-build" ]]; then
+        rm -rf librist-build
+    fi
+
+    # Copy source to temp build directory
+    cp -r "$TEMP_DIR/caritrans_latest/librist-master" librist-build
+
+    cd librist-build
+
+    # Clean any previous build artifacts
+    rm -rf build
+
+    # Configure with meson
+    if ! meson setup build; then
+        log_warn "Meson setup failed for librist"
+        cd /tmp && rm -rf librist-build
+        return 1
+    fi
+
+    # Build
+    cd build
+    if ! ninja; then
+        log_warn "Ninja build failed for librist"
+        cd /tmp && rm -rf librist-build
+        return 1
+    fi
+
+    # Install
+    if ! ninja install; then
+        log_warn "Ninja install failed for librist"
+        cd /tmp && rm -rf librist-build
+        return 1
+    fi
+
+    # Update library cache
+    ldconfig
+
+    # Cleanup
+    cd /tmp
+    rm -rf librist-build
+
+    # Verify installation
+    if command -v ristreceiver &> /dev/null || [[ -f /usr/local/bin/ristreceiver ]]; then
+        log_info "librist rebuilt and installed successfully"
+    else
+        log_warn "ristreceiver not found after rebuild"
+    fi
 }
 
 # Update and restart the API service
@@ -532,6 +641,7 @@ main() {
     update_php_api
     rebuild_apps
     build_tools
+    rebuild_librist
     update_api
     update_avsync_service
     fix_permissions

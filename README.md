@@ -55,6 +55,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | `cari-avsync` | A/V sync monitor with 24-hour trending |
 | `udp_input` | UDP input tool with PID filtering and monitoring |
 | `srt_input` | SRT input tool with caller/listener modes and encryption |
+| `rist_input` | RIST input tool with Simple/Main/Advanced profiles and encryption |
 | `hls_input` | HLS input tool with bitrate/resolution selection |
 | `player_preview` | HLS preview generator using FFmpeg |
 
@@ -303,9 +304,10 @@ Current development branch: `claude/video-transcoder-gstreamer-YnBIH`
 ### Input Types
 Building on the UDP input foundation:
 
+- [x] **UDP Input** - Multicast/unicast with PID filtering and real-time monitoring
 - [x] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes, encryption, streamid
-- [x] **HLS Input** - HTTP Live Streaming with live mode, bitrate/resolution selection
-- [ ] **RIST Input** - Reliable Internet Stream Transport (scanning supported, service WIP)
+- [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control
+- [ ] **HLS Input** - HTTP Live Streaming (partial - stability issues, needs GStreamer pipeline rewrite)
 
 ### Planned Features
 - [x] Web UI for input configuration wizard with type-specific options
@@ -315,6 +317,24 @@ Building on the UDP input foundation:
 - [ ] User authentication improvements
 
 ## Changelog
+
+### 2024-12-26
+
+**RIST Input Support**
+- New `rist_input` tool using vendored librist with ristreceiver
+- Supports Simple, Main, and Advanced RIST profiles
+- AES-128/AES-256 encryption with secret passphrase
+- Configurable buffer size (default: disabled for low latency)
+- `/metrics` and `/metrics/history` REST endpoints for GUI bitrate charts
+- Full GUI support with RIST-specific options in web interface
+- Systemd service generation via Python API
+- A/V sync monitoring support for RIST inputs
+
+**A/V Sync Monitor Fixes**
+- Fixed service detection for RIST and other inputs with spaces/special chars
+- Added `sanitize_to_id()` function to match systemd service naming
+- Fixed timezone mismatch between A/V sync and bandwidth graph
+- Both now display timestamps in browser-local timezone
 
 ### 2024-12-22
 

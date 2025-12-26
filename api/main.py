@@ -163,6 +163,22 @@ class HTTPInputService(BaseModel):
     description: Optional[str] = None
 
 
+class RISTInputService(BaseModel):
+    """Model for creating RIST input service"""
+    id: str
+    source_url: str  # RIST URL (e.g., rist://host:port)
+    output_address: str
+    output_port: int
+    api_port: int
+    buffer_size: int = 0  # Buffer size for retransmissions (ms), 0 = use ristreceiver default
+    secret: Optional[str] = None  # Encryption secret
+    encryption_type: int = 0  # 0=disabled, 128=AES-128, 256=AES-256
+    profile: int = 1  # 0=simple, 1=main, 2=advanced
+    program: Optional[int] = None
+    pids: Optional[str] = None
+    description: Optional[str] = None
+
+
 class ServiceFile(BaseModel):
     """Model for generic service file creation"""
     service_name: str
@@ -518,6 +534,74 @@ LimitNPROC=4096
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cari-http-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
+def generate_rist_input_service_file(service_data: RISTInputService) -> str:
+    """Generate systemd service file content for RIST input"""
+
+    # Unique log file for this input
+    log_file = f"/var/log/caritrans/rist-input-{service_data.id}.log"
+
+    # Build the command
+    cmd_parts = [
+        "/usr/local/bin/rist_input",
+        f"--url '{service_data.source_url}'",
+        f"--output {service_data.output_address}:{service_data.output_port}",
+        f"--api-port {service_data.api_port}",
+        f"--log-file {log_file}"
+    ]
+
+    # Only add buffer if explicitly set (> 0)
+    if service_data.buffer_size > 0:
+        cmd_parts.append(f"--buffer {service_data.buffer_size}")
+
+    if service_data.secret:
+        cmd_parts.append(f"--secret '{service_data.secret}'")
+        cmd_parts.append(f"--encryption {service_data.encryption_type}")
+
+    if service_data.program is not None:
+        cmd_parts.append(f"--program {service_data.program}")
+
+    if service_data.pids:
+        cmd_parts.append(f"--pids {service_data.pids}")
+
+    exec_start = " ".join(cmd_parts)
+    description = service_data.description or f"CariTranscoder RIST Input - {service_data.id}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main process
+ExecStart={exec_start}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-rist-{service_data.id}
 
 [Install]
 WantedBy=multi-user.target
@@ -1139,6 +1223,138 @@ async def restart_http_input(input_id: str):
 async def http_input_status(input_id: str):
     """Get status of a HTTP input service"""
     service_name = f"cari-http-{input_id}.service"
+    return get_service_status(service_name)
+
+
+# ----------------------------------------------------------------------------
+# RIST Input Service Management
+# ----------------------------------------------------------------------------
+
+@app.post("/input/rist/create")
+async def create_rist_input_service(service: RISTInputService):
+    """Create a systemd service file for RIST input"""
+
+    service_name = f"cari-rist-{service.id}"
+    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+
+    try:
+        # Generate service content
+        service_content = generate_rist_input_service_file(service)
+
+        # Write the service file
+        with open(service_file, 'w') as f:
+            f.write(service_content)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Created RIST input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "service_file": service_file,
+            "message": f"RIST input service '{service_name}' created successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create RIST service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/input/rist/{input_id}")
+async def delete_rist_input_service(input_id: str):
+    """Delete a RIST input service"""
+
+    service_name = f"cari-rist-{input_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+
+    try:
+        # Stop the service first
+        run_systemctl("stop", service_name)
+        run_systemctl("disable", service_name)
+
+        # Remove the service file
+        if os.path.exists(service_file):
+            os.remove(service_file)
+
+        # Reload systemd
+        daemon_reload()
+
+        logger.info(f"Deleted RIST input service: {service_name}")
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "message": f"RIST input service '{service_name}' deleted successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete RIST service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/input/rist/{input_id}/start")
+async def start_rist_input(input_id: str):
+    """Start a RIST input service"""
+    service_name = f"cari-rist-{input_id}.service"
+
+    # Check if service file exists
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        logger.error(f"RIST service file not found: {service_file}")
+        return {
+            "success": False,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    # Enable and start the service
+    run_systemctl("enable", service_name)
+    result = run_systemctl("start", service_name)
+    logger.info(f"Started RIST service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/rist/{input_id}/stop")
+async def stop_rist_input(input_id: str):
+    """Stop a RIST input service"""
+    service_name = f"cari-rist-{input_id}.service"
+
+    result = run_systemctl("stop", service_name)
+    logger.info(f"Stopped RIST service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.post("/input/rist/{input_id}/restart")
+async def restart_rist_input(input_id: str):
+    """Restart a RIST input service"""
+    service_name = f"cari-rist-{input_id}.service"
+
+    result = run_systemctl("restart", service_name)
+    logger.info(f"Restarted RIST service: {service_name}, result: {result}")
+
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", "")
+    }
+
+
+@app.get("/input/rist/{input_id}/status")
+async def rist_input_status(input_id: str):
+    """Get status of a RIST input service"""
+    service_name = f"cari-rist-{input_id}.service"
     return get_service_status(service_name)
 
 

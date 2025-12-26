@@ -1042,7 +1042,7 @@ function addSource() {
                 <!-- RIST Settings -->
                 <div class="rist-settings" style="display:none;">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">RIST Profile</label>
                             <select class="form-select" name="sources[${sourcesCount - 1}][rist_profile]">
                                 <option value="simple">Simple</option>
@@ -1050,12 +1050,20 @@ function addSource() {
                                 <option value="advanced">Advanced</option>
                             </select>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <label class="form-label">Buffer (ms)</label>
-                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="1000">
+                            <input type="number" class="form-control" name="sources[${sourcesCount - 1}][rist_buffer]" value="0" placeholder="0 = auto">
                         </div>
-                        <div class="col-md-4 mb-2">
-                            <label class="form-label">Secret (optional)</label>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Encryption</label>
+                            <select class="form-select" name="sources[${sourcesCount - 1}][rist_encryption]">
+                                <option value="0">None</option>
+                                <option value="128">AES-128</option>
+                                <option value="256">AES-256</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label">Secret</label>
                             <input type="password" class="form-control" name="sources[${sourcesCount - 1}][rist_secret]" placeholder="Encryption key">
                         </div>
                     </div>
@@ -1539,7 +1547,7 @@ async function handleFormSubmit(e) {
                 const bufferInput = card.querySelector('[name*="rist_buffer"]');
                 const secretInput = card.querySelector('[name*="rist_secret"]');
                 sourceData.rist_profile = profileSelect ? profileSelect.value : 'main';
-                sourceData.rist_buffer = bufferInput ? bufferInput.value : 1000;
+                sourceData.rist_buffer = bufferInput ? bufferInput.value : 0;
                 sourceData.rist_secret = secretInput ? secretInput.value : '';
             } else if (type === 'file') {
                 const loopSelect = card.querySelector('[name*="file_loop"]');
@@ -2344,7 +2352,13 @@ async function loadAVSyncHistory(inputId) {
             statusEl.className = 'stat-value status-' + status.toLowerCase();
 
             document.getElementById('avsyncSamples').textContent = samples + ' samples';
-            document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp;
+            // Use unix_ts for browser-local time display (consistent with BW graph)
+            if (displayData.unix_ts) {
+                const localTime = new Date(displayData.unix_ts * 1000).toLocaleTimeString();
+                document.getElementById('avsyncLastUpdate').textContent = localTime;
+            } else {
+                document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp;
+            }
 
             // Update status badge
             const badge = document.getElementById('avsyncStatus');
@@ -2378,10 +2392,17 @@ async function loadAVSyncHistory(inputId) {
             avsyncChart.data.datasets[1].data = [];
 
             for (const entry of data.history) {
-                // Format timestamp for display (HH:MM)
-                const ts = entry.timestamp;
-                const timePart = ts.includes(' ') ? ts.split(' ')[1] : ts;
-                const shortTime = timePart.substring(0, 5); // HH:MM
+                // Use unix_ts for browser-local time display (consistent with BW graph)
+                let shortTime;
+                if (entry.unix_ts) {
+                    const date = new Date(entry.unix_ts * 1000);
+                    shortTime = date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+                } else {
+                    // Fallback to server timestamp
+                    const ts = entry.timestamp;
+                    const timePart = ts.includes(' ') ? ts.split(' ')[1] : ts;
+                    shortTime = timePart.substring(0, 5); // HH:MM
+                }
 
                 avsyncChart.data.labels.push(shortTime);
                 avsyncChart.data.datasets[0].data.push(entry.a2v_mean_ms);

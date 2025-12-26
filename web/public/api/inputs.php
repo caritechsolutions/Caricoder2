@@ -352,10 +352,10 @@ function get_all_input_metrics() {
     foreach ($inputs as $input) {
         $id = $input['id'];
 
-        // Check if input is UDP, SRT, HLS, or HTTP type and has output config
+        // Check if input is UDP, SRT, HLS, HTTP, or RIST type and has output config
         $config = $input['config'] ?? [];
         $input_type = $config['general']['type'] ?? '';
-        if ($input_type !== 'udp' && $input_type !== 'srt' && $input_type !== 'hls' && $input_type !== 'http') {
+        if ($input_type !== 'udp' && $input_type !== 'srt' && $input_type !== 'hls' && $input_type !== 'http' && $input_type !== 'rist') {
             continue;
         }
 
@@ -907,6 +907,111 @@ function generate_http_input_service($id, $config) {
 }
 
 /**
+ * Generate systemd service for RIST input
+ */
+function generate_rist_input_service($id, $config) {
+    // Get source info and RIST settings from source string
+    $source_url = '';
+    $buffer_size = 0;  // Default: no buffer option (let ristreceiver use its default)
+    $profile = 1;  // Default: main
+    $secret = '';
+    $encryption_type = 0;
+
+    if (isset($config['sources'])) {
+        foreach ($config['sources'] as $key => $value) {
+            if (strpos($key, 'source_') === 0) {
+                $parts = explode('|', $value);
+                $source_url = $parts[1] ?? '';
+
+                // Parse RIST settings from extra settings (parts[3] is comma-separated key=value pairs)
+                if (isset($parts[3])) {
+                    $extras = explode(',', $parts[3]);
+                    foreach ($extras as $extra) {
+                        if (strpos($extra, 'profile=') === 0) {
+                            $profile_str = substr($extra, 8);
+                            // Convert string profile to numeric (0=simple, 1=main, 2=advanced)
+                            if ($profile_str === 'simple') $profile = 0;
+                            elseif ($profile_str === 'main') $profile = 1;
+                            elseif ($profile_str === 'advanced') $profile = 2;
+                            else $profile = (int)$profile_str;
+                        } elseif (strpos($extra, 'buffer=') === 0) {
+                            $buffer_size = (int)substr($extra, 7);
+                        } elseif (strpos($extra, 'secret=') === 0) {
+                            $secret = substr($extra, 7);
+                        } elseif (strpos($extra, 'encryption=') === 0) {
+                            $encryption_type = (int)substr($extra, 11);
+                        }
+                    }
+                }
+                break; // Use primary source
+            }
+        }
+    }
+
+    // Get output address
+    $output_addr = $config['output']['address'] ?? '';
+    $output_port = (int)($config['output']['port'] ?? 10000);
+    $api_port = (int)($config['output']['api_port'] ?? 9100);
+
+    if (!$output_addr) {
+        return ['success' => false, 'error' => 'No output address configured'];
+    }
+
+    // Get PIDs
+    $program_pid = $config['pids']['program'] ?? '';
+    $video_pid = $config['pids']['video'] ?? '';
+    $audio_pids = $config['pids']['audio'] ?? '';
+
+    if (empty($program_pid)) {
+        return ['success' => false, 'error' => 'Program PID not configured'];
+    }
+
+    // Build PIDs list for monitoring
+    $monitor_pids = [];
+    if ($video_pid) {
+        $monitor_pids[] = $video_pid;
+    }
+    if ($audio_pids) {
+        foreach (explode(',', $audio_pids) as $pid) {
+            $pid = trim($pid);
+            if ($pid) {
+                $monitor_pids[] = $pid;
+            }
+        }
+    }
+
+    $name = $config['general']['name'] ?? $id;
+
+    // Call the API to create the service
+    $api_data = [
+        'id' => $id,
+        'source_url' => $source_url,
+        'output_address' => $output_addr,
+        'output_port' => $output_port,
+        'api_port' => $api_port,
+        'buffer_size' => $buffer_size,
+        'profile' => $profile,
+        'program' => (int)$program_pid,
+        'description' => "CariTranscoder RIST Input - {$name}"
+    ];
+
+    // Add encryption if configured
+    if (!empty($secret)) {
+        $api_data['secret'] = $secret;
+        $api_data['encryption_type'] = $encryption_type;
+    }
+
+    // Add PIDs for monitoring if available
+    if (!empty($monitor_pids)) {
+        $api_data['pids'] = implode(',', $monitor_pids);
+    }
+
+    $result = call_cari_api('/input/rist/create', 'POST', $api_data);
+
+    return $result;
+}
+
+/**
  * Sanitize name to ID (lowercase, alphanumeric, hyphens)
  */
 function sanitize_name_to_id($name) {
@@ -1211,33 +1316,34 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
 
         return $ffprobe_result;
     } elseif ($type === 'hls' || strpos($url, 'http://') === 0 || strpos($url, 'https://') === 0) {
-        // HLS input - use tsp with HLS plugin to output to temp UDP, then ffprobe
+        // HLS input - use ffmpeg to output to temp UDP, then ffprobe
+        // ffmpeg remuxes HLS to MPEG-TS with predictable PIDs (256, 257, etc.)
         $hls_url = $url;
 
         // Use temp multicast address for ffprobe
         $temp_port = rand(20000, 29999);
-        $temp_udp = "239.10.10.10:{$temp_port}";
+        $temp_udp = "udp://239.10.10.10:{$temp_port}";
 
-        // Start tsp with HLS input in background
-        $tsp_cmd = sprintf(
-            'timeout 15 tsp -I hls %s --live -O ip %s > /dev/null 2>&1 & echo $!',
+        // Start ffmpeg with HLS input in background, output to temp UDP
+        $ffmpeg_cmd = sprintf(
+            'timeout 15 ffmpeg -re -i %s -c copy -f mpegts %s > /dev/null 2>&1 & echo $!',
             escapeshellarg($hls_url),
             escapeshellarg($temp_udp)
         );
 
-        $tsp_pid = trim(shell_exec($tsp_cmd));
+        $ffmpeg_pid = trim(shell_exec($ffmpeg_cmd));
 
-        // Wait for HLS to start streaming (HLS needs more time to download segments)
+        // Wait for ffmpeg to start streaming (HLS needs time to download segments)
         sleep(5);
 
         // Now use ffprobe on the temp UDP
         $ffprobe_result = scan_with_ffprobe("udp://@239.10.10.10:{$temp_port}", 'udp');
 
-        // Kill tsp process
-        if ($tsp_pid) {
-            shell_exec("kill {$tsp_pid} 2>/dev/null");
+        // Kill ffmpeg process
+        if ($ffmpeg_pid) {
+            shell_exec("kill {$ffmpeg_pid} 2>/dev/null");
             // Also kill any child processes
-            shell_exec("pkill -P {$tsp_pid} 2>/dev/null");
+            shell_exec("pkill -P {$ffmpeg_pid} 2>/dev/null");
         }
 
         return $ffprobe_result;
@@ -1657,9 +1763,9 @@ function create_input($data) {
     if (empty($primaryAudio)) $primaryAudio = is_array($data['audio_pids'] ?? null) ? implode(',', $data['audio_pids']) : ($data['audio_pids'] ?? '');
     if (empty($primaryProgram)) $primaryProgram = $data['program_pid'] ?? '';
 
-    // Allocate output address and API port for UDP, SRT, HLS, and HTTP inputs
+    // Allocate output address and API port for UDP, SRT, HLS, HTTP, and RIST inputs
     $output_alloc = null;
-    if (in_array($primaryType, ['udp', 'srt', 'hls', 'http'])) {
+    if (in_array($primaryType, ['udp', 'srt', 'hls', 'http', 'rist'])) {
         $output_alloc = allocate_output_address();
         if (!$output_alloc) {
             return ['success' => false, 'error' => 'No available output addresses in pool'];
@@ -1717,12 +1823,16 @@ function create_input($data) {
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
-                $buffer = $source['rist_buffer'] ?? 1000;
+                $buffer = (int)($source['rist_buffer'] ?? 0);
                 $secret = $source['rist_secret'] ?? '';
+                $encryption = $source['rist_encryption'] ?? 0;
                 $extraSettings[] = "profile={$profile}";
-                $extraSettings[] = "buffer={$buffer}";
+                if ($buffer > 0) {
+                    $extraSettings[] = "buffer={$buffer}";
+                }
                 if ($secret) {
                     $extraSettings[] = "secret={$secret}";
+                    $extraSettings[] = "encryption={$encryption}";
                 }
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
@@ -1802,7 +1912,7 @@ function create_input($data) {
         // Set permissions to 664 so both owner and group (www-data) can read/write
         chmod($config_file, 0664);
 
-        // Generate systemd service for UDP, SRT, HLS, and HTTP inputs
+        // Generate systemd service for UDP, SRT, HLS, HTTP, and RIST inputs
         $service_result = null;
         if ($primaryType === 'udp') {
             $service_result = generate_udp_input_service($id, $config);
@@ -1812,6 +1922,8 @@ function create_input($data) {
             $service_result = generate_hls_input_service($id, $config);
         } elseif ($primaryType === 'http') {
             $service_result = generate_http_input_service($id, $config);
+        } elseif ($primaryType === 'rist') {
+            $service_result = generate_rist_input_service($id, $config);
         }
 
         $response = [
@@ -1939,12 +2051,16 @@ function update_input($id, $data) {
                 }
             } elseif ($type === 'rist') {
                 $profile = $source['rist_profile'] ?? 'main';
-                $buffer = $source['rist_buffer'] ?? 1000;
+                $buffer = (int)($source['rist_buffer'] ?? 0);
                 $secret = $source['rist_secret'] ?? '';
+                $encryption = $source['rist_encryption'] ?? 0;
                 $extraSettings[] = "profile={$profile}";
-                $extraSettings[] = "buffer={$buffer}";
+                if ($buffer > 0) {
+                    $extraSettings[] = "buffer={$buffer}";
+                }
                 if ($secret) {
                     $extraSettings[] = "secret={$secret}";
+                    $extraSettings[] = "encryption={$encryption}";
                 }
             } elseif ($type === 'file') {
                 $loop = $source['file_loop'] ?? '1';
@@ -2019,6 +2135,11 @@ function update_input($id, $data) {
             if ($service_result && !$service_result['success']) {
                 $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
             }
+        } elseif ($type === 'rist') {
+            $service_result = generate_rist_input_service($id, $config);
+            if ($service_result && !$service_result['success']) {
+                $response['warning'] = 'Config saved but systemd service generation failed: ' . ($service_result['error'] ?? 'unknown');
+            }
         }
 
         return $response;
@@ -2058,6 +2179,9 @@ function delete_input($id) {
     } elseif ($type === 'http') {
         // Delete HTTP input service (stops and removes service file)
         call_cari_api("/input/http/{$id}", 'DELETE');
+    } elseif ($type === 'rist') {
+        // Delete RIST input service (stops and removes service file)
+        call_cari_api("/input/rist/{$id}", 'DELETE');
     } else {
         // Stop other service types
         stop_input_service($id);
@@ -2130,6 +2254,15 @@ function start_input_service($id) {
         return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
     }
 
+    // RIST inputs use the RIST API endpoint
+    if ($type === 'rist') {
+        $result = call_cari_api("/input/rist/{$id}/start", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service started"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start service'];
+    }
+
     // Other types use generic service control
     $service = "cari-input@{$id}";
     $result = call_cari_api('/service/control', 'POST', [
@@ -2185,6 +2318,15 @@ function stop_input_service($id) {
     // HTTP inputs use the HTTP API endpoint
     if ($type === 'http') {
         $result = call_cari_api("/input/http/{$id}/stop", 'POST');
+        if (isset($result['success']) && $result['success']) {
+            return ['success' => true, 'message' => "Input service stopped"];
+        }
+        return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop service'];
+    }
+
+    // RIST inputs use the RIST API endpoint
+    if ($type === 'rist') {
+        $result = call_cari_api("/input/rist/{$id}/stop", 'POST');
         if (isset($result['success']) && $result['success']) {
             return ['success' => true, 'message' => "Input service stopped"];
         }
