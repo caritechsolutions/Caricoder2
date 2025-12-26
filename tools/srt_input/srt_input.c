@@ -372,8 +372,9 @@ void* tsp_manager_thread(void *arg) {
 
         // Build the srt-live-transmit command
         // Output to stdout (file://con), enable stats in JSON format
+        // -s:500 = stats every 500 packets (~1 second at typical bitrates)
         snprintf(srt_cmd, sizeof(srt_cmd),
-            "srt-live-transmit '%s' file://con -s:100 -pf:json -statsout:%s 2>/dev/null",
+            "srt-live-transmit '%s' file://con -s:500 -pf:json -statsout:%s 2>/dev/null",
             srt_url, g_ctx.srt_stats_file);
 
         // Build tsp command using fork input
@@ -638,15 +639,10 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
         }
 
         // Read only the last line of the stats file (most recent stats)
-        // The file grows with one JSON line per stats interval
+        // File rotation handled by logrotate with copytruncate
         char stats_json[8192];
         char line[8192];
         stats_json[0] = '\0';
-
-        // Get file size for truncation decision
-        fseek(fp, 0, SEEK_END);
-        long file_size = ftell(fp);
-        fseek(fp, 0, SEEK_SET);
 
         while (fgets(line, sizeof(line), fp) != NULL) {
             // Keep only the last non-empty line
@@ -656,17 +652,6 @@ static int api_handler(void *cls, struct MHD_Connection *connection,
             }
         }
         fclose(fp);
-
-        // Truncate file if it exceeds 50KB to prevent unbounded growth
-        // srt-live-transmit will continue appending from the beginning
-        if (file_size > 50 * 1024 && strlen(stats_json) > 0) {
-            FILE *wf = fopen(g_ctx.srt_stats_file, "w");
-            if (wf) {
-                // Write last line back so we don't lose current stats
-                fputs(stats_json, wf);
-                fclose(wf);
-            }
-        }
 
         // Parse key values from the JSON
         // srt-live-transmit outputs nested JSON like:

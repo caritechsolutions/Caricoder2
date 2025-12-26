@@ -1,0 +1,18 @@
+# Logrotate config for Caricoder2 SRT input statistics files
+# These files are written by srt-live-transmit and grow continuously
+#
+# Install by copying or symlinking to /etc/logrotate.d/:
+#   sudo cp /path/to/caricoder2-srt-stats /etc/logrotate.d/
+#   or
+#   sudo ln -s /path/to/caricoder2-srt-stats /etc/logrotate.d/
+#
+# Test with: sudo logrotate -d /etc/logrotate.d/caricoder2-srt-stats
+
+/tmp/srt-input-*-stats.json {
+    size 1M
+    rotate 2
+    copytruncate
+    missingok
+    notifempty
+    nocreate
+}
