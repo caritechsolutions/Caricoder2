@@ -281,6 +281,59 @@ journalctl -u cari-api -f
 systemctl restart nginx php7.4-fpm cari-api
 ```
 
+## Port Usage
+
+CariTranscoder uses several ports for its services and input monitoring. Understanding the port scheme helps avoid conflicts.
+
+### System Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Nginx Web UI | 8080 | Main web interface |
+| CariTrans API | 8000 | FastAPI service for privileged operations |
+| A/V Sync Monitor | 8082 | cari-avsync REST API |
+
+### Per-Input Port Scheme
+
+Each input is assigned a base `api_port` (configured during input creation, typically starting at 9100). The following ports are derived from it:
+
+| Service | Port | Example (api_port=9105) |
+|---------|------|-------------------------|
+| Input API | `api_port` | 9105 |
+| Player Preview | `api_port + 1000` | 10105 |
+| RIST Metrics | `api_port + 2000` | 11105 (RIST only) |
+
+**Input API (`api_port`):**
+- Health check, metrics, bitrate history
+- Endpoints: `/health`, `/status`, `/metrics`, `/metrics/history`
+- For RIST: also serves `/rist-stats` (fetches from ristreceiver)
+
+**Player Preview (`api_port + 1000`):**
+- FFmpeg HLS preview generation
+- Endpoints: `/health`, `/status`, `/keepalive`
+- Started on-demand when preview modal opens
+
+**RIST Metrics (`api_port + 2000`):**
+- ristreceiver Prometheus metrics endpoint
+- Only used for RIST inputs
+- Provides quality, peers, RTT, packet stats
+
+### Example Port Allocation
+
+For a system with 3 inputs:
+
+| Input | Type | api_port | Preview Port | RIST Metrics |
+|-------|------|----------|--------------|--------------|
+| bet | UDP | 9100 | 10100 | - |
+| news | SRT | 9101 | 10101 | - |
+| live | RIST | 9102 | 10102 | 11102 |
+
+### Avoiding Conflicts
+
+- Always use unique `api_port` values for each input
+- Ensure ports in range `api_port` to `api_port + 2000` are available
+- Check for conflicts with other services on the system
+
 ## Development
 
 ### Building from source
@@ -306,8 +359,9 @@ Building on the UDP input foundation:
 
 - [x] **UDP Input** - Multicast/unicast with PID filtering and real-time monitoring
 - [x] **SRT Input** - Secure Reliable Transport with caller/listener/rendezvous modes, encryption, streamid
-- [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control
+- [x] **RIST Input** - Reliable Internet Stream Transport with Simple/Main/Advanced profiles, encryption, buffer control, live statistics
 - [x] **HLS Input** - HTTP Live Streaming via ffmpeg with automatic PID discovery
+- [x] **HTTP/TS Input** - Direct MPEG-TS over HTTP using TSDuck HTTP plugin
 
 ### Planned Features
 - [x] Web UI for input configuration wizard with type-specific options
@@ -329,6 +383,23 @@ Building on the UDP input foundation:
 - Full GUI support with RIST-specific options in web interface
 - Systemd service generation via Python API
 - A/V sync monitoring support for RIST inputs
+
+**RIST Live Statistics**
+- Added `/rist-stats` endpoint to fetch ristreceiver Prometheus metrics
+- GUI displays RIST-specific stats during preview (RIST inputs only):
+  - Link quality percentage with color-coded status
+  - Connected peers count
+  - Round-trip time (RTT)
+  - Retry bandwidth overhead
+  - Packet statistics: received, missing, recovered, lost, reordered
+- Auto-updates every 5 seconds while preview is open
+- Uses ristreceiver's built-in Prometheus metrics HTTP endpoint
+
+**HTTP/TS Input Support**
+- New HTTP input type for direct MPEG-TS over HTTP
+- Uses TSDuck's HTTP plugin (`tsp -I http`)
+- Simpler alternative to HLS for servers providing raw transport streams
+- Full GUI support with HTTP-specific options
 
 **A/V Sync Monitor Fixes**
 - Fixed service detection for RIST and other inputs with spaces/special chars

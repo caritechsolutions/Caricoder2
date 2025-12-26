@@ -10,6 +10,8 @@ This manual provides step-by-step instructions for using CariTranscoder to manag
 4. [Bitrate Monitoring](#bitrate-monitoring)
 5. [A/V Sync Monitoring](#av-sync-monitoring)
 6. [Troubleshooting](#troubleshooting)
+7. [Port Reference](#port-reference)
+8. [Best Practices](#best-practices)
 
 ---
 
@@ -150,6 +152,14 @@ The preview modal displays:
 - Status indicator (OK/WARNING/ERROR)
 - 24-hour history graph
 - Updates every 5 minutes
+
+**RIST Statistics (RIST inputs only)**
+- Link quality percentage with color-coded status (green ≥99%, yellow ≥95%, red <95%)
+- Connected peers count
+- Round-trip time (RTT) in milliseconds
+- Retry bandwidth overhead
+- Packet statistics: received, missing, recovered, lost, reordered, 1st retry
+- Updates every 5 seconds
 
 ---
 
@@ -344,6 +354,40 @@ curl http://localhost:8082/health
 | `/etc/caritrans/outputs/` | Output configurations |
 | `/var/log/caritrans/` | Log files |
 | `/var/lib/caritrans/` | Data files |
+
+---
+
+## Port Reference
+
+CariTranscoder uses several ports. Each input has a base `api_port` (assigned during creation) with additional ports derived from it.
+
+### System Ports
+
+| Port | Service | Description |
+|------|---------|-------------|
+| 8080 | Web UI | Nginx web interface |
+| 8000 | CariTrans API | FastAPI for privileged operations |
+| 8082 | A/V Sync | cari-avsync monitor service |
+
+### Per-Input Ports
+
+| Offset | Port Example | Service |
+|--------|--------------|---------|
+| +0 | 9100 | Input API (health, metrics, history) |
+| +1000 | 10100 | Player Preview (HLS generation) |
+| +2000 | 11100 | RIST Metrics (RIST inputs only) |
+
+**Example:** If your input has `api_port=9105`:
+- Input API: `http://localhost:9105/metrics`
+- Preview API: `http://localhost:10105/status`
+- RIST Stats: `http://localhost:9105/rist-stats` (fetches from port 11105 internally)
+
+### Checking Port Usage
+
+```bash
+# See all ports in use by CariTranscoder
+ss -tlnp | grep -E '(8000|8080|8082|9[0-9]{3}|1[01][0-9]{3})'
+```
 
 ---
 
