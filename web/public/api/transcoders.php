@@ -609,18 +609,23 @@ function handle_all_metrics() {
 function get_transcoder_metrics($id) {
     $log_file = "/var/log/caritrans/transcoder-{$id}.log";
     $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+    $service_file = "/etc/systemd/system/cari-transcoder@{$id}.service";
 
     $metrics = [
         'status' => 'offline',
         'output_video_bitrate' => 0,
         'output_audio_bitrate' => 0,
+        'output_total_bitrate' => 0,
         'input_video_bitrate' => 0,
         'input_audio_bitrate' => 0,
         'input_format' => null,
         'output_format' => null
     ];
 
-    // Load transcoder config for input source and format info
+    $input_api_port = null;
+    $input_address = null;
+
+    // Try to get input source from transcoder config file first
     if (file_exists($config_file)) {
         $config = parse_config($config_file);
 
@@ -638,40 +643,65 @@ function get_transcoder_metrics($id) {
         $source_service = $config['input']['source_service'] ?? null;
         if ($source_service) {
             $metrics['source_service'] = $source_service;
-
-            // Fetch input metrics from the input's API
             $input_config_file = CONFIG_PATH . '/inputs/' . $source_service . '.conf';
             if (file_exists($input_config_file)) {
                 $input_config = parse_config($input_config_file);
-                $api_port = $input_config['output']['api_port'] ?? null;
+                $input_api_port = $input_config['output']['api_port'] ?? null;
+            }
+        }
+    }
 
-                if ($api_port) {
-                    // Query the input's API for metrics
-                    $url = "http://127.0.0.1:{$api_port}/metrics";
-                    $ctx = stream_context_create([
-                        'http' => ['timeout' => 2, 'ignore_errors' => true]
-                    ]);
-                    $response = @file_get_contents($url, false, $ctx);
+    // If no config file or no source_service, try to parse input address from service file
+    if (!$input_api_port && file_exists($service_file)) {
+        $service_content = file_get_contents($service_file);
+        // Parse --input ADDRESS:PORT from the ExecStart line
+        if (preg_match('/--input\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+            $input_address = $matches[1];
+            $input_port = $matches[2];
 
-                    if ($response !== false) {
-                        $input_data = json_decode($response, true);
-                        if ($input_data && isset($input_data['pids'])) {
-                            // Process PIDs to get video/audio bitrate
-                            foreach ($input_data['pids'] as $pid => $pidData) {
-                                $bitrate = $pidData['current_bitrate'] ?? 0;
-                                if ($bitrate > 500000 && $metrics['input_video_bitrate'] === 0) {
-                                    $metrics['input_video_bitrate'] = $bitrate;
-                                } elseif ($bitrate > 0 && $bitrate <= 500000) {
-                                    $metrics['input_audio_bitrate'] += $bitrate;
-                                }
-                            }
+            // Find an input whose output matches this address:port
+            $inputs_dir = CONFIG_PATH . '/inputs';
+            if (is_dir($inputs_dir)) {
+                foreach (glob("{$inputs_dir}/*.conf") as $input_file) {
+                    $input_config = parse_config($input_file);
+                    $out_addr = $input_config['output']['address'] ?? '';
+                    $out_port = $input_config['output']['port'] ?? '';
 
-                            // Get input format from stream info
-                            if (isset($input_data['stream_info'])) {
-                                $metrics['input_format'] = $input_data['stream_info'];
-                            }
-                        }
+                    if ($out_addr === $input_address && $out_port == $input_port) {
+                        $input_api_port = $input_config['output']['api_port'] ?? null;
+                        $input_id = basename($input_file, '.conf');
+                        $metrics['source_service'] = $input_id;
+                        break;
                     }
+                }
+            }
+        }
+    }
+
+    // Fetch input metrics if we found an API port
+    if ($input_api_port) {
+        $url = "http://127.0.0.1:{$input_api_port}/metrics";
+        $ctx = stream_context_create([
+            'http' => ['timeout' => 2, 'ignore_errors' => true]
+        ]);
+        $response = @file_get_contents($url, false, $ctx);
+
+        if ($response !== false) {
+            $input_data = json_decode($response, true);
+            if ($input_data && isset($input_data['pids'])) {
+                // Process PIDs to get video/audio bitrate
+                foreach ($input_data['pids'] as $pid => $pidData) {
+                    $bitrate = $pidData['current_bitrate'] ?? 0;
+                    if ($bitrate > 500000 && $metrics['input_video_bitrate'] === 0) {
+                        $metrics['input_video_bitrate'] = $bitrate;
+                    } elseif ($bitrate > 0 && $bitrate <= 500000) {
+                        $metrics['input_audio_bitrate'] += $bitrate;
+                    }
+                }
+
+                // Get input format from stream info
+                if (isset($input_data['stream_info'])) {
+                    $metrics['input_format'] = $input_data['stream_info'];
                 }
             }
         }
