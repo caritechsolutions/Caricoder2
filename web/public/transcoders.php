@@ -139,7 +139,7 @@ function getResolution($config) {
                         <th>Audio</th>
                         <th>Input</th>
                         <th>Output</th>
-                        <th style="width: 180px;">Bitrate (V/A)</th>
+                        <th style="width: 140px;">Output Bitrate</th>
                         <th style="width: 150px;">Actions</th>
                     </tr>
                 </thead>
@@ -205,7 +205,7 @@ function getResolution($config) {
                         </td>
                         <td>
                             <div class="bitrate-cell" id="bitrate-<?php echo $transcoder['id']; ?>">
-                                <span class="bitrate-video">-</span> / <span class="bitrate-audio">-</span>
+                                <span class="bitrate-total text-success fw-bold">-</span>
                             </div>
                         </td>
                         <td>
@@ -737,20 +737,19 @@ function updateTranscoderMetrics(transcoderId, metrics) {
 
     if (!bitrateCell) return;
 
-    const videoSpan = bitrateCell.querySelector('.bitrate-video');
-    const audioSpan = bitrateCell.querySelector('.bitrate-audio');
+    const totalSpan = bitrateCell.querySelector('.bitrate-total');
 
     if (!metrics || metrics.status === 'offline') {
         bitrateCell.classList.add('offline');
-        if (videoSpan) videoSpan.textContent = '-';
-        if (audioSpan) audioSpan.textContent = '-';
+        if (totalSpan) totalSpan.textContent = '-';
         return;
     }
 
     bitrateCell.classList.remove('offline');
 
-    if (videoSpan) videoSpan.textContent = formatBitrate(metrics.video_bitrate || 0);
-    if (audioSpan) audioSpan.textContent = formatBitrate(metrics.audio_bitrate || 0);
+    // Use output_total_bitrate or video_bitrate (which holds total when using TS bitrate mode)
+    const totalBitrate = metrics.output_total_bitrate || metrics.video_bitrate || 0;
+    if (totalSpan) totalSpan.textContent = formatBitrate(totalBitrate);
 
     // Update status dot if needed
     if (statusDot && metrics.status) {
