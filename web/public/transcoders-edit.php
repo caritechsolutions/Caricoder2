@@ -82,7 +82,7 @@ $config = [
 if (!$is_new) {
     // Load existing config
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/transcoders/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
         header('Location: transcoders.php?error=notfound');

@@ -94,30 +94,34 @@ function call_cari_api($endpoint, $method = 'GET', $data = null) {
  * Get list of available inputs for dropdown
  */
 function handle_get_inputs() {
-    $inputs = get_service_list('inputs');
-    $result = [];
+    try {
+        $inputs = get_service_list('inputs');
+        $result = [];
 
-    foreach ($inputs as $input) {
-        // Get the output address from input config
-        $config_file = CONFIG_DIR . '/inputs/' . $input['id'] . '.conf';
-        $output_address = '';
-        $output_port = '';
+        foreach ($inputs as $input) {
+            // Get the output address from input config - use CONFIG_PATH like get_service_list does
+            $config_file = CONFIG_PATH . '/inputs/' . $input['id'] . '.conf';
+            $output_address = '';
+            $output_port = '';
 
-        if (file_exists($config_file)) {
-            $config = parse_config($config_file);
-            $output_address = $config['output']['address'] ?? '';
-            $output_port = $config['output']['port'] ?? '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+
+            $result[] = [
+                'id' => $input['id'],
+                'name' => $input['name'],
+                'output_address' => $output_address,
+                'output_port' => $output_port
+            ];
         }
 
-        $result[] = [
-            'id' => $input['id'],
-            'name' => $input['name'],
-            'output_address' => $output_address,
-            'output_port' => $output_port
-        ];
+        echo json_encode(['success' => true, 'inputs' => $result]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
     }
-
-    echo json_encode(['success' => true, 'inputs' => $result]);
 }
 
 /**
@@ -134,7 +138,7 @@ function handle_get_next_id() {
     $base_id = preg_replace('/[^a-z0-9_-]/', '', strtolower($input_id));
 
     // Find existing transcoders for this input
-    $transcoders_dir = CONFIG_DIR . '/transcoders';
+    $transcoders_dir = CONFIG_PATH . '/transcoders';
     $max_num = 0;
 
     if (is_dir($transcoders_dir)) {
@@ -180,7 +184,7 @@ function handle_get($id) {
     }
 
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/transcoders/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
         echo json_encode(['success' => false, 'error' => 'Transcoder not found']);
@@ -217,7 +221,7 @@ function handle_create() {
     }
 
     // Check if already exists
-    $config_file = CONFIG_DIR . '/transcoders/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
     if (file_exists($config_file)) {
         echo json_encode(['success' => false, 'error' => 'Transcoder ID already exists']);
         return;
@@ -227,8 +231,8 @@ function handle_create() {
     $config = build_transcoder_config($input);
 
     // Ensure directory exists
-    if (!is_dir(CONFIG_DIR . '/transcoders')) {
-        mkdir(CONFIG_DIR . '/transcoders', 0755, true);
+    if (!is_dir(CONFIG_PATH . '/transcoders')) {
+        mkdir(CONFIG_PATH . '/transcoders', 0755, true);
     }
 
     // Write config file
@@ -266,7 +270,7 @@ function handle_update() {
     }
 
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/transcoders/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
         echo json_encode(['success' => false, 'error' => 'Transcoder not found']);
@@ -305,7 +309,7 @@ function handle_delete($id) {
     }
 
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $config_file = CONFIG_DIR . '/transcoders/' . $id . '.conf';
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
 
     // Stop and disable service first
     stop_transcoder_service($id);
