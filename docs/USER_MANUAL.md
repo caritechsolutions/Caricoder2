@@ -6,12 +6,13 @@ This manual provides step-by-step instructions for using CariTranscoder to manag
 
 1. [Getting Started](#getting-started)
 2. [Managing Input Streams](#managing-input-streams)
-3. [Stream Preview](#stream-preview)
-4. [Bitrate Monitoring](#bitrate-monitoring)
-5. [A/V Sync Monitoring](#av-sync-monitoring)
-6. [Troubleshooting](#troubleshooting)
-7. [Port Reference](#port-reference)
-8. [Best Practices](#best-practices)
+3. [Video Transcoding](#video-transcoding)
+4. [Stream Preview](#stream-preview)
+5. [Bitrate Monitoring](#bitrate-monitoring)
+6. [A/V Sync Monitoring](#av-sync-monitoring)
+7. [Troubleshooting](#troubleshooting)
+8. [Port Reference](#port-reference)
+9. [Best Practices](#best-practices)
 
 ---
 
@@ -127,6 +128,213 @@ port = 10000
   - **Green (pulsing)**: Running and receiving data
   - **Red**: Running but no data received
   - **Gray**: Stopped
+
+---
+
+## Video Transcoding
+
+The `cari-transcoder` tool provides real-time video and audio transcoding using GStreamer. It receives MPEG-TS streams via UDP multicast, transcodes video/audio, and outputs to TCP or stdout.
+
+### Quick Start
+
+```bash
+# Detect input stream format
+cari-transcoder --input 239.100.0.1:5000 --detect-only
+
+# Basic transcode to H.264 at 2 Mbps
+cari-transcoder --input 239.100.0.1:5000 --video-bitrate 2000000 --tcp-port 8888
+
+# View output with ffplay
+ffplay tcp://localhost:8888
+```
+
+### Processing Modes
+
+Both video and audio support three processing modes:
+
+| Mode | Description |
+|------|-------------|
+| **transcode** | Decode and re-encode (default) |
+| **passthrough** | Copy stream without modification |
+| **drop** | Discard the stream entirely |
+
+### Video Encoding
+
+#### Supported Output Codecs
+
+| Codec | Option | Encoder | Notes |
+|-------|--------|---------|-------|
+| H.264/AVC | `--video-codec h264` | x264enc | Full x264 options support |
+| H.265/HEVC | `--video-codec h265` | x265enc | Bandwidth efficient |
+| MPEG-2 | `--video-codec mpeg2` | avenc_mpeg2video | Legacy compatibility |
+
+#### Common Video Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--video-bitrate BPS` | Target bitrate in bits/second | 5000000 (5 Mbps) |
+| `--video-preset PRESET` | Encoder speed/quality tradeoff | superfast |
+| `--keyframe-interval N` | GOP size in frames | 60 |
+
+**Preset Options** (fastest to slowest): ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+
+#### x264 Encoder Options
+
+For H.264 encoding, additional x264-specific options are available:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--profile` | H.264 profile (baseline/main/high) | main |
+| `--bframes N` | B-frames between I and P frames (0-16) | 0 |
+| `--ref N` | Number of reference frames (1-12) | 1 |
+| `--qp-min N` | Minimum quantizer (0-51) | 10 |
+| `--qp-max N` | Maximum quantizer (0-51) | 51 |
+| `--vbv-bufsize MS` | VBV buffer size in milliseconds | 600 |
+| `--threads N` | Encoding threads (0=auto) | 0 |
+| `--sliced-threads` | Enable low-latency sliced threading | enabled |
+| `--cabac` / `--no-cabac` | CABAC entropy coding | enabled |
+| `--trellis` | Trellis quantization | disabled |
+| `--aud` / `--no-aud` | Access Unit delimiters | enabled |
+| `--psy-tune TUNE` | Psychovisual tuning (film/animation/grain) | none |
+| `--x264-opts STRING` | Custom x264 options (key=val:key=val) | none |
+
+### Video Scaling
+
+Scale video to different resolutions:
+
+```bash
+# Scale to 720p
+cari-transcoder --input 239.100.0.1:5000 --scale 1280x720 --video-bitrate 2000000
+
+# Scale to 480p with lanczos algorithm
+cari-transcoder --input 239.100.0.1:5000 --scale 854x480 --scale-method 3
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--scale WxH` | Output resolution (e.g., 1280x720) | none |
+| `--scale-method N` | Scaling algorithm (see below) | 1 (bilinear) |
+| `--add-borders` | Add black bars to preserve aspect ratio | disabled |
+| `--scale-threads N` | Scaling threads (0=auto) | 0 |
+| `--deinterlace` | Enable deinterlacing | disabled |
+
+**Scale Methods:**
+- 0 = Nearest neighbor (fastest, blocky)
+- 1 = Bilinear (default, good balance)
+- 2 = 4-tap
+- 3 = Lanczos (high quality)
+- 4 = Bilinear2
+- 5 = Sinc
+- 6 = Hermite
+- 7 = Spline
+- 8 = Catmull-Rom
+- 9 = Mitchell
+
+### Audio Encoding
+
+#### Supported Output Codecs
+
+| Codec | Option | Encoder |
+|-------|--------|---------|
+| AAC | `--audio-codec aac` | avenc_aac (default) |
+| AC3 | `--audio-codec ac3` | avenc_ac3 |
+| MP2 | `--audio-codec mp2` | avenc_mp2 |
+
+#### Common Audio Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--audio-bitrate BPS` | Audio bitrate in bits/second | 128000 |
+| `--audio-channels N` | Number of channels (1, 2, 6) | 2 |
+| `--audio-samplerate HZ` | Sample rate in Hz | 48000 |
+
+#### AAC Encoder Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--aac-coder CODER` | Coding algorithm (anmr/twoloop/fast) | fast |
+| `--aac-is` / `--no-aac-is` | Intensity stereo coding | enabled |
+| `--aac-ms` / `--no-aac-ms` | M/S stereo coding | enabled |
+| `--aac-pns` / `--no-aac-pns` | Perceptual noise substitution | enabled |
+| `--aac-tns` / `--no-aac-tns` | Temporal noise shaping | enabled |
+| `--aac-ltp` / `--no-aac-ltp` | Long term prediction | disabled |
+| `--aac-cutoff HZ` | Audio cutoff bandwidth (0=auto) | 0 |
+
+### Output Options
+
+| Option | Description |
+|--------|-------------|
+| `--tcp-port PORT` | Output to TCP server on specified port (default: 8888) |
+| `--stdout` | Output to stdout for piping to tsp |
+
+### Example Workflows
+
+**Basic SD Transcode:**
+```bash
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-bitrate 2000000 \
+    --audio-bitrate 128000 \
+    --tcp-port 8888
+```
+
+**HD to SD Downscale:**
+```bash
+cari-transcoder --input 239.100.0.1:5000 \
+    --scale 854x480 --deinterlace \
+    --video-bitrate 1500000 \
+    --tcp-port 8888
+```
+
+**H.265 Encoding for Bandwidth Savings:**
+```bash
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-codec h265 \
+    --video-bitrate 1500000 \
+    --tcp-port 8888
+```
+
+**High-Quality Broadcast:**
+```bash
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-codec h264 --video-bitrate 8000000 \
+    --video-preset medium --profile high \
+    --bframes 2 --ref 3 \
+    --audio-codec aac --audio-bitrate 192000 \
+    --tcp-port 8888
+```
+
+**Pipe to TSDuck for Multicast Output:**
+```bash
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-bitrate 3000000 --stdout | \
+    tsp -I file - -P regulate --bitrate 5000000 -O ip 239.100.0.2:5000
+```
+
+### Troubleshooting Transcoder
+
+**No video playing (audio only):**
+- Check video codec compatibility
+- For H.265, ensure `h265parse config-interval=-1` is in pipeline
+- Test with `GST_DEBUG=2` environment variable
+
+**Stream detection fails:**
+```bash
+# Verify input stream is accessible
+ffprobe udp://@239.100.0.1:5000
+
+# Check with more analysis time
+ffprobe -analyzeduration 10000000 udp://@239.100.0.1:5000
+```
+
+**High CPU usage:**
+- Use faster preset: `--video-preset ultrafast`
+- Reduce resolution: `--scale 854x480`
+- Lower bitrate: `--video-bitrate 1000000`
+
+**Output stuttering:**
+- Increase VBV buffer: `--vbv-bufsize 1000`
+- Check network bandwidth to destination
+- Use `--sliced-threads` for lower latency
 
 ---
 
