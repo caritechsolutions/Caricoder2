@@ -129,6 +129,9 @@ typedef struct {
     /* Scaling settings */
     int scale_width;
     int scale_height;
+    int scale_method;           /* 0=nearest,1=bilinear,2=4tap,3=lanczos,etc */
+    int scale_add_borders;      /* Add black bars to preserve aspect ratio */
+    int scale_threads;          /* Number of scaling threads (0=auto) */
     gboolean deinterlace;
 
     /* Audio output settings */
@@ -248,6 +251,12 @@ static void print_help(const char *prog) {
 
     printf("SCALING OPTIONS:\n");
     printf("  --scale WIDTHxHEIGHT       Output resolution (e.g., 1280x720)\n");
+    printf("  --scale-method N           Scaling algorithm (default: 1)\n");
+    printf("                             0=nearest,1=bilinear,2=4tap,3=lanczos\n");
+    printf("                             4=bilinear2,5=sinc,6=hermite,7=spline\n");
+    printf("                             8=catrom,9=mitchell\n");
+    printf("  --add-borders              Add black bars to preserve aspect ratio\n");
+    printf("  --scale-threads N          Scaling threads, 0=auto (default: 0)\n");
     printf("  --deinterlace              Enable deinterlacing\n");
     printf("\n");
 
@@ -327,6 +336,13 @@ static void init_context(void) {
     g_ctx.x264_psy_tune[0] = '\0';   /* No psy-tune by default */
     g_ctx.x264_option_string[0] = '\0';
 
+    /* Scaling defaults */
+    g_ctx.scale_width = 0;            /* 0 = no scaling */
+    g_ctx.scale_height = 0;
+    g_ctx.scale_method = 1;           /* bilinear - good balance */
+    g_ctx.scale_add_borders = 0;      /* stretch to fill */
+    g_ctx.scale_threads = 0;          /* auto */
+
     /* Audio defaults */
     g_ctx.audio_mode = MODE_TRANSCODE;
     g_ctx.audio_out_codec = AUDIO_CODEC_AAC;
@@ -399,7 +415,11 @@ static int parse_args(int argc, char *argv[]) {
         OPT_AAC_PRED,
         OPT_AAC_NO_PRED,
         OPT_AAC_CUTOFF,
-        OPT_AAC_STRICT
+        OPT_AAC_STRICT,
+        /* Scaling options */
+        OPT_SCALE_METHOD,
+        OPT_SCALE_ADD_BORDERS,
+        OPT_SCALE_THREADS
     };
 
     static struct option long_options[] = {
@@ -451,6 +471,9 @@ static int parse_args(int argc, char *argv[]) {
         {"aac-strict",         required_argument, 0, OPT_AAC_STRICT},
         /* Scaling options */
         {"scale",              required_argument, 0, 's'},
+        {"scale-method",       required_argument, 0, OPT_SCALE_METHOD},
+        {"add-borders",        no_argument,       0, OPT_SCALE_ADD_BORDERS},
+        {"scale-threads",      required_argument, 0, OPT_SCALE_THREADS},
         {"deinterlace",        no_argument,       0, 'D'},
         /* Audio options */
         {"audio-mode",         required_argument, 0, 'A'},
@@ -676,6 +699,17 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_AAC_STRICT:
                 g_ctx.aac_strict = atoi(optarg);
+                break;
+
+            /* Scaling options */
+            case OPT_SCALE_METHOD:
+                g_ctx.scale_method = atoi(optarg);
+                break;
+            case OPT_SCALE_ADD_BORDERS:
+                g_ctx.scale_add_borders = 1;
+                break;
+            case OPT_SCALE_THREADS:
+                g_ctx.scale_threads = atoi(optarg);
                 break;
 
             default:
@@ -1095,7 +1129,11 @@ static char *build_pipeline_string(void) {
             /* Optional scaling */
             if (g_ctx.scale_width > 0 && g_ctx.scale_height > 0) {
                 n = snprintf(p, remaining,
-                    "videoscale ! video/x-raw,width=%d,height=%d ! ",
+                    "videoscale method=%d add-borders=%s n-threads=%d ! "
+                    "video/x-raw,width=%d,height=%d ! ",
+                    g_ctx.scale_method,
+                    g_ctx.scale_add_borders ? "true" : "false",
+                    g_ctx.scale_threads,
                     g_ctx.scale_width, g_ctx.scale_height);
                 p += n; remaining -= n;
             }
