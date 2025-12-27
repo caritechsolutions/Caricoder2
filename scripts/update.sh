@@ -28,7 +28,7 @@ SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 # Updated: 2024-12-26
-BRANCH="claude/setup-caritranscoder-j6OYk"
+BRANCH="claude/av-sync-monitor-Y57VM"
 
 # Parse arguments
 AUTO_CONFIRM=false
