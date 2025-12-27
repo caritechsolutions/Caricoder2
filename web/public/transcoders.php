@@ -596,15 +596,14 @@ async function loadPreviewMetrics() {
                 statusText.textContent = 'Transcoder offline or not responding';
             }
 
-            // Update input format display
+            // Update input format display - fetch from input's preview_media_info API
             if (metrics.source_service) {
                 document.getElementById('inputSourceName').textContent = '(' + metrics.source_service + ')';
-            }
-            if (metrics.input_format) {
-                document.getElementById('inputVideoCodec').textContent = metrics.input_format.video_codec || '-';
-                document.getElementById('inputResolution').textContent = metrics.input_format.resolution || '-';
-                document.getElementById('inputAudioCodec').textContent = metrics.input_format.audio_codec || '-';
-                document.getElementById('inputAudioChannels').textContent = metrics.input_format.audio_channels || '-';
+                // Load detailed input format info (only once per modal open)
+                if (!window.inputFormatLoaded) {
+                    window.inputFormatLoaded = true;
+                    loadInputMediaInfo(metrics.source_service);
+                }
             }
 
             // Update output format display
@@ -660,10 +659,45 @@ async function loadPreviewMetrics() {
     }
 }
 
+// Load input media info via the same API used by inputs page
+async function loadInputMediaInfo(inputId) {
+    try {
+        const response = await fetch(`api/inputs.php?action=preview_media_info&id=${inputId}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            console.log('Failed to load input media info:', data.error);
+            return;
+        }
+
+        // Update video info
+        if (data.video) {
+            document.getElementById('inputVideoCodec').textContent =
+                (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
+            document.getElementById('inputResolution').textContent =
+                data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
+        }
+
+        // Update audio info (use first track)
+        if (data.audio && data.audio.length > 0) {
+            const track = data.audio[0];
+            document.getElementById('inputAudioCodec').textContent =
+                (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
+            document.getElementById('inputAudioChannels').textContent =
+                track.channels ? `${track.channels}ch` : '-';
+        }
+    } catch (e) {
+        console.error('Failed to load input media info:', e);
+    }
+}
+
 // Show preview modal
 function showPreview(id, name) {
     document.getElementById('previewId').value = id;
     document.getElementById('previewName').textContent = name;
+
+    // Reset input format loaded flag
+    window.inputFormatLoaded = false;
 
     // Reset history (3 series)
     inputVideoHistory = [];
@@ -672,9 +706,9 @@ function showPreview(id, name) {
 
     // Reset format displays
     document.getElementById('inputSourceName').textContent = '';
-    document.getElementById('inputVideoCodec').textContent = '-';
+    document.getElementById('inputVideoCodec').textContent = 'Loading...';
     document.getElementById('inputResolution').textContent = '-';
-    document.getElementById('inputAudioCodec').textContent = '-';
+    document.getElementById('inputAudioCodec').textContent = 'Loading...';
     document.getElementById('inputAudioChannels').textContent = '-';
     document.getElementById('outputVideoCodec').textContent = '-';
     document.getElementById('outputResolution').textContent = '-';
