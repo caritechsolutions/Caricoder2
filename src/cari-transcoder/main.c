@@ -22,7 +22,7 @@
 #include <gst/gst.h>
 
 /* Version */
-#define VERSION "2.0.0"
+#define VERSION "2.1.0"
 
 /* Defaults */
 #define DEFAULT_VIDEO_BITRATE 5000000
@@ -30,6 +30,14 @@
 #define DEFAULT_KEYFRAME_INTERVAL 60
 #define DEFAULT_AUDIO_SAMPLERATE 48000
 #define DEFAULT_TCP_PORT 8888
+
+/* x264 defaults for low-latency streaming */
+#define DEFAULT_X264_BFRAMES 0
+#define DEFAULT_X264_REF 1
+#define DEFAULT_X264_QP_MIN 10
+#define DEFAULT_X264_QP_MAX 51
+#define DEFAULT_X264_VBV_BUF 600
+#define DEFAULT_X264_THREADS 0
 
 /* Codec types */
 typedef enum {
@@ -97,6 +105,26 @@ typedef struct {
     int video_bitrate;
     VideoPreset video_preset;
     int keyframe_interval;
+
+    /* x264 encoder settings */
+    int x264_bframes;           /* B-frames between I and P (0-16) */
+    int x264_ref;               /* Reference frames (1-12) */
+    int x264_qp_min;            /* Minimum quantizer (0-51) */
+    int x264_qp_max;            /* Maximum quantizer (0-51) */
+    int x264_vbv_buf;           /* VBV buffer size in ms (0-10000) */
+    int x264_threads;           /* Encoding threads (0=auto) */
+    int x264_sliced_threads;    /* Low latency sliced threading */
+    int x264_b_adapt;           /* Adaptive B-frame decision */
+    int x264_cabac;             /* CABAC entropy coding */
+    int x264_intra_refresh;     /* Periodic intra refresh */
+    int x264_interlaced;        /* Interlaced encoding */
+    int x264_aud;               /* Access Unit delimiters */
+    int x264_trellis;           /* Trellis quantization */
+    int x264_weightp;           /* Weighted P-frames (0-2) */
+    int x264_rc_lookahead;      /* Rate control lookahead frames */
+    char x264_profile[32];      /* H.264 profile */
+    char x264_psy_tune[32];     /* Psychovisual tuning */
+    char x264_option_string[256]; /* Custom x264 options */
 
     /* Scaling settings */
     int scale_width;
@@ -186,6 +214,27 @@ static void print_help(const char *prog) {
     printf("  --keyframe-interval FRAMES GOP size in frames (default: 60)\n");
     printf("\n");
 
+    printf("X264 ENCODER OPTIONS:\n");
+    printf("  --profile PROFILE          baseline|main|high (default: main)\n");
+    printf("  --bframes N                B-frames between I and P, 0-16 (default: 0)\n");
+    printf("  --ref N                    Reference frames, 1-12 (default: 1)\n");
+    printf("  --qp-min N                 Minimum quantizer, 0-51 (default: 10)\n");
+    printf("  --qp-max N                 Maximum quantizer, 0-51 (default: 51)\n");
+    printf("  --vbv-bufsize MS           VBV buffer size in ms, 0-10000 (default: 600)\n");
+    printf("  --rc-lookahead N           Lookahead frames for ratecontrol (default: 0)\n");
+    printf("  --threads N                Encoding threads, 0=auto (default: 0)\n");
+    printf("  --sliced-threads           Enable low-latency sliced threading\n");
+    printf("  --cabac / --no-cabac       Enable/disable CABAC entropy coding (default: on)\n");
+    printf("  --trellis                  Enable trellis quantization\n");
+    printf("  --b-adapt                  Enable adaptive B-frame decision\n");
+    printf("  --weightp N                Weighted P-frames, 0-2 (default: 0)\n");
+    printf("  --intra-refresh            Use periodic intra refresh instead of IDR\n");
+    printf("  --interlaced               Enable interlaced encoding\n");
+    printf("  --aud / --no-aud           Enable/disable Access Unit delimiters (default: on)\n");
+    printf("  --psy-tune TUNE            none|film|animation|grain|psnr|ssim\n");
+    printf("  --x264-opts STRING         Custom x264 options (key1=val1:key2=val2)\n");
+    printf("\n");
+
     printf("SCALING OPTIONS:\n");
     printf("  --scale WIDTHxHEIGHT       Output resolution (e.g., 1280x720)\n");
     printf("  --deinterlace              Enable deinterlacing\n");
@@ -235,6 +284,26 @@ static void init_context(void) {
     g_ctx.video_preset = PRESET_SUPERFAST;
     g_ctx.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL;
 
+    /* x264 defaults for low-latency streaming */
+    g_ctx.x264_bframes = DEFAULT_X264_BFRAMES;
+    g_ctx.x264_ref = DEFAULT_X264_REF;
+    g_ctx.x264_qp_min = DEFAULT_X264_QP_MIN;
+    g_ctx.x264_qp_max = DEFAULT_X264_QP_MAX;
+    g_ctx.x264_vbv_buf = DEFAULT_X264_VBV_BUF;
+    g_ctx.x264_threads = DEFAULT_X264_THREADS;
+    g_ctx.x264_sliced_threads = 1;   /* Enable for low latency */
+    g_ctx.x264_b_adapt = 0;          /* Disable for low latency */
+    g_ctx.x264_cabac = 1;            /* Enable by default */
+    g_ctx.x264_intra_refresh = 0;    /* Disabled */
+    g_ctx.x264_interlaced = 0;       /* Progressive */
+    g_ctx.x264_aud = 1;              /* Enable AUD */
+    g_ctx.x264_trellis = 0;          /* Disable for speed */
+    g_ctx.x264_weightp = 0;          /* Disable for low latency */
+    g_ctx.x264_rc_lookahead = 0;     /* Zero for low latency */
+    strcpy(g_ctx.x264_profile, "main");
+    g_ctx.x264_psy_tune[0] = '\0';   /* No psy-tune by default */
+    g_ctx.x264_option_string[0] = '\0';
+
     /* Audio defaults */
     g_ctx.audio_mode = MODE_TRANSCODE;
     g_ctx.audio_out_codec = AUDIO_CODEC_AAC;
@@ -258,23 +327,74 @@ static void init_context(void) {
  * Parse command line arguments
  */
 static int parse_args(int argc, char *argv[]) {
+    /* Long option codes for x264 settings (no short options) */
+    enum {
+        OPT_BFRAMES = 1000,
+        OPT_REF,
+        OPT_QP_MIN,
+        OPT_QP_MAX,
+        OPT_VBV_BUF,
+        OPT_THREADS,
+        OPT_SLICED_THREADS,
+        OPT_B_ADAPT,
+        OPT_CABAC,
+        OPT_NO_CABAC,
+        OPT_INTRA_REFRESH,
+        OPT_INTERLACED,
+        OPT_AUD,
+        OPT_NO_AUD,
+        OPT_TRELLIS,
+        OPT_WEIGHTP,
+        OPT_RC_LOOKAHEAD,
+        OPT_PROFILE,
+        OPT_PSY_TUNE,
+        OPT_X264_OPTS
+    };
+
     static struct option long_options[] = {
+        /* Input options */
         {"input",              required_argument, 0, 'i'},
         {"input-interface",    required_argument, 0, 'I'},
+        /* Video options */
         {"video-mode",         required_argument, 0, 'V'},
         {"video-codec",        required_argument, 0, 'c'},
         {"video-bitrate",      required_argument, 0, 'b'},
         {"video-preset",       required_argument, 0, 'p'},
         {"keyframe-interval",  required_argument, 0, 'k'},
+        /* x264 encoder options */
+        {"bframes",            required_argument, 0, OPT_BFRAMES},
+        {"ref",                required_argument, 0, OPT_REF},
+        {"qp-min",             required_argument, 0, OPT_QP_MIN},
+        {"qp-max",             required_argument, 0, OPT_QP_MAX},
+        {"vbv-bufsize",        required_argument, 0, OPT_VBV_BUF},
+        {"threads",            required_argument, 0, OPT_THREADS},
+        {"sliced-threads",     no_argument,       0, OPT_SLICED_THREADS},
+        {"b-adapt",            no_argument,       0, OPT_B_ADAPT},
+        {"cabac",              no_argument,       0, OPT_CABAC},
+        {"no-cabac",           no_argument,       0, OPT_NO_CABAC},
+        {"intra-refresh",      no_argument,       0, OPT_INTRA_REFRESH},
+        {"interlaced",         no_argument,       0, OPT_INTERLACED},
+        {"aud",                no_argument,       0, OPT_AUD},
+        {"no-aud",             no_argument,       0, OPT_NO_AUD},
+        {"trellis",            no_argument,       0, OPT_TRELLIS},
+        {"weightp",            required_argument, 0, OPT_WEIGHTP},
+        {"rc-lookahead",       required_argument, 0, OPT_RC_LOOKAHEAD},
+        {"profile",            required_argument, 0, OPT_PROFILE},
+        {"psy-tune",           required_argument, 0, OPT_PSY_TUNE},
+        {"x264-opts",          required_argument, 0, OPT_X264_OPTS},
+        /* Scaling options */
         {"scale",              required_argument, 0, 's'},
         {"deinterlace",        no_argument,       0, 'D'},
+        /* Audio options */
         {"audio-mode",         required_argument, 0, 'A'},
         {"audio-codec",        required_argument, 0, 'C'},
         {"audio-bitrate",      required_argument, 0, 'a'},
         {"audio-channels",     required_argument, 0, 'n'},
         {"audio-samplerate",   required_argument, 0, 'r'},
+        /* Output options */
         {"stdout",             no_argument,       0, 'o'},
         {"tcp-port",           required_argument, 0, 't'},
+        /* General options */
         {"debug",              no_argument,       0, 'd'},
         {"detect-only",        no_argument,       0, 'O'},
         {"help",               no_argument,       0, 'h'},
@@ -381,6 +501,68 @@ static int parse_args(int argc, char *argv[]) {
             case 'h':  /* --help */
                 print_help(argv[0]);
                 exit(0);
+
+            /* x264 encoder options */
+            case OPT_BFRAMES:
+                g_ctx.x264_bframes = atoi(optarg);
+                break;
+            case OPT_REF:
+                g_ctx.x264_ref = atoi(optarg);
+                break;
+            case OPT_QP_MIN:
+                g_ctx.x264_qp_min = atoi(optarg);
+                break;
+            case OPT_QP_MAX:
+                g_ctx.x264_qp_max = atoi(optarg);
+                break;
+            case OPT_VBV_BUF:
+                g_ctx.x264_vbv_buf = atoi(optarg);
+                break;
+            case OPT_THREADS:
+                g_ctx.x264_threads = atoi(optarg);
+                break;
+            case OPT_SLICED_THREADS:
+                g_ctx.x264_sliced_threads = 1;
+                break;
+            case OPT_B_ADAPT:
+                g_ctx.x264_b_adapt = 1;
+                break;
+            case OPT_CABAC:
+                g_ctx.x264_cabac = 1;
+                break;
+            case OPT_NO_CABAC:
+                g_ctx.x264_cabac = 0;
+                break;
+            case OPT_INTRA_REFRESH:
+                g_ctx.x264_intra_refresh = 1;
+                break;
+            case OPT_INTERLACED:
+                g_ctx.x264_interlaced = 1;
+                break;
+            case OPT_AUD:
+                g_ctx.x264_aud = 1;
+                break;
+            case OPT_NO_AUD:
+                g_ctx.x264_aud = 0;
+                break;
+            case OPT_TRELLIS:
+                g_ctx.x264_trellis = 1;
+                break;
+            case OPT_WEIGHTP:
+                g_ctx.x264_weightp = atoi(optarg);
+                break;
+            case OPT_RC_LOOKAHEAD:
+                g_ctx.x264_rc_lookahead = atoi(optarg);
+                break;
+            case OPT_PROFILE:
+                strncpy(g_ctx.x264_profile, optarg, sizeof(g_ctx.x264_profile) - 1);
+                break;
+            case OPT_PSY_TUNE:
+                strncpy(g_ctx.x264_psy_tune, optarg, sizeof(g_ctx.x264_psy_tune) - 1);
+                break;
+            case OPT_X264_OPTS:
+                strncpy(g_ctx.x264_option_string, optarg, sizeof(g_ctx.x264_option_string) - 1);
+                break;
 
             default:
                 return -1;
@@ -761,11 +943,11 @@ static const char *get_audio_encoder(AudioCodec codec) {
  * Build the pipeline string based on detected input and output settings
  */
 static char *build_pipeline_string(void) {
-    char *pipeline = malloc(4096);
+    char *pipeline = malloc(8192);
     if (!pipeline) return NULL;
 
     char *p = pipeline;
-    int remaining = 4096;
+    int remaining = 8192;
     int n;
 
     /* Queue settings to match Python code */
@@ -806,13 +988,48 @@ static char *build_pipeline_string(void) {
 
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
-                case VIDEO_CODEC_H264:
+                case VIDEO_CODEC_H264: {
+                    /* Build x264enc with all options */
                     n = snprintf(p, remaining,
-                        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! mux. ",
+                        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d "
+                        "bframes=%d ref=%d qp-min=%d qp-max=%d vbv-buf-capacity=%d "
+                        "rc-lookahead=%d threads=%d sliced-threads=%s b-adapt=%s "
+                        "cabac=%s trellis=%s aud=%s intra-refresh=%s interlaced=%s ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        g_ctx.x264_bframes,
+                        g_ctx.x264_ref,
+                        g_ctx.x264_qp_min,
+                        g_ctx.x264_qp_max,
+                        g_ctx.x264_vbv_buf,
+                        g_ctx.x264_rc_lookahead,
+                        g_ctx.x264_threads,
+                        g_ctx.x264_sliced_threads ? "true" : "false",
+                        g_ctx.x264_b_adapt ? "true" : "false",
+                        g_ctx.x264_cabac ? "true" : "false",
+                        g_ctx.x264_trellis ? "true" : "false",
+                        g_ctx.x264_aud ? "true" : "false",
+                        g_ctx.x264_intra_refresh ? "true" : "false",
+                        g_ctx.x264_interlaced ? "true" : "false");
+                    p += n; remaining -= n;
+
+                    /* Add optional psy-tune */
+                    if (g_ctx.x264_psy_tune[0] != '\0') {
+                        n = snprintf(p, remaining, "psy-tune=%s ", g_ctx.x264_psy_tune);
+                        p += n; remaining -= n;
+                    }
+
+                    /* Add optional custom options */
+                    if (g_ctx.x264_option_string[0] != '\0') {
+                        n = snprintf(p, remaining, "option-string=\"%s\" ", g_ctx.x264_option_string);
+                        p += n; remaining -= n;
+                    }
+
+                    /* Connect to muxer */
+                    n = snprintf(p, remaining, "! mux. ");
                     break;
+                }
                 case VIDEO_CODEC_H265:
                     n = snprintf(p, remaining,
                         "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! mux. ",
