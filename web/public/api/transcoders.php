@@ -53,6 +53,9 @@ switch ($action) {
     case 'next_id':
         handle_get_next_id();
         break;
+    case 'all_metrics':
+        handle_all_metrics();
+        break;
     case 'list':
     default:
         handle_list();
@@ -579,4 +582,95 @@ function stop_transcoder_service($id) {
 function delete_transcoder_service($id) {
     $result = call_cari_api('/transcoder/delete', 'POST', ['id' => $id]);
     return $result ?: ['success' => false, 'error' => 'Failed to delete service'];
+}
+
+/**
+ * Get metrics for all transcoders
+ * Parses tsp bitrate_monitor output from log files
+ */
+function handle_all_metrics() {
+    $transcoders = get_service_list('transcoders');
+    $all_metrics = [];
+
+    foreach ($transcoders as $transcoder) {
+        $id = $transcoder['id'];
+        $metrics = get_transcoder_metrics($id);
+        $all_metrics[$id] = $metrics;
+    }
+
+    echo json_encode(['success' => true, 'transcoders' => $all_metrics]);
+}
+
+/**
+ * Get metrics for a single transcoder
+ * Parses the last bitrate_monitor output from the log file
+ */
+function get_transcoder_metrics($id) {
+    $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+    $metrics = [
+        'status' => 'offline',
+        'video_bitrate' => 0,
+        'audio_bitrate' => 0
+    ];
+
+    // Check if service is running
+    $service_name = "cari-transcoder@{$id}";
+    exec("systemctl is-active " . escapeshellarg($service_name) . " 2>/dev/null", $output, $retval);
+    $is_running = ($retval === 0 && isset($output[0]) && trim($output[0]) === 'active');
+
+    if (!$is_running) {
+        $metrics['status'] = 'stopped';
+        return $metrics;
+    }
+
+    $metrics['status'] = 'running';
+
+    // Try to read bitrate from log file (last few lines)
+    if (file_exists($log_file) && is_readable($log_file)) {
+        // Read last 20 lines of log file
+        $lines = [];
+        $fp = fopen($log_file, 'r');
+        if ($fp) {
+            // Seek to approximate position near end (last ~4KB)
+            fseek($fp, max(0, filesize($log_file) - 4096));
+            fgets($fp); // Skip partial line
+            while (!feof($fp)) {
+                $line = fgets($fp);
+                if ($line !== false) {
+                    $lines[] = $line;
+                }
+            }
+            fclose($fp);
+
+            // Keep only last 20 lines
+            $lines = array_slice($lines, -20);
+        }
+
+        // Parse bitrate_monitor output
+        // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
+        $video_pid = 65;  // Default video PID (0x41)
+        $audio_pid = 66;  // Default audio PID (0x42)
+
+        foreach (array_reverse($lines) as $line) {
+            if (strpos($line, 'bitrate_monitor') !== false) {
+                if (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+(\d+)\s+bits\/s/', $line, $matches)) {
+                    $pid = intval($matches[1]);
+                    $bitrate = intval($matches[2]);
+
+                    if ($pid === $video_pid && $metrics['video_bitrate'] === 0) {
+                        $metrics['video_bitrate'] = $bitrate;
+                    } elseif ($pid === $audio_pid && $metrics['audio_bitrate'] === 0) {
+                        $metrics['audio_bitrate'] = $bitrate;
+                    }
+
+                    // Stop if we have both
+                    if ($metrics['video_bitrate'] > 0 && $metrics['audio_bitrate'] > 0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return $metrics;
 }
