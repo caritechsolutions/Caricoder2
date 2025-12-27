@@ -711,39 +711,31 @@ function get_transcoder_metrics($id) {
         }
 
         // Parse bitrate_monitor output
-        // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
-        // Since GStreamer mpegtsmux auto-assigns PIDs, we detect video/audio by bitrate magnitude:
-        // - Video: typically > 500,000 bits/s (highest bitrate stream)
-        // - Audio: typically 32,000 - 500,000 bits/s (second highest)
-        // - Other PIDs (PAT, PMT, etc.): very low bitrate, ignored
-
-        $pid_bitrates = [];
+        // Format without --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, TS bitrate: 5000000 bits/s
+        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
-                if (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+(\d+)\s+bits\/s/', $line, $matches)) {
-                    $pid = intval($matches[1]);
+                // Try total TS bitrate format first
+                if (preg_match('/TS bitrate:\s*(\d+)\s*bits\/s/', $line, $matches)) {
+                    $total_bitrate = intval($matches[1]);
+                    // Store total as video bitrate (output is combined stream)
+                    if ($metrics['output_video_bitrate'] === 0) {
+                        $metrics['output_video_bitrate'] = $total_bitrate;
+                        $metrics['output_total_bitrate'] = $total_bitrate;
+                        break;
+                    }
+                }
+                // Also try per-PID format in case it's used
+                elseif (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+(\d+)\s+bits\/s/', $line, $matches)) {
                     $bitrate = intval($matches[2]);
-
-                    // Only track PIDs we haven't seen yet (most recent value)
-                    // Skip very low bitrate PIDs (PAT, PMT, etc. are typically < 10000 bps)
-                    if (!isset($pid_bitrates[$pid]) && $bitrate > 10000) {
-                        $pid_bitrates[$pid] = $bitrate;
+                    if ($bitrate > 500000 && $metrics['output_video_bitrate'] === 0) {
+                        $metrics['output_video_bitrate'] = $bitrate;
+                    } elseif ($bitrate > 10000 && $bitrate <= 500000 && $metrics['output_audio_bitrate'] === 0) {
+                        $metrics['output_audio_bitrate'] = $bitrate;
                     }
                 }
             }
-        }
-
-        // Sort by bitrate descending and classify
-        arsort($pid_bitrates);
-        $sorted_bitrates = array_values($pid_bitrates);
-
-        // Highest bitrate is video, second highest is audio
-        if (count($sorted_bitrates) >= 1) {
-            $metrics['output_video_bitrate'] = $sorted_bitrates[0];
-        }
-        if (count($sorted_bitrates) >= 2) {
-            $metrics['output_audio_bitrate'] = $sorted_bitrates[1];
         }
     }
 
