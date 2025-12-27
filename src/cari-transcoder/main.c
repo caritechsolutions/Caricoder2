@@ -1098,15 +1098,14 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings - simple leaky queue like working gst-launch pipeline */
-    const char *queue_settings = "leaky=1";
+    /* Queue settings - matching working gst-launch pipeline */
+    const char *queue_settings = "max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0";
 
-    /* Input: udpsrc -> queue -> tsparse -> tsdemux */
+    /* Input: udpsrc -> tsparse -> tsdemux (no queue after udpsrc) */
     n = snprintf(p, remaining,
         "udpsrc uri=udp://%s:%d buffer-size=2097152 ! "
-        "queue %s ! "
         "tsparse ! tsdemux name=demux ",
-        g_ctx.input_address, g_ctx.input_port, queue_settings);
+        g_ctx.input_address, g_ctx.input_port);
     p += n; remaining -= n;
 
     /* Video branch */
@@ -1178,20 +1177,23 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    /* Connect to muxer */
-                    n = snprintf(p, remaining, "! mux. ");
+                    /* h264parse before mux for proper stream formatting */
+                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! mux. ");
                     break;
                 }
                 case VIDEO_CODEC_H265:
+                    /* x265enc with h265parse config-interval=-1 for proper muxing */
                     n = snprintf(p, remaining,
-                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! h265parse ! mux. ",
+                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
+                        "h265parse config-interval=-1 ! mux. ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
                         g_ctx.keyframe_interval);
                     break;
                 case VIDEO_CODEC_MPEG2:
+                    /* mpeg2 with mpegvideoparse before mux */
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mux. ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! mux. ",
                         g_ctx.video_bitrate,
                         g_ctx.keyframe_interval);
                     break;
@@ -1206,20 +1208,19 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Audio branch - matches working gst-launch pipeline exactly */
+    /* Audio branch - with parser before mux */
     if (g_ctx.audio_mode == MODE_TRANSCODE && g_ctx.stream_info.audio_detected) {
         const char *parser = get_audio_parser(g_ctx.stream_info.audio_codec);
         const char *decoder = get_audio_decoder(g_ctx.stream_info.audio_codec);
-        const char *encoder = get_audio_encoder(g_ctx.audio_out_codec);
 
-        if (parser && decoder && encoder) {
+        if (parser && decoder) {
             /* Base audio pipeline up to encoder */
             n = snprintf(p, remaining,
                 "demux. ! queue %s ! %s ! %s ! audioconvert ! audioresample ! ",
                 queue_settings, parser, decoder);
             p += n; remaining -= n;
 
-            /* Audio encoder with codec-specific options */
+            /* Audio encoder with codec-specific options + parser before mux */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
                     /* Set audio format via caps, then avenc_aac with all options */
@@ -1251,22 +1252,24 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    n = snprintf(p, remaining, "! mux. ");
+                    /* aacparse before mux */
+                    n = snprintf(p, remaining, "! aacparse ! mux. ");
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_ac3 bitrate=%d ! ac3parse ! mux. ", g_ctx.audio_bitrate);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! mux. ", g_ctx.audio_bitrate);
                     break;
 
                 default:
-                    n = snprintf(p, remaining, "%s bitrate=%d ! mux. ",
-                        encoder, g_ctx.audio_bitrate);
+                    /* Fallback - should not reach here */
+                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! mux. ",
+                        g_ctx.audio_bitrate);
             }
             p += n; remaining -= n;
         }
@@ -1276,14 +1279,17 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Muxer and output */
-    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue %s ! queue ! ", queue_settings);
+    /* Muxer and output - single queue after mux */
+    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue ! ");
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
         n = snprintf(p, remaining, "fdsink fd=1");
     } else {
-        n = snprintf(p, remaining, "tcpserversink host=0.0.0.0 port=%d", g_ctx.tcp_port);
+        /* tcpserversink with sync=false and sync-method for low latency */
+        n = snprintf(p, remaining,
+            "tcpserversink host=0.0.0.0 port=%d sync=false sync-method=latest-keyframe",
+            g_ctx.tcp_port);
     }
     p += n;
 
