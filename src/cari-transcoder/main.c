@@ -837,7 +837,7 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Audio branch */
+    /* Audio branch - matches working gst-launch pipeline exactly */
     if (g_ctx.audio_mode == MODE_TRANSCODE && g_ctx.stream_info.audio_detected) {
         const char *parser = get_audio_parser(g_ctx.stream_info.audio_codec);
         const char *decoder = get_audio_decoder(g_ctx.stream_info.audio_codec);
@@ -846,10 +846,8 @@ static char *build_pipeline_string(void) {
         if (parser && decoder && encoder) {
             n = snprintf(p, remaining,
                 "demux. ! queue %s ! %s ! %s ! audioconvert ! audioresample ! "
-                "audio/x-raw,format=S16LE,rate=%d,channels=%d ! "
                 "%s bitrate=%d ! mux. ",
                 queue_settings, parser, decoder,
-                g_ctx.audio_samplerate, g_ctx.audio_channels,
                 encoder, g_ctx.audio_bitrate);
             p += n; remaining -= n;
         }
@@ -864,11 +862,9 @@ static char *build_pipeline_string(void) {
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
-        n = snprintf(p, remaining, "fdsink fd=1 sync=false");
+        n = snprintf(p, remaining, "fdsink fd=1");
     } else {
-        n = snprintf(p, remaining,
-            "tcpserversink host=0.0.0.0 port=%d sync=true async=true",
-            g_ctx.tcp_port);
+        n = snprintf(p, remaining, "tcpserversink host=0.0.0.0 port=%d", g_ctx.tcp_port);
     }
     p += n;
 
