@@ -336,32 +336,32 @@ include __DIR__ . '/../templates/header.php';
                                 <div class="d-flex flex-wrap gap-3">
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="sliced_threads" id="slicedThreads"
-                                               <?php echo ($config['video']['sliced_threads'] ?? true) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['sliced_threads'] ?? false) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="slicedThreads">Sliced Threads</label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="cabac" id="cabac"
-                                               <?php echo ($config['video']['cabac'] ?? true) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['cabac'] ?? true) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="cabac">CABAC</label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="trellis" id="trellis"
-                                               <?php echo ($config['video']['trellis'] ?? false) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['trellis'] ?? false) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="trellis">Trellis</label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="aud" id="aud"
-                                               <?php echo ($config['video']['aud'] ?? true) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['aud'] ?? true) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="aud">AUD</label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="intra_refresh" id="intraRefresh"
-                                               <?php echo ($config['video']['intra_refresh'] ?? false) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['intra_refresh'] ?? false) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="intraRefresh">Intra Refresh</label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="interlaced" id="interlaced"
-                                               <?php echo ($config['video']['interlaced'] ?? false) ? 'checked' : ''; ?>>
+                                               <?php echo config_bool($config['video']['interlaced'] ?? false) ? 'checked' : ''; ?>>
                                         <label class="form-check-label" for="interlaced">Interlaced</label>
                                     </div>
                                 </div>
@@ -379,7 +379,7 @@ include __DIR__ . '/../templates/header.php';
                     <div class="form-check form-switch d-inline-block me-2">
                         <input class="form-check-input" type="checkbox" name="scaling_enabled" id="scalingEnabled"
                                onchange="toggleScalingOptions()"
-                               <?php echo ($config['scaling']['enabled'] ?? false) ? 'checked' : ''; ?>>
+                               <?php echo config_bool($config['scaling']['enabled'] ?? false) ? 'checked' : ''; ?>>
                     </div>
                     <i class="bi bi-arrows-angle-expand me-2"></i>Video Scaling
                 </h5>
@@ -424,12 +424,12 @@ include __DIR__ . '/../templates/header.php';
                         <div class="d-flex flex-wrap gap-3 mt-2">
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" name="add_borders" id="addBorders"
-                                       <?php echo ($config['scaling']['add_borders'] ?? false) ? 'checked' : ''; ?>>
+                                       <?php echo config_bool($config['scaling']['add_borders'] ?? false) ? 'checked' : ''; ?>>
                                 <label class="form-check-label" for="addBorders">Add Borders</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" name="deinterlace" id="deinterlace"
-                                       <?php echo ($config['scaling']['deinterlace'] ?? false) ? 'checked' : ''; ?>>
+                                       <?php echo config_bool($config['scaling']['deinterlace'] ?? false) ? 'checked' : ''; ?>>
                                 <label class="form-check-label" for="deinterlace">Deinterlace</label>
                             </div>
                         </div>
@@ -529,32 +529,32 @@ include __DIR__ . '/../templates/header.php';
                             <div class="d-flex flex-wrap gap-3">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_is" id="aacIs"
-                                           <?php echo ($config['audio']['aac_is'] ?? true) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_is'] ?? true) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacIs">Intensity Stereo</label>
                                 </div>
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_ms" id="aacMs"
-                                           <?php echo ($config['audio']['aac_ms'] ?? true) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_ms'] ?? true) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacMs">M/S Stereo</label>
                                 </div>
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_pns" id="aacPns"
-                                           <?php echo ($config['audio']['aac_pns'] ?? true) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_pns'] ?? true) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacPns">PNS</label>
                                 </div>
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_tns" id="aacTns"
-                                           <?php echo ($config['audio']['aac_tns'] ?? true) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_tns'] ?? true) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacTns">TNS</label>
                                 </div>
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_ltp" id="aacLtp"
-                                           <?php echo ($config['audio']['aac_ltp'] ?? false) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_ltp'] ?? false) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacLtp">LTP</label>
                                 </div>
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" name="aac_pred" id="aacPred"
-                                           <?php echo ($config['audio']['aac_pred'] ?? false) ? 'checked' : ''; ?>>
+                                           <?php echo config_bool($config['audio']['aac_pred'] ?? false) ? 'checked' : ''; ?>>
                                     <label class="form-check-label" for="aacPred">Prediction</label>
                                 </div>
                             </div>
