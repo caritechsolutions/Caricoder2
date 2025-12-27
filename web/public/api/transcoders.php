@@ -9,6 +9,9 @@ require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
 
+// API URL for Python backend
+define('CARI_API_URL', 'http://127.0.0.1:8081');
+
 // Check authentication
 if (!auth_is_logged_in()) {
     http_response_code(401);
@@ -241,10 +244,16 @@ function handle_create() {
         return;
     }
 
-    // Create systemd service
+    // Create systemd service (optional - may fail in dev mode if API not running)
     $result = create_transcoder_service($id, $config);
     if (!$result['success']) {
-        // Clean up config file on failure
+        // In dev mode, still succeed if config was saved (service creation is optional)
+        if (DEV_MODE) {
+            error_log("Transcoder service creation skipped (dev mode): " . ($result['error'] ?? 'API unavailable'));
+            echo json_encode(['success' => true, 'id' => $id, 'message' => 'Transcoder config saved (service creation skipped in dev mode)']);
+            return;
+        }
+        // In production, clean up config file on failure
         unlink($config_file);
         echo json_encode($result);
         return;
@@ -286,12 +295,19 @@ function handle_update() {
         return;
     }
 
-    // Stop existing service
-    stop_transcoder_service($id);
+    // Stop existing service (ignore errors in dev mode)
+    if (!DEV_MODE) {
+        stop_transcoder_service($id);
+    }
 
-    // Recreate systemd service
+    // Recreate systemd service (optional in dev mode)
     $result = create_transcoder_service($id, $config);
     if (!$result['success']) {
+        if (DEV_MODE) {
+            error_log("Transcoder service update skipped (dev mode): " . ($result['error'] ?? 'API unavailable'));
+            echo json_encode(['success' => true, 'message' => 'Transcoder config updated (service update skipped in dev mode)']);
+            return;
+        }
         echo json_encode($result);
         return;
     }
