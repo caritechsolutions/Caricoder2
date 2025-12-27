@@ -47,6 +47,9 @@ switch ($action) {
     case 'get':
         handle_get($id);
         break;
+    case 'probe_stream':
+        handle_probe_stream();
+        break;
     case 'inputs':
         handle_get_inputs();
         break;
@@ -585,6 +588,31 @@ function delete_transcoder_service($id) {
 }
 
 /**
+ * Probe a stream using ffprobe API
+ * Returns video/audio codec info, resolution, etc.
+ */
+function handle_probe_stream() {
+    $address = $_GET['address'] ?? '';
+
+    if (empty($address)) {
+        echo json_encode(['success' => false, 'error' => 'Stream address required']);
+        return;
+    }
+
+    // Build the stream URL - expect format like "239.1.1.1:5000"
+    // Convert to udp://@ADDRESS:PORT format for ffprobe
+    $stream_url = 'udp://@' . $address;
+
+    $api_data = [
+        'stream_url' => $stream_url
+    ];
+
+    $result = call_cari_api('/preview/media-info', 'POST', $api_data);
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to probe stream']);
+}
+
+/**
  * Get metrics for all transcoders
  * Parses tsp bitrate_monitor output from log files
  */
@@ -652,12 +680,14 @@ function get_transcoder_metrics($id) {
     }
 
     // If no config file or no source_service, try to parse input address from service file
-    if (!$input_api_port && file_exists($service_file)) {
+    if (file_exists($service_file)) {
         $service_content = file_get_contents($service_file);
+
         // Parse --input ADDRESS:PORT from the ExecStart line
-        if (preg_match('/--input\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+        if (!$input_api_port && preg_match('/--input\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
             $input_address = $matches[1];
             $input_port = $matches[2];
+            $metrics['input_address'] = $input_address . ':' . $input_port;
 
             // Find an input whose output matches this address:port
             $inputs_dir = CONFIG_PATH . '/inputs';
@@ -675,6 +705,11 @@ function get_transcoder_metrics($id) {
                     }
                 }
             }
+        }
+
+        // Parse output address: -O ip ADDRESS:PORT
+        if (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
         }
     }
 

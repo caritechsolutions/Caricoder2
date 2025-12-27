@@ -284,6 +284,7 @@ function getResolution($config) {
                         <div class="card h-100">
                             <div class="card-header py-2 bg-success bg-opacity-10">
                                 <strong><i class="bi bi-box-arrow-right me-1"></i>Output Format</strong>
+                                <small class="text-muted ms-2" id="outputAddressName"></small>
                             </div>
                             <div class="card-body py-2">
                                 <div class="row small">
@@ -606,12 +607,13 @@ async function loadPreviewMetrics() {
                 }
             }
 
-            // Update output format display
-            if (metrics.output_format) {
-                document.getElementById('outputVideoCodec').textContent = (metrics.output_format.video_codec || '-').toUpperCase();
-                document.getElementById('outputResolution').textContent = metrics.output_format.video_resolution || '-';
-                document.getElementById('outputAudioCodec').textContent = (metrics.output_format.audio_codec || '-').toUpperCase();
-                document.getElementById('outputAudioBitrateConfig').textContent = formatBitrate(metrics.output_format.audio_bitrate || 0);
+            // Update output format display - probe actual stream
+            if (metrics.output_address) {
+                document.getElementById('outputAddressName').textContent = '(' + metrics.output_address + ')';
+                if (!window.outputFormatLoaded) {
+                    window.outputFormatLoaded = true;
+                    loadOutputMediaInfo(metrics.output_address);
+                }
             }
 
             // Update bitrate displays
@@ -691,13 +693,51 @@ async function loadInputMediaInfo(inputId) {
     }
 }
 
+// Load output media info via ffprobe API
+async function loadOutputMediaInfo(outputAddress) {
+    try {
+        const response = await fetch(`api/transcoders.php?action=probe_stream&address=${encodeURIComponent(outputAddress)}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            console.log('Failed to load output media info:', data.error);
+            document.getElementById('outputVideoCodec').textContent = 'N/A';
+            document.getElementById('outputResolution').textContent = 'N/A';
+            document.getElementById('outputAudioCodec').textContent = 'N/A';
+            document.getElementById('outputAudioBitrateConfig').textContent = 'N/A';
+            return;
+        }
+
+        // Update video info
+        if (data.video) {
+            document.getElementById('outputVideoCodec').textContent =
+                (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
+            document.getElementById('outputResolution').textContent =
+                data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
+        }
+
+        // Update audio info (use first track)
+        if (data.audio && data.audio.length > 0) {
+            const track = data.audio[0];
+            document.getElementById('outputAudioCodec').textContent =
+                (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
+            document.getElementById('outputAudioBitrateConfig').textContent =
+                track.bit_rate ? formatBitrate(parseInt(track.bit_rate)) : '-';
+        }
+    } catch (e) {
+        console.error('Failed to load output media info:', e);
+        document.getElementById('outputVideoCodec').textContent = 'Error';
+    }
+}
+
 // Show preview modal
 function showPreview(id, name) {
     document.getElementById('previewId').value = id;
     document.getElementById('previewName').textContent = name;
 
-    // Reset input format loaded flag
+    // Reset format loaded flags
     window.inputFormatLoaded = false;
+    window.outputFormatLoaded = false;
 
     // Reset history (3 series)
     inputVideoHistory = [];
@@ -710,9 +750,10 @@ function showPreview(id, name) {
     document.getElementById('inputResolution').textContent = '-';
     document.getElementById('inputAudioCodec').textContent = 'Loading...';
     document.getElementById('inputAudioChannels').textContent = '-';
-    document.getElementById('outputVideoCodec').textContent = '-';
+    document.getElementById('outputAddressName').textContent = '';
+    document.getElementById('outputVideoCodec').textContent = 'Loading...';
     document.getElementById('outputResolution').textContent = '-';
-    document.getElementById('outputAudioCodec').textContent = '-';
+    document.getElementById('outputAudioCodec').textContent = 'Loading...';
     document.getElementById('outputAudioBitrateConfig').textContent = '-';
 
     // Reset bitrate displays
