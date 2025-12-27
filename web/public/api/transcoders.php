@@ -44,10 +44,122 @@ switch ($action) {
     case 'get':
         handle_get($id);
         break;
+    case 'inputs':
+        handle_get_inputs();
+        break;
+    case 'next_id':
+        handle_get_next_id();
+        break;
     case 'list':
     default:
         handle_list();
         break;
+}
+
+/**
+ * Call the CariTranscoder Python API
+ */
+function call_cari_api($endpoint, $method = 'GET', $data = null) {
+    $url = CARI_API_URL . $endpoint;
+
+    $options = [
+        'http' => [
+            'method' => $method,
+            'timeout' => 30,
+            'ignore_errors' => true,
+            'header' => "Content-Type: application/json\r\n"
+        ]
+    ];
+
+    if ($data !== null && in_array($method, ['POST', 'PUT', 'PATCH'])) {
+        $options['http']['content'] = json_encode($data);
+    }
+
+    $context = stream_context_create($options);
+    $response = @file_get_contents($url, false, $context);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Failed to connect to CariTranscoder API'];
+    }
+
+    $result = json_decode($response, true);
+    if ($result === null) {
+        return ['success' => false, 'error' => 'Invalid response from API: ' . substr($response, 0, 200)];
+    }
+
+    return $result;
+}
+
+/**
+ * Get list of available inputs for dropdown
+ */
+function handle_get_inputs() {
+    $inputs = get_service_list('inputs');
+    $result = [];
+
+    foreach ($inputs as $input) {
+        // Get the output address from input config
+        $config_file = CONFIG_DIR . '/inputs/' . $input['id'] . '.conf';
+        $output_address = '';
+        $output_port = '';
+
+        if (file_exists($config_file)) {
+            $config = parse_config($config_file);
+            $output_address = $config['output']['address'] ?? '';
+            $output_port = $config['output']['port'] ?? '';
+        }
+
+        $result[] = [
+            'id' => $input['id'],
+            'name' => $input['name'],
+            'output_address' => $output_address,
+            'output_port' => $output_port
+        ];
+    }
+
+    echo json_encode(['success' => true, 'inputs' => $result]);
+}
+
+/**
+ * Get next available transcoder ID number for an input
+ */
+function handle_get_next_id() {
+    $input_id = $_GET['input_id'] ?? '';
+    if (empty($input_id)) {
+        echo json_encode(['success' => false, 'error' => 'Input ID required']);
+        return;
+    }
+
+    // Clean input_id for use in transcoder name
+    $base_id = preg_replace('/[^a-z0-9_-]/', '', strtolower($input_id));
+
+    // Find existing transcoders for this input
+    $transcoders_dir = CONFIG_DIR . '/transcoders';
+    $max_num = 0;
+
+    if (is_dir($transcoders_dir)) {
+        $files = glob($transcoders_dir . '/' . $base_id . '_trans_*.conf');
+        foreach ($files as $file) {
+            $filename = basename($file, '.conf');
+            if (preg_match('/_trans_(\d+)$/', $filename, $matches)) {
+                $num = intval($matches[1]);
+                if ($num > $max_num) {
+                    $max_num = $num;
+                }
+            }
+        }
+    }
+
+    $next_num = $max_num + 1;
+    $next_id = $base_id . '_trans_' . $next_num;
+    $next_name = $base_id . '_trans_' . $next_num;
+
+    echo json_encode([
+        'success' => true,
+        'next_number' => $next_num,
+        'next_id' => $next_id,
+        'next_name' => $next_name
+    ]);
 }
 
 /**

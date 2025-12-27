@@ -120,48 +120,55 @@ include __DIR__ . '/../templates/header.php';
         <input type="hidden" name="id" value="<?php echo htmlspecialchars($id); ?>">
         <?php endif; ?>
 
-        <!-- Basic Information -->
-        <div class="card mb-4">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Basic Information</h5>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Transcoder Name <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" name="name" id="transcoderName"
-                               value="<?php echo htmlspecialchars($config['general']['name'] ?? ''); ?>" required>
-                        <div class="form-text">A descriptive name for this transcoder</div>
-                    </div>
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Transcoder ID <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" name="transcoder_id" id="transcoderId"
-                               value="<?php echo htmlspecialchars($id); ?>"
-                               pattern="[a-z0-9-]+" <?php echo $is_new ? '' : 'readonly'; ?> required>
-                        <div class="form-text">Unique identifier (lowercase, numbers, hyphens only)</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Input Configuration -->
+        <!-- Input Source Selection -->
         <div class="card mb-4">
             <div class="card-header">
                 <h5 class="mb-0"><i class="bi bi-box-arrow-in-right me-2"></i>Input Source</h5>
             </div>
             <div class="card-body">
+                <?php if ($is_new): ?>
                 <div class="row">
                     <div class="col-md-6 mb-3">
-                        <label class="form-label">Multicast Address <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" name="input_address"
-                               value="<?php echo htmlspecialchars($config['input']['address'] ?? ''); ?>"
-                               placeholder="239.100.0.1" required>
+                        <label class="form-label">Select Input <span class="text-danger">*</span></label>
+                        <select class="form-select" name="input_source" id="inputSource" required onchange="onInputChange()">
+                            <option value="">-- Select an Input --</option>
+                        </select>
+                        <div class="form-text">Select an existing input stream to transcode</div>
                     </div>
                     <div class="col-md-6 mb-3">
-                        <label class="form-label">Port <span class="text-danger">*</span></label>
-                        <input type="number" class="form-control" name="input_port"
+                        <label class="form-label">Transcoder Name</label>
+                        <input type="text" class="form-control" name="name" id="transcoderName"
+                               value="<?php echo htmlspecialchars($config['general']['name'] ?? ''); ?>" readonly>
+                        <div class="form-text">Auto-generated based on input selection</div>
+                        <input type="hidden" name="transcoder_id" id="transcoderId" value="">
+                    </div>
+                </div>
+                <?php else: ?>
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Transcoder Name</label>
+                        <input type="text" class="form-control" name="name" id="transcoderName"
+                               value="<?php echo htmlspecialchars($config['general']['name'] ?? ''); ?>" readonly>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Transcoder ID</label>
+                        <input type="text" class="form-control" name="transcoder_id" id="transcoderId"
+                               value="<?php echo htmlspecialchars($id); ?>" readonly>
+                    </div>
+                </div>
+                <?php endif; ?>
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Input Multicast Address</label>
+                        <input type="text" class="form-control" name="input_address" id="inputAddress"
+                               value="<?php echo htmlspecialchars($config['input']['address'] ?? ''); ?>"
+                               placeholder="239.100.0.1" <?php echo $is_new ? 'readonly' : ''; ?>>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Input Port</label>
+                        <input type="number" class="form-control" name="input_port" id="inputPort"
                                value="<?php echo htmlspecialchars($config['input']['port'] ?? '5000'); ?>"
-                               min="1" max="65535" required>
+                               min="1" max="65535" <?php echo $is_new ? 'readonly' : ''; ?>>
                     </div>
                 </div>
             </div>
@@ -573,15 +580,70 @@ include __DIR__ . '/../templates/header.php';
 </div>
 
 <script>
-// Auto-generate ID from name
-document.getElementById('transcoderName').addEventListener('input', function() {
-    const idField = document.getElementById('transcoderId');
-    if (!idField.readOnly) {
-        idField.value = this.value.toLowerCase()
-            .replace(/[^a-z0-9\s-]/g, '')
-            .replace(/\s+/g, '-')
-            .replace(/-+/g, '-');
+// Input data storage
+let inputsData = [];
+
+// Load inputs on page load
+async function loadInputs() {
+    const isNew = <?php echo $is_new ? 'true' : 'false'; ?>;
+    if (!isNew) return;
+
+    try {
+        const response = await fetch('api/transcoders.php?action=inputs');
+        const result = await response.json();
+        if (result.success && result.inputs) {
+            inputsData = result.inputs;
+            const select = document.getElementById('inputSource');
+            result.inputs.forEach(input => {
+                const option = document.createElement('option');
+                option.value = input.id;
+                option.textContent = input.name;
+                option.dataset.address = input.output_address;
+                option.dataset.port = input.output_port;
+                select.appendChild(option);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to load inputs:', err);
     }
+}
+
+// Handle input selection change
+async function onInputChange() {
+    const select = document.getElementById('inputSource');
+    const selectedOption = select.options[select.selectedIndex];
+
+    if (!select.value) {
+        document.getElementById('transcoderName').value = '';
+        document.getElementById('transcoderId').value = '';
+        document.getElementById('inputAddress').value = '';
+        document.getElementById('inputPort').value = '';
+        return;
+    }
+
+    // Set input address/port from selected input's output
+    document.getElementById('inputAddress').value = selectedOption.dataset.address || '';
+    document.getElementById('inputPort').value = selectedOption.dataset.port || '';
+
+    // Get next available transcoder ID for this input
+    try {
+        const response = await fetch(`api/transcoders.php?action=next_id&input_id=${select.value}`);
+        const result = await response.json();
+        if (result.success) {
+            document.getElementById('transcoderName').value = result.next_name;
+            document.getElementById('transcoderId').value = result.next_id;
+        }
+    } catch (err) {
+        console.error('Failed to get next ID:', err);
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadInputs();
+    toggleVideoOptions();
+    toggleAudioOptions();
+    toggleScalingOptions();
 });
 
 function toggleVideoOptions() {
@@ -672,11 +734,6 @@ function deleteTranscoder() {
             });
     }
 }
-
-// Initialize visibility
-toggleVideoOptions();
-toggleAudioOptions();
-toggleScalingOptions();
 </script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>
