@@ -2096,11 +2096,11 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     # Build tsp command with null carrier for CBR output
     # Using: tsp --bitrate X -I null -P regulate -P merge "transcoder_cmd" -P bitrate_monitor ... -P pcradjust -O ip
+    # Note: Use --all-pids to monitor all PIDs since GStreamer mpegtsmux auto-assigns PIDs
     tsp_cmd = (
         f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
         f'-P merge "{transcoder_cmd}" '
-        f"-P bitrate_monitor --pid 65 --periodic-bitrate 5 "
-        f"-P bitrate_monitor --pid 66 --periodic-bitrate 5 "
+        f"-P bitrate_monitor --all-pids --periodic-bitrate 5 "
         f"-P pcradjust "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
     )

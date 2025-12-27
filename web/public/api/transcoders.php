@@ -648,8 +648,12 @@ function get_transcoder_metrics($id) {
 
         // Parse bitrate_monitor output
         // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
-        $video_pid = 65;  // Default video PID (0x41)
-        $audio_pid = 66;  // Default audio PID (0x42)
+        // Since GStreamer mpegtsmux auto-assigns PIDs, we detect video/audio by bitrate magnitude:
+        // - Video: typically > 500,000 bits/s (highest bitrate stream)
+        // - Audio: typically 32,000 - 500,000 bits/s (second highest)
+        // - Other PIDs (PAT, PMT, etc.): very low bitrate, ignored
+
+        $pid_bitrates = [];
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
@@ -657,18 +661,25 @@ function get_transcoder_metrics($id) {
                     $pid = intval($matches[1]);
                     $bitrate = intval($matches[2]);
 
-                    if ($pid === $video_pid && $metrics['video_bitrate'] === 0) {
-                        $metrics['video_bitrate'] = $bitrate;
-                    } elseif ($pid === $audio_pid && $metrics['audio_bitrate'] === 0) {
-                        $metrics['audio_bitrate'] = $bitrate;
-                    }
-
-                    // Stop if we have both
-                    if ($metrics['video_bitrate'] > 0 && $metrics['audio_bitrate'] > 0) {
-                        break;
+                    // Only track PIDs we haven't seen yet (most recent value)
+                    // Skip very low bitrate PIDs (PAT, PMT, etc. are typically < 10000 bps)
+                    if (!isset($pid_bitrates[$pid]) && $bitrate > 10000) {
+                        $pid_bitrates[$pid] = $bitrate;
                     }
                 }
             }
+        }
+
+        // Sort by bitrate descending and classify
+        arsort($pid_bitrates);
+        $sorted_bitrates = array_values($pid_bitrates);
+
+        // Highest bitrate is video, second highest is audio
+        if (count($sorted_bitrates) >= 1) {
+            $metrics['video_bitrate'] = $sorted_bitrates[0];
+        }
+        if (count($sorted_bitrates) >= 2) {
+            $metrics['audio_bitrate'] = $sorted_bitrates[1];
         }
     }
 
