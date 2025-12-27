@@ -1,8 +1,9 @@
 /*
  * CariTranscoder - GStreamer-based Video/Audio Transcoder
  *
+ * Uses gst_parse_launch() to build pipelines - much simpler and more reliable.
  * Receives MPEG-TS via UDP, transcodes video/audio using GStreamer,
- * and outputs to stdout for piping to tsp.
+ * and outputs to stdout or TCP for piping to tsp.
  *
  * Copyright (c) 2024 CariTech Solutions
  */
@@ -21,15 +22,14 @@
 #include <gst/gst.h>
 
 /* Version */
-#define VERSION "1.0.0"
+#define VERSION "2.0.0"
 
 /* Defaults */
-#define DEFAULT_API_PORT 9200
 #define DEFAULT_VIDEO_BITRATE 5000000
 #define DEFAULT_AUDIO_BITRATE 128000
 #define DEFAULT_KEYFRAME_INTERVAL 60
-#define DEFAULT_BFRAMES 2
 #define DEFAULT_AUDIO_SAMPLERATE 48000
+#define DEFAULT_TCP_PORT 8888
 
 /* Codec types */
 typedef enum {
@@ -69,21 +69,17 @@ typedef enum {
 
 /* Detected stream information */
 typedef struct {
-    /* Video */
     VideoCodec video_codec;
     int video_width;
     int video_height;
     int video_fps_num;
     int video_fps_den;
     gboolean video_interlaced;
-    char video_profile[32];
 
-    /* Audio */
     AudioCodec audio_codec;
     int audio_channels;
     int audio_sample_rate;
 
-    /* Detection state */
     gboolean video_detected;
     gboolean audio_detected;
 } StreamInfo;
@@ -100,30 +96,27 @@ typedef struct {
     VideoCodec video_out_codec;
     int video_bitrate;
     VideoPreset video_preset;
-    char video_profile[32];
     int keyframe_interval;
-    int bframes;
 
     /* Scaling settings */
     int scale_width;
     int scale_height;
     gboolean deinterlace;
-    int out_fps_num;
-    int out_fps_den;
 
     /* Audio output settings */
     ProcessingMode audio_mode;
     AudioCodec audio_out_codec;
     int audio_bitrate;
-    int audio_channels;  /* 0=passthrough, 1=mono, 2=stereo, 6=5.1 */
+    int audio_channels;
     int audio_samplerate;
 
+    /* Output settings */
+    gboolean use_stdout;
+    int tcp_port;
+
     /* General settings */
-    int api_port;
-    char log_file[256];
     gboolean debug;
     gboolean detect_only;
-    gboolean dump_pipeline;
 
     /* Runtime state */
     volatile int running;
@@ -137,11 +130,6 @@ typedef struct {
     pthread_mutex_t lock;
 
     /* Statistics */
-    uint64_t packets_in;
-    uint64_t packets_out;
-    uint64_t bytes_in;
-    uint64_t bytes_out;
-    uint64_t frames_encoded;
     struct timeval start_time;
 } AppContext;
 
@@ -158,28 +146,11 @@ static VideoCodec parse_video_codec(const char *str);
 static AudioCodec parse_audio_codec(const char *str);
 static ProcessingMode parse_mode(const char *str);
 static VideoPreset parse_preset(const char *str);
-static const char *preset_to_string(VideoPreset preset) __attribute__((unused));
-
-/* Detection pipeline functions (unused - kept for future use) */
-static int create_detection_pipeline(void) __attribute__((unused));
-static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data);
-static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
-static void print_detected_info(void);
-static GstPadProbeReturn on_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data);
-
-/* FFprobe-based detection */
 static int detect_stream_with_ffprobe(void);
-
-/* Full transcoding pipeline functions */
-static int create_transcode_pipeline(void);
-static void print_pipeline_description(void);
-static GstElement *create_video_bin(void);
-static GstElement *create_audio_bin(void);
-static void on_transcode_pad_added(GstElement *element, GstPad *pad, gpointer data);
-static const char *get_video_decoder_name(VideoCodec codec);
-static const char *get_video_parser_name(VideoCodec codec);
-static const char *get_audio_decoder_name(AudioCodec codec);
-static const char *get_audio_parser_name(AudioCodec codec);
+static void print_detected_info(void);
+static char *build_pipeline_string(void);
+static int create_pipeline(void);
+static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data);
 
 /*
  * Signal handler
@@ -211,32 +182,31 @@ static void print_help(const char *prog) {
     printf("  --video-codec CODEC        h264|h265|mpeg2 (output codec, default: h264)\n");
     printf("  --video-bitrate BPS        Target bitrate in bps (default: 5000000)\n");
     printf("  --video-preset PRESET      ultrafast|superfast|veryfast|faster|fast|\n");
-    printf("                             medium|slow|slower|veryslow (default: medium)\n");
-    printf("  --video-profile PROFILE    baseline|main|high for H.264 (default: main)\n");
+    printf("                             medium|slow|slower|veryslow (default: superfast)\n");
     printf("  --keyframe-interval FRAMES GOP size in frames (default: 60)\n");
-    printf("  --bframes COUNT            Number of B-frames (default: 2)\n");
     printf("\n");
 
     printf("SCALING OPTIONS:\n");
     printf("  --scale WIDTHxHEIGHT       Output resolution (e.g., 1280x720)\n");
     printf("  --deinterlace              Enable deinterlacing\n");
-    printf("  --fps NUM/DEN              Output framerate (e.g., 30/1 or 30000/1001)\n");
     printf("\n");
 
     printf("AUDIO OPTIONS:\n");
     printf("  --audio-mode MODE          transcode|passthrough|drop (default: transcode)\n");
     printf("  --audio-codec CODEC        aac|ac3|mp2 (default: aac)\n");
     printf("  --audio-bitrate BPS        Audio bitrate in bps (default: 128000)\n");
-    printf("  --audio-channels MODE      1|2|6|passthrough (default: 2/stereo)\n");
+    printf("  --audio-channels COUNT     1|2|6 (default: 2/stereo)\n");
     printf("  --audio-samplerate HZ      Sample rate (default: 48000)\n");
     printf("\n");
 
+    printf("OUTPUT OPTIONS:\n");
+    printf("  --stdout                   Output to stdout (for piping to tsp)\n");
+    printf("  --tcp-port PORT            TCP server port (default: 8888)\n");
+    printf("\n");
+
     printf("GENERAL OPTIONS:\n");
-    printf("  --api-port PORT            REST API port for stats (default: 9200)\n");
-    printf("  --log-file PATH            Log file path\n");
     printf("  --debug                    Enable debug logging\n");
     printf("  --detect-only              Detect stream info and exit (JSON output)\n");
-    printf("  --dump-pipeline            Print pipeline graph and exit\n");
     printf("  --help                     Show this help\n");
     printf("\n");
 
@@ -244,17 +214,12 @@ static void print_help(const char *prog) {
     printf("  Detect stream format:\n");
     printf("    %s --input 239.100.0.1:5000 --detect-only\n\n", prog);
 
-    printf("  Transcode H.264 to H.265 at 5 Mbps:\n");
-    printf("    %s --input 239.100.0.1:5000 --video-codec h265 --video-bitrate 5000000 \\\n", prog);
+    printf("  Transcode to H.264 at 2 Mbps (TCP output for testing):\n");
+    printf("    %s --input 239.100.0.1:5000 --video-bitrate 2000000 --tcp-port 8888\n\n", prog);
+
+    printf("  Transcode and pipe to tsp:\n");
+    printf("    %s --input 239.100.0.1:5000 --video-bitrate 2000000 --stdout \\\n", prog);
     printf("        | tsp -I file - -P regulate --bitrate 6000000 -O ip 239.100.0.2:5000\n\n");
-
-    printf("  Scale to 720p with deinterlacing:\n");
-    printf("    %s --input 239.100.0.1:5000 --scale 1280x720 --deinterlace \\\n", prog);
-    printf("        --video-bitrate 3000000 | tsp ...\n\n");
-
-    printf("  Passthrough video, transcode audio to AAC:\n");
-    printf("    %s --input 239.100.0.1:5000 --video-mode passthrough \\\n", prog);
-    printf("        --audio-codec aac --audio-bitrate 128000 | tsp ...\n");
 }
 
 /*
@@ -263,37 +228,27 @@ static void print_help(const char *prog) {
 static void init_context(void) {
     memset(&g_ctx, 0, sizeof(g_ctx));
 
-    /* Input defaults */
-    g_ctx.input_port = 0;
-
     /* Video defaults */
     g_ctx.video_mode = MODE_TRANSCODE;
     g_ctx.video_out_codec = VIDEO_CODEC_H264;
     g_ctx.video_bitrate = DEFAULT_VIDEO_BITRATE;
-    g_ctx.video_preset = PRESET_MEDIUM;
-    strcpy(g_ctx.video_profile, "main");
+    g_ctx.video_preset = PRESET_SUPERFAST;
     g_ctx.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL;
-    g_ctx.bframes = DEFAULT_BFRAMES;
-
-    /* Scaling defaults (0 = no scaling) */
-    g_ctx.scale_width = 0;
-    g_ctx.scale_height = 0;
-    g_ctx.deinterlace = FALSE;
-    g_ctx.out_fps_num = 0;
-    g_ctx.out_fps_den = 1;
 
     /* Audio defaults */
     g_ctx.audio_mode = MODE_TRANSCODE;
     g_ctx.audio_out_codec = AUDIO_CODEC_AAC;
     g_ctx.audio_bitrate = DEFAULT_AUDIO_BITRATE;
-    g_ctx.audio_channels = 2;  /* Stereo */
+    g_ctx.audio_channels = 2;
     g_ctx.audio_samplerate = DEFAULT_AUDIO_SAMPLERATE;
 
+    /* Output defaults */
+    g_ctx.use_stdout = FALSE;
+    g_ctx.tcp_port = DEFAULT_TCP_PORT;
+
     /* General defaults */
-    g_ctx.api_port = DEFAULT_API_PORT;
     g_ctx.debug = FALSE;
     g_ctx.detect_only = FALSE;
-    g_ctx.dump_pipeline = FALSE;
     g_ctx.running = 1;
 
     pthread_mutex_init(&g_ctx.lock, NULL);
@@ -304,37 +259,24 @@ static void init_context(void) {
  */
 static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
-        /* Input */
         {"input",              required_argument, 0, 'i'},
         {"input-interface",    required_argument, 0, 'I'},
-
-        /* Video */
         {"video-mode",         required_argument, 0, 'V'},
         {"video-codec",        required_argument, 0, 'c'},
         {"video-bitrate",      required_argument, 0, 'b'},
         {"video-preset",       required_argument, 0, 'p'},
-        {"video-profile",      required_argument, 0, 'P'},
         {"keyframe-interval",  required_argument, 0, 'k'},
-        {"bframes",            required_argument, 0, 'B'},
-
-        /* Scaling */
         {"scale",              required_argument, 0, 's'},
         {"deinterlace",        no_argument,       0, 'D'},
-        {"fps",                required_argument, 0, 'f'},
-
-        /* Audio */
         {"audio-mode",         required_argument, 0, 'A'},
         {"audio-codec",        required_argument, 0, 'C'},
         {"audio-bitrate",      required_argument, 0, 'a'},
         {"audio-channels",     required_argument, 0, 'n'},
         {"audio-samplerate",   required_argument, 0, 'r'},
-
-        /* General */
-        {"api-port",           required_argument, 0, 'x'},
-        {"log-file",           required_argument, 0, 'l'},
+        {"stdout",             no_argument,       0, 'o'},
+        {"tcp-port",           required_argument, 0, 't'},
         {"debug",              no_argument,       0, 'd'},
         {"detect-only",        no_argument,       0, 'O'},
-        {"dump-pipeline",      no_argument,       0, 'G'},
         {"help",               no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -343,10 +285,9 @@ static int parse_args(int argc, char *argv[]) {
     int option_index = 0;
     char *colon;
 
-    while ((opt = getopt_long(argc, argv, "i:I:V:c:b:p:P:k:B:s:Df:A:C:a:n:r:x:l:dOGh",
+    while ((opt = getopt_long(argc, argv, "i:I:V:c:b:p:k:s:DA:C:a:n:r:ot:dOh",
                               long_options, &option_index)) != -1) {
         switch (opt) {
-            /* Input */
             case 'i':  /* --input */
                 colon = strchr(optarg, ':');
                 if (!colon) {
@@ -362,7 +303,6 @@ static int parse_args(int argc, char *argv[]) {
                 strncpy(g_ctx.input_interface, optarg, sizeof(g_ctx.input_interface) - 1);
                 break;
 
-            /* Video */
             case 'V':  /* --video-mode */
                 g_ctx.video_mode = parse_mode(optarg);
                 break;
@@ -383,19 +323,10 @@ static int parse_args(int argc, char *argv[]) {
                 g_ctx.video_preset = parse_preset(optarg);
                 break;
 
-            case 'P':  /* --video-profile */
-                strncpy(g_ctx.video_profile, optarg, sizeof(g_ctx.video_profile) - 1);
-                break;
-
             case 'k':  /* --keyframe-interval */
                 g_ctx.keyframe_interval = atoi(optarg);
                 break;
 
-            case 'B':  /* --bframes */
-                g_ctx.bframes = atoi(optarg);
-                break;
-
-            /* Scaling */
             case 's':  /* --scale WIDTHxHEIGHT */
                 if (sscanf(optarg, "%dx%d", &g_ctx.scale_width, &g_ctx.scale_height) != 2) {
                     fprintf(stderr, "Error: Scale must be in WIDTHxHEIGHT format\n");
@@ -407,15 +338,6 @@ static int parse_args(int argc, char *argv[]) {
                 g_ctx.deinterlace = TRUE;
                 break;
 
-            case 'f':  /* --fps NUM/DEN */
-                if (sscanf(optarg, "%d/%d", &g_ctx.out_fps_num, &g_ctx.out_fps_den) != 2) {
-                    /* Try just a number */
-                    g_ctx.out_fps_num = atoi(optarg);
-                    g_ctx.out_fps_den = 1;
-                }
-                break;
-
-            /* Audio */
             case 'A':  /* --audio-mode */
                 g_ctx.audio_mode = parse_mode(optarg);
                 break;
@@ -433,30 +355,19 @@ static int parse_args(int argc, char *argv[]) {
                 break;
 
             case 'n':  /* --audio-channels */
-                if (strcasecmp(optarg, "passthrough") == 0) {
-                    g_ctx.audio_channels = 0;
-                } else if (strcasecmp(optarg, "mono") == 0) {
-                    g_ctx.audio_channels = 1;
-                } else if (strcasecmp(optarg, "stereo") == 0) {
-                    g_ctx.audio_channels = 2;
-                } else if (strcasecmp(optarg, "5.1") == 0) {
-                    g_ctx.audio_channels = 6;
-                } else {
-                    g_ctx.audio_channels = atoi(optarg);
-                }
+                g_ctx.audio_channels = atoi(optarg);
                 break;
 
             case 'r':  /* --audio-samplerate */
                 g_ctx.audio_samplerate = atoi(optarg);
                 break;
 
-            /* General */
-            case 'x':  /* --api-port */
-                g_ctx.api_port = atoi(optarg);
+            case 'o':  /* --stdout */
+                g_ctx.use_stdout = TRUE;
                 break;
 
-            case 'l':  /* --log-file */
-                strncpy(g_ctx.log_file, optarg, sizeof(g_ctx.log_file) - 1);
+            case 't':  /* --tcp-port */
+                g_ctx.tcp_port = atoi(optarg);
                 break;
 
             case 'd':  /* --debug */
@@ -465,10 +376,6 @@ static int parse_args(int argc, char *argv[]) {
 
             case 'O':  /* --detect-only */
                 g_ctx.detect_only = TRUE;
-                break;
-
-            case 'G':  /* --dump-pipeline */
-                g_ctx.dump_pipeline = TRUE;
                 break;
 
             case 'h':  /* --help */
@@ -480,7 +387,6 @@ static int parse_args(int argc, char *argv[]) {
         }
     }
 
-    /* Validate required options */
     if (g_ctx.input_port == 0) {
         fprintf(stderr, "Error: --input ADDRESS:PORT is required\n");
         return -1;
@@ -551,10 +457,11 @@ static VideoPreset parse_preset(const char *str) {
     if (strcasecmp(str, "slow") == 0)      return PRESET_SLOW;
     if (strcasecmp(str, "slower") == 0)    return PRESET_SLOWER;
     if (strcasecmp(str, "veryslow") == 0)  return PRESET_VERYSLOW;
-    return PRESET_MEDIUM;
+    return PRESET_SUPERFAST;
 }
 
-static const char *preset_to_string(VideoPreset preset) {
+static const char *preset_to_gst_string(VideoPreset preset) {
+    /* GStreamer x264enc uses these preset names */
     switch (preset) {
         case PRESET_ULTRAFAST: return "ultrafast";
         case PRESET_SUPERFAST: return "superfast";
@@ -565,17 +472,407 @@ static const char *preset_to_string(VideoPreset preset) {
         case PRESET_SLOW:      return "slow";
         case PRESET_SLOWER:    return "slower";
         case PRESET_VERYSLOW:  return "veryslow";
-        default:               return "medium";
+        default:               return "superfast";
     }
 }
 
 /*
- * Timeout callback to quit main loop
+ * Simple JSON string value extractor
  */
-static gboolean quit_main_loop_cb(gpointer data) {
-    GMainLoop *loop = (GMainLoop *)data;
-    g_main_loop_quit(loop);
-    return G_SOURCE_REMOVE;
+static char *json_get_string(const char *json, const char *key) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t') pos++;
+
+    if (*pos != '"') return NULL;
+    pos++;
+
+    const char *end = strchr(pos, '"');
+    if (!end) return NULL;
+
+    size_t len = end - pos;
+    char *result = malloc(len + 1);
+    if (result) {
+        memcpy(result, pos, len);
+        result[len] = '\0';
+    }
+    return result;
+}
+
+/*
+ * Simple JSON integer value extractor
+ */
+static int json_get_int(const char *json, const char *key) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return 0;
+
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t') pos++;
+
+    return atoi(pos);
+}
+
+/*
+ * Detect stream using ffprobe
+ */
+static int detect_stream_with_ffprobe(void) {
+    char cmd[512];
+    char url[256];
+    FILE *fp;
+    char *output = NULL;
+    size_t output_size = 0;
+    size_t output_capacity = 32768;
+    int ret = -1;
+
+    snprintf(url, sizeof(url), "udp://@%s:%d", g_ctx.input_address, g_ctx.input_port);
+
+    snprintf(cmd, sizeof(cmd),
+             "ffprobe -v quiet -print_format json -show_streams "
+             "-analyzeduration 5000000 -probesize 5000000 -i \"%s\" 2>/dev/null",
+             url);
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Running: %s\n", cmd);
+    }
+
+    fprintf(stderr, "Detecting stream at %s:%d using ffprobe...\n",
+            g_ctx.input_address, g_ctx.input_port);
+
+    fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "Error: Failed to run ffprobe\n");
+        return -1;
+    }
+
+    output = malloc(output_capacity);
+    if (!output) {
+        pclose(fp);
+        return -1;
+    }
+
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        size_t len = strlen(buffer);
+        if (output_size + len >= output_capacity) {
+            output_capacity *= 2;
+            char *new_output = realloc(output, output_capacity);
+            if (!new_output) {
+                free(output);
+                pclose(fp);
+                return -1;
+            }
+            output = new_output;
+        }
+        memcpy(output + output_size, buffer, len);
+        output_size += len;
+    }
+    output[output_size] = '\0';
+
+    int status = pclose(fp);
+    if (status != 0) {
+        fprintf(stderr, "Error: ffprobe failed (status %d)\n", status);
+        free(output);
+        return -1;
+    }
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "FFprobe output (%zu bytes):\n%s\n", output_size, output);
+    }
+
+    /* Parse streams */
+    const char *stream_pos = output;
+    while ((stream_pos = strstr(stream_pos, "\"codec_type\"")) != NULL) {
+        const char *stream_start = stream_pos;
+        int brace_count = 0;
+        while (stream_start > output) {
+            stream_start--;
+            if (*stream_start == '{') {
+                brace_count++;
+                if (brace_count == 1) break;
+            } else if (*stream_start == '}') {
+                brace_count--;
+            }
+        }
+
+        const char *stream_end = stream_pos;
+        brace_count = 0;
+        while (*stream_end) {
+            if (*stream_end == '{') brace_count++;
+            else if (*stream_end == '}') {
+                brace_count--;
+                if (brace_count < 0) break;
+            }
+            stream_end++;
+        }
+
+        size_t stream_len = stream_end - stream_start + 1;
+        char *stream_json = malloc(stream_len + 1);
+        if (!stream_json) break;
+        memcpy(stream_json, stream_start, stream_len);
+        stream_json[stream_len] = '\0';
+
+        char *codec_type = json_get_string(stream_json, "codec_type");
+        char *codec_name = json_get_string(stream_json, "codec_name");
+
+        if (codec_type && codec_name) {
+            if (strcmp(codec_type, "video") == 0 && !g_ctx.stream_info.video_detected) {
+                if (strcmp(codec_name, "h264") == 0) {
+                    g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
+                } else if (strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "h265") == 0) {
+                    g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
+                } else if (strcmp(codec_name, "mpeg2video") == 0) {
+                    g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
+                }
+
+                g_ctx.stream_info.video_width = json_get_int(stream_json, "width");
+                g_ctx.stream_info.video_height = json_get_int(stream_json, "height");
+                g_ctx.stream_info.video_detected = TRUE;
+
+                fprintf(stderr, "Video detected: %s %dx%d\n",
+                        video_codec_to_string(g_ctx.stream_info.video_codec),
+                        g_ctx.stream_info.video_width,
+                        g_ctx.stream_info.video_height);
+                ret = 0;
+            } else if (strcmp(codec_type, "audio") == 0 && !g_ctx.stream_info.audio_detected) {
+                if (strcmp(codec_name, "aac") == 0) {
+                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
+                } else if (strcmp(codec_name, "ac3") == 0) {
+                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
+                } else if (strcmp(codec_name, "eac3") == 0) {
+                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
+                } else if (strcmp(codec_name, "mp2") == 0) {
+                    g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
+                }
+
+                g_ctx.stream_info.audio_channels = json_get_int(stream_json, "channels");
+                g_ctx.stream_info.audio_sample_rate = json_get_int(stream_json, "sample_rate");
+                g_ctx.stream_info.audio_detected = TRUE;
+
+                fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
+                        audio_codec_to_string(g_ctx.stream_info.audio_codec),
+                        g_ctx.stream_info.audio_channels,
+                        g_ctx.stream_info.audio_sample_rate);
+                ret = 0;
+            }
+        }
+
+        free(codec_type);
+        free(codec_name);
+        free(stream_json);
+
+        stream_pos++;
+    }
+
+    free(output);
+    return ret;
+}
+
+/*
+ * Print detected stream info (JSON format)
+ */
+static void print_detected_info(void) {
+    printf("{\n");
+    printf("  \"video\": {\n");
+    printf("    \"detected\": %s,\n", g_ctx.stream_info.video_detected ? "true" : "false");
+    printf("    \"codec\": \"%s\",\n", video_codec_to_string(g_ctx.stream_info.video_codec));
+    printf("    \"width\": %d,\n", g_ctx.stream_info.video_width);
+    printf("    \"height\": %d\n", g_ctx.stream_info.video_height);
+    printf("  },\n");
+    printf("  \"audio\": {\n");
+    printf("    \"detected\": %s,\n", g_ctx.stream_info.audio_detected ? "true" : "false");
+    printf("    \"codec\": \"%s\",\n", audio_codec_to_string(g_ctx.stream_info.audio_codec));
+    printf("    \"channels\": %d,\n", g_ctx.stream_info.audio_channels);
+    printf("    \"sample_rate\": %d\n", g_ctx.stream_info.audio_sample_rate);
+    printf("  }\n");
+    printf("}\n");
+}
+
+/*
+ * Get video parser element name for input codec
+ */
+static const char *get_video_parser(VideoCodec codec) {
+    switch (codec) {
+        case VIDEO_CODEC_H264:  return "h264parse";
+        case VIDEO_CODEC_H265:  return "h265parse";
+        case VIDEO_CODEC_MPEG2: return "mpegvideoparse";
+        default:                return NULL;
+    }
+}
+
+/*
+ * Get video decoder element name for input codec
+ */
+static const char *get_video_decoder(VideoCodec codec) {
+    switch (codec) {
+        case VIDEO_CODEC_H264:  return "avdec_h264";
+        case VIDEO_CODEC_H265:  return "avdec_h265";
+        case VIDEO_CODEC_MPEG2: return "avdec_mpeg2video";
+        default:                return NULL;
+    }
+}
+
+/*
+ * Get audio parser element name for input codec
+ */
+static const char *get_audio_parser(AudioCodec codec) {
+    switch (codec) {
+        case AUDIO_CODEC_AAC:   return "aacparse";
+        case AUDIO_CODEC_AC3:   return "ac3parse";
+        case AUDIO_CODEC_EAC3:  return "ac3parse";
+        case AUDIO_CODEC_MP2:   return "mpegaudioparse";
+        default:                return NULL;
+    }
+}
+
+/*
+ * Get audio decoder element name for input codec
+ */
+static const char *get_audio_decoder(AudioCodec codec) {
+    switch (codec) {
+        case AUDIO_CODEC_AAC:   return "avdec_aac";
+        case AUDIO_CODEC_AC3:   return "avdec_ac3";
+        case AUDIO_CODEC_EAC3:  return "avdec_eac3";
+        case AUDIO_CODEC_MP2:   return "avdec_mp2float";
+        default:                return NULL;
+    }
+}
+
+/*
+ * Get audio encoder element name for output codec
+ */
+static const char *get_audio_encoder(AudioCodec codec) {
+    switch (codec) {
+        case AUDIO_CODEC_AAC:   return "avenc_aac";
+        case AUDIO_CODEC_AC3:   return "avenc_ac3";
+        case AUDIO_CODEC_MP2:   return "avenc_mp2";
+        default:                return NULL;
+    }
+}
+
+/*
+ * Build the pipeline string based on detected input and output settings
+ */
+static char *build_pipeline_string(void) {
+    char *pipeline = malloc(4096);
+    if (!pipeline) return NULL;
+
+    char *p = pipeline;
+    int remaining = 4096;
+    int n;
+
+    /* Queue settings to match Python code */
+    const char *queue_settings = "leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0";
+
+    /* Input: udpsrc -> queue -> tsparse -> tsdemux */
+    n = snprintf(p, remaining,
+        "udpsrc uri=udp://%s:%d buffer-size=2097152 ! "
+        "queue %s ! "
+        "tsparse ! tsdemux name=demux ",
+        g_ctx.input_address, g_ctx.input_port, queue_settings);
+    p += n; remaining -= n;
+
+    /* Video branch */
+    if (g_ctx.video_mode == MODE_TRANSCODE && g_ctx.stream_info.video_detected) {
+        const char *parser = get_video_parser(g_ctx.stream_info.video_codec);
+        const char *decoder = get_video_decoder(g_ctx.stream_info.video_codec);
+
+        if (parser && decoder) {
+            n = snprintf(p, remaining,
+                "demux. ! queue %s ! %s ! %s ! videoconvert ! ",
+                queue_settings, parser, decoder);
+            p += n; remaining -= n;
+
+            /* Optional deinterlace */
+            if (g_ctx.deinterlace) {
+                n = snprintf(p, remaining, "deinterlace ! ");
+                p += n; remaining -= n;
+            }
+
+            /* Optional scaling */
+            if (g_ctx.scale_width > 0 && g_ctx.scale_height > 0) {
+                n = snprintf(p, remaining,
+                    "videoscale ! video/x-raw,width=%d,height=%d ! ",
+                    g_ctx.scale_width, g_ctx.scale_height);
+                p += n; remaining -= n;
+            }
+
+            /* Video encoder based on output codec */
+            switch (g_ctx.video_out_codec) {
+                case VIDEO_CODEC_H264:
+                    n = snprintf(p, remaining,
+                        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! mux. ",
+                        preset_to_gst_string(g_ctx.video_preset),
+                        g_ctx.video_bitrate / 1000,
+                        g_ctx.keyframe_interval);
+                    break;
+                case VIDEO_CODEC_H265:
+                    n = snprintf(p, remaining,
+                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! mux. ",
+                        preset_to_gst_string(g_ctx.video_preset),
+                        g_ctx.video_bitrate / 1000,
+                        g_ctx.keyframe_interval);
+                    break;
+                case VIDEO_CODEC_MPEG2:
+                    n = snprintf(p, remaining,
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mux. ",
+                        g_ctx.video_bitrate,
+                        g_ctx.keyframe_interval);
+                    break;
+                default:
+                    n = 0;
+            }
+            p += n; remaining -= n;
+        }
+    } else if (g_ctx.video_mode == MODE_DROP) {
+        n = snprintf(p, remaining, "demux. ! queue %s ! fakesink ", queue_settings);
+        p += n; remaining -= n;
+    }
+    /* TODO: passthrough mode */
+
+    /* Audio branch */
+    if (g_ctx.audio_mode == MODE_TRANSCODE && g_ctx.stream_info.audio_detected) {
+        const char *parser = get_audio_parser(g_ctx.stream_info.audio_codec);
+        const char *decoder = get_audio_decoder(g_ctx.stream_info.audio_codec);
+        const char *encoder = get_audio_encoder(g_ctx.audio_out_codec);
+
+        if (parser && decoder && encoder) {
+            n = snprintf(p, remaining,
+                "demux. ! queue %s ! %s ! %s ! audioconvert ! audioresample ! "
+                "audio/x-raw,format=S16LE,rate=%d,channels=%d ! "
+                "%s bitrate=%d ! mux. ",
+                queue_settings, parser, decoder,
+                g_ctx.audio_samplerate, g_ctx.audio_channels,
+                encoder, g_ctx.audio_bitrate);
+            p += n; remaining -= n;
+        }
+    } else if (g_ctx.audio_mode == MODE_DROP) {
+        n = snprintf(p, remaining, "demux. ! queue %s ! fakesink ", queue_settings);
+        p += n; remaining -= n;
+    }
+    /* TODO: passthrough mode */
+
+    /* Muxer and output */
+    n = snprintf(p, remaining, "mpegtsmux name=mux ! queue %s ! queue ! ", queue_settings);
+    p += n; remaining -= n;
+
+    if (g_ctx.use_stdout) {
+        n = snprintf(p, remaining, "fdsink fd=1 sync=false");
+    } else {
+        n = snprintf(p, remaining,
+            "tcpserversink host=0.0.0.0 port=%d sync=true async=true",
+            g_ctx.tcp_port);
+    }
+    p += n;
+
+    return pipeline;
 }
 
 /*
@@ -624,14 +921,12 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
             break;
 
         case GST_MESSAGE_STATE_CHANGED:
-            if (GST_MESSAGE_SRC(msg) == GST_OBJECT(g_ctx.pipeline)) {
+            if (GST_MESSAGE_SRC(msg) == GST_OBJECT(g_ctx.pipeline) && g_ctx.debug) {
                 GstState old_state, new_state, pending_state;
                 gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
-                if (g_ctx.debug) {
-                    fprintf(stderr, "Pipeline state: %s -> %s\n",
-                            gst_element_state_get_name(old_state),
-                            gst_element_state_get_name(new_state));
-                }
+                fprintf(stderr, "Pipeline state: %s -> %s\n",
+                        gst_element_state_get_name(old_state),
+                        gst_element_state_get_name(new_state));
             }
             break;
 
@@ -643,1232 +938,39 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
 }
 
 /*
- * Helper to parse video caps into stream info
+ * Create pipeline using gst_parse_launch
  */
-static void parse_video_caps(GstCaps *caps) {
-    if (!caps || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
-        return;
-    }
+static int create_pipeline(void) {
+    GError *error = NULL;
 
-    GstStructure *str = gst_caps_get_structure(caps, 0);
-    const gchar *name = gst_structure_get_name(str);
-
-    if (!g_str_has_prefix(name, "video/")) {
-        return;
-    }
-
-    pthread_mutex_lock(&g_ctx.lock);
-
-    /* Parse video codec */
-    if (g_strcmp0(name, "video/x-h264") == 0) {
-        g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
-    } else if (g_strcmp0(name, "video/x-h265") == 0) {
-        g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
-    } else if (g_strcmp0(name, "video/mpeg") == 0) {
-        gint mpegversion = 0;
-        gst_structure_get_int(str, "mpegversion", &mpegversion);
-        if (mpegversion == 2) {
-            g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
-        }
-    }
-
-    gst_structure_get_int(str, "width", &g_ctx.stream_info.video_width);
-    gst_structure_get_int(str, "height", &g_ctx.stream_info.video_height);
-
-    gint fps_num = 0, fps_den = 1;
-    if (gst_structure_get_fraction(str, "framerate", &fps_num, &fps_den)) {
-        g_ctx.stream_info.video_fps_num = fps_num;
-        g_ctx.stream_info.video_fps_den = fps_den;
-    }
-
-    const gchar *interlace_mode = gst_structure_get_string(str, "interlace-mode");
-    g_ctx.stream_info.video_interlaced =
-        (interlace_mode && g_strcmp0(interlace_mode, "progressive") != 0);
-
-    const gchar *profile = gst_structure_get_string(str, "profile");
-    if (profile) {
-        strncpy(g_ctx.stream_info.video_profile, profile,
-                sizeof(g_ctx.stream_info.video_profile) - 1);
-    }
-
-    g_ctx.stream_info.video_detected = TRUE;
-
-    if (g_ctx.debug) {
-        fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
-                video_codec_to_string(g_ctx.stream_info.video_codec),
-                g_ctx.stream_info.video_width,
-                g_ctx.stream_info.video_height,
-                g_ctx.stream_info.video_fps_num,
-                g_ctx.stream_info.video_fps_den,
-                g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
-    }
-
-    pthread_mutex_unlock(&g_ctx.lock);
-}
-
-/*
- * Helper to parse audio caps into stream info
- */
-static void parse_audio_caps(GstCaps *caps) {
-    if (!caps || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
-        return;
-    }
-
-    GstStructure *str = gst_caps_get_structure(caps, 0);
-    const gchar *name = gst_structure_get_name(str);
-
-    if (!g_str_has_prefix(name, "audio/")) {
-        return;
-    }
-
-    pthread_mutex_lock(&g_ctx.lock);
-
-    /* Parse audio codec */
-    if (g_strcmp0(name, "audio/mpeg") == 0) {
-        gint mpegversion = 0;
-        gst_structure_get_int(str, "mpegversion", &mpegversion);
-        if (mpegversion == 4 || mpegversion == 2) {
-            g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
-        } else if (mpegversion == 1) {
-            gint layer = 0;
-            gst_structure_get_int(str, "layer", &layer);
-            if (layer == 2) {
-                g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
-            }
-        }
-    } else if (g_strcmp0(name, "audio/x-ac3") == 0) {
-        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
-    } else if (g_strcmp0(name, "audio/x-eac3") == 0) {
-        g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
-    }
-
-    gst_structure_get_int(str, "channels", &g_ctx.stream_info.audio_channels);
-    gst_structure_get_int(str, "rate", &g_ctx.stream_info.audio_sample_rate);
-
-    g_ctx.stream_info.audio_detected = TRUE;
-
-    if (g_ctx.debug) {
-        fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
-                audio_codec_to_string(g_ctx.stream_info.audio_codec),
-                g_ctx.stream_info.audio_channels,
-                g_ctx.stream_info.audio_sample_rate);
-    }
-
-    pthread_mutex_unlock(&g_ctx.lock);
-}
-
-/*
- * Pad probe to capture caps when they become available/change
- * This catches the full caps including width/height/framerate
- */
-static GstPadProbeReturn on_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data) {
-    gboolean is_video = GPOINTER_TO_INT(data);
-    GstEvent *event;
-
-    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
-        event = GST_PAD_PROBE_INFO_EVENT(info);
-
-        if (GST_EVENT_TYPE(event) == GST_EVENT_CAPS) {
-            GstCaps *caps = NULL;
-            gst_event_parse_caps(event, &caps);
-
-            if (g_ctx.debug && caps) {
-                gchar *caps_str = gst_caps_to_string(caps);
-                fprintf(stderr, "Caps event on %s: %s\n", GST_PAD_NAME(pad), caps_str);
-                g_free(caps_str);
-            }
-
-            if (is_video) {
-                parse_video_caps(caps);
-            } else {
-                parse_audio_caps(caps);
-            }
-
-            /* Check if we have both streams with full info */
-            if (g_ctx.detect_only &&
-                g_ctx.stream_info.video_detected &&
-                g_ctx.stream_info.audio_detected &&
-                g_ctx.stream_info.video_width > 0 &&
-                g_ctx.stream_info.audio_sample_rate > 0) {
-                /* We have complete info, schedule quit */
-                g_timeout_add(200, quit_main_loop_cb, g_ctx.main_loop);
-            }
-        }
-    }
-
-    return GST_PAD_PROBE_OK;
-}
-
-/*
- * Callback when tsdemux adds a new pad (video or audio stream found)
- */
-static void on_demux_pad_added(GstElement *element, GstPad *pad, gpointer data) {
-    (void)element;
-    (void)data;
-
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    if (!caps) {
-        caps = gst_pad_query_caps(pad, NULL);
-    }
-
-    if (!caps) {
-        fprintf(stderr, "Warning: Could not get caps for pad %s\n", GST_PAD_NAME(pad));
-        return;
-    }
-
-    GstStructure *str = gst_caps_get_structure(caps, 0);
-    const gchar *name = gst_structure_get_name(str);
-
-    if (g_ctx.debug) {
-        gchar *caps_str = gst_caps_to_string(caps);
-        fprintf(stderr, "Pad added: %s, caps: %s\n", GST_PAD_NAME(pad), caps_str);
-        g_free(caps_str);
-    }
-
-    GstElement *sink = NULL;
-    gboolean is_video = FALSE;
-
-    if (g_str_has_prefix(name, "video/")) {
-        sink = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "fakesink_v");
-        is_video = TRUE;
-        /* Initial parse of video caps */
-        parse_video_caps(caps);
-    } else if (g_str_has_prefix(name, "audio/")) {
-        sink = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "fakesink_a");
-        is_video = FALSE;
-        /* Initial parse of audio caps */
-        parse_audio_caps(caps);
-    }
-
-    if (sink) {
-        GstPad *sink_pad = gst_element_get_static_pad(sink, "sink");
-
-        if (sink_pad && !gst_pad_is_linked(sink_pad)) {
-            /* Add a probe to capture caps events for full stream info */
-            gst_pad_add_probe(pad,
-                              GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
-                              on_caps_probe,
-                              GINT_TO_POINTER(is_video),
-                              NULL);
-
-            /* Link the pad to the fakesink */
-            GstPadLinkReturn link_ret = gst_pad_link(pad, sink_pad);
-            if (link_ret != GST_PAD_LINK_OK) {
-                fprintf(stderr, "Warning: Failed to link %s pad: %d\n",
-                        is_video ? "video" : "audio", link_ret);
-            } else if (g_ctx.debug) {
-                fprintf(stderr, "Linked %s pad to fakesink\n", is_video ? "video" : "audio");
-            }
-        }
-
-        if (sink_pad) {
-            gst_object_unref(sink_pad);
-        }
-        gst_object_unref(sink);
-    }
-
-    gst_caps_unref(caps);
-}
-
-/*
- * Simple JSON string value extractor
- * Finds "key": "value" and returns the value (caller must free)
- */
-static char *json_get_string(const char *json, const char *key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-
-    const char *pos = strstr(json, pattern);
-    if (!pos) return NULL;
-
-    pos += strlen(pattern);
-    while (*pos == ' ' || *pos == '\t') pos++;
-
-    if (*pos != '"') return NULL;
-    pos++;
-
-    const char *end = strchr(pos, '"');
-    if (!end) return NULL;
-
-    size_t len = end - pos;
-    char *result = malloc(len + 1);
-    if (result) {
-        memcpy(result, pos, len);
-        result[len] = '\0';
-    }
-    return result;
-}
-
-/*
- * Simple JSON integer value extractor
- * Finds "key": 123 and returns the integer value
- */
-static int json_get_int(const char *json, const char *key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-
-    const char *pos = strstr(json, pattern);
-    if (!pos) return 0;
-
-    pos += strlen(pattern);
-    while (*pos == ' ' || *pos == '\t') pos++;
-
-    return atoi(pos);
-}
-
-/*
- * Detect stream using ffprobe (more reliable than GStreamer for format detection)
- */
-static int detect_stream_with_ffprobe(void) {
-    char cmd[512];
-    char url[256];
-    FILE *fp;
-    char *output = NULL;
-    size_t output_size = 0;
-    size_t output_capacity = 32768;
-    int ret = -1;
-
-    /* Build URL */
-    snprintf(url, sizeof(url), "udp://@%s:%d", g_ctx.input_address, g_ctx.input_port);
-
-    /* Build ffprobe command */
-    snprintf(cmd, sizeof(cmd),
-             "ffprobe -v quiet -print_format json -show_streams "
-             "-analyzeduration 5000000 -probesize 5000000 -i \"%s\" 2>/dev/null",
-             url);
-
-    if (g_ctx.debug) {
-        fprintf(stderr, "Running: %s\n", cmd);
-    }
-
-    fprintf(stderr, "Detecting stream at %s:%d using ffprobe...\n",
-            g_ctx.input_address, g_ctx.input_port);
-
-    fp = popen(cmd, "r");
-    if (!fp) {
-        fprintf(stderr, "Error: Failed to run ffprobe\n");
+    /* Build the pipeline string */
+    char *pipeline_str = build_pipeline_string();
+    if (!pipeline_str) {
+        fprintf(stderr, "Error: Failed to build pipeline string\n");
         return -1;
     }
 
-    /* Read all output */
-    output = malloc(output_capacity);
-    if (!output) {
-        pclose(fp);
+    fprintf(stderr, "\n=== Pipeline ===\n%s\n================\n\n", pipeline_str);
+
+    /* Create pipeline from string */
+    g_ctx.pipeline = gst_parse_launch(pipeline_str, &error);
+    free(pipeline_str);
+
+    if (error) {
+        fprintf(stderr, "Pipeline parse error: %s\n", error->message);
+        g_error_free(error);
         return -1;
     }
 
-    char buffer[4096];
-    while (fgets(buffer, sizeof(buffer), fp)) {
-        size_t len = strlen(buffer);
-        if (output_size + len >= output_capacity) {
-            output_capacity *= 2;
-            char *new_output = realloc(output, output_capacity);
-            if (!new_output) {
-                free(output);
-                pclose(fp);
-                return -1;
-            }
-            output = new_output;
-        }
-        memcpy(output + output_size, buffer, len);
-        output_size += len;
-    }
-    output[output_size] = '\0';
-
-    int status = pclose(fp);
-    if (status != 0) {
-        fprintf(stderr, "Error: ffprobe failed (status %d)\n", status);
-        free(output);
-        return -1;
-    }
-
-    if (g_ctx.debug) {
-        fprintf(stderr, "FFprobe output (%zu bytes):\n%s\n", output_size, output);
-    }
-
-    /* Parse streams - look for video and audio codec_type sections */
-    const char *stream_pos = output;
-    while ((stream_pos = strstr(stream_pos, "\"codec_type\"")) != NULL) {
-        /* Find the start of this stream object (search backwards for {) */
-        const char *stream_start = stream_pos;
-        int brace_count = 0;
-        while (stream_start > output) {
-            stream_start--;
-            if (*stream_start == '{') {
-                brace_count++;
-                if (brace_count == 1) break;
-            } else if (*stream_start == '}') {
-                brace_count--;
-            }
-        }
-
-        /* Find the end of this stream object */
-        const char *stream_end = stream_pos;
-        brace_count = 0;
-        while (*stream_end) {
-            if (*stream_end == '{') brace_count++;
-            else if (*stream_end == '}') {
-                brace_count--;
-                if (brace_count < 0) break;
-            }
-            stream_end++;
-        }
-
-        /* Extract this stream's JSON */
-        size_t stream_len = stream_end - stream_start + 1;
-        char *stream_json = malloc(stream_len + 1);
-        if (!stream_json) break;
-        memcpy(stream_json, stream_start, stream_len);
-        stream_json[stream_len] = '\0';
-
-        /* Check codec type */
-        char *codec_type = json_get_string(stream_json, "codec_type");
-        if (codec_type) {
-            if (strcmp(codec_type, "video") == 0 && !g_ctx.stream_info.video_detected) {
-                /* Parse video info */
-                char *codec_name = json_get_string(stream_json, "codec_name");
-                if (codec_name) {
-                    if (strcasecmp(codec_name, "h264") == 0 || strcasecmp(codec_name, "avc") == 0) {
-                        g_ctx.stream_info.video_codec = VIDEO_CODEC_H264;
-                    } else if (strcasecmp(codec_name, "hevc") == 0 || strcasecmp(codec_name, "h265") == 0) {
-                        g_ctx.stream_info.video_codec = VIDEO_CODEC_H265;
-                    } else if (strcasecmp(codec_name, "mpeg2video") == 0) {
-                        g_ctx.stream_info.video_codec = VIDEO_CODEC_MPEG2;
-                    }
-                    free(codec_name);
-                }
-
-                g_ctx.stream_info.video_width = json_get_int(stream_json, "width");
-                g_ctx.stream_info.video_height = json_get_int(stream_json, "height");
-
-                /* Parse framerate (r_frame_rate is "num/den") */
-                char *fps = json_get_string(stream_json, "r_frame_rate");
-                if (fps) {
-                    if (sscanf(fps, "%d/%d", &g_ctx.stream_info.video_fps_num,
-                               &g_ctx.stream_info.video_fps_den) != 2) {
-                        g_ctx.stream_info.video_fps_num = 0;
-                        g_ctx.stream_info.video_fps_den = 1;
-                    }
-                    free(fps);
-                }
-
-                /* Check for interlaced (field_order != "progressive") */
-                char *field_order = json_get_string(stream_json, "field_order");
-                if (field_order) {
-                    g_ctx.stream_info.video_interlaced =
-                        (strcmp(field_order, "progressive") != 0 &&
-                         strcmp(field_order, "unknown") != 0);
-                    free(field_order);
-                }
-
-                /* Profile */
-                char *profile = json_get_string(stream_json, "profile");
-                if (profile) {
-                    strncpy(g_ctx.stream_info.video_profile, profile,
-                            sizeof(g_ctx.stream_info.video_profile) - 1);
-                    free(profile);
-                }
-
-                g_ctx.stream_info.video_detected = TRUE;
-
-                if (g_ctx.debug) {
-                    fprintf(stderr, "Video detected: %s %dx%d @ %d/%d fps%s\n",
-                            video_codec_to_string(g_ctx.stream_info.video_codec),
-                            g_ctx.stream_info.video_width,
-                            g_ctx.stream_info.video_height,
-                            g_ctx.stream_info.video_fps_num,
-                            g_ctx.stream_info.video_fps_den,
-                            g_ctx.stream_info.video_interlaced ? " (interlaced)" : "");
-                }
-
-            } else if (strcmp(codec_type, "audio") == 0 && !g_ctx.stream_info.audio_detected) {
-                /* Parse audio info */
-                char *codec_name = json_get_string(stream_json, "codec_name");
-                if (codec_name) {
-                    if (strcasecmp(codec_name, "aac") == 0) {
-                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AAC;
-                    } else if (strcasecmp(codec_name, "ac3") == 0) {
-                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_AC3;
-                    } else if (strcasecmp(codec_name, "eac3") == 0) {
-                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_EAC3;
-                    } else if (strcasecmp(codec_name, "mp2") == 0) {
-                        g_ctx.stream_info.audio_codec = AUDIO_CODEC_MP2;
-                    }
-                    free(codec_name);
-                }
-
-                g_ctx.stream_info.audio_channels = json_get_int(stream_json, "channels");
-
-                /* Sample rate might be a string */
-                char *sample_rate_str = json_get_string(stream_json, "sample_rate");
-                if (sample_rate_str) {
-                    g_ctx.stream_info.audio_sample_rate = atoi(sample_rate_str);
-                    free(sample_rate_str);
-                }
-                if (g_ctx.stream_info.audio_sample_rate == 0) {
-                    g_ctx.stream_info.audio_sample_rate = json_get_int(stream_json, "sample_rate");
-                }
-
-                g_ctx.stream_info.audio_detected = TRUE;
-
-                if (g_ctx.debug) {
-                    fprintf(stderr, "Audio detected: %s %d ch @ %d Hz\n",
-                            audio_codec_to_string(g_ctx.stream_info.audio_codec),
-                            g_ctx.stream_info.audio_channels,
-                            g_ctx.stream_info.audio_sample_rate);
-                }
-            }
-            free(codec_type);
-        }
-
-        free(stream_json);
-        stream_pos++;  /* Move past current match */
-    }
-
-    if (g_ctx.stream_info.video_detected || g_ctx.stream_info.audio_detected) {
-        ret = 0;
-    } else {
-        fprintf(stderr, "Error: No streams detected\n");
-    }
-
-    free(output);
-    return ret;
-}
-
-/*
- * Create detection-only pipeline
- * udpsrc -> queue -> tsparse -> tsdemux -> (pads inspected via callback)
- */
-static int create_detection_pipeline(void) {
-    GstElement *udpsrc, *queue, *tsparse, *tsdemux, *fakesink_v, *fakesink_a;
-    char uri[256];
-
-    g_ctx.pipeline = gst_pipeline_new("detection-pipeline");
     if (!g_ctx.pipeline) {
         fprintf(stderr, "Error: Failed to create pipeline\n");
         return -1;
     }
 
-    /* Create elements */
-    udpsrc = gst_element_factory_make("udpsrc", "udpsrc");
-    queue = gst_element_factory_make("queue", "queue");
-    tsparse = gst_element_factory_make("tsparse", "tsparse");
-    tsdemux = gst_element_factory_make("tsdemux", "tsdemux");
-    fakesink_v = gst_element_factory_make("fakesink", "fakesink_v");
-    fakesink_a = gst_element_factory_make("fakesink", "fakesink_a");
-
-    if (!udpsrc || !queue || !tsparse || !tsdemux || !fakesink_v || !fakesink_a) {
-        fprintf(stderr, "Error: Failed to create GStreamer elements\n");
-        fprintf(stderr, "  udpsrc=%p queue=%p tsparse=%p tsdemux=%p\n",
-                (void*)udpsrc, (void*)queue, (void*)tsparse, (void*)tsdemux);
-        return -1;
-    }
-
-    /* Configure udpsrc */
-    snprintf(uri, sizeof(uri), "udp://%s:%d", g_ctx.input_address, g_ctx.input_port);
-    g_object_set(udpsrc, "uri", uri, NULL);
-    g_object_set(udpsrc, "buffer-size", 2097152, NULL);  /* 2MB buffer */
-
-    if (g_ctx.input_interface[0]) {
-        g_object_set(udpsrc, "multicast-iface", g_ctx.input_interface, NULL);
-    }
-
-    /* Configure queue */
-    g_object_set(queue,
-                 "leaky", 1,  /* downstream */
-                 "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
-                 "max-size-bytes", 0,
-                 NULL);
-
-    /* Add all elements to pipeline */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline),
-                     udpsrc, queue, tsparse, tsdemux, fakesink_v, fakesink_a, NULL);
-
-    /* Link static elements: udpsrc -> queue -> tsparse -> tsdemux */
-    if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
-        fprintf(stderr, "Error: Failed to link elements\n");
-        return -1;
-    }
-
-    /* Connect to pad-added signal for dynamic linking */
-    g_signal_connect(tsdemux, "pad-added", G_CALLBACK(on_demux_pad_added), NULL);
-
     /* Set up bus watch */
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(g_ctx.pipeline));
     gst_bus_add_watch(bus, on_bus_message, NULL);
     gst_object_unref(bus);
-
-    fprintf(stderr, "Detecting stream at %s:%d...\n",
-            g_ctx.input_address, g_ctx.input_port);
-
-    return 0;
-}
-
-/*
- * Print detected stream info as JSON
- */
-static void print_detected_info(void) {
-    printf("{\n");
-    printf("  \"video\": {\n");
-    printf("    \"codec\": \"%s\",\n", video_codec_to_string(g_ctx.stream_info.video_codec));
-    printf("    \"width\": %d,\n", g_ctx.stream_info.video_width);
-    printf("    \"height\": %d,\n", g_ctx.stream_info.video_height);
-    printf("    \"framerate\": \"%d/%d\",\n",
-           g_ctx.stream_info.video_fps_num, g_ctx.stream_info.video_fps_den);
-    printf("    \"interlaced\": %s,\n", g_ctx.stream_info.video_interlaced ? "true" : "false");
-    printf("    \"profile\": \"%s\"\n", g_ctx.stream_info.video_profile);
-    printf("  },\n");
-    printf("  \"audio\": {\n");
-    printf("    \"codec\": \"%s\",\n", audio_codec_to_string(g_ctx.stream_info.audio_codec));
-    printf("    \"channels\": %d,\n", g_ctx.stream_info.audio_channels);
-    printf("    \"sample_rate\": %d\n", g_ctx.stream_info.audio_sample_rate);
-    printf("  }\n");
-    printf("}\n");
-}
-
-/*
- * Get GStreamer decoder element name for input video codec
- * Uses libav decoders (gstreamer1.0-libav) to match Python implementation
- */
-static const char *get_video_decoder_name(VideoCodec codec) {
-    switch (codec) {
-        case VIDEO_CODEC_H264:  return "avdec_h264";
-        case VIDEO_CODEC_H265:  return "avdec_h265";
-        case VIDEO_CODEC_MPEG2: return "avdec_mpeg2video";
-        default:                return NULL;
-    }
-}
-
-/*
- * Get GStreamer parser element name for input video codec
- */
-static const char *get_video_parser_name(VideoCodec codec) {
-    switch (codec) {
-        case VIDEO_CODEC_H264:  return "h264parse";
-        case VIDEO_CODEC_H265:  return "h265parse";
-        case VIDEO_CODEC_MPEG2: return "mpegvideoparse";
-        default:                return NULL;
-    }
-}
-
-/*
- * Get GStreamer decoder element name for input audio codec
- * Uses libav decoders (gstreamer1.0-libav) to match Python implementation
- */
-static const char *get_audio_decoder_name(AudioCodec codec) {
-    switch (codec) {
-        case AUDIO_CODEC_AAC:   return "avdec_aac";
-        case AUDIO_CODEC_AC3:   return "avdec_ac3";
-        case AUDIO_CODEC_EAC3:  return "avdec_eac3";
-        case AUDIO_CODEC_MP2:   return "avdec_mp2float";
-        default:                return NULL;
-    }
-}
-
-/*
- * Get GStreamer parser element name for input audio codec
- */
-static const char *get_audio_parser_name(AudioCodec codec) {
-    switch (codec) {
-        case AUDIO_CODEC_AAC:   return "aacparse";
-        case AUDIO_CODEC_AC3:   return "ac3parse";
-        case AUDIO_CODEC_EAC3:  return "ac3parse";  /* EAC3 uses same parser */
-        case AUDIO_CODEC_MP2:   return "mpegaudioparse";
-        default:                return NULL;
-    }
-}
-
-/*
- * Callback for transcoding pipeline pad-added from tsdemux
- */
-static void on_transcode_pad_added(GstElement *element, GstPad *pad, gpointer data) {
-    (void)element;
-    (void)data;
-
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    if (!caps) {
-        caps = gst_pad_query_caps(pad, NULL);
-    }
-    if (!caps) return;
-
-    GstStructure *str = gst_caps_get_structure(caps, 0);
-    const gchar *name = gst_structure_get_name(str);
-
-    if (g_ctx.debug) {
-        gchar *caps_str = gst_caps_to_string(caps);
-        fprintf(stderr, "Transcode pad added: %s, caps: %s\n", GST_PAD_NAME(pad), caps_str);
-        g_free(caps_str);
-    }
-
-    GstElement *target = NULL;
-    const char *target_name = NULL;
-
-    if (g_str_has_prefix(name, "video/")) {
-        if (g_ctx.video_mode == MODE_DROP) {
-            /* Link to fakesink for video drop */
-            target = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "video_null");
-        } else {
-            target = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "video_queue");
-        }
-        target_name = "video";
-    } else if (g_str_has_prefix(name, "audio/")) {
-        if (g_ctx.audio_mode == MODE_DROP) {
-            target = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "audio_null");
-        } else {
-            target = gst_bin_get_by_name(GST_BIN(g_ctx.pipeline), "audio_queue");
-        }
-        target_name = "audio";
-    }
-
-    if (target) {
-        GstPad *sink_pad = gst_element_get_static_pad(target, "sink");
-        if (sink_pad && !gst_pad_is_linked(sink_pad)) {
-            GstPadLinkReturn ret = gst_pad_link(pad, sink_pad);
-            if (ret != GST_PAD_LINK_OK) {
-                fprintf(stderr, "Warning: Failed to link %s pad: %d\n", target_name, ret);
-            } else if (g_ctx.debug) {
-                fprintf(stderr, "Linked %s stream to processing chain\n", target_name);
-            }
-        }
-        if (sink_pad) gst_object_unref(sink_pad);
-        gst_object_unref(target);
-    }
-
-    gst_caps_unref(caps);
-}
-
-/*
- * Create video processing bin
- * Returns a bin: [ghost sink] -> queue -> parse -> decode -> convert -> (deinterlace) -> (scale) -> encode -> parse -> [ghost src]
- */
-static GstElement *create_video_bin(void) {
-    GstElement *bin = gst_bin_new("video_bin");
-    GstElement *queue, *parser, *decoder, *convert, *encoder, *out_parser;
-    GstElement *deinterlace = NULL, *scale = NULL, *capsfilter = NULL;
-
-    const char *parser_name = get_video_parser_name(g_ctx.stream_info.video_codec);
-    const char *decoder_name = get_video_decoder_name(g_ctx.stream_info.video_codec);
-
-    if (!parser_name || !decoder_name) {
-        fprintf(stderr, "Error: Unsupported input video codec\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Create elements */
-    queue = gst_element_factory_make("queue", "video_queue");
-    parser = gst_element_factory_make(parser_name, "video_parser");
-    decoder = gst_element_factory_make(decoder_name, "video_decoder");
-    convert = gst_element_factory_make("videoconvert", "video_convert");
-
-    if (!queue || !parser || !decoder || !convert) {
-        fprintf(stderr, "Error: Failed to create video decode elements\n");
-        fprintf(stderr, "  queue=%p parser=%p decoder=%p convert=%p\n",
-                (void*)queue, (void*)parser, (void*)decoder, (void*)convert);
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Configure queue - match Python settings exactly */
-    g_object_set(queue,
-                 "leaky", 1,  /* downstream */
-                 "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
-                 "max-size-bytes", 0,
-                 NULL);
-
-    /* Create encoder based on output codec */
-    const char *encoder_name = NULL;
-    const char *out_parser_name = NULL;
-
-    switch (g_ctx.video_out_codec) {
-        case VIDEO_CODEC_H264:
-            encoder_name = "x264enc";
-            out_parser_name = "h264parse";
-            break;
-        case VIDEO_CODEC_H265:
-            encoder_name = "x265enc";
-            out_parser_name = "h265parse";
-            break;
-        case VIDEO_CODEC_MPEG2:
-            encoder_name = "avenc_mpeg2video";
-            out_parser_name = "mpegvideoparse";
-            break;
-        default:
-            fprintf(stderr, "Error: Unsupported output video codec\n");
-            gst_object_unref(bin);
-            return NULL;
-    }
-
-    encoder = gst_element_factory_make(encoder_name, "video_encoder");
-    out_parser = gst_element_factory_make(out_parser_name, "video_out_parser");
-
-    if (!encoder || !out_parser) {
-        fprintf(stderr, "Error: Failed to create video encoder '%s'\n", encoder_name);
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Configure encoder - match Python settings exactly */
-    if (g_ctx.video_out_codec == VIDEO_CODEC_H264) {
-        /* x264enc: tune=zerolatency (0x4), speed-preset=superfast (2) */
-        g_object_set(encoder,
-                     "bitrate", g_ctx.video_bitrate / 1000,  /* x264enc uses kbps */
-                     "key-int-max", g_ctx.keyframe_interval,
-                     "speed-preset", 2,  /* superfast */
-                     "tune", 0x00000004,  /* zerolatency */
-                     NULL);
-    } else if (g_ctx.video_out_codec == VIDEO_CODEC_H265) {
-        g_object_set(encoder,
-                     "bitrate", g_ctx.video_bitrate / 1000,
-                     "key-int-max", g_ctx.keyframe_interval,
-                     "speed-preset", 2,  /* superfast */
-                     "tune", 4,  /* zerolatency */
-                     NULL);
-    } else if (g_ctx.video_out_codec == VIDEO_CODEC_MPEG2) {
-        g_object_set(encoder,
-                     "bitrate", g_ctx.video_bitrate,
-                     "gop-size", g_ctx.keyframe_interval,
-                     NULL);
-    }
-
-    /* Add elements to bin */
-    gst_bin_add_many(GST_BIN(bin), queue, parser, decoder, convert, NULL);
-
-    /* Optional: deinterlace */
-    if (g_ctx.deinterlace) {
-        deinterlace = gst_element_factory_make("deinterlace", "video_deinterlace");
-        if (deinterlace) {
-            gst_bin_add(GST_BIN(bin), deinterlace);
-        }
-    }
-
-    /* Optional: scale */
-    if (g_ctx.scale_width > 0 && g_ctx.scale_height > 0) {
-        scale = gst_element_factory_make("videoscale", "video_scale");
-        capsfilter = gst_element_factory_make("capsfilter", "video_caps");
-        if (scale && capsfilter) {
-            GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                                "width", G_TYPE_INT, g_ctx.scale_width,
-                                                "height", G_TYPE_INT, g_ctx.scale_height,
-                                                NULL);
-            g_object_set(capsfilter, "caps", caps, NULL);
-            gst_caps_unref(caps);
-            gst_bin_add_many(GST_BIN(bin), scale, capsfilter, NULL);
-        }
-    }
-
-    gst_bin_add_many(GST_BIN(bin), encoder, out_parser, NULL);
-
-    /* Link elements */
-    if (!gst_element_link_many(queue, parser, decoder, convert, NULL)) {
-        fprintf(stderr, "Error: Failed to link video decode chain\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    GstElement *last = convert;
-
-    if (deinterlace) {
-        if (!gst_element_link(last, deinterlace)) {
-            fprintf(stderr, "Error: Failed to link deinterlace\n");
-            gst_object_unref(bin);
-            return NULL;
-        }
-        last = deinterlace;
-    }
-
-    if (scale && capsfilter) {
-        if (!gst_element_link_many(last, scale, capsfilter, NULL)) {
-            fprintf(stderr, "Error: Failed to link scale\n");
-            gst_object_unref(bin);
-            return NULL;
-        }
-        last = capsfilter;
-    }
-
-    if (!gst_element_link_many(last, encoder, out_parser, NULL)) {
-        fprintf(stderr, "Error: Failed to link video encode chain\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Create ghost pads */
-    GstPad *sink_pad = gst_element_get_static_pad(queue, "sink");
-    GstPad *src_pad = gst_element_get_static_pad(out_parser, "src");
-
-    gst_element_add_pad(bin, gst_ghost_pad_new("sink", sink_pad));
-    gst_element_add_pad(bin, gst_ghost_pad_new("src", src_pad));
-
-    gst_object_unref(sink_pad);
-    gst_object_unref(src_pad);
-
-    return bin;
-}
-
-/*
- * Create audio processing bin
- * Returns a bin: [ghost sink] -> queue -> parse -> decode -> convert -> (resample) -> encode -> [ghost src]
- */
-static GstElement *create_audio_bin(void) {
-    GstElement *bin = gst_bin_new("audio_bin");
-    GstElement *queue, *parser, *decoder, *convert, *resample, *encoder;
-    GstElement *capsfilter = NULL;
-
-    const char *parser_name = get_audio_parser_name(g_ctx.stream_info.audio_codec);
-    const char *decoder_name = get_audio_decoder_name(g_ctx.stream_info.audio_codec);
-
-    if (!parser_name || !decoder_name) {
-        fprintf(stderr, "Error: Unsupported input audio codec\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Create elements */
-    queue = gst_element_factory_make("queue", "audio_queue");
-    parser = gst_element_factory_make(parser_name, "audio_parser");
-    decoder = gst_element_factory_make(decoder_name, "audio_decoder");
-    convert = gst_element_factory_make("audioconvert", "audio_convert");
-    resample = gst_element_factory_make("audioresample", "audio_resample");
-
-    if (!queue || !parser || !decoder || !convert || !resample) {
-        fprintf(stderr, "Error: Failed to create audio decode elements\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Configure queue - match Python settings */
-    g_object_set(queue,
-                 "leaky", 1,  /* downstream */
-                 "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
-                 "max-size-bytes", 0,
-                 NULL);
-
-    /* Create encoder based on output codec - use avenc_* to match Python */
-    const char *encoder_name = NULL;
-
-    switch (g_ctx.audio_out_codec) {
-        case AUDIO_CODEC_AAC:
-            encoder = gst_element_factory_make("avenc_aac", "audio_encoder");
-            encoder_name = "avenc_aac";
-            break;
-        case AUDIO_CODEC_AC3:
-            encoder = gst_element_factory_make("avenc_ac3", "audio_encoder");
-            encoder_name = "avenc_ac3";
-            break;
-        case AUDIO_CODEC_MP2:
-            encoder = gst_element_factory_make("avenc_mp2", "audio_encoder");
-            encoder_name = "avenc_mp2";
-            break;
-        default:
-            fprintf(stderr, "Error: Unsupported output audio codec\n");
-            gst_object_unref(bin);
-            return NULL;
-    }
-
-    if (!encoder) {
-        fprintf(stderr, "Error: Failed to create audio encoder '%s'\n", encoder_name);
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Configure encoder bitrate */
-    /* Different encoders have different property names */
-    if (g_ctx.audio_out_codec == AUDIO_CODEC_AAC) {
-        g_object_set(encoder, "bitrate", g_ctx.audio_bitrate, NULL);
-    } else if (g_ctx.audio_out_codec == AUDIO_CODEC_AC3) {
-        g_object_set(encoder, "bitrate", g_ctx.audio_bitrate, NULL);
-    } else if (g_ctx.audio_out_codec == AUDIO_CODEC_MP2) {
-        g_object_set(encoder, "bitrate", g_ctx.audio_bitrate / 1000, NULL);  /* twolame uses kbps */
-    }
-
-    /* Add capsfilter before encoder - avenc_aac REQUIRES S16LE format input */
-    /* Always create capsfilter to ensure proper audio format negotiation */
-    capsfilter = gst_element_factory_make("capsfilter", "audio_caps");
-    if (capsfilter) {
-        GstCaps *caps = gst_caps_new_simple("audio/x-raw",
-                                            "format", G_TYPE_STRING, "S16LE",
-                                            NULL);
-        /* Add sample rate if specified, otherwise default to 48000 */
-        int samplerate = (g_ctx.audio_samplerate > 0) ? g_ctx.audio_samplerate : 48000;
-        gst_caps_set_simple(caps, "rate", G_TYPE_INT, samplerate, NULL);
-
-        /* Add channels if specified, otherwise default to 2 (stereo) */
-        int channels = (g_ctx.audio_channels > 0) ? g_ctx.audio_channels : 2;
-        gst_caps_set_simple(caps, "channels", G_TYPE_INT, channels, NULL);
-
-        g_object_set(capsfilter, "caps", caps, NULL);
-        gst_caps_unref(caps);
-    } else {
-        fprintf(stderr, "Error: Failed to create audio capsfilter\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Add elements to bin */
-    gst_bin_add_many(GST_BIN(bin), queue, parser, decoder, convert, resample,
-                     capsfilter, encoder, NULL);
-
-    /* Link elements: queue -> parser -> decoder -> convert -> resample -> capsfilter -> encoder */
-    if (!gst_element_link_many(queue, parser, decoder, convert, resample,
-                               capsfilter, encoder, NULL)) {
-        fprintf(stderr, "Error: Failed to link audio chain\n");
-        gst_object_unref(bin);
-        return NULL;
-    }
-
-    /* Create ghost pads */
-    GstPad *sink_pad = gst_element_get_static_pad(queue, "sink");
-    GstPad *src_pad = gst_element_get_static_pad(encoder, "src");
-
-    gst_element_add_pad(bin, gst_ghost_pad_new("sink", sink_pad));
-    gst_element_add_pad(bin, gst_ghost_pad_new("src", src_pad));
-
-    gst_object_unref(sink_pad);
-    gst_object_unref(src_pad);
-
-    return bin;
-}
-
-/*
- * Print the equivalent gst-launch pipeline for debugging
- */
-static void print_pipeline_description(void) {
-    const char *in_video_parser = get_video_parser_name(g_ctx.stream_info.video_codec);
-    const char *in_video_decoder = get_video_decoder_name(g_ctx.stream_info.video_codec);
-    const char *in_audio_parser = get_audio_parser_name(g_ctx.stream_info.audio_codec);
-    const char *in_audio_decoder = get_audio_decoder_name(g_ctx.stream_info.audio_codec);
-
-    const char *out_video_encoder = NULL;
-    const char *out_audio_encoder = NULL;
-
-    switch (g_ctx.video_out_codec) {
-        case VIDEO_CODEC_H264:
-            out_video_encoder = "x264enc";
-            break;
-        case VIDEO_CODEC_H265:
-            out_video_encoder = "x265enc";
-            break;
-        case VIDEO_CODEC_MPEG2:
-            out_video_encoder = "mpeg2enc";
-            break;
-        default:
-            out_video_encoder = "unknown";
-    }
-
-    switch (g_ctx.audio_out_codec) {
-        case AUDIO_CODEC_AAC:
-            out_audio_encoder = "avenc_aac";
-            break;
-        case AUDIO_CODEC_AC3:
-            out_audio_encoder = "avenc_ac3";
-            break;
-        case AUDIO_CODEC_MP2:
-            out_audio_encoder = "avenc_mp2";
-            break;
-        default:
-            out_audio_encoder = "unknown";
-    }
-
-    fprintf(stderr, "\n=== Equivalent gst-launch pipeline ===\n");
-    fprintf(stderr, "gst-launch-1.0 -v \\\n");
-    fprintf(stderr, "  udpsrc uri=udp://%s:%d buffer-size=2097152 ! \\\n",
-            g_ctx.input_address, g_ctx.input_port);
-    fprintf(stderr, "  queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
-    fprintf(stderr, "  tsparse ! tsdemux name=demux \\\n");
-    fprintf(stderr, "  demux. ! queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
-    fprintf(stderr, "    %s ! %s ! videoconvert ! \\\n",
-            in_video_parser ? in_video_parser : "ERROR_NO_PARSER",
-            in_video_decoder ? in_video_decoder : "ERROR_NO_DECODER");
-    fprintf(stderr, "    %s tune=zerolatency speed-preset=superfast bitrate=%d key-int-max=%d ! mux. \\\n",
-            out_video_encoder,
-            g_ctx.video_bitrate / 1000,
-            g_ctx.keyframe_interval);
-    fprintf(stderr, "  demux. ! queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
-    fprintf(stderr, "    %s ! %s ! audioconvert ! audioresample ! \\\n",
-            in_audio_parser ? in_audio_parser : "ERROR_NO_PARSER",
-            in_audio_decoder ? in_audio_decoder : "ERROR_NO_DECODER");
-    fprintf(stderr, "    %s bitrate=%d ! mux. \\\n",
-            out_audio_encoder,
-            g_ctx.audio_bitrate);
-    fprintf(stderr, "  mpegtsmux name=mux ! \\\n");
-    fprintf(stderr, "  queue leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! \\\n");
-    fprintf(stderr, "  queue ! tcpserversink host=0.0.0.0 port=8888 sync=true async=true\n");
-    fprintf(stderr, "=======================================\n\n");
-}
-
-/*
- * Create full transcoding pipeline
- * UDP -> tsdemux -> video_bin/audio_bin -> mpegtsmux -> fdsink (stdout)
- */
-static int create_transcode_pipeline(void) {
-    GstElement *udpsrc, *queue, *tsparse, *tsdemux;
-    GstElement *video_bin = NULL, *audio_bin = NULL;
-    GstElement *mux;
-    GstElement *video_null = NULL, *audio_null = NULL;
-    char uri[256];
-
-    /* First, detect stream format */
-    fprintf(stderr, "Detecting input stream format...\n");
-    if (detect_stream_with_ffprobe() != 0) {
-        fprintf(stderr, "Error: Failed to detect input stream format\n");
-        return -1;
-    }
-
-    fprintf(stderr, "Input: %s %dx%d, %s %d ch\n",
-            video_codec_to_string(g_ctx.stream_info.video_codec),
-            g_ctx.stream_info.video_width,
-            g_ctx.stream_info.video_height,
-            audio_codec_to_string(g_ctx.stream_info.audio_codec),
-            g_ctx.stream_info.audio_channels);
-
-    fprintf(stderr, "Output: %s @ %d bps, %s @ %d bps\n",
-            video_codec_to_string(g_ctx.video_out_codec),
-            g_ctx.video_bitrate,
-            audio_codec_to_string(g_ctx.audio_out_codec),
-            g_ctx.audio_bitrate);
-
-    /* Print pipeline description for debugging */
-    print_pipeline_description();
-
-    /* Create pipeline */
-    g_ctx.pipeline = gst_pipeline_new("transcode-pipeline");
-    if (!g_ctx.pipeline) {
-        fprintf(stderr, "Error: Failed to create pipeline\n");
-        return -1;
-    }
-
-    /* Create source elements */
-    udpsrc = gst_element_factory_make("udpsrc", "udpsrc");
-    queue = gst_element_factory_make("queue", "input_queue");
-    tsparse = gst_element_factory_make("tsparse", "tsparse");
-    tsdemux = gst_element_factory_make("tsdemux", "tsdemux");
-
-    if (!udpsrc || !queue || !tsparse || !tsdemux) {
-        fprintf(stderr, "Error: Failed to create source elements\n");
-        return -1;
-    }
-
-    /* Configure udpsrc */
-    snprintf(uri, sizeof(uri), "udp://%s:%d", g_ctx.input_address, g_ctx.input_port);
-    g_object_set(udpsrc, "uri", uri, NULL);
-    g_object_set(udpsrc, "buffer-size", 2097152, NULL);
-
-    if (g_ctx.input_interface[0]) {
-        g_object_set(udpsrc, "multicast-iface", g_ctx.input_interface, NULL);
-    }
-
-    /* Configure input queue - match Python settings */
-    g_object_set(queue,
-                 "leaky", 1,  /* downstream */
-                 "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
-                 "max-size-bytes", 0,
-                 NULL);
-
-    /* Create output elements - match working gst-launch pipeline */
-    mux = gst_element_factory_make("mpegtsmux", "mux");
-    GstElement *out_queue1 = gst_element_factory_make("queue", "output_queue1");
-    GstElement *out_queue2 = gst_element_factory_make("queue", "output_queue2");
-    GstElement *tcpsink = gst_element_factory_make("tcpserversink", "tcpsink");
-
-    if (!mux || !out_queue1 || !out_queue2 || !tcpsink) {
-        fprintf(stderr, "Error: Failed to create mux/sink elements\n");
-        return -1;
-    }
-
-    /* Configure output queue1 - match Python settings */
-    g_object_set(out_queue1,
-                 "leaky", 1,  /* downstream */
-                 "max-size-buffers", 0,
-                 "max-size-time", (guint64)3000000000,  /* 3 seconds */
-                 "max-size-bytes", 0,
-                 NULL);
-
-    /* Configure tcpserversink for testing - match Python sync settings */
-    g_object_set(tcpsink,
-                 "host", "0.0.0.0",
-                 "port", 8888,
-                 "sync", TRUE,
-                 "async", TRUE,
-                 NULL);
-
-    /* Add source elements AND mux/queues/tcpsink to pipeline (mux must be added before linking) */
-    gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, mux, out_queue1, out_queue2, tcpsink, NULL);
-
-    /* Link source chain */
-    if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
-        fprintf(stderr, "Error: Failed to link source chain\n");
-        return -1;
-    }
-
-    /* Create video processing */
-    if (g_ctx.video_mode == MODE_TRANSCODE) {
-        video_bin = create_video_bin();
-        if (!video_bin) {
-            return -1;
-        }
-        gst_bin_add(GST_BIN(g_ctx.pipeline), video_bin);
-
-        /* Link video bin to muxer */
-        GstPad *video_src = gst_element_get_static_pad(video_bin, "src");
-        GstPad *mux_video = gst_element_request_pad_simple(mux, "sink_%d");
-        if (gst_pad_link(video_src, mux_video) != GST_PAD_LINK_OK) {
-            fprintf(stderr, "Error: Failed to link video to muxer\n");
-            gst_object_unref(video_src);
-            gst_object_unref(mux_video);
-            return -1;
-        }
-        gst_object_unref(video_src);
-        gst_object_unref(mux_video);
-    } else if (g_ctx.video_mode == MODE_DROP) {
-        video_null = gst_element_factory_make("fakesink", "video_null");
-        gst_bin_add(GST_BIN(g_ctx.pipeline), video_null);
-    }
-    /* TODO: passthrough mode */
-
-    /* Create audio processing */
-    if (g_ctx.audio_mode == MODE_TRANSCODE) {
-        audio_bin = create_audio_bin();
-        if (!audio_bin) {
-            return -1;
-        }
-        gst_bin_add(GST_BIN(g_ctx.pipeline), audio_bin);
-
-        /* Link audio bin to muxer */
-        GstPad *audio_src = gst_element_get_static_pad(audio_bin, "src");
-        GstPad *mux_audio = gst_element_request_pad_simple(mux, "sink_%d");
-        if (gst_pad_link(audio_src, mux_audio) != GST_PAD_LINK_OK) {
-            fprintf(stderr, "Error: Failed to link audio to muxer\n");
-            gst_object_unref(audio_src);
-            gst_object_unref(mux_audio);
-            return -1;
-        }
-        gst_object_unref(audio_src);
-        gst_object_unref(mux_audio);
-    } else if (g_ctx.audio_mode == MODE_DROP) {
-        audio_null = gst_element_factory_make("fakesink", "audio_null");
-        gst_bin_add(GST_BIN(g_ctx.pipeline), audio_null);
-    }
-    /* TODO: passthrough mode */
-
-    /* Link mux -> output_queue1 -> output_queue2 -> tcpsink */
-    if (!gst_element_link_many(mux, out_queue1, out_queue2, tcpsink, NULL)) {
-        fprintf(stderr, "Error: Failed to link mux to tcpsink\n");
-        return -1;
-    }
-
-    /* Connect dynamic pad signal */
-    g_signal_connect(tsdemux, "pad-added", G_CALLBACK(on_transcode_pad_added), NULL);
-
-    /* Set up bus watch */
-    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(g_ctx.pipeline));
-    gst_bus_add_watch(bus, on_bus_message, NULL);
-    gst_object_unref(bus);
-
-    fprintf(stderr, "Transcoding pipeline ready. Starting...\n");
 
     return 0;
 }
@@ -1911,7 +1013,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    /* For detect-only mode, use ffprobe (more reliable) */
+    /* For detect-only mode, use ffprobe */
     if (g_ctx.detect_only) {
         ret = detect_stream_with_ffprobe();
         if (ret == 0) {
@@ -1921,21 +1023,36 @@ int main(int argc, char *argv[]) {
         return ret != 0 ? 1 : 0;
     }
 
-    /* Initialize GStreamer for transcoding */
+    /* Always detect stream first to determine input codecs */
+    fprintf(stderr, "Step 1: Detecting input stream...\n");
+    ret = detect_stream_with_ffprobe();
+    if (ret != 0) {
+        fprintf(stderr, "Error: Could not detect stream\n");
+        return 1;
+    }
+
+    if (!g_ctx.stream_info.video_detected && !g_ctx.stream_info.audio_detected) {
+        fprintf(stderr, "Error: No video or audio streams detected\n");
+        return 1;
+    }
+
+    /* Initialize GStreamer */
+    fprintf(stderr, "Step 2: Initializing GStreamer...\n");
     gst_init(&argc, &argv);
 
     /* Create main loop */
     g_ctx.main_loop = g_main_loop_new(NULL, FALSE);
 
-    /* Create transcoding pipeline */
-    ret = create_transcode_pipeline();
-
+    /* Create pipeline using gst_parse_launch */
+    fprintf(stderr, "Step 3: Building pipeline...\n");
+    ret = create_pipeline();
     if (ret != 0) {
         cleanup();
         return 1;
     }
 
     /* Start pipeline */
+    fprintf(stderr, "Step 4: Starting transcoder...\n");
     GstStateChangeReturn state_ret = gst_element_set_state(g_ctx.pipeline, GST_STATE_PLAYING);
     if (state_ret == GST_STATE_CHANGE_FAILURE) {
         fprintf(stderr, "Error: Failed to start pipeline\n");
@@ -1943,8 +1060,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Record start time */
     gettimeofday(&g_ctx.start_time, NULL);
+
+    if (g_ctx.use_stdout) {
+        fprintf(stderr, "Transcoding to stdout. Press Ctrl+C to stop.\n");
+    } else {
+        fprintf(stderr, "Transcoding to TCP port %d. Press Ctrl+C to stop.\n", g_ctx.tcp_port);
+        fprintf(stderr, "Test with: ffplay tcp://localhost:%d\n", g_ctx.tcp_port);
+    }
 
     /* Run main loop */
     g_main_loop_run(g_ctx.main_loop);
