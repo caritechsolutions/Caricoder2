@@ -1186,10 +1186,11 @@ static char *build_pipeline_string(void) {
                 case AUDIO_CODEC_AAC:
                     /* avenc_aac with all options */
                     n = snprintf(p, remaining,
-                        "avenc_aac bitrate=%d channels=%d aac-coder=%s aac-is=%s aac-ms=%s "
-                        "aac-pns=%s aac-tns=%s aac-ltp=%s aac-pred=%s ",
+                        "avenc_aac bitrate=%d channels=%d sample-rate=%d aac-coder=%s "
+                        "aac-is=%s aac-ms=%s aac-pns=%s aac-tns=%s aac-ltp=%s aac-pred=%s ",
                         g_ctx.audio_bitrate,
                         g_ctx.audio_channels,
+                        g_ctx.audio_samplerate,
                         g_ctx.aac_coder,
                         g_ctx.aac_is ? "true" : "false",
                         g_ctx.aac_ms ? "true" : "false",
