@@ -1982,7 +1982,8 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     log_file = f"/var/log/caritrans/transcoder-{service_data.id}.log"
 
-    # Build cari-transcoder command
+    # Build cari-transcoder command - only include essential options
+    # The transcoder uses sensible defaults, so we only pass what's needed
     transcoder_cmd_parts = [
         "/usr/local/bin/cari-transcoder",
         f"--input {service_data.input_address}:{service_data.input_port}",
@@ -1995,20 +1996,36 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
     if service_data.video_mode != "transcode":
         transcoder_cmd_parts.append(f"--video-mode {service_data.video_mode}")
     else:
-        transcoder_cmd_parts.append(f"--video-codec {service_data.video_codec}")
-        transcoder_cmd_parts.append(f"--video-preset {service_data.video_preset}")
-        transcoder_cmd_parts.append(f"--keyframe-interval {service_data.keyframe_interval}")
+        # Only include codec if not default (h264)
+        if service_data.video_codec != "h264":
+            transcoder_cmd_parts.append(f"--video-codec {service_data.video_codec}")
 
-        # x264 specific options
-        if service_data.video_codec == "h264":
-            transcoder_cmd_parts.append(f"--profile {service_data.profile}")
-            transcoder_cmd_parts.append(f"--bframes {service_data.bframes}")
-            transcoder_cmd_parts.append(f"--ref {service_data.ref}")
-            transcoder_cmd_parts.append(f"--qp-min {service_data.qp_min}")
-            transcoder_cmd_parts.append(f"--qp-max {service_data.qp_max}")
-            transcoder_cmd_parts.append(f"--vbv-bufsize {service_data.vbv_bufsize}")
-            transcoder_cmd_parts.append(f"--threads {service_data.video_threads}")
+        # Only include preset if not default (superfast)
+        if service_data.video_preset != "superfast":
+            transcoder_cmd_parts.append(f"--video-preset {service_data.video_preset}")
 
+        # Only include keyframe interval if not default (60)
+        if service_data.keyframe_interval != 60:
+            transcoder_cmd_parts.append(f"--keyframe-interval {service_data.keyframe_interval}")
+
+        # x264/x265 specific options - only include if changed from defaults
+        if service_data.video_codec in ["h264", "h265"]:
+            if service_data.profile != "main":
+                transcoder_cmd_parts.append(f"--profile {service_data.profile}")
+            if service_data.bframes != 0:
+                transcoder_cmd_parts.append(f"--bframes {service_data.bframes}")
+            if service_data.ref != 1:
+                transcoder_cmd_parts.append(f"--ref {service_data.ref}")
+            if service_data.qp_min != 10:
+                transcoder_cmd_parts.append(f"--qp-min {service_data.qp_min}")
+            if service_data.qp_max != 51:
+                transcoder_cmd_parts.append(f"--qp-max {service_data.qp_max}")
+            if service_data.vbv_bufsize != 600:
+                transcoder_cmd_parts.append(f"--vbv-bufsize {service_data.vbv_bufsize}")
+            if service_data.video_threads != 0:
+                transcoder_cmd_parts.append(f"--threads {service_data.video_threads}")
+
+            # Boolean flags - only include if explicitly enabled/disabled from default
             if service_data.sliced_threads:
                 transcoder_cmd_parts.append("--sliced-threads")
             if not service_data.cabac:
@@ -2026,11 +2043,13 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
             if service_data.x264_opts:
                 transcoder_cmd_parts.append(f'--x264-opts "{service_data.x264_opts}"')
 
-    # Scaling options
+    # Scaling options - only if scaling is enabled
     if service_data.scaling_enabled:
         transcoder_cmd_parts.append(f"--scale {service_data.scale_width}x{service_data.scale_height}")
-        transcoder_cmd_parts.append(f"--scale-method {service_data.scale_method}")
-        transcoder_cmd_parts.append(f"--scale-threads {service_data.scale_threads}")
+        if service_data.scale_method != 1:
+            transcoder_cmd_parts.append(f"--scale-method {service_data.scale_method}")
+        if service_data.scale_threads != 0:
+            transcoder_cmd_parts.append(f"--scale-threads {service_data.scale_threads}")
         if service_data.add_borders:
             transcoder_cmd_parts.append("--add-borders")
         if service_data.deinterlace:
@@ -2040,13 +2059,21 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
     if service_data.audio_mode != "transcode":
         transcoder_cmd_parts.append(f"--audio-mode {service_data.audio_mode}")
     else:
-        transcoder_cmd_parts.append(f"--audio-codec {service_data.audio_codec}")
-        transcoder_cmd_parts.append(f"--audio-channels {service_data.audio_channels}")
-        transcoder_cmd_parts.append(f"--audio-samplerate {service_data.audio_samplerate}")
+        # Only include codec if not default (aac)
+        if service_data.audio_codec != "aac":
+            transcoder_cmd_parts.append(f"--audio-codec {service_data.audio_codec}")
 
-        # AAC specific options
+        # Only include channels/samplerate if not default
+        if service_data.audio_channels != 2:
+            transcoder_cmd_parts.append(f"--audio-channels {service_data.audio_channels}")
+        if service_data.audio_samplerate != 48000:
+            transcoder_cmd_parts.append(f"--audio-samplerate {service_data.audio_samplerate}")
+
+        # AAC specific options - only include if changed from defaults
         if service_data.audio_codec == "aac":
-            transcoder_cmd_parts.append(f"--aac-coder {service_data.aac_coder}")
+            if service_data.aac_coder != "fast":
+                transcoder_cmd_parts.append(f"--aac-coder {service_data.aac_coder}")
+            # These are on by default in the transcoder, only pass if disabled
             if not service_data.aac_is:
                 transcoder_cmd_parts.append("--no-aac-is")
             if not service_data.aac_ms:
@@ -2055,6 +2082,7 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
                 transcoder_cmd_parts.append("--no-aac-pns")
             if not service_data.aac_tns:
                 transcoder_cmd_parts.append("--no-aac-tns")
+            # These are off by default, only pass if enabled
             if service_data.aac_ltp:
                 transcoder_cmd_parts.append("--aac-ltp")
             if service_data.aac_pred:
