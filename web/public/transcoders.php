@@ -214,6 +214,9 @@ function getResolution($config) {
                                 <button class="btn btn-outline-warning" onclick="stopTranscoder('<?php echo $transcoder['id']; ?>')" title="Stop">
                                     <i class="bi bi-stop-fill"></i>
                                 </button>
+                                <button class="btn btn-outline-info" onclick="showPreview('<?php echo $transcoder['id']; ?>', '<?php echo htmlspecialchars($transcoder['name']); ?>')" title="Monitor">
+                                    <i class="bi bi-graph-up"></i>
+                                </button>
                                 <?php else: ?>
                                 <button class="btn btn-outline-success" onclick="startTranscoder('<?php echo $transcoder['id']; ?>')" title="Start">
                                     <i class="bi bi-play-fill"></i>
@@ -236,8 +239,108 @@ function getResolution($config) {
     </div>
 </div>
 
+<!-- Preview Modal -->
+<div class="modal fade" id="previewModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-graph-up me-2"></i>Transcoder Monitor - <span id="previewName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="previewId">
+
+                <!-- Status Bar -->
+                <div class="alert alert-info mb-3 py-2" id="monitorStatus">
+                    <i class="bi bi-activity me-1"></i>
+                    <span id="monitorStatusText">Connecting...</span>
+                </div>
+
+                <!-- Current Bitrate Stats -->
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <strong><i class="bi bi-camera-video me-1"></i>Video</strong>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted">Current Bitrate</span>
+                                    <span class="fs-4 fw-bold text-primary" id="monitorVideoBitrate">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <strong><i class="bi bi-volume-up me-1"></i>Audio</strong>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted">Current Bitrate</span>
+                                    <span class="fs-4 fw-bold text-success" id="monitorAudioBitrate">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bitrate Graph -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-graph-up me-1"></i>Bitrate History</strong>
+                        <small class="text-muted">
+                            <span id="graphStatus" class="badge bg-success">Live</span>
+                            Last update: <span id="graphLastUpdate">-</span>
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-2">
+                            <div class="col-6 text-center">
+                                <span class="text-primary fw-bold">● Video</span>
+                            </div>
+                            <div class="col-6 text-center">
+                                <span class="text-success fw-bold">● Audio</span>
+                            </div>
+                        </div>
+                        <div class="position-relative" style="height: 250px;">
+                            <canvas id="bitrateChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- A/V Sync Placeholder -->
+                <div class="card">
+                    <div class="card-header py-2">
+                        <strong><i class="bi bi-soundwave me-1"></i>A/V Sync Monitor</strong>
+                        <span class="badge bg-secondary ms-2">Pending</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="text-center text-muted py-3">
+                            <i class="bi bi-clock-history me-2"></i>
+                            A/V sync monitoring requires integration with output analyzer.
+                            <br><small>Coming in future update.</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
 let metricsInterval = null;
+let previewModal = null;
+let bitrateChart = null;
+let previewInterval = null;
+let videoHistory = [];
+let audioHistory = [];
+const MAX_HISTORY_POINTS = 60;
 
 // Filter transcoders
 function filterTranscoders() {
@@ -330,6 +433,179 @@ function formatBitrate(bps) {
     }
     return bps + ' bps';
 }
+
+// Initialize bitrate chart
+function initBitrateChart() {
+    const ctx = document.getElementById('bitrateChart').getContext('2d');
+
+    if (bitrateChart) {
+        bitrateChart.destroy();
+    }
+
+    bitrateChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Video',
+                    data: [],
+                    borderColor: 'rgb(13, 110, 253)',
+                    backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0
+                },
+                {
+                    label: 'Audio',
+                    data: [],
+                    borderColor: 'rgb(25, 135, 84)',
+                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return context.dataset.label + ': ' + formatBitrate(context.parsed.y);
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    display: true,
+                    ticks: { maxTicksLimit: 10 }
+                },
+                y: {
+                    display: true,
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) {
+                            return formatBitrate(value);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Fetch metrics for preview modal
+async function loadPreviewMetrics() {
+    const id = document.getElementById('previewId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/transcoders.php?action=all_metrics`);
+        const data = await response.json();
+
+        if (data.success && data.transcoders && data.transcoders[id]) {
+            const metrics = data.transcoders[id];
+
+            // Update status
+            const statusEl = document.getElementById('monitorStatus');
+            const statusText = document.getElementById('monitorStatusText');
+
+            if (metrics.status === 'running') {
+                statusEl.className = 'alert alert-success mb-3 py-2';
+                statusText.textContent = 'Transcoder running - receiving data';
+            } else if (metrics.status === 'stopped') {
+                statusEl.className = 'alert alert-secondary mb-3 py-2';
+                statusText.textContent = 'Transcoder stopped';
+            } else {
+                statusEl.className = 'alert alert-warning mb-3 py-2';
+                statusText.textContent = 'Transcoder offline or not responding';
+            }
+
+            // Update bitrate displays
+            document.getElementById('monitorVideoBitrate').textContent = formatBitrate(metrics.video_bitrate || 0);
+            document.getElementById('monitorAudioBitrate').textContent = formatBitrate(metrics.audio_bitrate || 0);
+
+            // Add to history
+            videoHistory.push(metrics.video_bitrate || 0);
+            audioHistory.push(metrics.audio_bitrate || 0);
+
+            if (videoHistory.length > MAX_HISTORY_POINTS) {
+                videoHistory.shift();
+                audioHistory.shift();
+            }
+
+            // Update chart
+            if (bitrateChart) {
+                const labels = Array(videoHistory.length).fill('').map((_, i) => {
+                    const idx = videoHistory.length - 1 - i;
+                    return idx % 12 === 0 ? `-${Math.floor(idx * 5 / 60)}m` : '';
+                }).reverse();
+
+                bitrateChart.data.labels = labels;
+                bitrateChart.data.datasets[0].data = [...videoHistory];
+                bitrateChart.data.datasets[1].data = [...audioHistory];
+                bitrateChart.update('none');
+            }
+
+            // Update timestamp
+            document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
+            document.getElementById('graphStatus').className = 'badge bg-success';
+            document.getElementById('graphStatus').textContent = 'Live';
+        } else {
+            document.getElementById('graphStatus').className = 'badge bg-danger';
+            document.getElementById('graphStatus').textContent = 'Offline';
+        }
+    } catch (e) {
+        console.error('Failed to fetch preview metrics:', e);
+        document.getElementById('graphStatus').className = 'badge bg-warning';
+        document.getElementById('graphStatus').textContent = 'Error';
+    }
+}
+
+// Show preview modal
+function showPreview(id, name) {
+    document.getElementById('previewId').value = id;
+    document.getElementById('previewName').textContent = name;
+
+    // Reset history
+    videoHistory = [];
+    audioHistory = [];
+
+    // Initialize chart
+    initBitrateChart();
+
+    // Load initial metrics
+    loadPreviewMetrics();
+
+    // Start polling
+    if (previewInterval) clearInterval(previewInterval);
+    previewInterval = setInterval(loadPreviewMetrics, 5000);
+
+    // Show modal
+    if (!previewModal) {
+        previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
+    }
+    previewModal.show();
+}
+
+// Cleanup on modal close
+document.getElementById('previewModal').addEventListener('hidden.bs.modal', function() {
+    if (previewInterval) {
+        clearInterval(previewInterval);
+        previewInterval = null;
+    }
+    videoHistory = [];
+    audioHistory = [];
+});
 
 // Fetch all transcoder metrics
 async function fetchAllMetrics() {
