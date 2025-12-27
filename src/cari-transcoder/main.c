@@ -1098,8 +1098,8 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings to match Python code */
-    const char *queue_settings = "leaky=1 max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0";
+    /* Queue settings - simple leaky queue like working gst-launch pipeline */
+    const char *queue_settings = "leaky=1";
 
     /* Input: udpsrc -> queue -> tsparse -> tsdemux */
     n = snprintf(p, remaining,
