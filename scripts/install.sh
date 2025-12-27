@@ -24,7 +24,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/video-transcoder-gstreamer-YnBIH"
+BRANCH="claude/setup-caritranscoder-j6OYk"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
@@ -86,7 +86,7 @@ install_dependencies() {
         curl \
         wget
 
-    # GStreamer
+    # GStreamer core and plugins
     apt-get install -y \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
@@ -95,6 +95,18 @@ install_dependencies() {
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-tools
+
+    # GStreamer libav (provides avdec_h264, avdec_ac3, avdec_eac3, avenc_* etc.)
+    apt-get install -y gstreamer1.0-libav || true
+
+    # Additional GStreamer codec plugins
+    # Note: x264 encoder is already in gstreamer1.0-plugins-ugly
+    # Note: AAC encoder is in gstreamer1.0-libav (avenc_aac)
+    apt-get install -y gstreamer1.0-vaapi || true
+
+    # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
+    apt-get install -y \
+        libgstreamer-plugins-bad1.0-dev || true
 
     # FFmpeg (for stream analysis and fallback transcoding)
     apt-get install -y ffmpeg
@@ -560,6 +572,19 @@ build_tools() {
             log_info "rist_input installed to /usr/local/bin/"
         else
             log_warn "Failed to build rist_input"
+        fi
+    fi
+
+    # Build cari-transcoder (GStreamer-based transcoder)
+    if [[ -d "$INSTALL_DIR/src/cari-transcoder" ]]; then
+        cd "$INSTALL_DIR/src/cari-transcoder"
+        log_info "Building cari-transcoder..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder (GStreamer dev packages may be missing)"
         fi
     fi
 

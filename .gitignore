@@ -4,3 +4,7 @@ tools/*/player_preview
 tools/*/*.o
 tools/*/udp_input
 tools/*/cari-avsync
+
+# Transcoder binaries
+src/cari-transcoder/cari-transcoder
+src/cari-transcoder/*.o
