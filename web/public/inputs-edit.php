@@ -19,7 +19,7 @@ if (empty($id)) {
 
 // Sanitize ID
 $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-$config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+$config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
 
 if (!file_exists($config_file)) {
     header('Location: inputs.php?error=notfound');

@@ -1076,18 +1076,6 @@ static const char *get_audio_decoder(AudioCodec codec) {
 }
 
 /*
- * Get audio encoder element name for output codec
- */
-static const char *get_audio_encoder(AudioCodec codec) {
-    switch (codec) {
-        case AUDIO_CODEC_AAC:   return "avenc_aac";
-        case AUDIO_CODEC_AC3:   return "avenc_ac3";
-        case AUDIO_CODEC_MP2:   return "avenc_mp2";
-        default:                return NULL;
-    }
-}
-
-/*
  * Build the pipeline string based on detected input and output settings
  */
 static char *build_pipeline_string(void) {
