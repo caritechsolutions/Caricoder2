@@ -179,6 +179,67 @@ class RISTInputService(BaseModel):
     description: Optional[str] = None
 
 
+class TranscoderService(BaseModel):
+    """Model for creating transcoder service with tsp CBR output"""
+    id: str
+    name: str
+    input_address: str
+    input_port: int
+    output_address: str
+    output_port: int
+    api_port: int = 9200
+    tsp_bitrate: int  # CBR bitrate for tsp output (video+audio+5%)
+
+    # Video settings
+    video_mode: str = "transcode"  # transcode, passthrough, drop
+    video_codec: str = "h264"  # h264, h265, mpeg2
+    video_bitrate: int = 5000000
+    video_preset: str = "superfast"
+    keyframe_interval: int = 60
+    profile: str = "main"  # baseline, main, high
+    bframes: int = 0
+    ref: int = 1
+    qp_min: int = 10
+    qp_max: int = 51
+    vbv_bufsize: int = 600
+    video_threads: int = 0
+    sliced_threads: bool = True
+    cabac: bool = True
+    trellis: bool = False
+    aud: bool = True
+    intra_refresh: bool = False
+    interlaced: bool = False
+    psy_tune: str = ""
+    x264_opts: str = ""
+
+    # Scaling settings
+    scaling_enabled: bool = False
+    scale_width: int = 1920
+    scale_height: int = 1080
+    scale_method: int = 1
+    add_borders: bool = False
+    scale_threads: int = 0
+    deinterlace: bool = False
+
+    # Audio settings
+    audio_mode: str = "transcode"  # transcode, passthrough, drop
+    audio_codec: str = "aac"  # aac, ac3, mp2
+    audio_bitrate: int = 128000
+    audio_channels: int = 2
+    audio_samplerate: int = 48000
+    aac_coder: str = "fast"
+    aac_is: bool = True
+    aac_ms: bool = True
+    aac_pns: bool = True
+    aac_tns: bool = True
+    aac_ltp: bool = False
+    aac_pred: bool = False
+    aac_cutoff: int = 0
+    aac_strict: int = 0
+
+    description: Optional[str] = None
+
+
 class ServiceFile(BaseModel):
     """Model for generic service file creation"""
     service_name: str
@@ -1910,6 +1971,253 @@ async def scan_stream(request: StreamScanRequest):
             "success": False,
             "error": str(e)
         }
+
+
+# ----------------------------------------------------------------------------
+# Transcoder Service Management
+# ----------------------------------------------------------------------------
+
+def generate_transcoder_service_file(service_data: TranscoderService) -> str:
+    """Generate systemd service file for transcoder with tsp CBR output"""
+
+    log_file = f"/var/log/caritrans/transcoder-{service_data.id}.log"
+
+    # Build cari-transcoder command
+    transcoder_cmd_parts = [
+        "/usr/local/bin/cari-transcoder",
+        f"--input {service_data.input_address}:{service_data.input_port}",
+        f"--video-bitrate {service_data.video_bitrate}",
+        f"--audio-bitrate {service_data.audio_bitrate}",
+        "--stdout"
+    ]
+
+    # Video mode
+    if service_data.video_mode != "transcode":
+        transcoder_cmd_parts.append(f"--video-mode {service_data.video_mode}")
+    else:
+        transcoder_cmd_parts.append(f"--video-codec {service_data.video_codec}")
+        transcoder_cmd_parts.append(f"--video-preset {service_data.video_preset}")
+        transcoder_cmd_parts.append(f"--keyframe-interval {service_data.keyframe_interval}")
+
+        # x264 specific options
+        if service_data.video_codec == "h264":
+            transcoder_cmd_parts.append(f"--profile {service_data.profile}")
+            transcoder_cmd_parts.append(f"--bframes {service_data.bframes}")
+            transcoder_cmd_parts.append(f"--ref {service_data.ref}")
+            transcoder_cmd_parts.append(f"--qp-min {service_data.qp_min}")
+            transcoder_cmd_parts.append(f"--qp-max {service_data.qp_max}")
+            transcoder_cmd_parts.append(f"--vbv-bufsize {service_data.vbv_bufsize}")
+            transcoder_cmd_parts.append(f"--threads {service_data.video_threads}")
+
+            if service_data.sliced_threads:
+                transcoder_cmd_parts.append("--sliced-threads")
+            if not service_data.cabac:
+                transcoder_cmd_parts.append("--no-cabac")
+            if service_data.trellis:
+                transcoder_cmd_parts.append("--trellis")
+            if not service_data.aud:
+                transcoder_cmd_parts.append("--no-aud")
+            if service_data.intra_refresh:
+                transcoder_cmd_parts.append("--intra-refresh")
+            if service_data.interlaced:
+                transcoder_cmd_parts.append("--interlaced")
+            if service_data.psy_tune:
+                transcoder_cmd_parts.append(f"--psy-tune {service_data.psy_tune}")
+            if service_data.x264_opts:
+                transcoder_cmd_parts.append(f'--x264-opts "{service_data.x264_opts}"')
+
+    # Scaling options
+    if service_data.scaling_enabled:
+        transcoder_cmd_parts.append(f"--scale {service_data.scale_width}x{service_data.scale_height}")
+        transcoder_cmd_parts.append(f"--scale-method {service_data.scale_method}")
+        transcoder_cmd_parts.append(f"--scale-threads {service_data.scale_threads}")
+        if service_data.add_borders:
+            transcoder_cmd_parts.append("--add-borders")
+        if service_data.deinterlace:
+            transcoder_cmd_parts.append("--deinterlace")
+
+    # Audio mode
+    if service_data.audio_mode != "transcode":
+        transcoder_cmd_parts.append(f"--audio-mode {service_data.audio_mode}")
+    else:
+        transcoder_cmd_parts.append(f"--audio-codec {service_data.audio_codec}")
+        transcoder_cmd_parts.append(f"--audio-channels {service_data.audio_channels}")
+        transcoder_cmd_parts.append(f"--audio-samplerate {service_data.audio_samplerate}")
+
+        # AAC specific options
+        if service_data.audio_codec == "aac":
+            transcoder_cmd_parts.append(f"--aac-coder {service_data.aac_coder}")
+            if not service_data.aac_is:
+                transcoder_cmd_parts.append("--no-aac-is")
+            if not service_data.aac_ms:
+                transcoder_cmd_parts.append("--no-aac-ms")
+            if not service_data.aac_pns:
+                transcoder_cmd_parts.append("--no-aac-pns")
+            if not service_data.aac_tns:
+                transcoder_cmd_parts.append("--no-aac-tns")
+            if service_data.aac_ltp:
+                transcoder_cmd_parts.append("--aac-ltp")
+            if service_data.aac_pred:
+                transcoder_cmd_parts.append("--aac-pred")
+            if service_data.aac_cutoff > 0:
+                transcoder_cmd_parts.append(f"--aac-cutoff {service_data.aac_cutoff}")
+            if service_data.aac_strict != 0:
+                transcoder_cmd_parts.append(f"--aac-strict {service_data.aac_strict}")
+
+    transcoder_cmd = " ".join(transcoder_cmd_parts)
+
+    # Build tsp command with null carrier for CBR output
+    # Using: tsp --bitrate X -I null -P regulate -P merge "transcoder_cmd" -P bitrate_monitor ... -P pcradjust -O ip
+    tsp_cmd = (
+        f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
+        f'-P merge "{transcoder_cmd}" '
+        f"-P bitrate_monitor --pid 65 --periodic-bitrate 5 "
+        f"-P bitrate_monitor --pid 66 --periodic-bitrate 5 "
+        f"-P pcradjust "
+        f"-O ip {service_data.output_address}:{service_data.output_port}"
+    )
+
+    description = service_data.description or f"CariTranscoder - {service_data.name}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main process - tsp with cari-transcoder via merge
+ExecStart=/bin/bash -c '{tsp_cmd} 2>>{log_file}'
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-transcoder-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
+@app.post("/transcoder/create")
+async def create_transcoder_service(service: TranscoderService):
+    """Create a systemd service file for transcoder"""
+
+    service_name = f"cari-transcoder@{service.id}"
+    service_file = f"{SYSTEMD_DIR}/{service_name}.service"
+
+    try:
+        # Generate service content
+        service_content = generate_transcoder_service_file(service)
+
+        # Write the service file
+        with open(service_file, 'w') as f:
+            f.write(service_content)
+
+        logger.info(f"Created transcoder service file: {service_file}")
+
+        # Reload systemd
+        daemon_reload()
+
+        return {
+            "success": True,
+            "service_name": service_name,
+            "service_file": service_file,
+            "message": f"Transcoder service created: {service_file}"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create transcoder service: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/transcoder/delete")
+async def delete_transcoder_service(data: dict = Body(...)):
+    """Delete a transcoder service"""
+
+    transcoder_id = data.get("id")
+    if not transcoder_id:
+        raise HTTPException(status_code=400, detail="Missing transcoder ID")
+
+    service_name = f"cari-transcoder@{transcoder_id}.service"
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+
+    try:
+        # Stop and disable the service first
+        run_systemctl("stop", service_name)
+        run_systemctl("disable", service_name)
+
+        # Remove the service file
+        if os.path.exists(service_file):
+            os.remove(service_file)
+            logger.info(f"Deleted transcoder service file: {service_file}")
+
+        # Reload systemd
+        daemon_reload()
+
+        return {
+            "success": True,
+            "message": f"Transcoder service {service_name} deleted"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete transcoder service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/transcoder/{transcoder_id}/start")
+async def start_transcoder(transcoder_id: str):
+    """Start a transcoder service"""
+    service_name = f"cari-transcoder@{transcoder_id}.service"
+
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        return {
+            "success": False,
+            "service": service_name,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    result = run_systemctl("start", service_name)
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.post("/transcoder/{transcoder_id}/stop")
+async def stop_transcoder(transcoder_id: str):
+    """Stop a transcoder service"""
+    service_name = f"cari-transcoder@{transcoder_id}.service"
+    result = run_systemctl("stop", service_name)
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.get("/transcoder/{transcoder_id}/status")
+async def transcoder_status(transcoder_id: str):
+    """Get transcoder service status"""
+    service_name = f"cari-transcoder@{transcoder_id}.service"
+    return get_service_status(service_name)
 
 
 # ----------------------------------------------------------------------------
