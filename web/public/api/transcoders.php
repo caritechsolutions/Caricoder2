@@ -604,14 +604,78 @@ function handle_all_metrics() {
 /**
  * Get metrics for a single transcoder
  * Parses the last bitrate_monitor output from the log file
+ * Also fetches input bitrate from linked input service
  */
 function get_transcoder_metrics($id) {
     $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+
     $metrics = [
         'status' => 'offline',
-        'video_bitrate' => 0,
-        'audio_bitrate' => 0
+        'output_video_bitrate' => 0,
+        'output_audio_bitrate' => 0,
+        'input_video_bitrate' => 0,
+        'input_audio_bitrate' => 0,
+        'input_format' => null,
+        'output_format' => null
     ];
+
+    // Load transcoder config for input source and format info
+    if (file_exists($config_file)) {
+        $config = parse_config($config_file);
+
+        // Get output format from config
+        $metrics['output_format'] = [
+            'video_codec' => $config['video']['codec'] ?? 'unknown',
+            'video_bitrate' => $config['video']['bitrate'] ?? 0,
+            'video_resolution' => ($config['video']['width'] ?? 'auto') . 'x' . ($config['video']['height'] ?? 'auto'),
+            'audio_codec' => $config['audio']['codec'] ?? 'aac',
+            'audio_bitrate' => $config['audio']['bitrate'] ?? 128000,
+            'audio_channels' => $config['audio']['channels'] ?? 2
+        ];
+
+        // Get linked input service
+        $source_service = $config['input']['source_service'] ?? null;
+        if ($source_service) {
+            $metrics['source_service'] = $source_service;
+
+            // Fetch input metrics from the input's API
+            $input_config_file = CONFIG_PATH . '/inputs/' . $source_service . '.conf';
+            if (file_exists($input_config_file)) {
+                $input_config = parse_config($input_config_file);
+                $api_port = $input_config['output']['api_port'] ?? null;
+
+                if ($api_port) {
+                    // Query the input's API for metrics
+                    $url = "http://127.0.0.1:{$api_port}/metrics";
+                    $ctx = stream_context_create([
+                        'http' => ['timeout' => 2, 'ignore_errors' => true]
+                    ]);
+                    $response = @file_get_contents($url, false, $ctx);
+
+                    if ($response !== false) {
+                        $input_data = json_decode($response, true);
+                        if ($input_data && isset($input_data['pids'])) {
+                            // Process PIDs to get video/audio bitrate
+                            foreach ($input_data['pids'] as $pid => $pidData) {
+                                $bitrate = $pidData['current_bitrate'] ?? 0;
+                                if ($bitrate > 500000 && $metrics['input_video_bitrate'] === 0) {
+                                    $metrics['input_video_bitrate'] = $bitrate;
+                                } elseif ($bitrate > 0 && $bitrate <= 500000) {
+                                    $metrics['input_audio_bitrate'] += $bitrate;
+                                }
+                            }
+
+                            // Get input format from stream info
+                            if (isset($input_data['stream_info'])) {
+                                $metrics['input_format'] = $input_data['stream_info'];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Check if service is running
     $service_name = "cari-transcoder@{$id}";
@@ -625,7 +689,7 @@ function get_transcoder_metrics($id) {
 
     $metrics['status'] = 'running';
 
-    // Try to read bitrate from log file (last few lines)
+    // Try to read output bitrate from log file (last few lines)
     if (file_exists($log_file) && is_readable($log_file)) {
         // Read last 20 lines of log file
         $lines = [];
@@ -676,12 +740,16 @@ function get_transcoder_metrics($id) {
 
         // Highest bitrate is video, second highest is audio
         if (count($sorted_bitrates) >= 1) {
-            $metrics['video_bitrate'] = $sorted_bitrates[0];
+            $metrics['output_video_bitrate'] = $sorted_bitrates[0];
         }
         if (count($sorted_bitrates) >= 2) {
-            $metrics['audio_bitrate'] = $sorted_bitrates[1];
+            $metrics['output_audio_bitrate'] = $sorted_bitrates[1];
         }
     }
+
+    // For backwards compatibility, also set video_bitrate/audio_bitrate
+    $metrics['video_bitrate'] = $metrics['output_video_bitrate'];
+    $metrics['audio_bitrate'] = $metrics['output_audio_bitrate'];
 
     return $metrics;
 }

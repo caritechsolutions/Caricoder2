@@ -2151,6 +2151,11 @@ async def create_transcoder_service(service: TranscoderService):
     service_file = f"{SYSTEMD_DIR}/{service_name}.service"
 
     try:
+        # Ensure log directory exists
+        log_dir = "/var/log/caritrans"
+        os.makedirs(log_dir, exist_ok=True)
+        os.chmod(log_dir, 0o755)
+
         # Generate service content
         service_content = generate_transcoder_service_file(service)
 

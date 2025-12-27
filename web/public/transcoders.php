@@ -256,17 +256,66 @@ function getResolution($config) {
                     <span id="monitorStatusText">Connecting...</span>
                 </div>
 
+                <!-- Format Information Row -->
+                <div class="row mb-3">
+                    <!-- Input Format -->
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header py-2 bg-info bg-opacity-10">
+                                <strong><i class="bi bi-box-arrow-in-right me-1"></i>Input Format</strong>
+                                <small class="text-muted ms-2" id="inputSourceName"></small>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row small">
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Video:</span> <span id="inputVideoCodec">-</span></div>
+                                        <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="inputResolution">-</span></div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Audio:</span> <span id="inputAudioCodec">-</span></div>
+                                        <div><span class="text-muted">Channels:</span> <span id="inputAudioChannels">-</span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Output Format -->
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header py-2 bg-success bg-opacity-10">
+                                <strong><i class="bi bi-box-arrow-right me-1"></i>Output Format</strong>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row small">
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Video:</span> <span id="outputVideoCodec">-</span></div>
+                                        <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="outputResolution">-</span></div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodec">-</span></div>
+                                        <div><span class="text-muted">Bitrate:</span> <span id="outputAudioBitrateConfig">-</span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Current Bitrate Stats -->
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <div class="card">
                             <div class="card-header py-2">
-                                <strong><i class="bi bi-camera-video me-1"></i>Video</strong>
+                                <strong><i class="bi bi-box-arrow-in-right me-1 text-info"></i>Input Bitrate</strong>
                             </div>
                             <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <span class="text-muted small">Video</span>
+                                    <span class="fw-bold text-info" id="monitorInputVideoBitrate">-</span>
+                                </div>
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Current Bitrate</span>
-                                    <span class="fs-4 fw-bold text-primary" id="monitorVideoBitrate">-</span>
+                                    <span class="text-muted small">Audio</span>
+                                    <span class="fw-bold text-info" id="monitorInputAudioBitrate">-</span>
                                 </div>
                             </div>
                         </div>
@@ -274,12 +323,16 @@ function getResolution($config) {
                     <div class="col-md-6">
                         <div class="card">
                             <div class="card-header py-2">
-                                <strong><i class="bi bi-volume-up me-1"></i>Audio</strong>
+                                <strong><i class="bi bi-box-arrow-right me-1 text-success"></i>Output Bitrate</strong>
                             </div>
                             <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <span class="text-muted small">Video</span>
+                                    <span class="fw-bold text-success" id="monitorVideoBitrate">-</span>
+                                </div>
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Current Bitrate</span>
-                                    <span class="fs-4 fw-bold text-success" id="monitorAudioBitrate">-</span>
+                                    <span class="text-muted small">Audio</span>
+                                    <span class="fw-bold text-success" id="monitorAudioBitrate">-</span>
                                 </div>
                             </div>
                         </div>
@@ -297,11 +350,17 @@ function getResolution($config) {
                     </div>
                     <div class="card-body">
                         <div class="row mb-2">
-                            <div class="col-6 text-center">
-                                <span class="text-primary fw-bold">● Video</span>
+                            <div class="col-3 text-center">
+                                <span style="color: #0dcaf0;" class="fw-bold">● Input Video</span>
                             </div>
-                            <div class="col-6 text-center">
-                                <span class="text-success fw-bold">● Audio</span>
+                            <div class="col-3 text-center">
+                                <span style="color: #6edff6;" class="fw-bold">● Input Audio</span>
+                            </div>
+                            <div class="col-3 text-center">
+                                <span style="color: #198754;" class="fw-bold">● Output Video</span>
+                            </div>
+                            <div class="col-3 text-center">
+                                <span style="color: #75b798;" class="fw-bold">● Output Audio</span>
                             </div>
                         </div>
                         <div class="position-relative" style="height: 250px;">
@@ -338,8 +397,10 @@ let metricsInterval = null;
 let previewModal = null;
 let bitrateChart = null;
 let previewInterval = null;
-let videoHistory = [];
-let audioHistory = [];
+let inputVideoHistory = [];
+let inputAudioHistory = [];
+let outputVideoHistory = [];
+let outputAudioHistory = [];
 const MAX_HISTORY_POINTS = 60;
 
 // Filter transcoders
@@ -448,22 +509,46 @@ function initBitrateChart() {
             labels: [],
             datasets: [
                 {
-                    label: 'Video',
+                    label: 'Input Video',
                     data: [],
-                    borderColor: 'rgb(13, 110, 253)',
-                    backgroundColor: 'rgba(13, 110, 253, 0.1)',
-                    fill: true,
+                    borderColor: '#0dcaf0',
+                    backgroundColor: 'rgba(13, 202, 240, 0.1)',
+                    fill: false,
                     tension: 0.3,
-                    pointRadius: 0
+                    pointRadius: 0,
+                    borderWidth: 2
                 },
                 {
-                    label: 'Audio',
+                    label: 'Input Audio',
                     data: [],
-                    borderColor: 'rgb(25, 135, 84)',
-                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
-                    fill: true,
+                    borderColor: '#6edff6',
+                    backgroundColor: 'rgba(110, 223, 246, 0.1)',
+                    fill: false,
                     tension: 0.3,
-                    pointRadius: 0
+                    pointRadius: 0,
+                    borderWidth: 1,
+                    borderDash: [5, 5]
+                },
+                {
+                    label: 'Output Video',
+                    data: [],
+                    borderColor: '#198754',
+                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 2
+                },
+                {
+                    label: 'Output Audio',
+                    data: [],
+                    borderColor: '#75b798',
+                    backgroundColor: 'rgba(117, 183, 152, 0.1)',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 1,
+                    borderDash: [5, 5]
                 }
             ]
         },
@@ -530,29 +615,56 @@ async function loadPreviewMetrics() {
                 statusText.textContent = 'Transcoder offline or not responding';
             }
 
+            // Update input format display
+            if (metrics.source_service) {
+                document.getElementById('inputSourceName').textContent = '(' + metrics.source_service + ')';
+            }
+            if (metrics.input_format) {
+                document.getElementById('inputVideoCodec').textContent = metrics.input_format.video_codec || '-';
+                document.getElementById('inputResolution').textContent = metrics.input_format.resolution || '-';
+                document.getElementById('inputAudioCodec').textContent = metrics.input_format.audio_codec || '-';
+                document.getElementById('inputAudioChannels').textContent = metrics.input_format.audio_channels || '-';
+            }
+
+            // Update output format display
+            if (metrics.output_format) {
+                document.getElementById('outputVideoCodec').textContent = (metrics.output_format.video_codec || '-').toUpperCase();
+                document.getElementById('outputResolution').textContent = metrics.output_format.video_resolution || '-';
+                document.getElementById('outputAudioCodec').textContent = (metrics.output_format.audio_codec || '-').toUpperCase();
+                document.getElementById('outputAudioBitrateConfig').textContent = formatBitrate(metrics.output_format.audio_bitrate || 0);
+            }
+
             // Update bitrate displays
-            document.getElementById('monitorVideoBitrate').textContent = formatBitrate(metrics.video_bitrate || 0);
-            document.getElementById('monitorAudioBitrate').textContent = formatBitrate(metrics.audio_bitrate || 0);
+            document.getElementById('monitorInputVideoBitrate').textContent = formatBitrate(metrics.input_video_bitrate || 0);
+            document.getElementById('monitorInputAudioBitrate').textContent = formatBitrate(metrics.input_audio_bitrate || 0);
+            document.getElementById('monitorVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
+            document.getElementById('monitorAudioBitrate').textContent = formatBitrate(metrics.output_audio_bitrate || 0);
 
-            // Add to history
-            videoHistory.push(metrics.video_bitrate || 0);
-            audioHistory.push(metrics.audio_bitrate || 0);
+            // Add to history (4 series)
+            inputVideoHistory.push(metrics.input_video_bitrate || 0);
+            inputAudioHistory.push(metrics.input_audio_bitrate || 0);
+            outputVideoHistory.push(metrics.output_video_bitrate || 0);
+            outputAudioHistory.push(metrics.output_audio_bitrate || 0);
 
-            if (videoHistory.length > MAX_HISTORY_POINTS) {
-                videoHistory.shift();
-                audioHistory.shift();
+            if (inputVideoHistory.length > MAX_HISTORY_POINTS) {
+                inputVideoHistory.shift();
+                inputAudioHistory.shift();
+                outputVideoHistory.shift();
+                outputAudioHistory.shift();
             }
 
             // Update chart
             if (bitrateChart) {
-                const labels = Array(videoHistory.length).fill('').map((_, i) => {
-                    const idx = videoHistory.length - 1 - i;
+                const labels = Array(inputVideoHistory.length).fill('').map((_, i) => {
+                    const idx = inputVideoHistory.length - 1 - i;
                     return idx % 12 === 0 ? `-${Math.floor(idx * 5 / 60)}m` : '';
                 }).reverse();
 
                 bitrateChart.data.labels = labels;
-                bitrateChart.data.datasets[0].data = [...videoHistory];
-                bitrateChart.data.datasets[1].data = [...audioHistory];
+                bitrateChart.data.datasets[0].data = [...inputVideoHistory];
+                bitrateChart.data.datasets[1].data = [...inputAudioHistory];
+                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
+                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
                 bitrateChart.update('none');
             }
 
@@ -576,9 +688,22 @@ function showPreview(id, name) {
     document.getElementById('previewId').value = id;
     document.getElementById('previewName').textContent = name;
 
-    // Reset history
-    videoHistory = [];
-    audioHistory = [];
+    // Reset history (4 series)
+    inputVideoHistory = [];
+    inputAudioHistory = [];
+    outputVideoHistory = [];
+    outputAudioHistory = [];
+
+    // Reset format displays
+    document.getElementById('inputSourceName').textContent = '';
+    document.getElementById('inputVideoCodec').textContent = '-';
+    document.getElementById('inputResolution').textContent = '-';
+    document.getElementById('inputAudioCodec').textContent = '-';
+    document.getElementById('inputAudioChannels').textContent = '-';
+    document.getElementById('outputVideoCodec').textContent = '-';
+    document.getElementById('outputResolution').textContent = '-';
+    document.getElementById('outputAudioCodec').textContent = '-';
+    document.getElementById('outputAudioBitrateConfig').textContent = '-';
 
     // Initialize chart
     initBitrateChart();
@@ -603,8 +728,10 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
         clearInterval(previewInterval);
         previewInterval = null;
     }
-    videoHistory = [];
-    audioHistory = [];
+    inputVideoHistory = [];
+    inputAudioHistory = [];
+    outputVideoHistory = [];
+    outputAudioHistory = [];
 });
 
 // Fetch all transcoder metrics
