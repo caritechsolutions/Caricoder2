@@ -1222,13 +1222,14 @@ static char *build_pipeline_string(void) {
             /* Audio encoder with codec-specific options */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
-                    /* avenc_aac with all options */
+                    /* Set audio format via caps, then avenc_aac with all options */
                     n = snprintf(p, remaining,
-                        "avenc_aac bitrate=%d channels=%d sample-rate=%d aac-coder=%s "
+                        "audio/x-raw,channels=%d,rate=%d ! "
+                        "avenc_aac bitrate=%d aac-coder=%s "
                         "aac-is=%s aac-ms=%s aac-pns=%s aac-tns=%s aac-ltp=%s aac-pred=%s ",
-                        g_ctx.audio_bitrate,
                         g_ctx.audio_channels,
                         g_ctx.audio_samplerate,
+                        g_ctx.audio_bitrate,
                         g_ctx.aac_coder,
                         g_ctx.aac_is ? "true" : "false",
                         g_ctx.aac_ms ? "true" : "false",
