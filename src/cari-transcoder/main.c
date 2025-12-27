@@ -1277,7 +1277,7 @@ static char *build_pipeline_string(void) {
     /* TODO: passthrough mode */
 
     /* Muxer and output */
-    n = snprintf(p, remaining, "mpegtsmux name=mux ! queue %s ! queue ! ", queue_settings);
+    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue %s ! queue ! ", queue_settings);
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
