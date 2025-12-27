@@ -711,14 +711,15 @@ function get_transcoder_metrics($id) {
         }
 
         // Parse bitrate_monitor output
-        // Format without --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, TS bitrate: 5000000 bits/s
-        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
+        // Format without --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, TS bitrate: 5,384,620 bits/s
+        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 2,200,051 bits/s
+        // Note: Numbers may contain commas as thousand separators
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
-                // Try total TS bitrate format first
-                if (preg_match('/TS bitrate:\s*(\d+)\s*bits\/s/', $line, $matches)) {
-                    $total_bitrate = intval($matches[1]);
+                // Try total TS bitrate format first (handles commas in numbers)
+                if (preg_match('/TS bitrate:\s*([\d,]+)\s*bits\/s/', $line, $matches)) {
+                    $total_bitrate = intval(str_replace(',', '', $matches[1]));
                     // Store total as video bitrate (output is combined stream)
                     if ($metrics['output_video_bitrate'] === 0) {
                         $metrics['output_video_bitrate'] = $total_bitrate;
@@ -726,9 +727,9 @@ function get_transcoder_metrics($id) {
                         break;
                     }
                 }
-                // Also try per-PID format in case it's used
-                elseif (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+(\d+)\s+bits\/s/', $line, $matches)) {
-                    $bitrate = intval($matches[2]);
+                // Also try per-PID format in case it's used (handles commas in numbers)
+                elseif (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
+                    $bitrate = intval(str_replace(',', '', $matches[2]));
                     if ($bitrate > 500000 && $metrics['output_video_bitrate'] === 0) {
                         $metrics['output_video_bitrate'] = $bitrate;
                     } elseif ($bitrate > 10000 && $bitrate <= 500000 && $metrics['output_audio_bitrate'] === 0) {
