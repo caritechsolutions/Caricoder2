@@ -577,6 +577,15 @@ restart_services() {
 fix_permissions() {
     log_step "Fixing permissions..."
 
+    # Ensure log directory exists for transcoder bitrate monitoring
+    LOG_DIR="/var/log/caritrans"
+    if [[ ! -d "$LOG_DIR" ]]; then
+        log_info "Creating log directory: $LOG_DIR"
+        mkdir -p "$LOG_DIR"
+    fi
+    chown root:root "$LOG_DIR"
+    chmod 755 "$LOG_DIR"
+
     # Parent config dir needs www-data group so web can traverse into subdirs
     if [[ -d "$CONFIG_DIR" ]]; then
         log_info "Fixing: $CONFIG_DIR -> $SERVICE_USER:$WEB_USER (750)"
