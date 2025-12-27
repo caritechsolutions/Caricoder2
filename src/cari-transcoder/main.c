@@ -1184,7 +1184,7 @@ static char *build_pipeline_string(void) {
                 }
                 case VIDEO_CODEC_H265:
                     n = snprintf(p, remaining,
-                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! mux. ",
+                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! h265parse ! mux. ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
                         g_ctx.keyframe_interval);
