@@ -27,8 +27,8 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-# Updated: 2024-12-20 22:40
-BRANCH="claude/av-sync-monitor-Y57VM"
+# Updated: 2024-12-26
+BRANCH="claude/setup-caritranscoder-j6OYk"
 
 # Parse arguments
 AUTO_CONFIRM=false
@@ -178,6 +178,27 @@ update_php_api() {
     fi
 }
 
+# Install/update GStreamer plugins
+update_gstreamer_plugins() {
+    log_step "Updating GStreamer plugins..."
+
+    apt-get update -qq
+
+    # GStreamer libav (provides avdec_h264, avdec_ac3, avdec_eac3, avenc_* etc.)
+    apt-get install -y gstreamer1.0-libav || true
+
+    # Additional GStreamer codec plugins
+    # Note: x264 encoder is already in gstreamer1.0-plugins-ugly
+    # Note: AAC encoder is in gstreamer1.0-libav (avenc_aac)
+    apt-get install -y gstreamer1.0-vaapi || true
+
+    # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
+    apt-get install -y \
+        libgstreamer-plugins-bad1.0-dev || true
+
+    log_info "GStreamer plugins updated"
+}
+
 # Optionally rebuild C applications
 rebuild_apps() {
     log_step "Checking if rebuild is needed..."
@@ -308,6 +329,19 @@ build_tools() {
             log_info "rist_input installed to /usr/local/bin/"
         else
             log_warn "Failed to build rist_input"
+        fi
+    fi
+
+    # Build cari-transcoder (GStreamer-based transcoder)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-transcoder" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-transcoder"
+        log_info "Building cari-transcoder..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder (GStreamer dev packages may be missing)"
         fi
     fi
 
@@ -639,6 +673,7 @@ main() {
     download_latest
     update_web
     update_php_api
+    update_gstreamer_plugins
     rebuild_apps
     build_tools
     rebuild_librist

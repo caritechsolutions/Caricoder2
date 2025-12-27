@@ -47,7 +47,7 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | Component | Description |
 |-----------|-------------|
 | `cari-input` | Input stream handler with UDP/SRT/HLS/RTMP support |
-| `cari-transcoder` | GStreamer-based video transcoding |
+| `cari-transcoder` | GStreamer-based video/audio transcoding (see below) |
 | `cari-mux` | MPEG-TS multiplexer for combining streams |
 | `cari-output` | Output stream distribution |
 | `cari-stats` | Real-time statistics collection |
@@ -58,6 +58,154 @@ A professional video transcoding and streaming appliance for broadcast and IPTV 
 | `rist_input` | RIST input tool with Simple/Main/Advanced profiles and encryption |
 | `hls_input` | HLS input tool using ffmpeg for reliable stream reception |
 | `player_preview` | HLS preview generator using FFmpeg |
+
+## cari-transcoder
+
+A GStreamer-based video/audio transcoder (v2.2.0) that receives MPEG-TS via UDP, transcodes using software encoders, and outputs to TCP or stdout for piping to TSDuck.
+
+### Features
+
+- **Automatic stream detection** using ffprobe
+- **Video encoding**: H.264 (x264), H.265 (x265), MPEG-2
+- **Audio encoding**: AAC, AC3, MP2
+- **Video scaling** with multiple algorithms
+- **Deinterlacing** support
+- **Low-latency** optimized pipeline
+
+### Basic Usage
+
+```bash
+# Detect input stream format
+cari-transcoder --input 239.100.0.1:5000 --detect-only
+
+# Transcode to H.264 at 2 Mbps (TCP output for testing)
+cari-transcoder --input 239.100.0.1:5000 --video-bitrate 2000000 --tcp-port 8888
+
+# Test output with ffplay
+ffplay tcp://localhost:8888
+
+# Transcode and pipe to TSDuck for multicast output
+cari-transcoder --input 239.100.0.1:5000 --video-bitrate 2000000 --stdout | \
+    tsp -I file - -P regulate --bitrate 6000000 -O ip 239.100.0.2:5000
+```
+
+### Video Encoding Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--video-mode` | transcode\|passthrough\|drop | transcode |
+| `--video-codec` | h264\|h265\|mpeg2 | h264 |
+| `--video-bitrate` | Target bitrate in bps | 5000000 |
+| `--video-preset` | ultrafast\|superfast\|veryfast\|faster\|fast\|medium\|slow\|slower\|veryslow | superfast |
+| `--keyframe-interval` | GOP size in frames | 60 |
+
+### x264 Encoder Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--profile` | baseline\|main\|high | main |
+| `--bframes` | B-frames between I and P (0-16) | 0 |
+| `--ref` | Reference frames (1-12) | 1 |
+| `--qp-min` | Minimum quantizer (0-51) | 10 |
+| `--qp-max` | Maximum quantizer (0-51) | 51 |
+| `--vbv-bufsize` | VBV buffer size in ms (0-10000) | 600 |
+| `--threads` | Encoding threads (0=auto) | 0 |
+| `--sliced-threads` | Enable low-latency sliced threading | enabled |
+| `--cabac` / `--no-cabac` | CABAC entropy coding | enabled |
+| `--trellis` | Trellis quantization | disabled |
+| `--aud` / `--no-aud` | Access Unit delimiters | enabled |
+| `--intra-refresh` | Periodic intra refresh instead of IDR | disabled |
+| `--interlaced` | Interlaced encoding | disabled |
+| `--psy-tune` | none\|film\|animation\|grain\|psnr\|ssim | none |
+| `--x264-opts` | Custom x264 options (key=val:key=val) | none |
+
+### Scaling Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--scale WxH` | Output resolution (e.g., 1280x720) | none |
+| `--scale-method` | 0=nearest, 1=bilinear, 2=4tap, 3=lanczos, 4=bilinear2, 5=sinc, 6=hermite, 7=spline, 8=catrom, 9=mitchell | 1 |
+| `--add-borders` | Add black bars to preserve aspect ratio | disabled |
+| `--scale-threads` | Scaling threads (0=auto) | 0 |
+| `--deinterlace` | Enable deinterlacing | disabled |
+
+### Audio Encoding Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--audio-mode` | transcode\|passthrough\|drop | transcode |
+| `--audio-codec` | aac\|ac3\|mp2 | aac |
+| `--audio-bitrate` | Audio bitrate in bps | 128000 |
+| `--audio-channels` | Number of channels (1, 2, 6) | 2 |
+| `--audio-samplerate` | Sample rate in Hz | 48000 |
+
+### AAC Encoder Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--aac-coder` | anmr\|twoloop\|fast | fast |
+| `--aac-is` / `--no-aac-is` | Intensity stereo coding | enabled |
+| `--aac-ms` / `--no-aac-ms` | M/S stereo coding | enabled |
+| `--aac-pns` / `--no-aac-pns` | Perceptual noise substitution | enabled |
+| `--aac-tns` / `--no-aac-tns` | Temporal noise shaping | enabled |
+| `--aac-ltp` / `--no-aac-ltp` | Long term prediction | disabled |
+| `--aac-pred` / `--no-aac-pred` | AAC-Main prediction | disabled |
+| `--aac-cutoff` | Audio cutoff bandwidth (0=auto) | 0 |
+| `--aac-strict` | Standards compliance (-2 to 2) | 0 |
+
+### Transcoding Examples
+
+```bash
+# H.264 720p at 2 Mbps with AAC stereo
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-codec h264 --video-bitrate 2000000 \
+    --scale 1280x720 --video-preset superfast \
+    --audio-codec aac --audio-bitrate 128000 \
+    --tcp-port 8888
+
+# H.265 480p for bandwidth savings
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-codec h265 --video-bitrate 1500000 \
+    --scale 854x480 \
+    --tcp-port 8888
+
+# High-quality H.264 with advanced x264 options
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-codec h264 --video-bitrate 8000000 \
+    --video-preset medium --profile high \
+    --bframes 3 --ref 4 --cabac --trellis \
+    --tcp-port 8888
+
+# Audio-only passthrough with video transcode
+cari-transcoder --input 239.100.0.1:5000 \
+    --video-bitrate 2000000 \
+    --audio-mode passthrough \
+    --tcp-port 8888
+
+# Deinterlace and scale interlaced source
+cari-transcoder --input 239.100.0.1:5000 \
+    --deinterlace --scale 1280x720 \
+    --video-bitrate 3000000 \
+    --tcp-port 8888
+```
+
+### Pipeline Architecture
+
+The transcoder uses GStreamer's `gst_parse_launch()` to build pipelines:
+
+```
+udpsrc -> tsparse -> tsdemux
+    ├─> queue -> video_parser -> decoder -> [deinterlace] -> [videoscale] -> encoder -> parser -> mux
+    └─> queue -> audio_parser -> decoder -> audioconvert -> audioresample -> encoder -> parser -> mux
+mpegtsmux -> queue -> tcpserversink/fdsink
+```
+
+Key pipeline optimizations:
+- Large queues (`max-size-time=2000000000`) for buffering
+- Parser elements before muxer (`h264parse`, `aacparse`, etc.)
+- `config-interval=-1` on video parsers for keyframe headers
+- `alignment=7` on mpegtsmux for proper TS packet alignment
+- `sync=false sync-method=latest-keyframe` on tcpserversink
 
 ## Requirements
 
