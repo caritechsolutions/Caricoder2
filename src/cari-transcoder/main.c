@@ -144,6 +144,8 @@ typedef struct {
     /* Output settings */
     gboolean use_stdout;
     int tcp_port;
+    char udp_host[256];             /* UDP output host (empty = disabled) */
+    int udp_port;                   /* UDP output port */
     int video_pid;              /* Video elementary stream PID (default 256/0x100) */
     int audio_pid;              /* Audio elementary stream PID (default 257/0x101) */
 
@@ -262,6 +264,8 @@ static void print_help(const char *prog) {
     printf("OUTPUT OPTIONS:\n");
     printf("  --stdout                   Output to stdout (for piping to tsp)\n");
     printf("  --tcp-port PORT            TCP server port (default: 8888)\n");
+    printf("  --udp-host HOST            UDP output host/multicast (enables UDP output)\n");
+    printf("  --udp-port PORT            UDP output port (default: 5000)\n");
     printf("  --video-pid PID            Video elementary stream PID (default: 256/0x100)\n");
     printf("  --audio-pid PID            Audio elementary stream PID (default: 257/0x101)\n");
     printf("\n");
@@ -334,6 +338,8 @@ static void init_context(void) {
     /* Output defaults */
     g_ctx.use_stdout = FALSE;
     g_ctx.tcp_port = DEFAULT_TCP_PORT;
+    g_ctx.udp_host[0] = '\0';         /* Empty = UDP output disabled */
+    g_ctx.udp_port = 5000;            /* Default UDP port */
     g_ctx.video_pid = 256;            /* Default video PID 0x100 */
     g_ctx.audio_pid = 257;            /* Default audio PID 0x101 */
 
@@ -378,7 +384,10 @@ static int parse_args(int argc, char *argv[]) {
         OPT_SCALE_THREADS,
         /* Output PID options */
         OPT_VIDEO_PID,
-        OPT_AUDIO_PID
+        OPT_AUDIO_PID,
+        /* UDP output options */
+        OPT_UDP_HOST,
+        OPT_UDP_PORT
     };
 
     static struct option long_options[] = {
@@ -427,6 +436,8 @@ static int parse_args(int argc, char *argv[]) {
         /* Output options */
         {"stdout",             no_argument,       0, 'o'},
         {"tcp-port",           required_argument, 0, 't'},
+        {"udp-host",           required_argument, 0, OPT_UDP_HOST},
+        {"udp-port",           required_argument, 0, OPT_UDP_PORT},
         {"video-pid",          required_argument, 0, OPT_VIDEO_PID},
         {"audio-pid",          required_argument, 0, OPT_AUDIO_PID},
         /* General options */
@@ -616,6 +627,14 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_AUDIO_PID:
                 g_ctx.audio_pid = atoi(optarg);
+                break;
+
+            /* UDP output options */
+            case OPT_UDP_HOST:
+                strncpy(g_ctx.udp_host, optarg, sizeof(g_ctx.udp_host) - 1);
+                break;
+            case OPT_UDP_PORT:
+                g_ctx.udp_port = atoi(optarg);
                 break;
 
             default:
@@ -1172,6 +1191,11 @@ static char *build_pipeline_string(void) {
     if (g_ctx.use_stdout) {
         /* filesink to /dev/stdout with unbuffered mode for immediate output */
         n = snprintf(p, remaining, "filesink location=/dev/stdout buffer-mode=2 sync=false");
+    } else if (g_ctx.udp_host[0] != '\0') {
+        /* udpsink for UDP output - sync=false for live streaming */
+        n = snprintf(p, remaining,
+            "udpsink host=%s port=%d sync=false",
+            g_ctx.udp_host, g_ctx.udp_port);
     } else {
         /* tcpserversink with sync=false and sync-method for low latency */
         n = snprintf(p, remaining,
