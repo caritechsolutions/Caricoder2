@@ -16,7 +16,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
+GSTREAMER_VERSION="1.26.1"
 INSTALL_DIR="/opt/caritrans"
 CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
@@ -352,6 +353,184 @@ install_librist() {
     else
         log_warn "ristreceiver not found in PATH after install"
         log_warn "RIST support may not work"
+    fi
+}
+
+# Install GStreamer from source (for mpegtsmux bitrate property support)
+install_gstreamer() {
+    log_step "Installing GStreamer ${GSTREAMER_VERSION} from source..."
+
+    # Check if already installed
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local CURRENT_VERSION=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        if [[ "$CURRENT_VERSION" == "$GSTREAMER_VERSION" ]]; then
+            log_info "GStreamer ${GSTREAMER_VERSION} already installed"
+            return 0
+        else
+            log_info "Current GStreamer version: ${CURRENT_VERSION}, upgrading to ${GSTREAMER_VERSION}"
+        fi
+    fi
+
+    local BUILD_DIR="/tmp/gstreamer-build"
+    local JOBS=$(nproc)
+
+    # Install build dependencies
+    log_info "Installing GStreamer build dependencies..."
+    apt-get install -y \
+        build-essential \
+        meson \
+        ninja-build \
+        pkg-config \
+        flex \
+        bison \
+        python3 \
+        python3-pip \
+        python3-gi \
+        libglib2.0-dev \
+        libgudev-1.0-dev \
+        liborc-0.4-dev \
+        libpango1.0-dev \
+        libcairo2-dev \
+        libasound2-dev \
+        libpulse-dev \
+        libx264-dev \
+        libx265-dev \
+        libvpx-dev \
+        libopus-dev \
+        libmp3lame-dev \
+        libfaad-dev \
+        libvorbis-dev \
+        libtheora-dev \
+        libflac-dev \
+        libspeex-dev \
+        libwebp-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libsoup2.4-dev \
+        libssl-dev \
+        libsrtp2-dev \
+        libnice-dev \
+        libtag1-dev \
+        libdv4-dev \
+        libmpeg2-4-dev \
+        libv4l-dev \
+        libxv-dev \
+        libxt-dev \
+        libxext-dev \
+        libgl-dev \
+        libegl-dev \
+        libdrm-dev \
+        libgbm-dev \
+        wayland-protocols \
+        libwayland-dev \
+        libgtk-3-dev \
+        libcurl4-openssl-dev \
+        libjson-glib-dev \
+        libsbc-dev \
+        libopencore-amrnb-dev \
+        libopencore-amrwb-dev \
+        libtwolame-dev \
+        libwavpack-dev \
+        libbs2b-dev \
+        libsndfile1-dev \
+        libass-dev \
+        libzbar-dev \
+        libchromaprint-dev \
+        librtmp-dev \
+        nasm \
+        yasm \
+        git \
+        cmake || true
+
+    # Optional packages that may not be available on all systems
+    apt-get install -y libfaac-dev libusrsctp-dev libwebrtc-audio-processing-dev \
+        liba52-0.7.4-dev libcdio-dev libdvdread-dev libdvdnav-dev \
+        libraw1394-dev libavc1394-dev libiec61883-dev libldac-dev libfdk-aac-dev 2>/dev/null || true
+
+    # Create build directory
+    log_info "Setting up build directory..."
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    # Download GStreamer monorepo
+    log_info "Downloading GStreamer ${GSTREAMER_VERSION}..."
+    if ! git clone --depth 1 --branch ${GSTREAMER_VERSION} \
+            https://gitlab.freedesktop.org/gstreamer/gstreamer.git; then
+        log_error "Failed to download GStreamer source"
+        rm -rf "${BUILD_DIR}"
+        return 1
+    fi
+    cd gstreamer
+
+    # Configure with meson
+    log_info "Configuring build with Meson..."
+    meson setup builddir \
+        --prefix=/usr/local \
+        --buildtype=release \
+        --strip \
+        -Dgpl=enabled \
+        -Dugly=enabled \
+        -Dbad=enabled \
+        -Dlibav=disabled \
+        -Ddevtools=disabled \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dtests=disabled \
+        -Dintrospection=disabled \
+        -Dnls=disabled \
+        -Dqt5=disabled \
+        -Dqt6=disabled \
+        -Dpython=disabled \
+        -Dvaapi=disabled \
+        -Dges=disabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        -Dsharp=disabled
+
+    # Build
+    log_info "Building GStreamer (this may take a while)..."
+    ninja -C builddir -j${JOBS}
+
+    # Install
+    log_info "Installing GStreamer..."
+    ninja -C builddir install
+
+    # Update library cache
+    ldconfig
+
+    # Update pkg-config path
+    cat > /etc/profile.d/gstreamer.sh << 'GSTENV'
+export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=/usr/local/bin:$PATH
+export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+GSTENV
+
+    # Source the environment for this session
+    export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    export PATH=/usr/local/bin:$PATH
+    export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+
+    # Cleanup
+    cd /
+    rm -rf "${BUILD_DIR}"
+
+    # Verify installation
+    if command -v /usr/local/bin/gst-launch-1.0 &> /dev/null; then
+        log_info "GStreamer ${GSTREAMER_VERSION} installed successfully"
+        /usr/local/bin/gst-launch-1.0 --version
+
+        # Check for mpegtsmux bitrate property
+        if /usr/local/bin/gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            log_info "mpegtsmux bitrate property available"
+        else
+            log_warn "mpegtsmux bitrate property not found (may still work)"
+        fi
+    else
+        log_error "GStreamer installation failed"
+        return 1
     fi
 }
 
@@ -991,6 +1170,17 @@ print_completion() {
     else
         echo -e "  librist:     ${YELLOW}Not Installed${NC}"
     fi
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local GST_VER=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        echo -e "  GStreamer:   ${GREEN}${GST_VER}${NC}"
+        if gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            echo -e "  mpegtsmux:   ${GREEN}CBR bitrate available${NC}"
+        else
+            echo -e "  mpegtsmux:   ${YELLOW}CBR bitrate not available${NC}"
+        fi
+    else
+        echo -e "  GStreamer:   ${YELLOW}Not Installed${NC}"
+    fi
     echo ""
     echo -e "${BLUE}Web Interface:${NC}"
     echo -e "  URL:         ${GREEN}http://${SERVER_IP}:8080${NC}"
@@ -1023,6 +1213,7 @@ main() {
     check_root
     check_os
     install_dependencies
+    install_gstreamer
     install_tsduck
     install_librist
     create_user

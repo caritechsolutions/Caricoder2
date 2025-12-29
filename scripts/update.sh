@@ -27,8 +27,9 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-# Updated: 2024-12-26
+# Updated: 2024-12-29
 BRANCH="claude/av-sync-monitor-Y57VM"
+GSTREAMER_VERSION="1.26.1"
 
 # Parse arguments
 AUTO_CONFIRM=false
@@ -73,6 +74,7 @@ show_plan() {
     echo -e "${YELLOW}This script will update:${NC}"
     echo -e "  - /var/www/caritrans/* (web interface)"
     echo -e "  - /usr/local/bin/cari-* (binaries, if rebuilding)"
+    echo -e "  - GStreamer ${GSTREAMER_VERSION} (optional, if upgrading)"
     echo ""
     echo -e "${GREEN}This script will NOT touch:${NC}"
     echo -e "  - /etc/caritrans/* (your configurations)"
@@ -178,25 +180,210 @@ update_php_api() {
     fi
 }
 
-# Install/update GStreamer plugins
-update_gstreamer_plugins() {
-    log_step "Updating GStreamer plugins..."
+# Install GStreamer from source (for mpegtsmux bitrate property support)
+install_gstreamer() {
+    log_step "Checking GStreamer version..."
 
+    # Check if already at target version
+    local NEEDS_UPGRADE=false
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local CURRENT_VERSION=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        if [[ "$CURRENT_VERSION" == "$GSTREAMER_VERSION" ]]; then
+            log_info "GStreamer ${GSTREAMER_VERSION} already installed"
+            return 0
+        else
+            log_info "Current GStreamer version: ${CURRENT_VERSION}"
+            NEEDS_UPGRADE=true
+        fi
+    else
+        NEEDS_UPGRADE=true
+    fi
+
+    # Check if user wants to upgrade
+    local DO_UPGRADE="n"
+    if [[ "$AUTO_CONFIRM" = false ]]; then
+        if [[ -t 0 ]]; then
+            if [[ "$NEEDS_UPGRADE" = true ]]; then
+                echo -e "${YELLOW}GStreamer upgrade to ${GSTREAMER_VERSION} available.${NC}"
+                echo -e "${YELLOW}This is required for mpegtsmux CBR bitrate control.${NC}"
+                echo -e "${YELLOW}Building from source takes 15-30 minutes.${NC}"
+            fi
+            read -p "Do you want to build/upgrade GStreamer to ${GSTREAMER_VERSION}? (y/N): " DO_UPGRADE
+        fi
+    else
+        # In auto mode, upgrade if needed
+        if [[ "$NEEDS_UPGRADE" = true ]]; then
+            DO_UPGRADE="y"
+        fi
+    fi
+
+    if [[ ! "$DO_UPGRADE" =~ ^[Yy]$ ]]; then
+        log_info "Skipping GStreamer upgrade"
+        return 0
+    fi
+
+    local BUILD_DIR="/tmp/gstreamer-build"
+    local JOBS=$(nproc)
+
+    # Install build dependencies
+    log_info "Installing GStreamer build dependencies..."
     apt-get update -qq
-
-    # GStreamer libav (provides avdec_h264, avdec_ac3, avdec_eac3, avenc_* etc.)
-    apt-get install -y gstreamer1.0-libav || true
-
-    # Additional GStreamer codec plugins
-    # Note: x264 encoder is already in gstreamer1.0-plugins-ugly
-    # Note: AAC encoder is in gstreamer1.0-libav (avenc_aac)
-    apt-get install -y gstreamer1.0-vaapi || true
-
-    # GStreamer video processing plugins (for deinterlacing, scaling, etc.)
     apt-get install -y \
-        libgstreamer-plugins-bad1.0-dev || true
+        build-essential \
+        meson \
+        ninja-build \
+        pkg-config \
+        flex \
+        bison \
+        python3 \
+        python3-pip \
+        python3-gi \
+        libglib2.0-dev \
+        libgudev-1.0-dev \
+        liborc-0.4-dev \
+        libpango1.0-dev \
+        libcairo2-dev \
+        libasound2-dev \
+        libpulse-dev \
+        libx264-dev \
+        libx265-dev \
+        libvpx-dev \
+        libopus-dev \
+        libmp3lame-dev \
+        libfaad-dev \
+        libvorbis-dev \
+        libtheora-dev \
+        libflac-dev \
+        libspeex-dev \
+        libwebp-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libsoup2.4-dev \
+        libssl-dev \
+        libsrtp2-dev \
+        libnice-dev \
+        libtag1-dev \
+        libdv4-dev \
+        libmpeg2-4-dev \
+        libv4l-dev \
+        libxv-dev \
+        libxt-dev \
+        libxext-dev \
+        libgl-dev \
+        libegl-dev \
+        libdrm-dev \
+        libgbm-dev \
+        wayland-protocols \
+        libwayland-dev \
+        libgtk-3-dev \
+        libcurl4-openssl-dev \
+        libjson-glib-dev \
+        libsbc-dev \
+        libopencore-amrnb-dev \
+        libopencore-amrwb-dev \
+        libtwolame-dev \
+        libwavpack-dev \
+        libbs2b-dev \
+        libsndfile1-dev \
+        libass-dev \
+        libzbar-dev \
+        libchromaprint-dev \
+        librtmp-dev \
+        nasm \
+        yasm \
+        git \
+        cmake || true
 
-    log_info "GStreamer plugins updated"
+    # Optional packages that may not be available on all systems
+    apt-get install -y libfaac-dev libusrsctp-dev libwebrtc-audio-processing-dev \
+        liba52-0.7.4-dev libcdio-dev libdvdread-dev libdvdnav-dev \
+        libraw1394-dev libavc1394-dev libiec61883-dev libldac-dev libfdk-aac-dev 2>/dev/null || true
+
+    # Create build directory
+    log_info "Setting up build directory..."
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    # Download GStreamer monorepo
+    log_info "Downloading GStreamer ${GSTREAMER_VERSION}..."
+    if ! git clone --depth 1 --branch ${GSTREAMER_VERSION} \
+            https://gitlab.freedesktop.org/gstreamer/gstreamer.git; then
+        log_error "Failed to download GStreamer source"
+        rm -rf "${BUILD_DIR}"
+        return 1
+    fi
+    cd gstreamer
+
+    # Configure with meson
+    log_info "Configuring build with Meson..."
+    meson setup builddir \
+        --prefix=/usr/local \
+        --buildtype=release \
+        --strip \
+        -Dgpl=enabled \
+        -Dugly=enabled \
+        -Dbad=enabled \
+        -Dlibav=disabled \
+        -Ddevtools=disabled \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dtests=disabled \
+        -Dintrospection=disabled \
+        -Dnls=disabled \
+        -Dqt5=disabled \
+        -Dqt6=disabled \
+        -Dpython=disabled \
+        -Dvaapi=disabled \
+        -Dges=disabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        -Dsharp=disabled
+
+    # Build
+    log_info "Building GStreamer (this may take 15-30 minutes)..."
+    ninja -C builddir -j${JOBS}
+
+    # Install
+    log_info "Installing GStreamer..."
+    ninja -C builddir install
+
+    # Update library cache
+    ldconfig
+
+    # Update pkg-config path
+    cat > /etc/profile.d/gstreamer.sh << 'GSTENV'
+export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=/usr/local/bin:$PATH
+export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+GSTENV
+
+    # Source the environment for this session
+    export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    export PATH=/usr/local/bin:$PATH
+    export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+
+    # Cleanup
+    cd /
+    rm -rf "${BUILD_DIR}"
+
+    # Verify installation
+    if command -v /usr/local/bin/gst-launch-1.0 &> /dev/null; then
+        log_info "GStreamer ${GSTREAMER_VERSION} installed successfully"
+        /usr/local/bin/gst-launch-1.0 --version
+
+        # Check for mpegtsmux bitrate property
+        if /usr/local/bin/gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            log_info "mpegtsmux bitrate property available"
+        else
+            log_warn "mpegtsmux bitrate property not found (may still work)"
+        fi
+    else
+        log_error "GStreamer installation failed"
+        return 1
+    fi
 }
 
 # Optionally rebuild C applications
@@ -642,6 +829,19 @@ print_completion() {
     echo ""
     echo -e "Your configuration has been preserved."
     echo ""
+    echo -e "${BLUE}GStreamer Version:${NC}"
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local GST_VER=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        echo -e "  Version: ${GREEN}${GST_VER}${NC}"
+        if gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            echo -e "  mpegtsmux bitrate: ${GREEN}Available${NC}"
+        else
+            echo -e "  mpegtsmux bitrate: ${YELLOW}Not available (upgrade to ${GSTREAMER_VERSION} for CBR)${NC}"
+        fi
+    else
+        echo -e "  ${YELLOW}GStreamer not found${NC}"
+    fi
+    echo ""
     echo -e "${BLUE}Web Interface:${NC}"
     echo -e "  URL: ${GREEN}http://${SERVER_IP}:8080${NC}"
     echo ""
@@ -682,7 +882,7 @@ main() {
     download_latest
     update_web
     update_php_api
-    update_gstreamer_plugins
+    install_gstreamer
     rebuild_apps
     build_tools
     rebuild_librist
