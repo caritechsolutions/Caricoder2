@@ -68,16 +68,7 @@ $config = [
         'codec' => 'aac',
         'bitrate' => 128000,
         'channels' => 2,
-        'samplerate' => 48000,
-        'aac_coder' => 'fast',
-        'aac_is' => true,
-        'aac_ms' => true,
-        'aac_pns' => true,
-        'aac_tns' => true,
-        'aac_ltp' => false,
-        'aac_pred' => false,
-        'aac_cutoff' => 0,
-        'aac_strict' => 0
+        'samplerate' => 48000
     ]
 ];
 
@@ -522,70 +513,6 @@ include __DIR__ . '/../templates/header.php';
                     </div>
                 </div>
 
-                <!-- AAC Options -->
-                <div class="audio-transcode-option aac-option">
-                    <hr>
-                    <h6 class="text-muted mb-3">AAC Encoder Options</h6>
-                    <div class="row">
-                        <div class="col-md-3 mb-3">
-                            <label class="form-label">Coder</label>
-                            <select class="form-select" name="aac_coder">
-                                <option value="fast" <?php echo ($config['audio']['aac_coder'] ?? 'fast') === 'fast' ? 'selected' : ''; ?>>Fast</option>
-                                <option value="twoloop" <?php echo ($config['audio']['aac_coder'] ?? '') === 'twoloop' ? 'selected' : ''; ?>>Two-loop</option>
-                                <option value="anmr" <?php echo ($config['audio']['aac_coder'] ?? '') === 'anmr' ? 'selected' : ''; ?>>ANMR</option>
-                            </select>
-                        </div>
-                        <div class="col-md-3 mb-3">
-                            <label class="form-label">Cutoff (Hz)</label>
-                            <input type="number" class="form-control" name="aac_cutoff"
-                                   value="<?php echo htmlspecialchars($config['audio']['aac_cutoff'] ?? '0'); ?>"
-                                   min="0" max="24000">
-                            <div class="form-text">0 = auto</div>
-                        </div>
-                        <div class="col-md-3 mb-3">
-                            <label class="form-label">Strict</label>
-                            <input type="number" class="form-control" name="aac_strict"
-                                   value="<?php echo htmlspecialchars($config['audio']['aac_strict'] ?? '0'); ?>"
-                                   min="-2" max="2">
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-12">
-                            <div class="d-flex flex-wrap gap-3">
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_is" id="aacIs"
-                                           <?php echo config_bool($config['audio']['aac_is'] ?? true) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacIs">Intensity Stereo</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_ms" id="aacMs"
-                                           <?php echo config_bool($config['audio']['aac_ms'] ?? true) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacMs">M/S Stereo</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_pns" id="aacPns"
-                                           <?php echo config_bool($config['audio']['aac_pns'] ?? true) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacPns">PNS</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_tns" id="aacTns"
-                                           <?php echo config_bool($config['audio']['aac_tns'] ?? true) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacTns">TNS</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_ltp" id="aacLtp"
-                                           <?php echo config_bool($config['audio']['aac_ltp'] ?? false) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacLtp">LTP</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="aac_pred" id="aacPred"
-                                           <?php echo config_bool($config['audio']['aac_pred'] ?? false) ? 'checked' : ''; ?>>
-                                    <label class="form-check-label" for="aacPred">Prediction</label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
 

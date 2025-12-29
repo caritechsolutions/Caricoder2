@@ -141,17 +141,6 @@ typedef struct {
     int audio_channels;
     int audio_samplerate;
 
-    /* AAC encoder settings (avenc_aac) */
-    char aac_coder[16];         /* Coding algorithm: anmr, twoloop, fast */
-    int aac_is;                 /* Intensity stereo coding */
-    int aac_ms;                 /* Force M/S stereo coding */
-    int aac_pns;                /* Perceptual noise substitution */
-    int aac_tns;                /* Temporal noise shaping */
-    int aac_ltp;                /* Long term prediction */
-    int aac_pred;               /* AAC-Main prediction */
-    int aac_cutoff;             /* Audio cutoff bandwidth (0=auto) */
-    int aac_strict;             /* Standards compliance (-2 to 2) */
-
     /* Output settings */
     gboolean use_stdout;
     int tcp_port;
@@ -270,18 +259,6 @@ static void print_help(const char *prog) {
     printf("  --audio-samplerate HZ      Sample rate (default: 48000)\n");
     printf("\n");
 
-    printf("AAC ENCODER OPTIONS:\n");
-    printf("  --aac-coder CODER          anmr|twoloop|fast (default: fast)\n");
-    printf("  --aac-is / --no-aac-is     Enable/disable intensity stereo (default: on)\n");
-    printf("  --aac-ms / --no-aac-ms     Enable/disable M/S stereo coding (default: on)\n");
-    printf("  --aac-pns / --no-aac-pns   Enable/disable perceptual noise sub (default: on)\n");
-    printf("  --aac-tns / --no-aac-tns   Enable/disable temporal noise shaping (default: on)\n");
-    printf("  --aac-ltp / --no-aac-ltp   Enable/disable long term prediction (default: off)\n");
-    printf("  --aac-pred / --no-aac-pred Enable/disable AAC-Main prediction (default: off)\n");
-    printf("  --aac-cutoff HZ            Audio cutoff bandwidth, 0=auto (default: 0)\n");
-    printf("  --aac-strict N             Strictness, -2 to 2 (default: 0)\n");
-    printf("\n");
-
     printf("OUTPUT OPTIONS:\n");
     printf("  --stdout                   Output to stdout (for piping to tsp)\n");
     printf("  --tcp-port PORT            TCP server port (default: 8888)\n");
@@ -354,17 +331,6 @@ static void init_context(void) {
     g_ctx.audio_channels = 2;
     g_ctx.audio_samplerate = DEFAULT_AUDIO_SAMPLERATE;
 
-    /* AAC encoder defaults (avenc_aac) */
-    strcpy(g_ctx.aac_coder, "fast");  /* fast coding for low latency */
-    g_ctx.aac_is = 1;                 /* intensity stereo enabled */
-    g_ctx.aac_ms = 1;                 /* M/S stereo enabled */
-    g_ctx.aac_pns = 1;                /* perceptual noise substitution enabled */
-    g_ctx.aac_tns = 1;                /* temporal noise shaping enabled */
-    g_ctx.aac_ltp = 0;                /* long term prediction disabled */
-    g_ctx.aac_pred = 0;               /* AAC-Main prediction disabled */
-    g_ctx.aac_cutoff = 0;             /* auto cutoff */
-    g_ctx.aac_strict = 0;             /* normal compliance */
-
     /* Output defaults */
     g_ctx.use_stdout = FALSE;
     g_ctx.tcp_port = DEFAULT_TCP_PORT;
@@ -406,22 +372,6 @@ static int parse_args(int argc, char *argv[]) {
         OPT_PROFILE,
         OPT_PSY_TUNE,
         OPT_X264_OPTS,
-        /* AAC options */
-        OPT_AAC_CODER,
-        OPT_AAC_IS,
-        OPT_AAC_NO_IS,
-        OPT_AAC_MS,
-        OPT_AAC_NO_MS,
-        OPT_AAC_PNS,
-        OPT_AAC_NO_PNS,
-        OPT_AAC_TNS,
-        OPT_AAC_NO_TNS,
-        OPT_AAC_LTP,
-        OPT_AAC_NO_LTP,
-        OPT_AAC_PRED,
-        OPT_AAC_NO_PRED,
-        OPT_AAC_CUTOFF,
-        OPT_AAC_STRICT,
         /* Scaling options */
         OPT_SCALE_METHOD,
         OPT_SCALE_ADD_BORDERS,
@@ -462,22 +412,6 @@ static int parse_args(int argc, char *argv[]) {
         {"profile",            required_argument, 0, OPT_PROFILE},
         {"psy-tune",           required_argument, 0, OPT_PSY_TUNE},
         {"x264-opts",          required_argument, 0, OPT_X264_OPTS},
-        /* AAC encoder options */
-        {"aac-coder",          required_argument, 0, OPT_AAC_CODER},
-        {"aac-is",             no_argument,       0, OPT_AAC_IS},
-        {"no-aac-is",          no_argument,       0, OPT_AAC_NO_IS},
-        {"aac-ms",             no_argument,       0, OPT_AAC_MS},
-        {"no-aac-ms",          no_argument,       0, OPT_AAC_NO_MS},
-        {"aac-pns",            no_argument,       0, OPT_AAC_PNS},
-        {"no-aac-pns",         no_argument,       0, OPT_AAC_NO_PNS},
-        {"aac-tns",            no_argument,       0, OPT_AAC_TNS},
-        {"no-aac-tns",         no_argument,       0, OPT_AAC_NO_TNS},
-        {"aac-ltp",            no_argument,       0, OPT_AAC_LTP},
-        {"no-aac-ltp",         no_argument,       0, OPT_AAC_NO_LTP},
-        {"aac-pred",           no_argument,       0, OPT_AAC_PRED},
-        {"no-aac-pred",        no_argument,       0, OPT_AAC_NO_PRED},
-        {"aac-cutoff",         required_argument, 0, OPT_AAC_CUTOFF},
-        {"aac-strict",         required_argument, 0, OPT_AAC_STRICT},
         /* Scaling options */
         {"scale",              required_argument, 0, 's'},
         {"scale-method",       required_argument, 0, OPT_SCALE_METHOD},
@@ -663,53 +597,6 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_X264_OPTS:
                 strncpy(g_ctx.x264_option_string, optarg, sizeof(g_ctx.x264_option_string) - 1);
-                break;
-
-            /* AAC encoder options */
-            case OPT_AAC_CODER:
-                strncpy(g_ctx.aac_coder, optarg, sizeof(g_ctx.aac_coder) - 1);
-                break;
-            case OPT_AAC_IS:
-                g_ctx.aac_is = 1;
-                break;
-            case OPT_AAC_NO_IS:
-                g_ctx.aac_is = 0;
-                break;
-            case OPT_AAC_MS:
-                g_ctx.aac_ms = 1;
-                break;
-            case OPT_AAC_NO_MS:
-                g_ctx.aac_ms = 0;
-                break;
-            case OPT_AAC_PNS:
-                g_ctx.aac_pns = 1;
-                break;
-            case OPT_AAC_NO_PNS:
-                g_ctx.aac_pns = 0;
-                break;
-            case OPT_AAC_TNS:
-                g_ctx.aac_tns = 1;
-                break;
-            case OPT_AAC_NO_TNS:
-                g_ctx.aac_tns = 0;
-                break;
-            case OPT_AAC_LTP:
-                g_ctx.aac_ltp = 1;
-                break;
-            case OPT_AAC_NO_LTP:
-                g_ctx.aac_ltp = 0;
-                break;
-            case OPT_AAC_PRED:
-                g_ctx.aac_pred = 1;
-                break;
-            case OPT_AAC_NO_PRED:
-                g_ctx.aac_pred = 0;
-                break;
-            case OPT_AAC_CUTOFF:
-                g_ctx.aac_cutoff = atoi(optarg);
-                break;
-            case OPT_AAC_STRICT:
-                g_ctx.aac_strict = atoi(optarg);
                 break;
 
             /* Scaling options */
@@ -1233,37 +1120,14 @@ static char *build_pipeline_string(void) {
             /* Audio encoder with codec-specific options + parser before mux */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
-                    /* Set audio format via caps, then avenc_aac with all options */
+                    /* Set audio format via caps, then avenc_aac with basic settings */
                     n = snprintf(p, remaining,
                         "audio/x-raw,channels=%d,rate=%d ! "
-                        "avenc_aac bitrate=%d aac-coder=%s "
-                        "aac-is=%s aac-ms=%s aac-pns=%s aac-tns=%s aac-ltp=%s aac-pred=%s ",
+                        "avenc_aac bitrate=%d ! aacparse ! mux.sink_%d ",
                         g_ctx.audio_channels,
                         g_ctx.audio_samplerate,
                         g_ctx.audio_bitrate,
-                        g_ctx.aac_coder,
-                        g_ctx.aac_is ? "true" : "false",
-                        g_ctx.aac_ms ? "true" : "false",
-                        g_ctx.aac_pns ? "true" : "false",
-                        g_ctx.aac_tns ? "true" : "false",
-                        g_ctx.aac_ltp ? "true" : "false",
-                        g_ctx.aac_pred ? "true" : "false");
-                    p += n; remaining -= n;
-
-                    /* Add optional cutoff */
-                    if (g_ctx.aac_cutoff > 0) {
-                        n = snprintf(p, remaining, "cutoff=%d ", g_ctx.aac_cutoff);
-                        p += n; remaining -= n;
-                    }
-
-                    /* Add strict if non-default */
-                    if (g_ctx.aac_strict != 0) {
-                        n = snprintf(p, remaining, "strict=%d ", g_ctx.aac_strict);
-                        p += n; remaining -= n;
-                    }
-
-                    /* aacparse before mux - use named sink pad for PID */
-                    n = snprintf(p, remaining, "! aacparse ! mux.sink_%d ", g_ctx.audio_pid);
+                        g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:

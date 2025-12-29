@@ -459,16 +459,7 @@ function build_transcoder_config($input) {
             'codec' => $input['audio_codec'] ?? 'aac',
             'bitrate' => intval($input['audio_bitrate'] ?? 128000),
             'channels' => intval($input['audio_channels'] ?? 2),
-            'samplerate' => intval($input['audio_samplerate'] ?? 48000),
-            'aac_coder' => $input['aac_coder'] ?? 'fast',
-            'aac_is' => !empty($input['aac_is']),
-            'aac_ms' => !empty($input['aac_ms']),
-            'aac_pns' => !empty($input['aac_pns']),
-            'aac_tns' => !empty($input['aac_tns']),
-            'aac_ltp' => !empty($input['aac_ltp']),
-            'aac_pred' => !empty($input['aac_pred']),
-            'aac_cutoff' => intval($input['aac_cutoff'] ?? 0),
-            'aac_strict' => intval($input['aac_strict'] ?? 0)
+            'samplerate' => intval($input['audio_samplerate'] ?? 48000)
         ]
     ];
 
@@ -556,16 +547,7 @@ function create_transcoder_service($id, $config) {
         'audio_codec' => $audio['codec'],
         'audio_bitrate' => $audio['bitrate'],
         'audio_channels' => $audio['channels'],
-        'audio_samplerate' => $audio['samplerate'],
-        'aac_coder' => $audio['aac_coder'],
-        'aac_is' => $audio['aac_is'],
-        'aac_ms' => $audio['aac_ms'],
-        'aac_pns' => $audio['aac_pns'],
-        'aac_tns' => $audio['aac_tns'],
-        'aac_ltp' => $audio['aac_ltp'],
-        'aac_pred' => $audio['aac_pred'],
-        'aac_cutoff' => $audio['aac_cutoff'],
-        'aac_strict' => $audio['aac_strict']
+        'audio_samplerate' => $audio['samplerate']
     ];
 
     $result = call_cari_api('/transcoder/create', 'POST', $service_data);
