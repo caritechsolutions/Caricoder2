@@ -1267,8 +1267,8 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Muxer and output - single queue after mux */
-    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue ! ");
+    /* Muxer and output - single queue after mux with leaky=downstream to prevent stalls */
+    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue %s leaky=downstream ! ", queue_settings);
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
