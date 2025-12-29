@@ -2104,8 +2104,8 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
     tsp_cmd = (
         f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
         f'-P merge "{transcoder_cmd}" '
-        f"-P bitrate_monitor --periodic-bitrate 5 --pid {service_data.video_pid} "
-        f"-P bitrate_monitor --periodic-bitrate 5 --pid {service_data.audio_pid} "
+        f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 5 "
+        f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 5 "
         f"-P pcradjust "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
     )
