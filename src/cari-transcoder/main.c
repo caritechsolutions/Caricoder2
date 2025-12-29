@@ -1072,27 +1072,30 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    /* h264parse before mux for proper stream formatting - use named sink pad for PID */
-                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! mux.sink_%d ",
-                        g_ctx.video_pid);
+                    /* h264parse before mux for proper stream formatting
+                     * Add queue before mux to prevent backpressure from blocking video */
+                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! queue %s ! mux.sink_%d ",
+                        queue_settings, g_ctx.video_pid);
                     break;
                 }
                 case VIDEO_CODEC_H265:
                     /* x265enc with h265parse config-interval=-1 for proper muxing */
                     n = snprintf(p, remaining,
                         "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
-                        "h265parse config-interval=-1 ! mux.sink_%d ",
+                        "h265parse config-interval=-1 ! queue %s ! mux.sink_%d ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
                         g_ctx.keyframe_interval,
+                        queue_settings,
                         g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
                     /* mpeg2 with mpegvideoparse before mux */
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! mux.sink_%d ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! queue %s ! mux.sink_%d ",
                         g_ctx.video_bitrate,
                         g_ctx.keyframe_interval,
+                        queue_settings,
                         g_ctx.video_pid);
                     break;
                 default:
@@ -1118,35 +1121,37 @@ static char *build_pipeline_string(void) {
                 queue_settings, parser, decoder);
             p += n; remaining -= n;
 
-            /* Audio encoder with codec-specific options + parser before mux */
+            /* Audio encoder with codec-specific options + parser before mux
+             * Add queue before mux to prevent backpressure from blocking audio */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
                     /* Set audio format via caps, then avenc_aac with basic settings */
                     n = snprintf(p, remaining,
                         "audio/x-raw,channels=%d,rate=%d ! "
-                        "avenc_aac bitrate=%d ! aacparse ! mux.sink_%d ",
+                        "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
                         g_ctx.audio_channels,
                         g_ctx.audio_samplerate,
                         g_ctx.audio_bitrate,
+                        queue_settings,
                         g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! ac3parse ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, g_ctx.audio_pid);
+                        "avenc_ac3 bitrate=%d ! ac3parse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, g_ctx.audio_pid);
+                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
                     break;
 
                 default:
                     /* Fallback - should not reach here */
-                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, g_ctx.audio_pid);
+                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
             }
             p += n; remaining -= n;
         }
