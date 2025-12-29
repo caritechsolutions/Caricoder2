@@ -2066,15 +2066,13 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     transcoder_cmd = " ".join(transcoder_cmd_parts)
 
-    # Build tsp command with null carrier for CBR output
-    # Using: tsp --bitrate X -I null -P regulate -P merge "transcoder_cmd" -P bitrate_monitor ... -P pcradjust -O ip
-    # Use two separate bitrate_monitor plugins for per-PID monitoring (video and audio)
+    # Build simple tsp command - just pipe transcoder output through tsp for monitoring
+    # No null packet insertion, no PCR adjustment - keep it simple like UDP input
     tsp_cmd = (
-        f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
-        f'-P merge "{transcoder_cmd}" '
+        f"{transcoder_cmd} --stdout | "
+        f"tsp -I file - "
         f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 5 "
         f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 5 "
-        f"-P pcradjust "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
     )
 
@@ -2091,7 +2089,7 @@ Type=simple
 User=root
 Group=root
 
-# Main process - tsp with cari-transcoder via merge
+# Main process - cari-transcoder piped through tsp for monitoring and UDP output
 ExecStart=/bin/bash -c '{tsp_cmd} 2>>{log_file}'
 ExecReload=/bin/kill -HUP $MAINPID
 
