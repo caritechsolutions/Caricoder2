@@ -992,9 +992,9 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings - leaky=1 (upstream) prevents blocking when queue fills
-     * This is critical for video which can fall behind during heavy encoding */
-    const char *queue_settings = "max-size-time=3000000000 max-size-buffers=0 max-size-bytes=0 leaky=1";
+    /* Queue settings - leaky=2 (downstream) drops OLD buffers when queue fills
+     * This keeps newest data flowing, critical for live video streaming */
+    const char *queue_settings = "max-size-time=3000000000 max-size-buffers=0 max-size-bytes=0 leaky=2";
 
     /* Input: udpsrc -> tsparse -> tsdemux (no queue after udpsrc) */
     n = snprintf(p, remaining,
@@ -1035,9 +1035,10 @@ static char *build_pipeline_string(void) {
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
                 case VIDEO_CODEC_H264: {
-                    /* Build x264enc with all options */
+                    /* Build x264enc with all options
+                     * qos=false prevents dropping frames when running behind */
                     n = snprintf(p, remaining,
-                        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d "
+                        "x264enc tune=zerolatency qos=false speed-preset=%s bitrate=%d key-int-max=%d "
                         "bframes=%d ref=%d qp-min=%d qp-max=%d vbv-buf-capacity=%d "
                         "rc-lookahead=%d threads=%d sliced-threads=%s b-adapt=%s "
                         "cabac=%s trellis=%s aud=%s intra-refresh=%s interlaced=%s ",
