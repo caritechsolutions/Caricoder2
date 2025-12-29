@@ -322,7 +322,7 @@ function getResolution($config) {
                                     </div>
                                     <div class="col-6">
                                         <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodec">-</span></div>
-                                        <div><span class="text-muted">Bitrate:</span> <span id="outputAudioBitrateConfig">-</span></div>
+                                        <div><span class="text-muted">Channels:</span> <span id="outputAudioChannels">-</span></div>
                                     </div>
                                 </div>
                             </div>
@@ -762,7 +762,7 @@ async function loadOutputMediaInfo(outputAddress) {
             document.getElementById('outputVideoCodec').textContent = 'N/A';
             document.getElementById('outputResolution').textContent = 'N/A';
             document.getElementById('outputAudioCodec').textContent = 'N/A';
-            document.getElementById('outputAudioBitrateConfig').textContent = 'N/A';
+            document.getElementById('outputAudioChannels').textContent = 'N/A';
             return;
         }
 
@@ -779,8 +779,8 @@ async function loadOutputMediaInfo(outputAddress) {
             const track = data.audio[0];
             document.getElementById('outputAudioCodec').textContent =
                 (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
-            document.getElementById('outputAudioBitrateConfig').textContent =
-                track.bit_rate ? formatBitrate(parseInt(track.bit_rate)) : '-';
+            document.getElementById('outputAudioChannels').textContent =
+                track.channels ? `${track.channels} ch` : '-';
         }
     } catch (e) {
         console.error('Failed to load output media info:', e);
@@ -829,7 +829,7 @@ function showPreview(id, name) {
     document.getElementById('outputVideoCodec').textContent = 'Loading...';
     document.getElementById('outputResolution').textContent = '-';
     document.getElementById('outputAudioCodec').textContent = 'Loading...';
-    document.getElementById('outputAudioBitrateConfig').textContent = '-';
+    document.getElementById('outputAudioChannels').textContent = '-';
 
     // Reset bitrate displays
     document.getElementById('monitorInputVideoBitrate').textContent = '-';
@@ -950,7 +950,9 @@ async function startOutputPlayer() {
 
     try {
         // Start player_preview for the output stream
-        const outputDir = `/var/www/caritrans/public/hls/transcoder-${id}`;
+        // Use /preview/ path to match inputs page structure
+        const folderName = `transcoder-${id}`;
+        const outputDir = `/var/www/caricoder/public/preview/${folderName}`;
         const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
 
         const response = await fetch('api/transcoders.php?action=start_preview', {
@@ -970,13 +972,13 @@ async function startOutputPlayer() {
             outputPlayerRunning = true;
             document.getElementById('playerStatus').className = 'badge bg-info me-2';
             document.getElementById('playerStatus').textContent = 'Loading...';
-            document.getElementById('videoStatusText').textContent = 'Loading player...';
+            document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
-            // Wait a moment for HLS segments to be generated
+            // Wait a moment for HLS segments to be generated, then start polling
             setTimeout(() => {
-                const playlistUrl = `/hls/transcoder-${id}/playlist.m3u8`;
+                const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
                 initOutputHlsPlayer(playlistUrl);
-            }, 2000);
+            }, 3000);
         } else {
             throw new Error(data.error || 'Failed to start preview');
         }
