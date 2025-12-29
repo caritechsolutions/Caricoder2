@@ -1170,8 +1170,8 @@ static char *build_pipeline_string(void) {
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
-        /* fdsink with sync=false to prevent blocking on timestamp sync */
-        n = snprintf(p, remaining, "fdsink fd=1 sync=false");
+        /* fdsink with sync=false and larger blocksize for better throughput */
+        n = snprintf(p, remaining, "fdsink fd=1 sync=false blocksize=65536");
     } else {
         /* tcpserversink with sync=false and sync-method for low latency */
         n = snprintf(p, remaining,
