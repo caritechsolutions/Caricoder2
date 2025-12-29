@@ -188,6 +188,8 @@ class TranscoderService(BaseModel):
     output_address: str
     output_port: int
     api_port: int = 9200
+    video_pid: int = 256  # Video elementary stream PID (default 0x100)
+    audio_pid: int = 257  # Audio elementary stream PID (default 0x101)
     tsp_bitrate: int  # CBR bitrate for tsp output (video+audio+5%)
 
     # Video settings
@@ -1989,6 +1991,8 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
         f"--input {service_data.input_address}:{service_data.input_port}",
         f"--video-bitrate {service_data.video_bitrate}",
         f"--audio-bitrate {service_data.audio_bitrate}",
+        f"--video-pid {service_data.video_pid}",
+        f"--audio-pid {service_data.audio_pid}",
         "--stdout"
     ]
 
@@ -2096,11 +2100,11 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     # Build tsp command with null carrier for CBR output
     # Using: tsp --bitrate X -I null -P regulate -P merge "transcoder_cmd" -P bitrate_monitor ... -P pcradjust -O ip
-    # Note: bitrate_monitor without --pid monitors total stream bitrate
+    # Use per-PID monitoring for separate video/audio bitrate tracking
     tsp_cmd = (
         f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
         f'-P merge "{transcoder_cmd}" '
-        f"-P bitrate_monitor --periodic-bitrate 5 "
+        f"-P bitrate_monitor --periodic-bitrate 5 --pid {service_data.video_pid} --pid {service_data.audio_pid} "
         f"-P pcradjust "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
     )

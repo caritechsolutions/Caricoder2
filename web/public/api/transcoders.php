@@ -50,6 +50,12 @@ switch ($action) {
     case 'probe_stream':
         handle_probe_stream();
         break;
+    case 'start_preview':
+        handle_start_preview();
+        break;
+    case 'stop_preview':
+        handle_stop_preview();
+        break;
     case 'inputs':
         handle_get_inputs();
         break;
@@ -412,7 +418,9 @@ function build_transcoder_config($input) {
         'output' => [
             'address' => $input['output_address'] ?? '',
             'port' => intval($input['output_port'] ?? 5000),
-            'api_port' => intval($input['api_port'] ?? 9200)
+            'api_port' => intval($input['api_port'] ?? 9200),
+            'video_pid' => intval($input['video_pid'] ?? 256),
+            'audio_pid' => intval($input['audio_pid'] ?? 257)
         ],
         'video' => [
             'mode' => $input['video_mode'] ?? 'transcode',
@@ -508,6 +516,8 @@ function create_transcoder_service($id, $config) {
         'output_address' => $output['address'],
         'output_port' => $output['port'],
         'api_port' => $output['api_port'],
+        'video_pid' => $output['video_pid'] ?? 256,
+        'audio_pid' => $output['audio_pid'] ?? 257,
         'tsp_bitrate' => $tsp_bitrate,
 
         // Video settings
@@ -613,6 +623,50 @@ function handle_probe_stream() {
 }
 
 /**
+ * Start player_preview for transcoder output
+ */
+function handle_start_preview() {
+    $input = json_decode(file_get_contents('php://input'), true);
+
+    $id = $input['id'] ?? '';
+    $input_address = $input['input_address'] ?? '';
+    $output_dir = $input['output_dir'] ?? '';
+    $api_port = intval($input['api_port'] ?? 0);
+
+    if (empty($input_address) || empty($output_dir) || $api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'Missing required parameters']);
+        return;
+    }
+
+    $api_data = [
+        'input_address' => $input_address,
+        'output_dir' => $output_dir,
+        'api_port' => $api_port,
+        'folder' => 'transcoder-' . $id
+    ];
+
+    $result = call_cari_api('/preview/start', 'POST', $api_data);
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to start preview']);
+}
+
+/**
+ * Stop player_preview for transcoder output
+ */
+function handle_stop_preview() {
+    $api_port = intval($_GET['api_port'] ?? 0);
+
+    if ($api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'API port required']);
+        return;
+    }
+
+    $result = call_cari_api("/preview/stop/{$api_port}", 'POST');
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to stop preview']);
+}
+
+/**
  * Get metrics for all transcoders
  * Parses tsp bitrate_monitor output from log files
  */
@@ -647,7 +701,9 @@ function get_transcoder_metrics($id) {
         'input_video_bitrate' => 0,
         'input_audio_bitrate' => 0,
         'input_format' => null,
-        'output_format' => null
+        'output_format' => null,
+        'video_pid' => 256,
+        'audio_pid' => 257
     ];
 
     $input_api_port = null;
@@ -656,6 +712,11 @@ function get_transcoder_metrics($id) {
     // Try to get input source from transcoder config file first
     if (file_exists($config_file)) {
         $config = parse_config($config_file);
+
+        // Get configured PIDs and api_port for output stream
+        $metrics['video_pid'] = intval($config['output']['video_pid'] ?? 256);
+        $metrics['audio_pid'] = intval($config['output']['audio_pid'] ?? 257);
+        $metrics['api_port'] = intval($config['output']['api_port'] ?? 9200);
 
         // Get output format from config
         $metrics['output_format'] = [
@@ -776,32 +837,38 @@ function get_transcoder_metrics($id) {
         }
 
         // Parse bitrate_monitor output
-        // Format without --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, TS bitrate: 5,384,620 bits/s
-        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 2,200,051 bits/s
+        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
         // Note: Numbers may contain commas as thousand separators
+
+        $video_pid = $metrics['video_pid'];
+        $audio_pid = $metrics['audio_pid'];
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
-                // Try total TS bitrate format first (handles commas in numbers)
-                if (preg_match('/TS bitrate:\s*([\d,]+)\s*bits\/s/', $line, $matches)) {
-                    $total_bitrate = intval(str_replace(',', '', $matches[1]));
-                    // Store total as video bitrate (output is combined stream)
-                    if ($metrics['output_video_bitrate'] === 0) {
-                        $metrics['output_video_bitrate'] = $total_bitrate;
-                        $metrics['output_total_bitrate'] = $total_bitrate;
-                        break;
-                    }
-                }
-                // Also try per-PID format in case it's used (handles commas in numbers)
-                elseif (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
+                // Try per-PID format - match the configured PIDs
+                if (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
+                    $pid = intval($matches[1]);
                     $bitrate = intval(str_replace(',', '', $matches[2]));
-                    if ($bitrate > 500000 && $metrics['output_video_bitrate'] === 0) {
+
+                    if ($pid === $video_pid && $metrics['output_video_bitrate'] === 0) {
                         $metrics['output_video_bitrate'] = $bitrate;
-                    } elseif ($bitrate > 10000 && $bitrate <= 500000 && $metrics['output_audio_bitrate'] === 0) {
+                    } elseif ($pid === $audio_pid && $metrics['output_audio_bitrate'] === 0) {
                         $metrics['output_audio_bitrate'] = $bitrate;
                     }
                 }
+                // Fallback: try total TS bitrate format (for backwards compatibility)
+                elseif (preg_match('/TS bitrate:\s*([\d,]+)\s*bits\/s/', $line, $matches)) {
+                    $total_bitrate = intval(str_replace(',', '', $matches[1]));
+                    if ($metrics['output_total_bitrate'] === 0) {
+                        $metrics['output_total_bitrate'] = $total_bitrate;
+                    }
+                }
             }
+        }
+
+        // Calculate total from video + audio if we have per-PID values
+        if ($metrics['output_video_bitrate'] > 0 || $metrics['output_audio_bitrate'] > 0) {
+            $metrics['output_total_bitrate'] = $metrics['output_video_bitrate'] + $metrics['output_audio_bitrate'];
         }
     }
 

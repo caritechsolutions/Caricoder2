@@ -27,7 +27,9 @@ $config = [
     'output' => [
         'address' => '',
         'port' => 5000,
-        'api_port' => 9200
+        'api_port' => 9200,
+        'video_pid' => 256,
+        'audio_pid' => 257
     ],
     'video' => [
         'mode' => 'transcode',
@@ -199,6 +201,29 @@ include __DIR__ . '/../templates/header.php';
                                value="<?php echo htmlspecialchars($config['output']['api_port'] ?? '9200'); ?>"
                                min="1024" max="65535">
                         <div class="form-text">For monitoring/stats</div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Video PID</label>
+                        <input type="number" class="form-control" name="video_pid"
+                               value="<?php echo htmlspecialchars($config['output']['video_pid'] ?? '256'); ?>"
+                               min="32" max="8190">
+                        <div class="form-text">Default: 256 (0x100)</div>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Audio PID</label>
+                        <input type="number" class="form-control" name="audio_pid"
+                               value="<?php echo htmlspecialchars($config['output']['audio_pid'] ?? '257'); ?>"
+                               min="32" max="8190">
+                        <div class="form-text">Default: 257 (0x101)</div>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">&nbsp;</label>
+                        <div class="alert alert-info py-2 mb-0 small">
+                            <i class="bi bi-info-circle me-1"></i>
+                            PIDs must be unique. Video and audio PIDs are used for bitrate monitoring.
+                        </div>
                     </div>
                 </div>
             </div>

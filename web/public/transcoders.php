@@ -249,6 +249,34 @@ function getResolution($config) {
             </div>
             <div class="modal-body">
                 <input type="hidden" id="previewId">
+                <input type="hidden" id="previewApiPort" value="">
+
+                <!-- Video Player Section -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-play-circle me-1"></i>Output Preview</strong>
+                        <div>
+                            <span id="playerStatus" class="badge bg-secondary me-2">Stopped</span>
+                            <button class="btn btn-sm btn-success" id="startPlayerBtn" onclick="startOutputPlayer()">
+                                <i class="bi bi-play-fill me-1"></i>Start
+                            </button>
+                            <button class="btn btn-sm btn-danger d-none" id="stopPlayerBtn" onclick="stopOutputPlayer()">
+                                <i class="bi bi-stop-fill me-1"></i>Stop
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="ratio ratio-16x9 bg-dark position-relative" style="max-height: 300px;">
+                            <div id="videoLoadingOverlay" class="position-absolute top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center">
+                                <div class="text-center text-white">
+                                    <i class="bi bi-tv fs-1 text-muted"></i>
+                                    <div id="videoStatusText" class="mt-2 text-muted">Click Start to preview output</div>
+                                </div>
+                            </div>
+                            <video id="outputVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- Status Bar -->
                 <div class="alert alert-info mb-3 py-2" id="monitorStatus">
@@ -327,9 +355,13 @@ function getResolution($config) {
                                 <strong><i class="bi bi-box-arrow-right me-1 text-success"></i>Output Bitrate</strong>
                             </div>
                             <div class="card-body py-2">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <span class="text-muted small">Video</span>
+                                    <span class="fw-bold text-success" id="monitorOutputVideoBitrate">-</span>
+                                </div>
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted small">Total Stream</span>
-                                    <span class="fw-bold text-success fs-5" id="monitorOutputTotalBitrate">-</span>
+                                    <span class="text-muted small">Audio</span>
+                                    <span class="fw-bold text-success" id="monitorOutputAudioBitrate">-</span>
                                 </div>
                             </div>
                         </div>
@@ -347,14 +379,17 @@ function getResolution($config) {
                     </div>
                     <div class="card-body">
                         <div class="row mb-2">
-                            <div class="col-4 text-center">
-                                <span style="color: #0dcaf0;" class="fw-bold">● Input Video</span>
+                            <div class="col-3 text-center">
+                                <span style="color: #0dcaf0;" class="fw-bold small">● In Video</span>
                             </div>
-                            <div class="col-4 text-center">
-                                <span style="color: #6edff6;" class="fw-bold">● Input Audio</span>
+                            <div class="col-3 text-center">
+                                <span style="color: #6edff6;" class="fw-bold small">● In Audio</span>
                             </div>
-                            <div class="col-4 text-center">
-                                <span style="color: #198754;" class="fw-bold">● Output Total</span>
+                            <div class="col-3 text-center">
+                                <span style="color: #198754;" class="fw-bold small">● Out Video</span>
+                            </div>
+                            <div class="col-3 text-center">
+                                <span style="color: #75b798;" class="fw-bold small">● Out Audio</span>
                             </div>
                         </div>
                         <div class="position-relative" style="height: 250px;">
@@ -393,7 +428,8 @@ let bitrateChart = null;
 let previewInterval = null;
 let inputVideoHistory = [];
 let inputAudioHistory = [];
-let outputTotalHistory = [];
+let outputVideoHistory = [];
+let outputAudioHistory = [];
 const MAX_HISTORY_POINTS = 60;
 
 // Filter transcoders
@@ -523,7 +559,7 @@ function initBitrateChart() {
                     borderDash: [5, 5]
                 },
                 {
-                    label: 'Output Total',
+                    label: 'Output Video',
                     data: [],
                     borderColor: '#198754',
                     backgroundColor: 'rgba(25, 135, 84, 0.1)',
@@ -531,6 +567,17 @@ function initBitrateChart() {
                     tension: 0.3,
                     pointRadius: 0,
                     borderWidth: 2
+                },
+                {
+                    label: 'Output Audio',
+                    data: [],
+                    borderColor: '#75b798',
+                    backgroundColor: 'rgba(117, 183, 152, 0.1)',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 1,
+                    borderDash: [5, 5]
                 }
             ]
         },
@@ -610,26 +657,36 @@ async function loadPreviewMetrics() {
             // Update output format display - probe actual stream
             if (metrics.output_address) {
                 document.getElementById('outputAddressName').textContent = '(' + metrics.output_address + ')';
+                // Store for player
+                window.currentOutputAddress = metrics.output_address;
                 if (!window.outputFormatLoaded) {
                     window.outputFormatLoaded = true;
                     loadOutputMediaInfo(metrics.output_address);
                 }
             }
 
+            // Store api_port for player
+            if (metrics.api_port) {
+                document.getElementById('previewApiPort').value = metrics.api_port;
+            }
+
             // Update bitrate displays
             document.getElementById('monitorInputVideoBitrate').textContent = formatBitrate(metrics.input_video_bitrate || 0);
             document.getElementById('monitorInputAudioBitrate').textContent = formatBitrate(metrics.input_audio_bitrate || 0);
-            document.getElementById('monitorOutputTotalBitrate').textContent = formatBitrate(metrics.output_video_bitrate || metrics.output_total_bitrate || 0);
+            document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
+            document.getElementById('monitorOutputAudioBitrate').textContent = formatBitrate(metrics.output_audio_bitrate || 0);
 
-            // Add to history (3 series: input video, input audio, output total)
+            // Add to history (4 series: input video, input audio, output video, output audio)
             inputVideoHistory.push(metrics.input_video_bitrate || 0);
             inputAudioHistory.push(metrics.input_audio_bitrate || 0);
-            outputTotalHistory.push(metrics.output_video_bitrate || metrics.output_total_bitrate || 0);
+            outputVideoHistory.push(metrics.output_video_bitrate || 0);
+            outputAudioHistory.push(metrics.output_audio_bitrate || 0);
 
             if (inputVideoHistory.length > MAX_HISTORY_POINTS) {
                 inputVideoHistory.shift();
                 inputAudioHistory.shift();
-                outputTotalHistory.shift();
+                outputVideoHistory.shift();
+                outputAudioHistory.shift();
             }
 
             // Update chart
@@ -642,7 +699,8 @@ async function loadPreviewMetrics() {
                 bitrateChart.data.labels = labels;
                 bitrateChart.data.datasets[0].data = [...inputVideoHistory];
                 bitrateChart.data.datasets[1].data = [...inputAudioHistory];
-                bitrateChart.data.datasets[2].data = [...outputTotalHistory];
+                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
+                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
                 bitrateChart.update('none');
             }
 
@@ -734,15 +792,32 @@ async function loadOutputMediaInfo(outputAddress) {
 function showPreview(id, name) {
     document.getElementById('previewId').value = id;
     document.getElementById('previewName').textContent = name;
+    document.getElementById('previewApiPort').value = '';
 
     // Reset format loaded flags
     window.inputFormatLoaded = false;
     window.outputFormatLoaded = false;
+    window.currentOutputAddress = null;
 
-    // Reset history (3 series)
+    // Reset player state
+    if (outputHlsPlayer) {
+        outputHlsPlayer.destroy();
+        outputHlsPlayer = null;
+    }
+    outputPlayerRunning = false;
+    document.getElementById('outputVideo').classList.add('d-none');
+    document.getElementById('videoLoadingOverlay').classList.remove('d-none');
+    document.getElementById('startPlayerBtn').classList.remove('d-none');
+    document.getElementById('stopPlayerBtn').classList.add('d-none');
+    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
+    document.getElementById('playerStatus').textContent = 'Stopped';
+    document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+
+    // Reset history (4 series)
     inputVideoHistory = [];
     inputAudioHistory = [];
-    outputTotalHistory = [];
+    outputVideoHistory = [];
+    outputAudioHistory = [];
 
     // Reset format displays
     document.getElementById('inputSourceName').textContent = '';
@@ -759,7 +834,8 @@ function showPreview(id, name) {
     // Reset bitrate displays
     document.getElementById('monitorInputVideoBitrate').textContent = '-';
     document.getElementById('monitorInputAudioBitrate').textContent = '-';
-    document.getElementById('monitorOutputTotalBitrate').textContent = '-';
+    document.getElementById('monitorOutputVideoBitrate').textContent = '-';
+    document.getElementById('monitorOutputAudioBitrate').textContent = '-';
 
     // Initialize chart
     initBitrateChart();
@@ -784,9 +860,16 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
         clearInterval(previewInterval);
         previewInterval = null;
     }
+
+    // Stop player if running
+    if (outputPlayerRunning) {
+        stopOutputPlayer();
+    }
+
     inputVideoHistory = [];
     inputAudioHistory = [];
-    outputTotalHistory = [];
+    outputVideoHistory = [];
+    outputAudioHistory = [];
 });
 
 // Fetch all transcoder metrics
@@ -844,6 +927,154 @@ document.addEventListener('DOMContentLoaded', function() {
 window.addEventListener('beforeunload', function() {
     if (metricsInterval) clearInterval(metricsInterval);
 });
+// Output player state
+let outputHlsPlayer = null;
+let outputPlayerRunning = false;
+
+// Start output player preview
+async function startOutputPlayer() {
+    const id = document.getElementById('previewId').value;
+    const apiPort = document.getElementById('previewApiPort').value;
+    const outputAddress = window.currentOutputAddress;
+
+    if (!outputAddress) {
+        document.getElementById('videoStatusText').textContent = 'No output address available';
+        return;
+    }
+
+    document.getElementById('startPlayerBtn').classList.add('d-none');
+    document.getElementById('stopPlayerBtn').classList.remove('d-none');
+    document.getElementById('playerStatus').className = 'badge bg-warning me-2';
+    document.getElementById('playerStatus').textContent = 'Starting...';
+    document.getElementById('videoStatusText').textContent = 'Starting preview...';
+
+    try {
+        // Start player_preview for the output stream
+        const outputDir = `/var/www/caritrans/public/hls/transcoder-${id}`;
+        const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
+
+        const response = await fetch('api/transcoders.php?action=start_preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: id,
+                input_address: outputAddress,
+                output_dir: outputDir,
+                api_port: previewPort
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            outputPlayerRunning = true;
+            document.getElementById('playerStatus').className = 'badge bg-info me-2';
+            document.getElementById('playerStatus').textContent = 'Loading...';
+            document.getElementById('videoStatusText').textContent = 'Loading player...';
+
+            // Wait a moment for HLS segments to be generated
+            setTimeout(() => {
+                const playlistUrl = `/hls/transcoder-${id}/playlist.m3u8`;
+                initOutputHlsPlayer(playlistUrl);
+            }, 2000);
+        } else {
+            throw new Error(data.error || 'Failed to start preview');
+        }
+    } catch (e) {
+        console.error('Failed to start output player:', e);
+        document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+        document.getElementById('playerStatus').textContent = 'Error';
+        document.getElementById('videoStatusText').textContent = 'Failed: ' + e.message;
+        document.getElementById('startPlayerBtn').classList.remove('d-none');
+        document.getElementById('stopPlayerBtn').classList.add('d-none');
+    }
+}
+
+// Stop output player preview
+async function stopOutputPlayer() {
+    const id = document.getElementById('previewId').value;
+    const apiPort = document.getElementById('previewApiPort').value;
+    const previewPort = parseInt(apiPort) + 100;
+
+    // Destroy HLS player
+    if (outputHlsPlayer) {
+        outputHlsPlayer.destroy();
+        outputHlsPlayer = null;
+    }
+
+    const video = document.getElementById('outputVideo');
+    video.classList.add('d-none');
+    document.getElementById('videoLoadingOverlay').classList.remove('d-none');
+
+    try {
+        await fetch(`api/transcoders.php?action=stop_preview&api_port=${previewPort}`, {
+            method: 'POST'
+        });
+    } catch (e) {
+        console.error('Failed to stop preview:', e);
+    }
+
+    outputPlayerRunning = false;
+    document.getElementById('startPlayerBtn').classList.remove('d-none');
+    document.getElementById('stopPlayerBtn').classList.add('d-none');
+    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
+    document.getElementById('playerStatus').textContent = 'Stopped';
+    document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+}
+
+// Initialize HLS player for output
+function initOutputHlsPlayer(playlistUrl) {
+    const video = document.getElementById('outputVideo');
+
+    if (outputHlsPlayer) {
+        outputHlsPlayer.destroy();
+        outputHlsPlayer = null;
+    }
+
+    if (Hls.isSupported()) {
+        outputHlsPlayer = new Hls({
+            liveSyncDurationCount: 3,
+            liveMaxLatencyDurationCount: 6
+        });
+
+        outputHlsPlayer.loadSource(playlistUrl);
+        outputHlsPlayer.attachMedia(video);
+
+        outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+            document.getElementById('videoLoadingOverlay').classList.add('d-none');
+            video.classList.remove('d-none');
+            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').textContent = 'Playing';
+            video.play();
+        });
+
+        outputHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
+            console.error('HLS error:', data);
+            if (data.fatal) {
+                document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+                document.getElementById('playerStatus').textContent = 'Error';
+                document.getElementById('videoStatusText').textContent = 'Playback error';
+            }
+        });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        video.src = playlistUrl;
+        video.addEventListener('loadedmetadata', function() {
+            document.getElementById('videoLoadingOverlay').classList.add('d-none');
+            video.classList.remove('d-none');
+            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').textContent = 'Playing';
+            video.play();
+        });
+    } else {
+        document.getElementById('videoStatusText').textContent = 'HLS not supported in this browser';
+        document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+        document.getElementById('playerStatus').textContent = 'Unsupported';
+    }
+}
 </script>
+
+<!-- HLS.js Library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.0-beta.1.0.canary.10759/hls.min.js"></script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>

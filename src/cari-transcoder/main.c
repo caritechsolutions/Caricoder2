@@ -155,6 +155,8 @@ typedef struct {
     /* Output settings */
     gboolean use_stdout;
     int tcp_port;
+    int video_pid;              /* Video elementary stream PID (default 256/0x100) */
+    int audio_pid;              /* Audio elementary stream PID (default 257/0x101) */
 
     /* General settings */
     gboolean debug;
@@ -283,6 +285,8 @@ static void print_help(const char *prog) {
     printf("OUTPUT OPTIONS:\n");
     printf("  --stdout                   Output to stdout (for piping to tsp)\n");
     printf("  --tcp-port PORT            TCP server port (default: 8888)\n");
+    printf("  --video-pid PID            Video elementary stream PID (default: 256/0x100)\n");
+    printf("  --audio-pid PID            Audio elementary stream PID (default: 257/0x101)\n");
     printf("\n");
 
     printf("GENERAL OPTIONS:\n");
@@ -364,6 +368,8 @@ static void init_context(void) {
     /* Output defaults */
     g_ctx.use_stdout = FALSE;
     g_ctx.tcp_port = DEFAULT_TCP_PORT;
+    g_ctx.video_pid = 256;            /* Default video PID 0x100 */
+    g_ctx.audio_pid = 257;            /* Default audio PID 0x101 */
 
     /* General defaults */
     g_ctx.debug = FALSE;
@@ -419,7 +425,10 @@ static int parse_args(int argc, char *argv[]) {
         /* Scaling options */
         OPT_SCALE_METHOD,
         OPT_SCALE_ADD_BORDERS,
-        OPT_SCALE_THREADS
+        OPT_SCALE_THREADS,
+        /* Output PID options */
+        OPT_VIDEO_PID,
+        OPT_AUDIO_PID
     };
 
     static struct option long_options[] = {
@@ -484,6 +493,8 @@ static int parse_args(int argc, char *argv[]) {
         /* Output options */
         {"stdout",             no_argument,       0, 'o'},
         {"tcp-port",           required_argument, 0, 't'},
+        {"video-pid",          required_argument, 0, OPT_VIDEO_PID},
+        {"audio-pid",          required_argument, 0, OPT_AUDIO_PID},
         /* General options */
         {"debug",              no_argument,       0, 'd'},
         {"detect-only",        no_argument,       0, 'O'},
@@ -710,6 +721,14 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_SCALE_THREADS:
                 g_ctx.scale_threads = atoi(optarg);
+                break;
+
+            /* Output PID options */
+            case OPT_VIDEO_PID:
+                g_ctx.video_pid = atoi(optarg);
+                break;
+            case OPT_AUDIO_PID:
+                g_ctx.audio_pid = atoi(optarg);
                 break;
 
             default:
@@ -1165,25 +1184,28 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    /* h264parse before mux for proper stream formatting */
-                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! mux. ");
+                    /* h264parse before mux for proper stream formatting - use named sink pad for PID */
+                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! mux.sink_%d ",
+                        g_ctx.video_pid);
                     break;
                 }
                 case VIDEO_CODEC_H265:
                     /* x265enc with h265parse config-interval=-1 for proper muxing */
                     n = snprintf(p, remaining,
                         "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
-                        "h265parse config-interval=-1 ! mux. ",
+                        "h265parse config-interval=-1 ! mux.sink_%d ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
                     /* mpeg2 with mpegvideoparse before mux */
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! mux. ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! mux.sink_%d ",
                         g_ctx.video_bitrate,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        g_ctx.video_pid);
                     break;
                 default:
                     n = 0;
@@ -1240,24 +1262,26 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    /* aacparse before mux */
-                    n = snprintf(p, remaining, "! aacparse ! mux. ");
+                    /* aacparse before mux - use named sink pad for PID */
+                    n = snprintf(p, remaining, "! aacparse ! mux.sink_%d ", g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! ac3parse ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_ac3 bitrate=%d ! ac3parse ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, g_ctx.audio_pid);
                     break;
 
                 default:
                     /* Fallback - should not reach here */
-                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! mux. ",
-                        g_ctx.audio_bitrate);
+                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, g_ctx.audio_pid);
             }
             p += n; remaining -= n;
         }
@@ -1267,8 +1291,11 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Muxer and output - single queue after mux with leaky=downstream to prevent stalls */
-    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue %s leaky=downstream ! ", queue_settings);
+    /* Muxer and output - single queue after mux with leaky=downstream to prevent stalls
+     * Use prog-map to assign video and audio to program 1 with specified PIDs */
+    n = snprintf(p, remaining,
+        "mpegtsmux name=mux alignment=7 prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s leaky=downstream ! ",
+        g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
