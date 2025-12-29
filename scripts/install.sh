@@ -448,7 +448,8 @@ install_gstreamer() {
 
     # Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
     log_info "Installing Meson build system via pip..."
-    pip3 install --break-system-packages --upgrade meson 2>/dev/null || pip3 install --upgrade meson
+    # Try standard pip upgrade first, then with --break-system-packages for newer systems
+    pip3 install --upgrade meson || pip3 install --break-system-packages --upgrade meson
     # Ensure pip-installed meson is in PATH (installed to /usr/local/bin by pip as root)
     export PATH="/usr/local/bin:$PATH"
     hash -r  # Clear bash command cache
