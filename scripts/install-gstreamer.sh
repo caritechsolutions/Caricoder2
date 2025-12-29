@@ -29,7 +29,6 @@ echo "[1/6] Installing build dependencies..."
 apt-get update
 apt-get install -y \
     build-essential \
-    meson \
     ninja-build \
     pkg-config \
     flex \
@@ -106,6 +105,10 @@ apt-get install -y \
     yasm \
     git \
     cmake
+
+# Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
+echo "Installing Meson build system via pip..."
+pip3 install --break-system-packages meson 2>/dev/null || pip3 install meson
 
 # Create build directory
 echo "[2/6] Setting up build directory..."

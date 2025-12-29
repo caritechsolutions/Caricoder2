@@ -230,7 +230,6 @@ install_gstreamer() {
     apt-get update -qq
     apt-get install -y \
         build-essential \
-        meson \
         ninja-build \
         pkg-config \
         flex \
@@ -298,6 +297,10 @@ install_gstreamer() {
     apt-get install -y libfaac-dev libusrsctp-dev libwebrtc-audio-processing-dev \
         liba52-0.7.4-dev libcdio-dev libdvdread-dev libdvdnav-dev \
         libraw1394-dev libavc1394-dev libiec61883-dev libldac-dev libfdk-aac-dev 2>/dev/null || true
+
+    # Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
+    log_info "Installing Meson build system via pip..."
+    pip3 install --break-system-packages meson 2>/dev/null || pip3 install meson
 
     # Create build directory
     log_info "Setting up build directory..."
