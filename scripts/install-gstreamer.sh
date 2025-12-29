@@ -109,6 +109,9 @@ apt-get install -y \
 # Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
 echo "Installing Meson build system via pip..."
 pip3 install --break-system-packages meson 2>/dev/null || pip3 install meson
+# Ensure pip-installed meson is in PATH (installed to /usr/local/bin by pip as root)
+export PATH="/usr/local/bin:$PATH"
+hash -r  # Clear bash command cache
 
 # Create build directory
 echo "[2/6] Setting up build directory..."
