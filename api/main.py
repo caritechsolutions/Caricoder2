@@ -2066,11 +2066,10 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     transcoder_cmd = " ".join(transcoder_cmd_parts)
 
-    # Build simple tsp command - just pipe transcoder output through tsp for monitoring
-    # No null packet insertion, no PCR adjustment - keep it simple like UDP input
+    # Build tsp command using fork input - tsp spawns transcoder as child process
+    # This matches how other input tools (hls_input, rist_input, srt_input) work
     tsp_cmd = (
-        f"{transcoder_cmd} --stdout | "
-        f"tsp -I file - "
+        f'tsp -I fork "{transcoder_cmd} --stdout" '
         f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 5 "
         f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 5 "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
