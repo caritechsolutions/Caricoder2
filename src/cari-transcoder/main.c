@@ -992,8 +992,9 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings - matching working gst-launch pipeline */
-    const char *queue_settings = "max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0";
+    /* Queue settings - leaky=1 (upstream) prevents blocking when queue fills
+     * This is critical for video which can fall behind during heavy encoding */
+    const char *queue_settings = "max-size-time=3000000000 max-size-buffers=0 max-size-bytes=0 leaky=1";
 
     /* Input: udpsrc -> tsparse -> tsdemux (no queue after udpsrc) */
     n = snprintf(p, remaining,
@@ -1155,10 +1156,10 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Muxer and output - single queue after mux with leaky=downstream to prevent stalls
+    /* Muxer and output - queue after mux uses same leaky settings to prevent stalls
      * Use prog-map to assign video and audio to program 1 with specified PIDs */
     n = snprintf(p, remaining,
-        "mpegtsmux name=mux alignment=7 prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s leaky=downstream ! ",
+        "mpegtsmux name=mux alignment=7 prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s ! ",
         g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
     p += n; remaining -= n;
 
