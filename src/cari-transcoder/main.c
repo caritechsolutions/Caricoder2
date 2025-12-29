@@ -1170,7 +1170,8 @@ static char *build_pipeline_string(void) {
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
-        n = snprintf(p, remaining, "fdsink fd=1");
+        /* fdsink with sync=false to prevent blocking on timestamp sync */
+        n = snprintf(p, remaining, "fdsink fd=1 sync=false");
     } else {
         /* tcpserversink with sync=false and sync-method for low latency */
         n = snprintf(p, remaining,
