@@ -56,6 +56,9 @@ switch ($action) {
     case 'stop_preview':
         handle_stop_preview();
         break;
+    case 'preview_keepalive':
+        handle_preview_keepalive();
+        break;
     case 'inputs':
         handle_get_inputs();
         break;
@@ -646,6 +649,35 @@ function handle_stop_preview() {
     $result = call_cari_api("/preview/stop/{$api_port}", 'POST');
 
     echo json_encode($result ?: ['success' => false, 'error' => 'Failed to stop preview']);
+}
+
+/**
+ * Send keepalive to player_preview
+ */
+function handle_preview_keepalive() {
+    $api_port = intval($_GET['api_port'] ?? 0);
+
+    if ($api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'API port required']);
+        return;
+    }
+
+    // Send keepalive directly to preview port
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'POST',
+            'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents("http://127.0.0.1:{$api_port}/keepalive", false, $ctx);
+
+    if ($response !== false) {
+        echo json_encode(['success' => true]);
+    } else {
+        echo json_encode(['success' => false, 'error' => 'Keepalive failed']);
+    }
 }
 
 /**
