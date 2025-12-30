@@ -1053,7 +1053,7 @@ static char *build_pipeline_string(void) {
                     /* x264enc with CBR mode and VBV buffer for consistent bitrate */
                     n = snprintf(p, remaining,
                         "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d "
-                        "pass=cbr vbv-buf-capacity=200 ! queue ! mux.sink_%d ",
+                        "pass=cbr vbv-buf-capacity=120 ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
