@@ -788,6 +788,11 @@ async function loadAVSyncHistory(transcoderId) {
 
         // Fetch from cari-avsync API
         const response = await fetch(`http://${window.location.hostname}:8082/history/${transcoderId}`);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
         const data = await response.json();
 
         if (!data.running) {
@@ -800,19 +805,21 @@ async function loadAVSyncHistory(transcoderId) {
             return;
         }
 
-        // Display current values
+        // Determine which data to show in stat cards
+        // Prefer current, fall back to last history entry
         let displayData = null;
-        if (data.current && data.current.a2v_mean_ms !== undefined) {
+        if (data.current && data.current.timestamp && data.current.timestamp.length > 0) {
             displayData = data.current;
         } else if (data.history && data.history.length > 0) {
             displayData = data.history[data.history.length - 1];
         }
 
+        // Update stat cards
         if (displayData) {
-            const a2v = displayData.a2v_mean_ms || displayData.a2v_avg_ms || 0;
-            const v2a = displayData.v2a_mean_ms || displayData.v2a_avg_ms || 0;
-            const status = displayData.status || 'OK';
-            const samples = (displayData.a2v_count || 0) + (displayData.v2a_count || 0);
+            const a2v = displayData.a2v_mean_ms;
+            const v2a = displayData.v2a_mean_ms;
+            const status = displayData.status;
+            const samples = displayData.a2v_samples || 0;
 
             document.getElementById('avsyncA2V').textContent = a2v.toFixed(1) + ' ms';
             document.getElementById('avsyncV2A').textContent = v2a.toFixed(1) + ' ms';
@@ -823,13 +830,15 @@ async function loadAVSyncHistory(transcoderId) {
 
             document.getElementById('avsyncSamples').textContent = samples + ' samples';
 
+            // Use unix_ts for browser-local time display
             if (displayData.unix_ts) {
                 const localTime = new Date(displayData.unix_ts * 1000).toLocaleTimeString();
                 document.getElementById('avsyncLastUpdate').textContent = localTime;
             } else {
-                document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp || '-';
+                document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp;
             }
 
+            // Update status badge
             const badge = document.getElementById('avsyncStatus');
             if (status === 'OK') {
                 badge.className = 'badge avsync-ok';
@@ -864,8 +873,8 @@ async function loadAVSyncHistory(transcoderId) {
                     shortTime = entry.timestamp.split(' ')[1] || entry.timestamp;
                 }
                 avsyncChart.data.labels.push(shortTime);
-                avsyncChart.data.datasets[0].data.push(entry.a2v_mean_ms || entry.a2v_avg_ms || 0);
-                avsyncChart.data.datasets[1].data.push(entry.v2a_mean_ms || entry.v2a_avg_ms || 0);
+                avsyncChart.data.datasets[0].data.push(entry.a2v_mean_ms);
+                avsyncChart.data.datasets[1].data.push(entry.v2a_mean_ms);
             }
             avsyncChart.update();
         }
