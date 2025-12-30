@@ -152,9 +152,17 @@ install_dependencies() {
 install_tsduck() {
     log_step "Installing TSDuck..."
 
+    # Check if TSDuck is installed AND working (not just present)
     if command -v tsp &> /dev/null; then
-        log_info "TSDuck already installed: $(tsp --version 2>&1 | head -1)"
-        return 0
+        if tsp --version &> /dev/null; then
+            log_info "TSDuck already installed: $(tsp --version 2>&1 | head -1)"
+            return 0
+        else
+            # TSDuck exists but is broken (library issues) - remove it
+            log_warn "TSDuck is installed but broken, removing..."
+            dpkg --purge tsduck 2>/dev/null || true
+            apt-get remove --purge tsduck -y 2>/dev/null || true
+        fi
     fi
 
     # Detect architecture and OS version
