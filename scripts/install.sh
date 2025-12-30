@@ -163,19 +163,23 @@ install_tsduck() {
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
     # Determine TSDuck version and package name based on Ubuntu version
+    # Available packages in repo: ubuntu20 (3.26-2349), ubuntu24 (3.43-4524)
     local TSDUCK_VERSION=""
     local UBUNTU_TAG=""
+    local FALLBACK_TAG=""
 
     case "$VERSION_CODENAME" in
         noble|plucky|oracular)
             # Ubuntu 24.04+ - use latest TSDuck
-            TSDUCK_VERSION="3.42-4421"
+            TSDUCK_VERSION="3.43-4524"
             UBUNTU_TAG="ubuntu24"
             ;;
         jammy)
-            # Ubuntu 22.04 - use older version compatible with this release
-            TSDUCK_VERSION="3.37-3520"
-            UBUNTU_TAG="ubuntu22"
+            # Ubuntu 22.04 - try ubuntu24 package (no ubuntu22 in repo)
+            TSDUCK_VERSION="3.43-4524"
+            UBUNTU_TAG="ubuntu24"
+            FALLBACK_TAG="ubuntu24"
+            log_info "Ubuntu 22.04 detected, using Ubuntu 24 package"
             ;;
         focal)
             # Ubuntu 20.04 - use version that supports focal
@@ -185,7 +189,7 @@ install_tsduck() {
         *)
             # Unknown - try ubuntu24 package
             log_warn "Unknown Ubuntu version, trying ubuntu24 package"
-            TSDUCK_VERSION="3.42-4421"
+            TSDUCK_VERSION="3.43-4524"
             UBUNTU_TAG="ubuntu24"
             ;;
     esac
@@ -1240,10 +1244,10 @@ main() {
     check_os
     install_dependencies
     install_gstreamer
-    install_tsduck
     create_user
     create_directories
     download_repo
+    install_tsduck
     install_librist
     build_apps
     build_tools
