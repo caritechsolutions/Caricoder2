@@ -177,9 +177,10 @@ install_tsduck() {
             UBUNTU_TAG="ubuntu24"
             ;;
         jammy)
-            # Ubuntu 22.04 - use ubuntu23 package from repo (compatible ABI, unlike ubuntu24)
-            TSDUCK_VERSION="3.37-3670"
-            UBUNTU_TAG="ubuntu23"
+            # Ubuntu 22.04 - download ubuntu22 package from GitHub (ubuntu23 has incompatible deps)
+            TSDUCK_VERSION="3.33-3139"
+            UBUNTU_TAG="ubuntu22"
+            DOWNLOAD_ONLY=true
             ;;
         focal)
             # Ubuntu 20.04 - use version that supports focal
