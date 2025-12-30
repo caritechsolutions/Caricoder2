@@ -7,7 +7,10 @@
 # Usage:
 #   Interactive:  ./update.sh
 #   Auto-confirm: ./update.sh -y
+#   Force GStreamer rebuild: ./update.sh -g
+#   Both flags:   ./update.sh -yg
 #   Via curl:     curl -sSL "https://raw.githubusercontent.com/.../update.sh?$(date +%s)" | sudo bash -s -- -y
+#   Via curl with GStreamer: curl -sSL "..." | sudo bash -s -- -yg
 #
 # Copyright (c) 2024 CariTech Solutions
 
@@ -33,9 +36,11 @@ GSTREAMER_VERSION="1.26.1"
 
 # Parse arguments
 AUTO_CONFIRM=false
-while getopts "y" opt; do
+FORCE_GSTREAMER=false
+while getopts "yg" opt; do
     case $opt in
         y) AUTO_CONFIRM=true ;;
+        g) FORCE_GSTREAMER=true ;;
         *) ;;
     esac
 done
@@ -184,9 +189,12 @@ update_php_api() {
 install_gstreamer() {
     log_step "Checking GStreamer version..."
 
-    # Check if already at target version
+    # Check if already at target version (unless force flag is set)
     local NEEDS_UPGRADE=false
-    if command -v gst-launch-1.0 &> /dev/null; then
+    if [[ "$FORCE_GSTREAMER" = true ]]; then
+        log_info "Force GStreamer rebuild requested (-g flag)"
+        NEEDS_UPGRADE=true
+    elif command -v gst-launch-1.0 &> /dev/null; then
         local CURRENT_VERSION=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
         if [[ "$CURRENT_VERSION" == "$GSTREAMER_VERSION" ]]; then
             log_info "GStreamer ${GSTREAMER_VERSION} already installed"
