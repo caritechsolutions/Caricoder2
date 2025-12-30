@@ -907,6 +907,11 @@ install_web() {
     find "$WEB_DIR" -type d -exec chmod 755 {} \;
     find "$WEB_DIR" -type f -exec chmod 644 {} \;
 
+    # Create preview directory for HLS player
+    mkdir -p "$WEB_DIR/public/preview"
+    chown "$WEB_USER:$WEB_USER" "$WEB_DIR/public/preview"
+    chmod 755 "$WEB_DIR/public/preview"
+
     log_info "Web interface installed to $WEB_DIR"
 }
 
