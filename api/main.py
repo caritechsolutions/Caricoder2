@@ -2066,14 +2066,15 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
 
     transcoder_cmd = " ".join(transcoder_cmd_parts)
 
-    # Build tsp command using fork input - tsp spawns transcoder as child process
-    # This matches how other input tools (hls_input, rist_input, srt_input) work
-    # --buffer-size-mb 1 for fast startup
-    tsp_cmd = (
-        f'tsp --buffer-size-mb 1 -I fork "{transcoder_cmd} --stdout" '
-        f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 5 "
-        f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 5 "
-        f"-O ip {service_data.output_address}:{service_data.output_port}"
+    # Add UDP output to transcoder command
+    transcoder_cmd += f" --udp-host {service_data.output_address} --udp-port {service_data.output_port}"
+
+    # Build tsp monitoring command - reads from output stream for bitrate monitoring
+    tsp_monitor_cmd = (
+        f"tsp -I ip {service_data.output_address}:{service_data.output_port} "
+        f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 2 "
+        f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 2 "
+        f"-O drop"
     )
 
     description = service_data.description or f"CariTranscoder - {service_data.name}"
@@ -2089,8 +2090,9 @@ Type=simple
 User=root
 Group=root
 
-# Main process - cari-transcoder piped through tsp for monitoring and UDP output
-ExecStart=/bin/bash -c '{tsp_cmd} 2>>{log_file}'
+# Main transcoder process with direct UDP output
+# tsp monitor starts in background after 2 second delay for bitrate monitoring
+ExecStart=/bin/bash -c '(sleep 2 && {tsp_monitor_cmd} 2>/dev/null) & exec {transcoder_cmd} 2>>{log_file}'
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart behavior
