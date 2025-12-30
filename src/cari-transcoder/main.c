@@ -1048,7 +1048,7 @@ static char *build_pipeline_string(void) {
             }
 
             /* videorate for consistent frame timing before encoder */
-            n = snprintf(p, remaining, "queue ! videorate ! queue ! ");
+            n = snprintf(p, remaining, "videorate ! queue ! ");
             p += n; remaining -= n;
 
             /* Video encoder based on output codec */
