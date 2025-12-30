@@ -22,7 +22,7 @@
 #include <gst/gst.h>
 
 /* Version */
-#define VERSION "2.2.0"
+#define VERSION "2.3.0"
 
 /* Defaults */
 #define DEFAULT_VIDEO_BITRATE 5000000
@@ -1182,10 +1182,12 @@ static char *build_pipeline_string(void) {
     /* TODO: passthrough mode */
 
     /* Muxer and output - queue after mux uses same leaky settings to prevent stalls
-     * Use prog-map to assign video and audio to program 1 with specified PIDs */
+     * Use prog-map to assign video and audio to program 1 with specified PIDs
+     * Calculate mux bitrate as (video + audio) * 1.1 for CBR output with 10% overhead */
+    int mux_bitrate = (int)((g_ctx.video_bitrate + g_ctx.audio_bitrate) * 1.1);
     n = snprintf(p, remaining,
-        "mpegtsmux name=mux alignment=7 prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s ! ",
-        g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
+        "mpegtsmux name=mux alignment=7 bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s ! ",
+        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
