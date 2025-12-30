@@ -1047,6 +1047,10 @@ static char *build_pipeline_string(void) {
                 p += n; remaining -= n;
             }
 
+            /* videorate for consistent frame timing before encoder */
+            n = snprintf(p, remaining, "queue ! videorate ! queue ! ");
+            p += n; remaining -= n;
+
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
                 case VIDEO_CODEC_H264:
