@@ -632,18 +632,30 @@ download_repo() {
     log_info "Downloading from: $TARBALL_URL"
 
     local DOWNLOAD_OK=false
-    if command -v wget &> /dev/null; then
-        if wget --no-check-certificate -q -O repo.tar.gz "$TARBALL_URL"; then
-            DOWNLOAD_OK=true
+
+    # Try curl first (better redirect handling), then wget
+    for attempt in 1 2 3; do
+        if command -v curl &> /dev/null; then
+            log_info "Download attempt $attempt using curl..."
+            if curl -k -L -f --connect-timeout 30 --max-time 300 -o repo.tar.gz "$TARBALL_URL" 2>&1; then
+                DOWNLOAD_OK=true
+                break
+            fi
+        elif command -v wget &> /dev/null; then
+            log_info "Download attempt $attempt using wget..."
+            if wget --no-check-certificate --timeout=30 -q -O repo.tar.gz "$TARBALL_URL" 2>&1; then
+                DOWNLOAD_OK=true
+                break
+            fi
         fi
-    else
-        if curl -k -L -f -o repo.tar.gz "$TARBALL_URL" 2>/dev/null; then
-            DOWNLOAD_OK=true
-        fi
-    fi
+        log_warn "Attempt $attempt failed, retrying in 3 seconds..."
+        sleep 3
+    done
 
     if [[ "$DOWNLOAD_OK" = false ]]; then
-        log_error "wget/curl download failed"
+        log_error "Download failed after 3 attempts"
+        log_error "URL: $TARBALL_URL"
+        log_error "Please check network connectivity to github.com"
         rm -rf "$TEMP_DIR"
         exit 1
     fi
