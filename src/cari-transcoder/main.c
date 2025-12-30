@@ -1073,17 +1073,17 @@ static char *build_pipeline_string(void) {
                         g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
-                    /* avenc_mpeg2video with strict CBR using VBV
+                    /* avenc_mpeg2video with VBV for capped bitrate
                      * bufsize = 0.5 seconds of bitrate for tight control
-                     * maxrate = minrate = bitrate for true CBR
+                     * maxrate = bitrate to cap peaks
+                     * No minrate - let mux pad with null packets for CBR output
                      * rc-init-occupancy = 90% of bufsize */
                     {
                         int bufsize = g_ctx.video_bitrate / 2;  /* 500ms buffer */
                         int init_occupancy = bufsize * 9 / 10;  /* 90% initial fill */
                         n = snprintf(p, remaining,
-                            "avenc_mpeg2video bitrate=%d maxrate=%d minrate=%d "
+                            "avenc_mpeg2video bitrate=%d maxrate=%d "
                             "bufsize=%d rc-init-occupancy=%d gop-size=%d ! queue ! mux.sink_%d ",
-                            g_ctx.video_bitrate,
                             g_ctx.video_bitrate,
                             g_ctx.video_bitrate,
                             bufsize,
