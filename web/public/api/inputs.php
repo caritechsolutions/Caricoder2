@@ -12,8 +12,9 @@ header('Content-Type: application/json');
 
 // Error handler to convert PHP errors to JSON
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
-    // Respect @ error suppression operator
-    if (error_reporting() === 0) {
+    // Respect @ error suppression operator (PHP 8+ compatible)
+    // In PHP 8+, @ sets error_reporting to a bitmask, not 0
+    if (!(error_reporting() & $errno)) {
         return false;
     }
     ob_end_clean();
@@ -2419,16 +2420,13 @@ function is_preview_running($id) {
         return false;
     }
 
-    // Try to connect to the preview API
-    $ctx = stream_context_create([
-        'http' => [
-            'timeout' => 1,
-            'ignore_errors' => true
-        ]
-    ]);
-
-    $response = @file_get_contents("http://127.0.0.1:{$preview_port}/health", false, $ctx);
-    return $response !== false;
+    // Use socket check - more reliable than file_get_contents for connection checks
+    $socket = @fsockopen('127.0.0.1', $preview_port, $errno, $errstr, 1);
+    if ($socket === false) {
+        return false;
+    }
+    fclose($socket);
+    return true;
 }
 
 /**
