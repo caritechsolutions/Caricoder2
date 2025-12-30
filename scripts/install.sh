@@ -112,11 +112,12 @@ install_dependencies() {
     # FFmpeg (for stream analysis and fallback transcoding)
     apt-get install -y ffmpeg
 
-    # SRT support
-    apt-get install -y libsrt-dev libsrt1.5-openssl || apt-get install -y libsrt-dev || true
+    # SRT support - package names vary by Ubuntu version
+    # Ubuntu 24.04: libsrt-openssl-dev, Ubuntu 22.04: libsrt-openssl-dev, Ubuntu 20.04: libsrt-dev
+    apt-get install -y libsrt-openssl-dev 2>/dev/null || apt-get install -y libsrt-gnutls-dev 2>/dev/null || apt-get install -y libsrt-dev 2>/dev/null || true
 
     # SRT tools (srt-live-transmit for stream reception)
-    apt-get install -y srt-tools || true
+    apt-get install -y srt-tools 2>/dev/null || true
 
     # Build tools for librist
     apt-get install -y meson ninja-build cmake || true
@@ -288,13 +289,12 @@ install_tsduck() {
 
 # Install librist from local source (for ristreceiver)
 install_librist() {
-    log_step "Installing librist (RIST library) from local source..."
+    log_step "Installing librist (RIST library)..."
 
-    # Check if local librist source exists
-    if [[ ! -d "$INSTALL_DIR/librist-master" ]]; then
-        log_warn "librist source not found at $INSTALL_DIR/librist-master"
-        log_warn "RIST support will not be available"
-        return 1
+    # Check if already installed
+    if command -v ristreceiver &> /dev/null || [[ -f /usr/local/bin/ristreceiver ]]; then
+        log_info "librist already installed"
+        return 0
     fi
 
     cd /tmp
@@ -305,9 +305,18 @@ install_librist() {
         rm -rf librist-build
     fi
 
-    # Copy source to temp build directory
-    log_info "Copying librist source to build directory..."
-    cp -r "$INSTALL_DIR/librist-master" librist-build
+    # Check for local source first, otherwise download
+    if [[ -d "$INSTALL_DIR/librist-master" ]]; then
+        log_info "Using local librist source..."
+        cp -r "$INSTALL_DIR/librist-master" librist-build
+    else
+        log_info "Downloading librist from code.videolan.org..."
+        if ! git clone --depth 1 https://code.videolan.org/rist/librist.git librist-build; then
+            log_warn "Failed to download librist source"
+            log_warn "RIST support will not be available"
+            return 1
+        fi
+    fi
 
     cd librist-build
 
@@ -1232,10 +1241,10 @@ main() {
     install_dependencies
     install_gstreamer
     install_tsduck
-    install_librist
     create_user
     create_directories
     download_repo
+    install_librist
     build_apps
     build_tools
     install_binaries

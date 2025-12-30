@@ -560,15 +560,9 @@ build_tools() {
     log_info "Tools build completed"
 }
 
-# Rebuild librist from local source (if needed)
+# Rebuild librist from source (if needed)
 rebuild_librist() {
     log_step "Checking librist installation..."
-
-    # Check if librist source exists in the update
-    if [[ ! -d "$TEMP_DIR/caritrans_latest/librist-master" ]]; then
-        log_info "librist source not found in update, skipping"
-        return 0
-    fi
 
     # Check if ristreceiver needs rebuild
     local REBUILD_RIST="n"
@@ -602,7 +596,7 @@ rebuild_librist() {
         return 0
     fi
 
-    log_info "Rebuilding librist from local source..."
+    log_info "Rebuilding librist..."
 
     cd /tmp
 
@@ -611,8 +605,20 @@ rebuild_librist() {
         rm -rf librist-build
     fi
 
-    # Copy source to temp build directory
-    cp -r "$TEMP_DIR/caritrans_latest/librist-master" librist-build
+    # Check for local source first, otherwise download
+    if [[ -d "$TEMP_DIR/caritrans_latest/librist-master" ]]; then
+        log_info "Using local librist source..."
+        cp -r "$TEMP_DIR/caritrans_latest/librist-master" librist-build
+    elif [[ -d "$INSTALL_DIR/librist-master" ]]; then
+        log_info "Using installed librist source..."
+        cp -r "$INSTALL_DIR/librist-master" librist-build
+    else
+        log_info "Downloading librist from code.videolan.org..."
+        if ! git clone --depth 1 https://code.videolan.org/rist/librist.git librist-build; then
+            log_warn "Failed to download librist source"
+            return 1
+        fi
+    fi
 
     cd librist-build
 
