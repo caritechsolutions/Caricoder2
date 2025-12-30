@@ -242,7 +242,7 @@ function handle_create() {
         }
     }
 
-    $id = preg_replace('/[^a-z0-9-]/', '', strtolower($input['transcoder_id']));
+    $id = preg_replace('/[^a-z0-9_-]/', '', strtolower($input['transcoder_id']));
     if (empty($id)) {
         echo json_encode(['success' => false, 'error' => 'Invalid ID']);
         return;
