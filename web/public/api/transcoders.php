@@ -750,8 +750,11 @@ function get_transcoder_metrics($id) {
             }
         }
 
-        // Parse output address: -O ip ADDRESS:PORT
-        if (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+        // Parse output address: --udp-host HOST --udp-port PORT (new format)
+        // or -O ip ADDRESS:PORT (legacy format)
+        if (preg_match('/--udp-host\s+(\d+\.\d+\.\d+\.\d+)\s+--udp-port\s+(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
+        } elseif (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
             $metrics['output_address'] = $matches[1] . ':' . $matches[2];
         }
     }
