@@ -428,6 +428,28 @@ function getResolution($config) {
                     </div>
                 </div>
 
+                <!-- Stream Health -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-heart-pulse me-1"></i>Stream Health</strong>
+                        <span id="healthStatus" class="badge bg-success">OK</span>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span class="text-muted small">Continuity Errors (recent)</span>
+                            <span class="fw-bold" id="continuityErrorCount">0</span>
+                        </div>
+                        <div id="continuityErrorDetails" class="mt-2 small text-muted d-none">
+                            <div class="fw-semibold">Errors by PID:</div>
+                            <div id="continuityErrorsByPid"></div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Continuity errors indicate packet loss in the source stream
+                        </div>
+                    </div>
+                </div>
+
                 <!-- A/V Sync Monitor -->
                 <div class="card">
                     <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -765,6 +787,153 @@ async function loadBitrateHistory(transcoderId) {
     }
 }
 
+// Load historical bitrate data for input (from linked source service)
+async function loadInputBitrateHistory(inputId) {
+    if (!inputId) return;
+
+    try {
+        const response = await fetch(`api/inputs.php?action=metrics_history&id=${inputId}`);
+        const data = await response.json();
+
+        if (!data.success || !data.pids) {
+            console.log('No input history available for:', inputId);
+            return;
+        }
+
+        // Determine video and audio PIDs (video has higher bitrate)
+        let videoPid = null, audioPids = [];
+        for (const [pid, pidData] of Object.entries(data.pids)) {
+            if (pidData.history && pidData.history.length > 0) {
+                const lastSamples = pidData.history.slice(-5);
+                const avgBitrate = lastSamples.reduce((a, b) => a + b[1], 0) / lastSamples.length;
+                if (avgBitrate > 500000 && !videoPid) {
+                    videoPid = pid;
+                } else {
+                    audioPids.push(pid);
+                }
+            }
+        }
+
+        if (!videoPid && audioPids.length === 0) {
+            return;
+        }
+
+        // Build combined timeline from all PIDs
+        const timelineMap = new Map();
+
+        // Add video data
+        if (videoPid && data.pids[videoPid].history) {
+            for (const [ts, bitrate] of data.pids[videoPid].history) {
+                if (!timelineMap.has(ts)) {
+                    timelineMap.set(ts, { video: 0, audio: 0 });
+                }
+                timelineMap.get(ts).video = bitrate;
+            }
+        }
+
+        // Add audio data (sum all audio PIDs)
+        for (const audioPid of audioPids) {
+            if (data.pids[audioPid] && data.pids[audioPid].history) {
+                for (const [ts, bitrate] of data.pids[audioPid].history) {
+                    if (!timelineMap.has(ts)) {
+                        timelineMap.set(ts, { video: 0, audio: 0 });
+                    }
+                    timelineMap.get(ts).audio += bitrate;
+                }
+            }
+        }
+
+        // Sort by timestamp
+        const sortedTimestamps = Array.from(timelineMap.keys()).sort((a, b) => a - b);
+
+        // We need to merge input timestamps with existing bitrateTimestamps from output history
+        // Create a unified timeline with both input and output data
+        const unifiedTimeline = new Map();
+
+        // Add existing output data to unified timeline
+        for (let i = 0; i < bitrateTimestamps.length; i++) {
+            const ts = bitrateTimestamps[i];
+            unifiedTimeline.set(ts, {
+                inVideo: 0,
+                inAudio: 0,
+                outVideo: outputVideoHistory[i] || 0,
+                outAudio: outputAudioHistory[i] || 0
+            });
+        }
+
+        // Add input data to unified timeline
+        for (const ts of sortedTimestamps) {
+            const values = timelineMap.get(ts);
+            if (!unifiedTimeline.has(ts)) {
+                unifiedTimeline.set(ts, {
+                    inVideo: 0,
+                    inAudio: 0,
+                    outVideo: 0,
+                    outAudio: 0
+                });
+            }
+            unifiedTimeline.get(ts).inVideo = values.video;
+            unifiedTimeline.get(ts).inAudio = values.audio;
+        }
+
+        // Sort unified timeline and rebuild all arrays
+        const unifiedSorted = Array.from(unifiedTimeline.keys()).sort((a, b) => a - b);
+
+        // Reset arrays
+        inputVideoHistory = [];
+        inputAudioHistory = [];
+        outputVideoHistory = [];
+        outputAudioHistory = [];
+        bitrateTimestamps = [];
+
+        // Carry forward last known values
+        let lastInVid = 0, lastInAud = 0, lastOutVid = 0, lastOutAud = 0;
+
+        for (const ts of unifiedSorted) {
+            const v = unifiedTimeline.get(ts);
+            if (v.inVideo > 0) lastInVid = v.inVideo;
+            if (v.inAudio > 0) lastInAud = v.inAudio;
+            if (v.outVideo > 0) lastOutVid = v.outVideo;
+            if (v.outAudio > 0) lastOutAud = v.outAudio;
+
+            // Only include if we have any data
+            if (lastInVid > 0 || lastOutVid > 0) {
+                inputVideoHistory.push(lastInVid);
+                inputAudioHistory.push(lastInAud);
+                outputVideoHistory.push(lastOutVid);
+                outputAudioHistory.push(lastOutAud);
+                bitrateTimestamps.push(ts);
+            }
+        }
+
+        // Limit to last MAX_HISTORY_POINTS
+        if (bitrateTimestamps.length > MAX_HISTORY_POINTS) {
+            const start = bitrateTimestamps.length - MAX_HISTORY_POINTS;
+            inputVideoHistory = inputVideoHistory.slice(start);
+            inputAudioHistory = inputAudioHistory.slice(start);
+            outputVideoHistory = outputVideoHistory.slice(start);
+            outputAudioHistory = outputAudioHistory.slice(start);
+            bitrateTimestamps = bitrateTimestamps.slice(start);
+        }
+
+        // Update chart
+        if (bitrateChart && bitrateTimestamps.length > 0) {
+            const labels = bitrateTimestamps.map(ts => {
+                return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+            });
+
+            bitrateChart.data.labels = labels;
+            bitrateChart.data.datasets[0].data = [...inputVideoHistory];
+            bitrateChart.data.datasets[1].data = [...inputAudioHistory];
+            bitrateChart.data.datasets[2].data = [...outputVideoHistory];
+            bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+            bitrateChart.update('none');
+        }
+    } catch (e) {
+        console.error('Failed to load input bitrate history:', e);
+    }
+}
+
 // Initialize A/V sync chart
 function initAVSyncChart() {
     const ctx = document.getElementById('avsyncChart').getContext('2d');
@@ -929,6 +1098,53 @@ async function loadAVSyncHistory(transcoderId) {
     }
 }
 
+// Load full continuity error count from log file
+async function loadContinuityErrors(transcoderId) {
+    try {
+        const response = await fetch(`api/transcoders.php?action=continuity_errors&id=${transcoderId}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            console.log('Failed to load continuity errors:', data.error);
+            return;
+        }
+
+        const errorCount = data.total_errors || 0;
+        const errorsByPid = data.errors_by_pid || {};
+
+        document.getElementById('continuityErrorCount').textContent = errorCount;
+
+        // Update health status badge
+        const healthBadge = document.getElementById('healthStatus');
+        if (errorCount === 0) {
+            healthBadge.className = 'badge bg-success';
+            healthBadge.textContent = 'OK';
+        } else if (errorCount < 50) {
+            healthBadge.className = 'badge bg-warning';
+            healthBadge.textContent = 'Warning';
+        } else {
+            healthBadge.className = 'badge bg-danger';
+            healthBadge.textContent = 'Errors';
+        }
+
+        // Show error details by PID if there are errors
+        const detailsDiv = document.getElementById('continuityErrorDetails');
+        const pidDiv = document.getElementById('continuityErrorsByPid');
+        if (errorCount > 0 && Object.keys(errorsByPid).length > 0) {
+            let pidHtml = '';
+            for (const [pid, count] of Object.entries(errorsByPid)) {
+                pidHtml += `<span class="me-2">PID ${pid}: <strong>${count}</strong></span>`;
+            }
+            pidDiv.innerHTML = pidHtml;
+            detailsDiv.classList.remove('d-none');
+        } else {
+            detailsDiv.classList.add('d-none');
+        }
+    } catch (e) {
+        console.error('Failed to load continuity errors:', e);
+    }
+}
+
 // Fetch metrics for preview modal
 async function loadPreviewMetrics() {
     const id = document.getElementById('previewId').value;
@@ -959,10 +1175,13 @@ async function loadPreviewMetrics() {
             // Update input format display - fetch from input's preview_media_info API
             if (metrics.source_service) {
                 document.getElementById('inputSourceName').textContent = '(' + metrics.source_service + ')';
-                // Load detailed input format info (only once per modal open)
+                // Load detailed input format info and history (only once per modal open)
                 if (!window.inputFormatLoaded) {
                     window.inputFormatLoaded = true;
+                    window.currentSourceService = metrics.source_service;
                     loadInputMediaInfo(metrics.source_service);
+                    // Load input bitrate history after output history
+                    loadInputBitrateHistory(metrics.source_service);
                 }
             }
 
@@ -1022,6 +1241,38 @@ async function loadPreviewMetrics() {
             document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
             document.getElementById('graphStatus').className = 'badge bg-success';
             document.getElementById('graphStatus').textContent = 'Live';
+
+            // Update continuity error display
+            const errorCount = metrics.continuity_errors || 0;
+            const errorsByPid = metrics.continuity_errors_by_pid || {};
+            document.getElementById('continuityErrorCount').textContent = errorCount;
+
+            // Update health status badge
+            const healthBadge = document.getElementById('healthStatus');
+            if (errorCount === 0) {
+                healthBadge.className = 'badge bg-success';
+                healthBadge.textContent = 'OK';
+            } else if (errorCount < 10) {
+                healthBadge.className = 'badge bg-warning';
+                healthBadge.textContent = 'Warning';
+            } else {
+                healthBadge.className = 'badge bg-danger';
+                healthBadge.textContent = 'Errors';
+            }
+
+            // Show error details by PID if there are errors
+            const detailsDiv = document.getElementById('continuityErrorDetails');
+            const pidDiv = document.getElementById('continuityErrorsByPid');
+            if (errorCount > 0 && Object.keys(errorsByPid).length > 0) {
+                let pidHtml = '';
+                for (const [pid, count] of Object.entries(errorsByPid)) {
+                    pidHtml += `<span class="me-2">PID ${pid}: <strong>${count}</strong></span>`;
+                }
+                pidDiv.innerHTML = pidHtml;
+                detailsDiv.classList.remove('d-none');
+            } else {
+                detailsDiv.classList.add('d-none');
+            }
         } else {
             document.getElementById('graphStatus').className = 'badge bg-danger';
             document.getElementById('graphStatus').textContent = 'Offline';
@@ -1103,7 +1354,7 @@ async function loadOutputMediaInfo(outputAddress) {
 }
 
 // Show preview modal
-function showPreview(id, name) {
+async function showPreview(id, name) {
     document.getElementById('previewId').value = id;
     document.getElementById('previewName').textContent = name;
     document.getElementById('previewApiPort').value = '';
@@ -1152,18 +1403,25 @@ function showPreview(id, name) {
     document.getElementById('monitorOutputVideoBitrate').textContent = '-';
     document.getElementById('monitorOutputAudioBitrate').textContent = '-';
 
+    // Reset health/continuity error displays
+    document.getElementById('healthStatus').className = 'badge bg-secondary';
+    document.getElementById('healthStatus').textContent = 'Loading...';
+    document.getElementById('continuityErrorCount').textContent = '-';
+    document.getElementById('continuityErrorDetails').classList.add('d-none');
+
     // Initialize charts
     initBitrateChart();
     initAVSyncChart();
 
-    // Load historical output bitrate data
-    loadBitrateHistory(id);
+    // Load historical output bitrate data first (await to ensure it's ready before input history)
+    await loadBitrateHistory(id);
 
-    // Load initial metrics
+    // Load initial metrics (this will trigger input history loading after source_service is known)
     loadPreviewMetrics();
 
-    // Load A/V sync data
+    // Load A/V sync data and full continuity error count
     loadAVSyncHistory(id);
+    loadContinuityErrors(id);
 
     // Start polling
     if (previewInterval) clearInterval(previewInterval);
