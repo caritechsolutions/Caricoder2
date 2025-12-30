@@ -47,7 +47,8 @@ function getResolution($config) {
         $height = $config['scaling']['height'] ?? '?';
         return "{$width}x{$height}";
     }
-    return 'Passthrough';
+    // When scaling is disabled, resolution is preserved from input
+    return '';
 }
 ?>
 
@@ -84,6 +85,35 @@ function getResolution($config) {
 .transcoder-row:hover {
     background-color: rgba(13, 110, 253, 0.05) !important;
 }
+
+/* A/V Sync Styles */
+.avsync-stat-card {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+}
+.avsync-stat-card .stat-label {
+    font-size: 0.75rem;
+    color: #6c757d;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.avsync-stat-card .stat-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #212529;
+}
+.avsync-stat-card .stat-sublabel {
+    font-size: 0.7rem;
+    color: #adb5bd;
+}
+.avsync-stat-card .stat-value.status-ok { color: #16a34a; }
+.avsync-stat-card .stat-value.status-warning { color: #d97706; }
+.avsync-stat-card .stat-value.status-error { color: #dc2626; }
+.badge.avsync-ok { background-color: #16a34a !important; }
+.badge.avsync-warning { background-color: #d97706 !important; }
+.badge.avsync-error { background-color: #dc2626 !important; }
 </style>
 
 <div class="container-fluid py-4">
@@ -180,7 +210,7 @@ function getResolution($config) {
                         </td>
                         <td>
                             <span class="badge bg-info codec-badge"><?php echo getCodecDisplay($videoCodec); ?></span>
-                            <small class="text-muted ms-1"><?php echo $resolution; ?></small>
+                            <?php if ($resolution): ?><small class="text-muted ms-1"><?php echo $resolution; ?></small><?php endif; ?>
                             <br>
                             <small class="text-muted"><?php echo format_bitrate($videoBitrate); ?></small>
                         </td>
@@ -398,17 +428,46 @@ function getResolution($config) {
                     </div>
                 </div>
 
-                <!-- A/V Sync Placeholder -->
+                <!-- A/V Sync Monitor -->
                 <div class="card">
-                    <div class="card-header py-2">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
                         <strong><i class="bi bi-soundwave me-1"></i>A/V Sync Monitor</strong>
-                        <span class="badge bg-secondary ms-2">Pending</span>
+                        <div class="small">
+                            <span id="avsyncStatus" class="badge bg-secondary">Loading...</span>
+                            Updated: <span id="avsyncLastUpdate">-</span>
+                        </div>
                     </div>
-                    <div class="card-body">
-                        <div class="text-center text-muted py-3">
-                            <i class="bi bi-clock-history me-2"></i>
-                            A/V sync monitoring requires integration with output analyzer.
-                            <br><small>Coming in future update.</small>
+                    <div class="card-body py-2">
+                        <!-- A/V Sync Stats -->
+                        <div class="row g-2 mb-3">
+                            <div class="col-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">Audio→Video</div>
+                                    <div class="stat-value" id="avsyncA2V">-</div>
+                                    <div class="stat-sublabel">A2V gap</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">Video→Audio</div>
+                                    <div class="stat-value" id="avsyncV2A">-</div>
+                                    <div class="stat-sublabel">V2A gap</div>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="avsync-stat-card">
+                                    <div class="stat-label">Status</div>
+                                    <div class="stat-value" id="avsyncCurrentStatus">-</div>
+                                    <div class="stat-sublabel" id="avsyncSamples">- samples</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- A/V Sync Graph -->
+                        <div class="position-relative" style="height: 150px;">
+                            <canvas id="avsyncChart"></canvas>
+                        </div>
+                        <div class="text-center mt-1">
+                            <small class="text-muted">24-hour A/V sync history (polled every 5 minutes)</small>
                         </div>
                     </div>
                 </div>
@@ -426,6 +485,8 @@ let metricsInterval = null;
 let previewModal = null;
 let bitrateChart = null;
 let previewInterval = null;
+let avsyncChart = null;
+let avsyncUpdateInterval = null;
 let inputVideoHistory = [];
 let inputAudioHistory = [];
 let outputVideoHistory = [];
@@ -615,6 +676,209 @@ function initBitrateChart() {
             }
         }
     });
+}
+
+// Load historical bitrate data for output
+async function loadBitrateHistory(transcoderId) {
+    try {
+        const response = await fetch(`api/transcoders.php?action=metrics_history&id=${transcoderId}`);
+        const data = await response.json();
+
+        if (data.success && data.pids) {
+            const videoPid = data.video_pid;
+            const audioPid = data.audio_pid;
+
+            // Load output history (video and audio)
+            if (data.pids[videoPid] && data.pids[videoPid].history) {
+                for (const [ts, bitrate] of data.pids[videoPid].history) {
+                    outputVideoHistory.push(bitrate);
+                }
+            }
+            if (data.pids[audioPid] && data.pids[audioPid].history) {
+                for (const [ts, bitrate] of data.pids[audioPid].history) {
+                    outputAudioHistory.push(bitrate);
+                }
+            }
+
+            // Trim to max points
+            if (outputVideoHistory.length > MAX_HISTORY_POINTS) {
+                outputVideoHistory = outputVideoHistory.slice(-MAX_HISTORY_POINTS);
+            }
+            if (outputAudioHistory.length > MAX_HISTORY_POINTS) {
+                outputAudioHistory = outputAudioHistory.slice(-MAX_HISTORY_POINTS);
+            }
+
+            // Update chart with loaded history
+            if (bitrateChart && outputVideoHistory.length > 0) {
+                const labels = Array(outputVideoHistory.length).fill('').map((_, i) => {
+                    const idx = outputVideoHistory.length - 1 - i;
+                    return idx % 12 === 0 ? `-${Math.floor(idx * 5 / 60)}m` : '';
+                }).reverse();
+
+                bitrateChart.data.labels = labels;
+                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
+                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+                bitrateChart.update('none');
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load bitrate history:', e);
+    }
+}
+
+// Initialize A/V sync chart
+function initAVSyncChart() {
+    const ctx = document.getElementById('avsyncChart').getContext('2d');
+
+    if (avsyncChart) {
+        avsyncChart.destroy();
+    }
+
+    avsyncChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'A→V',
+                    data: [],
+                    borderColor: '#0d6efd',
+                    backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 1,
+                    borderWidth: 2
+                },
+                {
+                    label: 'V→A',
+                    data: [],
+                    borderColor: '#6c757d',
+                    backgroundColor: 'rgba(108, 117, 125, 0.1)',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 1,
+                    borderWidth: 2
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, position: 'bottom', labels: { boxWidth: 12, font: { size: 10 } } }
+            },
+            scales: {
+                x: { display: true, ticks: { font: { size: 9 }, maxTicksLimit: 8 } },
+                y: {
+                    display: true,
+                    beginAtZero: true,
+                    title: { display: false },
+                    ticks: { font: { size: 9 }, callback: v => v + 'ms' }
+                }
+            }
+        }
+    });
+}
+
+// Load A/V sync data from cari-avsync service
+async function loadAVSyncHistory(transcoderId) {
+    try {
+        document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+        document.getElementById('avsyncStatus').textContent = 'Loading...';
+
+        // Fetch from cari-avsync API
+        const response = await fetch(`http://${window.location.hostname}:8082/history/${transcoderId}`);
+        const data = await response.json();
+
+        if (!data.running) {
+            document.getElementById('avsyncStatus').className = 'badge bg-warning';
+            document.getElementById('avsyncStatus').textContent = 'Not Running';
+            document.getElementById('avsyncA2V').textContent = '-';
+            document.getElementById('avsyncV2A').textContent = '-';
+            document.getElementById('avsyncCurrentStatus').textContent = '-';
+            document.getElementById('avsyncSamples').textContent = 'Transcoder not running';
+            return;
+        }
+
+        // Display current values
+        let displayData = null;
+        if (data.current && data.current.a2v_mean_ms !== undefined) {
+            displayData = data.current;
+        } else if (data.history && data.history.length > 0) {
+            displayData = data.history[data.history.length - 1];
+        }
+
+        if (displayData) {
+            const a2v = displayData.a2v_mean_ms || displayData.a2v_avg_ms || 0;
+            const v2a = displayData.v2a_mean_ms || displayData.v2a_avg_ms || 0;
+            const status = displayData.status || 'OK';
+            const samples = (displayData.a2v_count || 0) + (displayData.v2a_count || 0);
+
+            document.getElementById('avsyncA2V').textContent = a2v.toFixed(1) + ' ms';
+            document.getElementById('avsyncV2A').textContent = v2a.toFixed(1) + ' ms';
+
+            const statusEl = document.getElementById('avsyncCurrentStatus');
+            statusEl.textContent = status;
+            statusEl.className = 'stat-value status-' + status.toLowerCase();
+
+            document.getElementById('avsyncSamples').textContent = samples + ' samples';
+
+            if (displayData.unix_ts) {
+                const localTime = new Date(displayData.unix_ts * 1000).toLocaleTimeString();
+                document.getElementById('avsyncLastUpdate').textContent = localTime;
+            } else {
+                document.getElementById('avsyncLastUpdate').textContent = displayData.timestamp || '-';
+            }
+
+            const badge = document.getElementById('avsyncStatus');
+            if (status === 'OK') {
+                badge.className = 'badge avsync-ok';
+                badge.textContent = 'OK';
+            } else if (status === 'WARNING') {
+                badge.className = 'badge avsync-warning';
+                badge.textContent = 'Warning';
+            } else {
+                badge.className = 'badge avsync-error';
+                badge.textContent = 'Error';
+            }
+        } else {
+            document.getElementById('avsyncStatus').className = 'badge bg-secondary';
+            document.getElementById('avsyncStatus').textContent = 'No Data';
+            document.getElementById('avsyncA2V').textContent = '-';
+            document.getElementById('avsyncV2A').textContent = '-';
+            document.getElementById('avsyncCurrentStatus').textContent = '-';
+            document.getElementById('avsyncSamples').textContent = 'No measurements yet';
+        }
+
+        // Update chart with history
+        if (avsyncChart && data.history && data.history.length > 0) {
+            avsyncChart.data.labels = [];
+            avsyncChart.data.datasets[0].data = [];
+            avsyncChart.data.datasets[1].data = [];
+
+            for (const entry of data.history) {
+                let shortTime = '';
+                if (entry.unix_ts) {
+                    shortTime = new Date(entry.unix_ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                } else if (entry.timestamp) {
+                    shortTime = entry.timestamp.split(' ')[1] || entry.timestamp;
+                }
+                avsyncChart.data.labels.push(shortTime);
+                avsyncChart.data.datasets[0].data.push(entry.a2v_mean_ms || entry.a2v_avg_ms || 0);
+                avsyncChart.data.datasets[1].data.push(entry.v2a_mean_ms || entry.v2a_avg_ms || 0);
+            }
+            avsyncChart.update();
+        }
+    } catch (e) {
+        console.error('Failed to load A/V sync history:', e);
+        document.getElementById('avsyncStatus').className = 'badge bg-danger';
+        document.getElementById('avsyncStatus').textContent = 'Error';
+        document.getElementById('avsyncA2V').textContent = '-';
+        document.getElementById('avsyncV2A').textContent = '-';
+        document.getElementById('avsyncCurrentStatus').textContent = 'Unavailable';
+        document.getElementById('avsyncCurrentStatus').className = 'stat-value';
+        document.getElementById('avsyncSamples').textContent = 'Service not reachable';
+    }
 }
 
 // Fetch metrics for preview modal
@@ -837,15 +1101,26 @@ function showPreview(id, name) {
     document.getElementById('monitorOutputVideoBitrate').textContent = '-';
     document.getElementById('monitorOutputAudioBitrate').textContent = '-';
 
-    // Initialize chart
+    // Initialize charts
     initBitrateChart();
+    initAVSyncChart();
+
+    // Load historical output bitrate data
+    loadBitrateHistory(id);
 
     // Load initial metrics
     loadPreviewMetrics();
 
+    // Load A/V sync data
+    loadAVSyncHistory(id);
+
     // Start polling
     if (previewInterval) clearInterval(previewInterval);
     previewInterval = setInterval(loadPreviewMetrics, 5000);
+
+    // Start A/V sync updates (every 5 minutes)
+    if (avsyncUpdateInterval) clearInterval(avsyncUpdateInterval);
+    avsyncUpdateInterval = setInterval(() => loadAVSyncHistory(id), 300000);
 
     // Show modal
     if (!previewModal) {
@@ -859,6 +1134,11 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
     if (previewInterval) {
         clearInterval(previewInterval);
         previewInterval = null;
+    }
+
+    if (avsyncUpdateInterval) {
+        clearInterval(avsyncUpdateInterval);
+        avsyncUpdateInterval = null;
     }
 
     // Stop player if running

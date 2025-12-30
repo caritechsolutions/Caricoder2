@@ -68,6 +68,9 @@ switch ($action) {
     case 'all_metrics':
         handle_all_metrics();
         break;
+    case 'metrics_history':
+        handle_metrics_history();
+        break;
     case 'list':
     default:
         handle_list();
@@ -695,6 +698,104 @@ function handle_all_metrics() {
     }
 
     echo json_encode(['success' => true, 'transcoders' => $all_metrics]);
+}
+
+/**
+ * Get historical metrics for a transcoder
+ * Parses the full log file for bitrate history
+ */
+function handle_metrics_history() {
+    $id = $_GET['id'] ?? '';
+    if (empty($id)) {
+        echo json_encode(['success' => false, 'error' => 'Transcoder ID required']);
+        return;
+    }
+
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        echo json_encode(['success' => false, 'error' => 'Transcoder not found']);
+        return;
+    }
+
+    $config = parse_config($config_file);
+    $video_pid = intval($config['output']['video_pid'] ?? 256);
+    $audio_pid = intval($config['output']['audio_pid'] ?? 257);
+
+    $history = [
+        'success' => true,
+        'transcoder_id' => $id,
+        'video_pid' => $video_pid,
+        'audio_pid' => $audio_pid,
+        'pids' => [
+            $video_pid => ['history' => []],
+            $audio_pid => ['history' => []]
+        ]
+    ];
+
+    if (!file_exists($log_file) || !is_readable($log_file)) {
+        echo json_encode($history);
+        return;
+    }
+
+    // Read the entire log file (or last N KB for performance)
+    $max_bytes = 256 * 1024; // Read last 256KB
+    $file_size = filesize($log_file);
+    $fp = fopen($log_file, 'r');
+    if (!$fp) {
+        echo json_encode($history);
+        return;
+    }
+
+    // Seek to near end if file is large
+    if ($file_size > $max_bytes) {
+        fseek($fp, $file_size - $max_bytes);
+        fgets($fp); // Skip partial line
+    }
+
+    $video_history = [];
+    $audio_history = [];
+
+    // Parse bitrate_monitor output lines
+    // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
+    while (!feof($fp)) {
+        $line = fgets($fp);
+        if ($line === false) break;
+
+        if (strpos($line, 'bitrate_monitor') !== false &&
+            preg_match('/bitrate_monitor:\s*(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}),\s*PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
+
+            $timestamp_str = $matches[1];
+            $pid = intval($matches[2]);
+            $bitrate = intval(str_replace(',', '', $matches[3]));
+
+            // Convert to unix timestamp
+            $timestamp = strtotime(str_replace('/', '-', $timestamp_str));
+
+            if ($pid === $video_pid) {
+                $video_history[] = [$timestamp, $bitrate];
+            } elseif ($pid === $audio_pid) {
+                $audio_history[] = [$timestamp, $bitrate];
+            }
+        }
+    }
+    fclose($fp);
+
+    // Keep last 300 samples (about 10 minutes at 2-second intervals)
+    $max_samples = 300;
+    if (count($video_history) > $max_samples) {
+        $video_history = array_slice($video_history, -$max_samples);
+    }
+    if (count($audio_history) > $max_samples) {
+        $audio_history = array_slice($audio_history, -$max_samples);
+    }
+
+    $history['pids'][$video_pid]['history'] = $video_history;
+    $history['pids'][$audio_pid]['history'] = $audio_history;
+
+    echo json_encode($history);
 }
 
 /**
