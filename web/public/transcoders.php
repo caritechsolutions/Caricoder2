@@ -690,13 +690,14 @@ async function loadBitrateHistory(transcoderId) {
             const audioPid = data.audio_pid;
 
             // Build combined timeline from video and audio PIDs
+            // Video and audio samples alternate, so we need to track which has data
             const timelineMap = new Map();
 
             // Add video data
             if (data.pids[videoPid] && data.pids[videoPid].history) {
                 for (const [ts, bitrate] of data.pids[videoPid].history) {
                     if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: 0, audio: 0 });
+                        timelineMap.set(ts, { video: null, audio: null });
                     }
                     timelineMap.get(ts).video = bitrate;
                 }
@@ -706,28 +707,44 @@ async function loadBitrateHistory(transcoderId) {
             if (data.pids[audioPid] && data.pids[audioPid].history) {
                 for (const [ts, bitrate] of data.pids[audioPid].history) {
                     if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: 0, audio: 0 });
+                        timelineMap.set(ts, { video: null, audio: null });
                     }
                     timelineMap.get(ts).audio = bitrate;
                 }
             }
 
-            // Sort by timestamp and populate arrays
+            // Sort by timestamp
             const sortedTimestamps = Array.from(timelineMap.keys()).sort((a, b) => a - b);
-
-            // Limit to last MAX_HISTORY_POINTS for display
-            const displayTimestamps = sortedTimestamps.slice(-MAX_HISTORY_POINTS);
 
             // Reset arrays
             outputVideoHistory = [];
             outputAudioHistory = [];
             bitrateTimestamps = [];
 
-            for (const ts of displayTimestamps) {
+            // Carry forward last known values for missing data
+            let lastVideo = 0;
+            let lastAudio = 0;
+
+            for (const ts of sortedTimestamps) {
                 const values = timelineMap.get(ts);
-                outputVideoHistory.push(values.video);
-                outputAudioHistory.push(values.audio);
-                bitrateTimestamps.push(ts);
+
+                // Update last known values if we have new data
+                if (values.video !== null) lastVideo = values.video;
+                if (values.audio !== null) lastAudio = values.audio;
+
+                // Only add entries where we have BOTH values (skip until we have both)
+                if (lastVideo > 0 || lastAudio > 0) {
+                    outputVideoHistory.push(lastVideo);
+                    outputAudioHistory.push(lastAudio);
+                    bitrateTimestamps.push(ts);
+                }
+            }
+
+            // Limit to last MAX_HISTORY_POINTS for display
+            if (outputVideoHistory.length > MAX_HISTORY_POINTS) {
+                outputVideoHistory = outputVideoHistory.slice(-MAX_HISTORY_POINTS);
+                outputAudioHistory = outputAudioHistory.slice(-MAX_HISTORY_POINTS);
+                bitrateTimestamps = bitrateTimestamps.slice(-MAX_HISTORY_POINTS);
             }
 
             // Update chart with loaded history
