@@ -1983,8 +1983,7 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
         f"--video-bitrate {service_data.video_bitrate}",
         f"--audio-bitrate {service_data.audio_bitrate}",
         f"--video-pid {service_data.video_pid}",
-        f"--audio-pid {service_data.audio_pid}",
-        "--stdout"
+        f"--audio-pid {service_data.audio_pid}"
     ]
 
     # Video mode
