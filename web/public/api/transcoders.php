@@ -56,6 +56,9 @@ switch ($action) {
     case 'stop_preview':
         handle_stop_preview();
         break;
+    case 'preview_keepalive':
+        handle_preview_keepalive();
+        break;
     case 'inputs':
         handle_get_inputs();
         break;
@@ -649,6 +652,35 @@ function handle_stop_preview() {
 }
 
 /**
+ * Send keepalive to player_preview
+ */
+function handle_preview_keepalive() {
+    $api_port = intval($_GET['api_port'] ?? 0);
+
+    if ($api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'API port required']);
+        return;
+    }
+
+    // Send keepalive directly to preview port
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'POST',
+            'timeout' => 2,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents("http://127.0.0.1:{$api_port}/keepalive", false, $ctx);
+
+    if ($response !== false) {
+        echo json_encode(['success' => true]);
+    } else {
+        echo json_encode(['success' => false, 'error' => 'Keepalive failed']);
+    }
+}
+
+/**
  * Get metrics for all transcoders
  * Parses tsp bitrate_monitor output from log files
  */
@@ -750,8 +782,11 @@ function get_transcoder_metrics($id) {
             }
         }
 
-        // Parse output address: -O ip ADDRESS:PORT
-        if (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+        // Parse output address: --udp-host HOST --udp-port PORT (new format)
+        // or -O ip ADDRESS:PORT (legacy format)
+        if (preg_match('/--udp-host\s+(\d+\.\d+\.\d+\.\d+)\s+--udp-port\s+(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
+        } elseif (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
             $metrics['output_address'] = $matches[1] . ':' . $matches[2];
         }
     }

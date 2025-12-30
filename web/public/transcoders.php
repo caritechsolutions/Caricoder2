@@ -930,6 +930,18 @@ window.addEventListener('beforeunload', function() {
 // Output player state
 let outputHlsPlayer = null;
 let outputPlayerRunning = false;
+let outputKeepaliveInterval = null;
+let currentPreviewPort = null;
+
+// Send keepalive to preview via API
+async function sendOutputKeepalive() {
+    if (!currentPreviewPort) return;
+    try {
+        await fetch(`api/transcoders.php?action=preview_keepalive&api_port=${currentPreviewPort}`, { method: 'POST' });
+    } catch (e) {
+        console.error('Keepalive failed:', e);
+    }
+}
 
 // Start output player preview
 async function startOutputPlayer() {
@@ -952,7 +964,7 @@ async function startOutputPlayer() {
         // Start player_preview for the output stream
         // Use /preview/ path to match inputs page structure
         const folderName = `transcoder-${id}`;
-        const outputDir = `/var/www/caricoder/public/preview/${folderName}`;
+        const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
         const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
 
         const response = await fetch('api/transcoders.php?action=start_preview', {
@@ -970,15 +982,20 @@ async function startOutputPlayer() {
 
         if (data.success) {
             outputPlayerRunning = true;
+            currentPreviewPort = previewPort;
             document.getElementById('playerStatus').className = 'badge bg-info me-2';
             document.getElementById('playerStatus').textContent = 'Loading...';
             document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
-            // Wait a moment for HLS segments to be generated, then start polling
+            // Start keepalive (every 30 seconds)
+            if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
+            outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
+
+            // Wait for HLS segments to be generated (5 seconds for keyframe + encoding)
             setTimeout(() => {
                 const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
                 initOutputHlsPlayer(playlistUrl);
-            }, 3000);
+            }, 5000);
         } else {
             throw new Error(data.error || 'Failed to start preview');
         }
@@ -997,6 +1014,13 @@ async function stopOutputPlayer() {
     const id = document.getElementById('previewId').value;
     const apiPort = document.getElementById('previewApiPort').value;
     const previewPort = parseInt(apiPort) + 100;
+
+    // Stop keepalive
+    if (outputKeepaliveInterval) {
+        clearInterval(outputKeepaliveInterval);
+        outputKeepaliveInterval = null;
+    }
+    currentPreviewPort = null;
 
     // Destroy HLS player
     if (outputHlsPlayer) {

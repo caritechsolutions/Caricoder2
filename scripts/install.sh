@@ -152,9 +152,17 @@ install_dependencies() {
 install_tsduck() {
     log_step "Installing TSDuck..."
 
+    # Check if TSDuck is installed AND working (not just present)
     if command -v tsp &> /dev/null; then
-        log_info "TSDuck already installed: $(tsp --version 2>&1 | head -1)"
-        return 0
+        if tsp --version &> /dev/null; then
+            log_info "TSDuck already installed: $(tsp --version 2>&1 | head -1)"
+            return 0
+        else
+            # TSDuck exists but is broken (library issues) - remove it
+            log_warn "TSDuck is installed but broken, removing..."
+            dpkg --purge tsduck 2>/dev/null || true
+            apt-get remove --purge tsduck -y 2>/dev/null || true
+        fi
     fi
 
     # Detect architecture and OS version
@@ -177,12 +185,10 @@ install_tsduck() {
             UBUNTU_TAG="ubuntu24"
             ;;
         jammy)
-            # Ubuntu 22.04 - must download from GitHub (not in local repo, can't use ubuntu24 due to ABI changes)
-            # Note: 3.33-3139 is the latest version with ubuntu22 packages on GitHub
+            # Ubuntu 22.04 - download ubuntu22 package from GitHub (ubuntu23 has incompatible deps)
             TSDUCK_VERSION="3.33-3139"
             UBUNTU_TAG="ubuntu22"
             DOWNLOAD_ONLY=true
-            log_info "Ubuntu 22.04 detected, will download from GitHub"
             ;;
         focal)
             # Ubuntu 20.04 - use version that supports focal
@@ -464,6 +470,15 @@ install_gstreamer() {
         git \
         cmake || true
 
+    # Install FFmpeg dev libraries for gst-libav plugin
+    apt-get install -y \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libavfilter-dev \
+        libswresample-dev \
+        libswscale-dev || true
+
     # Install graphene library (prevents meson from downloading it)
     apt-get install -y libgraphene-1.0-dev 2>/dev/null || true
 
@@ -506,7 +521,7 @@ install_gstreamer() {
         -Dgpl=enabled \
         -Dugly=enabled \
         -Dbad=enabled \
-        -Dlibav=disabled \
+        -Dlibav=enabled \
         -Ddevtools=disabled \
         -Ddoc=disabled \
         -Dexamples=disabled \
@@ -635,18 +650,30 @@ download_repo() {
     log_info "Downloading from: $TARBALL_URL"
 
     local DOWNLOAD_OK=false
-    if command -v wget &> /dev/null; then
-        if wget --no-check-certificate -q -O repo.tar.gz "$TARBALL_URL"; then
-            DOWNLOAD_OK=true
+
+    # Try curl first (better redirect handling), then wget
+    for attempt in 1 2 3; do
+        if command -v curl &> /dev/null; then
+            log_info "Download attempt $attempt using curl..."
+            if curl -k -L -f --connect-timeout 30 --max-time 300 -o repo.tar.gz "$TARBALL_URL" 2>&1; then
+                DOWNLOAD_OK=true
+                break
+            fi
+        elif command -v wget &> /dev/null; then
+            log_info "Download attempt $attempt using wget..."
+            if wget --no-check-certificate --timeout=30 -q -O repo.tar.gz "$TARBALL_URL" 2>&1; then
+                DOWNLOAD_OK=true
+                break
+            fi
         fi
-    else
-        if curl -k -L -f -o repo.tar.gz "$TARBALL_URL" 2>/dev/null; then
-            DOWNLOAD_OK=true
-        fi
-    fi
+        log_warn "Attempt $attempt failed, retrying in 3 seconds..."
+        sleep 3
+    done
 
     if [[ "$DOWNLOAD_OK" = false ]]; then
-        log_error "wget/curl download failed"
+        log_error "Download failed after 3 attempts"
+        log_error "URL: $TARBALL_URL"
+        log_error "Please check network connectivity to github.com"
         rm -rf "$TEMP_DIR"
         exit 1
     fi
@@ -889,6 +916,11 @@ install_web() {
     find "$WEB_DIR" -type d -exec chmod 755 {} \;
     find "$WEB_DIR" -type f -exec chmod 644 {} \;
 
+    # Create preview directory for HLS player
+    mkdir -p "$WEB_DIR/public/preview"
+    chown "$WEB_USER:$WEB_USER" "$WEB_DIR/public/preview"
+    chmod 755 "$WEB_DIR/public/preview"
+
     log_info "Web interface installed to $WEB_DIR"
 }
 
@@ -1114,11 +1146,11 @@ start_services() {
         log_warn "PHP-FPM service not found"
     fi
 
-    # Start Nginx
+    # Start Nginx (always restart to pick up new config)
     if command -v nginx &> /dev/null; then
-        log_info "Starting nginx..."
+        log_info "Restarting nginx..."
         systemctl enable nginx 2>/dev/null || true
-        systemctl start nginx || systemctl restart nginx
+        systemctl restart nginx
     fi
 
     # Verify services are running

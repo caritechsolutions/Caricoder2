@@ -1011,14 +1011,9 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings - leaky=2 (downstream) drops OLD buffers when queue fills
-     * This keeps newest data flowing, critical for live video streaming */
-    const char *queue_settings = "max-size-time=3000000000 max-size-buffers=0 max-size-bytes=0 leaky=2";
-
-    /* Input: udpsrc -> tsparse -> tsdemux (no queue after udpsrc) */
+    /* Input: udpsrc -> queue -> tsparse -> queue -> tsdemux */
     n = snprintf(p, remaining,
-        "udpsrc uri=udp://%s:%d buffer-size=2097152 ! "
-        "tsparse ! tsdemux name=demux ",
+        "udpsrc uri=udp://%s:%d ! queue ! tsparse ! queue ! tsdemux name=demux ",
         g_ctx.input_address, g_ctx.input_port);
     p += n; remaining -= n;
 
@@ -1028,9 +1023,10 @@ static char *build_pipeline_string(void) {
         const char *decoder = get_video_decoder(g_ctx.stream_info.video_codec);
 
         if (parser && decoder) {
+            /* demux -> queue -> parser -> queue -> decoder -> queue */
             n = snprintf(p, remaining,
-                "demux. ! queue %s ! %s ! %s ! videoconvert ! ",
-                queue_settings, parser, decoder);
+                "demux. ! queue ! %s ! queue ! %s ! queue ! ",
+                parser, decoder);
             p += n; remaining -= n;
 
             /* Optional deinterlace */
@@ -1039,10 +1035,10 @@ static char *build_pipeline_string(void) {
                 p += n; remaining -= n;
             }
 
-            /* Optional scaling */
+            /* Optional scaling - needs videoconvert */
             if (g_ctx.scale_width > 0 && g_ctx.scale_height > 0) {
                 n = snprintf(p, remaining,
-                    "videoscale method=%d add-borders=%s n-threads=%d ! "
+                    "videoconvert ! videoscale method=%d add-borders=%s n-threads=%d ! "
                     "video/x-raw,width=%d,height=%d ! ",
                     g_ctx.scale_method,
                     g_ctx.scale_add_borders ? "true" : "false",
@@ -1053,69 +1049,30 @@ static char *build_pipeline_string(void) {
 
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
-                case VIDEO_CODEC_H264: {
-                    /* Build x264enc with all options
-                     * qos=false prevents dropping frames when running behind */
+                case VIDEO_CODEC_H264:
+                    /* x264enc with CBR mode and VBV buffer for consistent bitrate */
                     n = snprintf(p, remaining,
-                        "x264enc tune=zerolatency qos=false speed-preset=%s bitrate=%d key-int-max=%d "
-                        "bframes=%d ref=%d qp-min=%d qp-max=%d vbv-buf-capacity=%d "
-                        "rc-lookahead=%d threads=%d sliced-threads=%s b-adapt=%s "
-                        "cabac=%s trellis=%s aud=%s intra-refresh=%s interlaced=%s ",
-                        preset_to_gst_string(g_ctx.video_preset),
+                        "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d "
+                        "pass=cbr vbv-buf-capacity=120 ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
+                        preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
                         g_ctx.x264_bframes,
-                        g_ctx.x264_ref,
-                        g_ctx.x264_qp_min,
-                        g_ctx.x264_qp_max,
-                        g_ctx.x264_vbv_buf,
-                        g_ctx.x264_rc_lookahead,
-                        g_ctx.x264_threads,
-                        g_ctx.x264_sliced_threads ? "true" : "false",
-                        g_ctx.x264_b_adapt ? "true" : "false",
-                        g_ctx.x264_cabac ? "true" : "false",
-                        g_ctx.x264_trellis ? "true" : "false",
-                        g_ctx.x264_aud ? "true" : "false",
-                        g_ctx.x264_intra_refresh ? "true" : "false",
-                        g_ctx.x264_interlaced ? "true" : "false");
-                    p += n; remaining -= n;
-
-                    /* Add optional psy-tune */
-                    if (g_ctx.x264_psy_tune[0] != '\0') {
-                        n = snprintf(p, remaining, "psy-tune=%s ", g_ctx.x264_psy_tune);
-                        p += n; remaining -= n;
-                    }
-
-                    /* Add optional custom options */
-                    if (g_ctx.x264_option_string[0] != '\0') {
-                        n = snprintf(p, remaining, "option-string=\"%s\" ", g_ctx.x264_option_string);
-                        p += n; remaining -= n;
-                    }
-
-                    /* h264parse before mux for proper stream formatting
-                     * Add queue before mux to prevent backpressure from blocking video */
-                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! queue %s ! mux.sink_%d ",
-                        queue_settings, g_ctx.video_pid);
+                        g_ctx.video_pid);
                     break;
-                }
                 case VIDEO_CODEC_H265:
-                    /* x265enc with h265parse config-interval=-1 for proper muxing */
                     n = snprintf(p, remaining,
-                        "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
-                        "h265parse config-interval=-1 ! queue %s ! mux.sink_%d ",
-                        preset_to_gst_string(g_ctx.video_preset),
+                        "x265enc bitrate=%d speed-preset=%s key-int-max=%d ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
+                        preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
-                        queue_settings,
                         g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
-                    /* mpeg2 with mpegvideoparse before mux */
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! queue %s ! mux.sink_%d ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate,
                         g_ctx.keyframe_interval,
-                        queue_settings,
                         g_ctx.video_pid);
                     break;
                 default:
@@ -1124,82 +1081,75 @@ static char *build_pipeline_string(void) {
             p += n; remaining -= n;
         }
     } else if (g_ctx.video_mode == MODE_DROP) {
-        n = snprintf(p, remaining, "demux. ! queue %s ! fakesink ", queue_settings);
+        n = snprintf(p, remaining, "demux. ! queue ! fakesink ");
         p += n; remaining -= n;
     }
-    /* TODO: passthrough mode */
 
-    /* Audio branch - with parser before mux */
+    /* Audio branch */
     if (g_ctx.audio_mode == MODE_TRANSCODE && g_ctx.stream_info.audio_detected) {
         const char *parser = get_audio_parser(g_ctx.stream_info.audio_codec);
         const char *decoder = get_audio_decoder(g_ctx.stream_info.audio_codec);
 
         if (parser && decoder) {
-            /* Base audio pipeline up to encoder */
+            /* demux -> queue -> parser -> decoder -> audioconvert */
             n = snprintf(p, remaining,
-                "demux. ! queue %s ! %s ! %s ! audioconvert ! audioresample ! ",
-                queue_settings, parser, decoder);
+                "demux. ! queue ! %s ! %s ! audioconvert ! ",
+                parser, decoder);
             p += n; remaining -= n;
 
-            /* Audio encoder with codec-specific options + parser before mux
-             * Add queue before mux to prevent backpressure from blocking audio */
+            /* Audio encoder based on output codec */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
-                    /* Set audio format via caps, then avenc_aac with basic settings */
+                    /* fdkaacenc for AAC encoding */
                     n = snprintf(p, remaining,
-                        "audio/x-raw,channels=%d,rate=%d ! "
-                        "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
-                        g_ctx.audio_channels,
-                        g_ctx.audio_samplerate,
+                        "fdkaacenc bitrate=%d ! queue ! mux.sink_%d ",
                         g_ctx.audio_bitrate,
-                        queue_settings,
                         g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! ac3parse ! queue %s ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
+                        "avenc_ac3 bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! queue %s ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
+                        "avenc_mp2 bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
                     break;
 
                 default:
-                    /* Fallback - should not reach here */
-                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
-                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
+                    n = snprintf(p, remaining,
+                        "fdkaacenc bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
             }
             p += n; remaining -= n;
         }
     } else if (g_ctx.audio_mode == MODE_DROP) {
-        n = snprintf(p, remaining, "demux. ! queue %s ! fakesink ", queue_settings);
+        n = snprintf(p, remaining, "demux. ! queue ! fakesink ");
         p += n; remaining -= n;
     }
-    /* TODO: passthrough mode */
 
-    /* Muxer and output - queue after mux uses same leaky settings to prevent stalls
-     * Use prog-map to assign video and audio to program 1 with specified PIDs
-     * Calculate mux bitrate as (video + audio) * 1.1 for CBR output with 10% overhead */
-    int mux_bitrate = (int)((g_ctx.video_bitrate + g_ctx.audio_bitrate) * 1.1);
+    /* Muxer - VBV constrains encoder so no overhead needed */
+    int mux_bitrate = g_ctx.video_bitrate + g_ctx.audio_bitrate;
     n = snprintf(p, remaining,
-        "mpegtsmux name=mux alignment=7 bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s ! ",
-        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
+        "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
+        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
     p += n; remaining -= n;
 
+    /* Output sink */
     if (g_ctx.use_stdout) {
-        /* filesink to /dev/stdout with unbuffered mode for immediate output */
         n = snprintf(p, remaining, "filesink location=/dev/stdout buffer-mode=2 sync=false");
     } else if (g_ctx.udp_host[0] != '\0') {
-        /* udpsink for UDP output - sync=false for live streaming */
+        /* udpsink with sync=true async=true for proper timing */
         n = snprintf(p, remaining,
-            "udpsink host=%s port=%d sync=false",
+            "udpsink host=%s port=%d sync=true async=true",
             g_ctx.udp_host, g_ctx.udp_port);
     } else {
-        /* tcpserversink with sync=false and sync-method for low latency */
         n = snprintf(p, remaining,
             "tcpserversink host=0.0.0.0 port=%d sync=false sync-method=latest-keyframe",
             g_ctx.tcp_port);
