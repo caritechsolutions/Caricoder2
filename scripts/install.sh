@@ -25,7 +25,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/setup-caritranscoder-j6OYk"
+BRANCH="claude/av-sync-monitor-Y57VM"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
