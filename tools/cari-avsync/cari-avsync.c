@@ -231,6 +231,22 @@ int parse_transcoder_config(const char* filepath, InputStatus* input) {
     // Set type to transcoder
     snprintf(input->type, sizeof(input->type), "transcoder");
 
+    // Extract ID from filename (e.g., /etc/caritrans/transcoders/bbcwtrans1.conf -> bbcwtrans1)
+    const char* basename = strrchr(filepath, '/');
+    if (basename) {
+        basename++;  // Skip the '/'
+    } else {
+        basename = filepath;
+    }
+    // Copy basename without .conf extension
+    size_t len = strlen(basename);
+    if (len > 5 && strcmp(basename + len - 5, ".conf") == 0) {
+        len -= 5;
+    }
+    if (len >= sizeof(input->id)) len = sizeof(input->id) - 1;
+    strncpy(input->id, basename, len);
+    input->id[len] = '\0';
+
     while (fgets(line, sizeof(line), fp)) {
         trim(line);
 
@@ -258,7 +274,7 @@ int parse_transcoder_config(const char* filepath, InputStatus* input) {
         if (strcmp(section, "general") == 0) {
             if (strcmp(key, "name") == 0) {
                 snprintf(input->name, sizeof(input->name), "%s", value);
-                snprintf(input->id, sizeof(input->id), "%s", value);
+                // Don't overwrite id - keep the filename-based id for service lookup
             }
         } else if (strcmp(section, "output") == 0) {
             // Transcoders use output section for PIDs and address
@@ -276,9 +292,14 @@ int parse_transcoder_config(const char* filepath, InputStatus* input) {
 
     fclose(fp);
 
-    if (input->name[0]) {
-        printf("  Parsed transcoder: %s - output=%s:%d, video=%d, audio=%d\n",
-               input->name,
+    // If no name was set, use the id
+    if (!input->name[0]) {
+        snprintf(input->name, sizeof(input->name), "%s", input->id);
+    }
+
+    if (input->id[0]) {
+        printf("  Parsed transcoder: %s (id=%s) - output=%s:%d, video=%d, audio=%d\n",
+               input->name, input->id,
                input->address, input->port,
                input->video_pid, input->audio_pid);
     }
@@ -311,22 +332,25 @@ int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
     char sanitized_name[128];
 
-    // Sanitize name to match systemd service naming
-    sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
-
     // Determine service name based on type
     if (strcmp(input_type, "transcoder") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-transcoder@%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "srt") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "hls") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "http") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "rist") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
+        // Transcoders use the config filename directly (already passed as input_name)
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-transcoder@%s 2>/dev/null", input_name);
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
+        // For inputs, sanitize name to match systemd service naming
+        sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
+
+        if (strcmp(input_type, "srt") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "hls") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "http") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "rist") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
+        } else {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
+        }
     }
     return system(cmd) == 0;
 }
