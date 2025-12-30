@@ -1129,8 +1129,8 @@ static char *build_pipeline_string(void) {
     /* Muxer - calculate bitrate as (video + audio) * 1.1 for 10% overhead */
     int mux_bitrate = (int)((g_ctx.video_bitrate + g_ctx.audio_bitrate) * 1.1);
     n = snprintf(p, remaining,
-        "mpegtsmux name=mux bitrate=%d ! queue ! ",
-        mux_bitrate);
+        "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
+        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
     p += n; remaining -= n;
 
     /* Output sink */
