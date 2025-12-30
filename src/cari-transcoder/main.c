@@ -1050,9 +1050,10 @@ static char *build_pipeline_string(void) {
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
                 case VIDEO_CODEC_H264:
-                    /* x264enc with simplified settings: bitrate, speed-preset, key-int-max, bframes */
+                    /* x264enc with CBR mode and VBV buffer for consistent bitrate */
                     n = snprintf(p, remaining,
-                        "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d ! queue ! mux.sink_%d ",
+                        "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d "
+                        "pass=cbr vbv-buf-capacity=120 ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
