@@ -952,7 +952,7 @@ async function startOutputPlayer() {
         // Start player_preview for the output stream
         // Use /preview/ path to match inputs page structure
         const folderName = `transcoder-${id}`;
-        const outputDir = `/var/www/caricoder/public/preview/${folderName}`;
+        const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
         const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
 
         const response = await fetch('api/transcoders.php?action=start_preview', {
