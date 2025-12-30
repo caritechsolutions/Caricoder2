@@ -1151,8 +1151,8 @@ static char *build_pipeline_string(void) {
         p += n; remaining -= n;
     }
 
-    /* Muxer - VBV constrains encoder so no overhead needed */
-    int mux_bitrate = g_ctx.video_bitrate + g_ctx.audio_bitrate;
+    /* Muxer - add 3% overhead for TS headers, PCR, PAT/PMT tables */
+    int mux_bitrate = (g_ctx.video_bitrate + g_ctx.audio_bitrate) * 103 / 100;
     n = snprintf(p, remaining,
         "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
         mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
