@@ -1052,24 +1052,27 @@ static char *build_pipeline_string(void) {
                 case VIDEO_CODEC_H264:
                     /* x264enc with simplified settings: bitrate, speed-preset, key-int-max, bframes */
                     n = snprintf(p, remaining,
-                        "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d ! queue ! mux. ",
+                        "x264enc bitrate=%d speed-preset=%s key-int-max=%d bframes=%d ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
-                        g_ctx.x264_bframes);
+                        g_ctx.x264_bframes,
+                        g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_H265:
                     n = snprintf(p, remaining,
-                        "x265enc bitrate=%d speed-preset=%s key-int-max=%d ! queue ! mux. ",
+                        "x265enc bitrate=%d speed-preset=%s key-int-max=%d ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
                         preset_to_gst_string(g_ctx.video_preset),
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! queue ! mux. ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        g_ctx.video_pid);
                     break;
                 default:
                     n = 0;
@@ -1098,26 +1101,30 @@ static char *build_pipeline_string(void) {
                 case AUDIO_CODEC_AAC:
                     /* fdkaacenc for AAC encoding */
                     n = snprintf(p, remaining,
-                        "fdkaacenc bitrate=%d ! queue ! mux. ",
-                        g_ctx.audio_bitrate);
+                        "fdkaacenc bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! queue ! mux. ",
-                        g_ctx.audio_bitrate);
+                        "avenc_ac3 bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! queue ! mux. ",
-                        g_ctx.audio_bitrate);
+                        "avenc_mp2 bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
                     break;
 
                 default:
                     n = snprintf(p, remaining,
-                        "fdkaacenc bitrate=%d ! queue ! mux. ",
-                        g_ctx.audio_bitrate);
+                        "fdkaacenc bitrate=%d ! queue ! mux.sink_%d ",
+                        g_ctx.audio_bitrate,
+                        g_ctx.audio_pid);
             }
             p += n; remaining -= n;
         }
