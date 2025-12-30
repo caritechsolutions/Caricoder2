@@ -2091,7 +2091,7 @@ Group=root
 
 # Main transcoder process with direct UDP output
 # tsp monitor starts in background after 2 second delay for bitrate monitoring
-ExecStart=/bin/bash -c '(sleep 2 && {tsp_monitor_cmd} 2>/dev/null) & exec {transcoder_cmd} 2>>{log_file}'
+ExecStart=/bin/bash -c '(sleep 2 && {tsp_monitor_cmd} >>{log_file} 2>&1) & exec {transcoder_cmd} 2>>{log_file}'
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart behavior
