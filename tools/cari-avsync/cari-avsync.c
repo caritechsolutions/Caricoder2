@@ -29,13 +29,9 @@
 #include <ctype.h>
 #include <math.h>
 
-// Compatibility for older libmicrohttpd versions (< 0.9.71)
-#ifndef MHD_Result
-typedef int MHD_Result;
-#endif
-
 #define API_PORT 8082
 #define CONFIG_DIR "/etc/caritrans/inputs"
+#define TRANSCODER_CONFIG_DIR "/etc/caritrans/transcoders"
 #define DATA_FILE "/var/lib/caritrans/avsync.json"
 #define BASELINE_FILE "/var/lib/caritrans/avsync_baseline.json"
 #define CHECK_INTERVAL 300      // 5 minutes between checks
@@ -211,6 +207,101 @@ int parse_config(const char* filepath, InputStatus* input) {
     return 0;
 }
 
+// Parse transcoder config file (different structure from inputs)
+int parse_transcoder_config(const char* filepath, InputStatus* input) {
+    FILE* fp = fopen(filepath, "r");
+    if (!fp) return -1;
+
+    char line[512];
+    char section[64] = "";
+
+    memset(input->id, 0, sizeof(input->id));
+    memset(input->name, 0, sizeof(input->name));
+    memset(input->type, 0, sizeof(input->type));
+    memset(input->address, 0, sizeof(input->address));
+    input->port = 0;
+    input->video_pid = 0;
+    input->audio_pid = 0;
+
+    // Set type to transcoder
+    snprintf(input->type, sizeof(input->type), "transcoder");
+
+    // Extract ID from filename (e.g., /etc/caritrans/transcoders/bbcwtrans1.conf -> bbcwtrans1)
+    const char* basename = strrchr(filepath, '/');
+    if (basename) {
+        basename++;  // Skip the '/'
+    } else {
+        basename = filepath;
+    }
+    // Copy basename without .conf extension
+    size_t len = strlen(basename);
+    if (len > 5 && strcmp(basename + len - 5, ".conf") == 0) {
+        len -= 5;
+    }
+    if (len >= sizeof(input->id)) len = sizeof(input->id) - 1;
+    strncpy(input->id, basename, len);
+    input->id[len] = '\0';
+
+    while (fgets(line, sizeof(line), fp)) {
+        trim(line);
+
+        if (line[0] == '#' || line[0] == ';' || line[0] == '\0') continue;
+
+        if (line[0] == '[') {
+            char* end = strchr(line, ']');
+            if (end) {
+                *end = '\0';
+                snprintf(section, sizeof(section), "%s", line + 1);
+            }
+            continue;
+        }
+
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+
+        *eq = '\0';
+        char key[64], value[256];
+        snprintf(key, sizeof(key), "%s", line);
+        snprintf(value, sizeof(value), "%s", eq + 1);
+        trim(key);
+        trim(value);
+
+        if (strcmp(section, "general") == 0) {
+            if (strcmp(key, "name") == 0) {
+                snprintf(input->name, sizeof(input->name), "%s", value);
+                // Don't overwrite id - keep the filename-based id for service lookup
+            }
+        } else if (strcmp(section, "output") == 0) {
+            // Transcoders use output section for PIDs and address
+            if (strcmp(key, "address") == 0) {
+                snprintf(input->address, sizeof(input->address), "%s", value);
+            } else if (strcmp(key, "port") == 0) {
+                input->port = atoi(value);
+            } else if (strcmp(key, "video_pid") == 0) {
+                input->video_pid = atoi(value);
+            } else if (strcmp(key, "audio_pid") == 0) {
+                input->audio_pid = atoi(value);
+            }
+        }
+    }
+
+    fclose(fp);
+
+    // If no name was set, use the id
+    if (!input->name[0]) {
+        snprintf(input->name, sizeof(input->name), "%s", input->id);
+    }
+
+    if (input->id[0]) {
+        printf("  Parsed transcoder: %s (id=%s) - output=%s:%d, video=%d, audio=%d\n",
+               input->name, input->id,
+               input->address, input->port,
+               input->video_pid, input->audio_pid);
+    }
+
+    return 0;
+}
+
 // Sanitize name to ID format (lowercase, alphanumeric and hyphens only)
 void sanitize_to_id(const char* name, char* id, size_t id_size) {
     size_t j = 0;
@@ -236,98 +327,161 @@ int is_service_running(const char* input_name, const char* input_type) {
     char cmd[256];
     char sanitized_name[128];
 
-    // Sanitize name to match systemd service naming
-    sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
-
-    // UDP uses cari-udp-{name}, SRT uses cari-srt-{name}, HLS uses cari-hls-{name}, HTTP uses cari-http-{name}, RIST uses cari-rist-{name}
-    if (strcmp(input_type, "srt") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "hls") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "http") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
-    } else if (strcmp(input_type, "rist") == 0) {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
+    // Determine service name based on type
+    if (strcmp(input_type, "transcoder") == 0) {
+        // Transcoders use the config filename directly (already passed as input_name)
+        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-transcoder@%s 2>/dev/null", input_name);
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
+        // For inputs, sanitize name to match systemd service naming
+        sanitize_to_id(input_name, sanitized_name, sizeof(sanitized_name));
+
+        if (strcmp(input_type, "srt") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-srt-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "hls") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-hls-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "http") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-http-%s 2>/dev/null", sanitized_name);
+        } else if (strcmp(input_type, "rist") == 0) {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-rist-%s 2>/dev/null", sanitized_name);
+        } else {
+            snprintf(cmd, sizeof(cmd), "systemctl is-active --quiet cari-udp-%s 2>/dev/null", sanitized_name);
+        }
     }
     return system(cmd) == 0;
 }
 
-// Discover all inputs from config files
+// Discover all inputs and transcoders from config files
 void discover_inputs(void) {
-    DIR* dir = opendir(CONFIG_DIR);
-    if (!dir) {
-        fprintf(stderr, "Cannot open config directory: %s\n", CONFIG_DIR);
-        return;
-    }
-
     pthread_mutex_lock(&g_ctx.global_lock);
 
     struct dirent* entry;
     int count = 0;
 
-    printf("Scanning config directory: %s\n", CONFIG_DIR);
+    // Scan inputs directory
+    DIR* dir = opendir(CONFIG_DIR);
+    if (dir) {
+        printf("Scanning inputs directory: %s\n", CONFIG_DIR);
 
-    while ((entry = readdir(dir)) != NULL && count < MAX_INPUTS) {
-        if (entry->d_type != DT_REG) continue;
+        while ((entry = readdir(dir)) != NULL && count < MAX_INPUTS) {
+            if (entry->d_type != DT_REG) continue;
 
-        const char* ext = strrchr(entry->d_name, '.');
-        if (!ext || strcmp(ext, ".conf") != 0) continue;
+            const char* ext = strrchr(entry->d_name, '.');
+            if (!ext || strcmp(ext, ".conf") != 0) continue;
 
-        char filepath[512];
-        snprintf(filepath, sizeof(filepath), "%s/%s", CONFIG_DIR, entry->d_name);
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/%s", CONFIG_DIR, entry->d_name);
 
-        printf("Reading config: %s\n", filepath);
+            printf("Reading config: %s\n", filepath);
 
-        InputStatus* input = &g_ctx.inputs[count];
+            InputStatus* input = &g_ctx.inputs[count];
 
-        // Preserve existing history if same input
-        char old_id[64];
-        snprintf(old_id, sizeof(old_id), "%s", input->id);
-        int old_history_count = input->history_count;
-        int old_history_index = input->history_index;
-        MeasurementResult old_history[HISTORY_SIZE];
-        if (old_history_count > 0) {
-            memcpy(old_history, input->history, sizeof(old_history));
-        }
+            // Preserve existing history if same input
+            char old_id[64];
+            snprintf(old_id, sizeof(old_id), "%s", input->id);
+            int old_history_count = input->history_count;
+            int old_history_index = input->history_index;
+            MeasurementResult old_history[HISTORY_SIZE];
+            if (old_history_count > 0) {
+                memcpy(old_history, input->history, sizeof(old_history));
+            }
 
-        pthread_mutex_t saved_lock = input->lock;
-        memset(input, 0, sizeof(InputStatus));
-        input->lock = saved_lock;
+            pthread_mutex_t saved_lock = input->lock;
+            memset(input, 0, sizeof(InputStatus));
+            input->lock = saved_lock;
 
-        if (parse_config(filepath, input) == 0) {
-            if (input->address[0] && input->port > 0 &&
-                input->video_pid > 0 && input->audio_pid > 0) {
+            if (parse_config(filepath, input) == 0) {
+                if (input->address[0] && input->port > 0 &&
+                    input->video_pid > 0 && input->audio_pid > 0) {
 
-                input->running = is_service_running(input->id, input->type);
-                const char* svc_prefix = "cari-udp";
-                if (strcmp(input->type, "srt") == 0) svc_prefix = "cari-srt";
-                else if (strcmp(input->type, "hls") == 0) svc_prefix = "cari-hls";
-                else if (strcmp(input->type, "http") == 0) svc_prefix = "cari-http";
-                else if (strcmp(input->type, "rist") == 0) svc_prefix = "cari-rist";
-                printf("  Service %s-%s: %s\n", svc_prefix, input->id,
-                       input->running ? "RUNNING" : "not running");
+                    input->running = is_service_running(input->id, input->type);
+                    const char* svc_prefix = "cari-udp";
+                    if (strcmp(input->type, "srt") == 0) svc_prefix = "cari-srt";
+                    else if (strcmp(input->type, "hls") == 0) svc_prefix = "cari-hls";
+                    else if (strcmp(input->type, "http") == 0) svc_prefix = "cari-http";
+                    else if (strcmp(input->type, "rist") == 0) svc_prefix = "cari-rist";
+                    printf("  Service %s-%s: %s\n", svc_prefix, input->id,
+                           input->running ? "RUNNING" : "not running");
 
-                // Restore history if same input
-                if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
-                    memcpy(input->history, old_history, sizeof(input->history));
-                    input->history_count = old_history_count;
-                    input->history_index = old_history_index;
+                    // Restore history if same input
+                    if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
+                        memcpy(input->history, old_history, sizeof(input->history));
+                        input->history_count = old_history_count;
+                        input->history_index = old_history_index;
+                    }
+
+                    count++;
+                } else {
+                    printf("  Skipping: missing required fields\n");
                 }
-
-                count++;
-            } else {
-                printf("  Skipping: missing required fields\n");
             }
         }
+        closedir(dir);
+    } else {
+        fprintf(stderr, "Cannot open inputs directory: %s\n", CONFIG_DIR);
+    }
+
+    // Scan transcoders directory
+    dir = opendir(TRANSCODER_CONFIG_DIR);
+    if (dir) {
+        printf("Scanning transcoders directory: %s\n", TRANSCODER_CONFIG_DIR);
+
+        while ((entry = readdir(dir)) != NULL && count < MAX_INPUTS) {
+            if (entry->d_type != DT_REG) continue;
+
+            const char* ext = strrchr(entry->d_name, '.');
+            if (!ext || strcmp(ext, ".conf") != 0) continue;
+
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/%s", TRANSCODER_CONFIG_DIR, entry->d_name);
+
+            printf("Reading config: %s\n", filepath);
+
+            InputStatus* input = &g_ctx.inputs[count];
+
+            // Preserve existing history if same input
+            char old_id[64];
+            snprintf(old_id, sizeof(old_id), "%s", input->id);
+            int old_history_count = input->history_count;
+            int old_history_index = input->history_index;
+            MeasurementResult old_history[HISTORY_SIZE];
+            if (old_history_count > 0) {
+                memcpy(old_history, input->history, sizeof(old_history));
+            }
+
+            pthread_mutex_t saved_lock = input->lock;
+            memset(input, 0, sizeof(InputStatus));
+            input->lock = saved_lock;
+
+            if (parse_transcoder_config(filepath, input) == 0) {
+                if (input->address[0] && input->port > 0 &&
+                    input->video_pid > 0 && input->audio_pid > 0) {
+
+                    input->running = is_service_running(input->id, input->type);
+                    printf("  Service cari-transcoder@%s: %s\n", input->id,
+                           input->running ? "RUNNING" : "not running");
+
+                    // Restore history if same input
+                    if (strcmp(old_id, input->id) == 0 && old_history_count > 0) {
+                        memcpy(input->history, old_history, sizeof(input->history));
+                        input->history_count = old_history_count;
+                        input->history_index = old_history_index;
+                    }
+
+                    count++;
+                } else {
+                    printf("  Skipping: missing required fields\n");
+                }
+            }
+        }
+        closedir(dir);
+    } else {
+        printf("Note: transcoders directory not found: %s\n", TRANSCODER_CONFIG_DIR);
     }
 
     g_ctx.input_count = count;
     pthread_mutex_unlock(&g_ctx.global_lock);
-    closedir(dir);
 
-    printf("Discovered %d inputs with A/V sync capability\n", count);
+    printf("Discovered %d sources with A/V sync capability\n", count);
 }
 
 // Comparison function for qsort - sort by PTS value
@@ -665,7 +819,7 @@ int build_input_json(InputStatus* input, char* buf, size_t buf_size, int include
 }
 
 // REST API handler
-static MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
+static enum MHD_Result api_handler(void* cls, struct MHD_Connection* connection,
                        const char* url, const char* method,
                        const char* version, const char* upload_data,
                        size_t* upload_data_size, void** con_cls) {

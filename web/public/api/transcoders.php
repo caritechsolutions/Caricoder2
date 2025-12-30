@@ -68,6 +68,12 @@ switch ($action) {
     case 'all_metrics':
         handle_all_metrics();
         break;
+    case 'metrics_history':
+        handle_metrics_history();
+        break;
+    case 'continuity_errors':
+        handle_continuity_errors();
+        break;
     case 'list':
     default:
         handle_list();
@@ -698,6 +704,104 @@ function handle_all_metrics() {
 }
 
 /**
+ * Get historical metrics for a transcoder
+ * Parses the full log file for bitrate history
+ */
+function handle_metrics_history() {
+    $id = $_GET['id'] ?? '';
+    if (empty($id)) {
+        echo json_encode(['success' => false, 'error' => 'Transcoder ID required']);
+        return;
+    }
+
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        echo json_encode(['success' => false, 'error' => 'Transcoder not found']);
+        return;
+    }
+
+    $config = parse_config($config_file);
+    $video_pid = intval($config['output']['video_pid'] ?? 256);
+    $audio_pid = intval($config['output']['audio_pid'] ?? 257);
+
+    $history = [
+        'success' => true,
+        'transcoder_id' => $id,
+        'video_pid' => $video_pid,
+        'audio_pid' => $audio_pid,
+        'pids' => [
+            $video_pid => ['history' => []],
+            $audio_pid => ['history' => []]
+        ]
+    ];
+
+    if (!file_exists($log_file) || !is_readable($log_file)) {
+        echo json_encode($history);
+        return;
+    }
+
+    // Read the entire log file (or last N KB for performance)
+    $max_bytes = 256 * 1024; // Read last 256KB
+    $file_size = filesize($log_file);
+    $fp = fopen($log_file, 'r');
+    if (!$fp) {
+        echo json_encode($history);
+        return;
+    }
+
+    // Seek to near end if file is large
+    if ($file_size > $max_bytes) {
+        fseek($fp, $file_size - $max_bytes);
+        fgets($fp); // Skip partial line
+    }
+
+    $video_history = [];
+    $audio_history = [];
+
+    // Parse bitrate_monitor output lines
+    // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
+    while (!feof($fp)) {
+        $line = fgets($fp);
+        if ($line === false) break;
+
+        if (strpos($line, 'bitrate_monitor') !== false &&
+            preg_match('/bitrate_monitor:\s*(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}),\s*PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
+
+            $timestamp_str = $matches[1];
+            $pid = intval($matches[2]);
+            $bitrate = intval(str_replace(',', '', $matches[3]));
+
+            // Convert to unix timestamp
+            $timestamp = strtotime(str_replace('/', '-', $timestamp_str));
+
+            if ($pid === $video_pid) {
+                $video_history[] = [$timestamp, $bitrate];
+            } elseif ($pid === $audio_pid) {
+                $audio_history[] = [$timestamp, $bitrate];
+            }
+        }
+    }
+    fclose($fp);
+
+    // Keep last 300 samples (about 10 minutes at 2-second intervals)
+    $max_samples = 300;
+    if (count($video_history) > $max_samples) {
+        $video_history = array_slice($video_history, -$max_samples);
+    }
+    if (count($audio_history) > $max_samples) {
+        $audio_history = array_slice($audio_history, -$max_samples);
+    }
+
+    $history['pids'][$video_pid]['history'] = $video_history;
+    $history['pids'][$audio_pid]['history'] = $audio_history;
+
+    echo json_encode($history);
+}
+
+/**
  * Get metrics for a single transcoder
  * Parses the last bitrate_monitor output from the log file
  * Also fetches input bitrate from linked input service
@@ -717,7 +821,9 @@ function get_transcoder_metrics($id) {
         'input_format' => null,
         'output_format' => null,
         'video_pid' => 256,
-        'audio_pid' => 257
+        'audio_pid' => 257,
+        'continuity_errors' => 0,
+        'continuity_errors_by_pid' => []
     ];
 
     $input_api_port = null;
@@ -887,6 +993,22 @@ function get_transcoder_metrics($id) {
         if ($metrics['output_video_bitrate'] > 0 || $metrics['output_audio_bitrate'] > 0) {
             $metrics['output_total_bitrate'] = $metrics['output_video_bitrate'] + $metrics['output_audio_bitrate'];
         }
+
+        // Parse CONTINUITY errors from log
+        // Format: Warning from tsdemux0: CONTINUITY: TS packet continuity error (pid:256 (0x0100) )
+        foreach ($lines as $line) {
+            if (strpos($line, 'CONTINUITY') !== false && strpos($line, 'continuity error') !== false) {
+                $metrics['continuity_errors']++;
+                // Extract PID from the message
+                if (preg_match('/pid:(\d+)/', $line, $matches)) {
+                    $pid = intval($matches[1]);
+                    if (!isset($metrics['continuity_errors_by_pid'][$pid])) {
+                        $metrics['continuity_errors_by_pid'][$pid] = 0;
+                    }
+                    $metrics['continuity_errors_by_pid'][$pid]++;
+                }
+            }
+        }
     }
 
     // For backwards compatibility, also set video_bitrate/audio_bitrate
@@ -894,4 +1016,84 @@ function get_transcoder_metrics($id) {
     $metrics['audio_bitrate'] = $metrics['output_audio_bitrate'];
 
     return $metrics;
+}
+
+/**
+ * Handle continuity errors request
+ * Returns all continuity errors from the log file with timestamps
+ */
+function handle_continuity_errors() {
+    $id = $_GET['id'] ?? '';
+    if (empty($id)) {
+        echo json_encode(['success' => false, 'error' => 'Transcoder ID required']);
+        return;
+    }
+
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+
+    if (!file_exists($log_file) || !is_readable($log_file)) {
+        echo json_encode([
+            'success' => true,
+            'total_errors' => 0,
+            'errors_by_pid' => [],
+            'recent_errors' => []
+        ]);
+        return;
+    }
+
+    // Read last 100KB of log file for analysis
+    $errors_by_pid = [];
+    $recent_errors = [];
+    $total_errors = 0;
+
+    $fp = fopen($log_file, 'r');
+    if ($fp) {
+        // Seek to position near end (last 100KB)
+        $file_size = filesize($log_file);
+        $read_size = min(102400, $file_size);
+        fseek($fp, max(0, $file_size - $read_size));
+
+        if ($file_size > $read_size) {
+            fgets($fp); // Skip partial line
+        }
+
+        while (!feof($fp)) {
+            $line = fgets($fp);
+            if ($line === false) continue;
+
+            // Parse: Warning from tsdemux0: CONTINUITY: TS packet continuity error (pid:256 (0x0100) )
+            if (strpos($line, 'CONTINUITY') !== false && strpos($line, 'continuity error') !== false) {
+                $total_errors++;
+
+                // Extract PID
+                $pid = 0;
+                if (preg_match('/pid:(\d+)/', $line, $matches)) {
+                    $pid = intval($matches[1]);
+                    if (!isset($errors_by_pid[$pid])) {
+                        $errors_by_pid[$pid] = 0;
+                    }
+                    $errors_by_pid[$pid]++;
+                }
+
+                // Store recent errors with timestamp (keep last 50)
+                $recent_errors[] = [
+                    'pid' => $pid,
+                    'message' => trim($line),
+                    'time' => time()
+                ];
+                if (count($recent_errors) > 50) {
+                    array_shift($recent_errors);
+                }
+            }
+        }
+        fclose($fp);
+    }
+
+    echo json_encode([
+        'success' => true,
+        'total_errors' => $total_errors,
+        'errors_by_pid' => $errors_by_pid,
+        'recent_errors' => array_slice($recent_errors, -10)  // Return last 10 only
+    ]);
 }

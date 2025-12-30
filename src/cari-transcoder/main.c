@@ -1013,7 +1013,7 @@ static char *build_pipeline_string(void) {
 
     /* Input: udpsrc -> queue -> tsparse -> queue -> tsdemux */
     n = snprintf(p, remaining,
-        "udpsrc uri=udp://%s:%d ! queue ! tsparse ! queue ! tsdemux name=demux ",
+        "udpsrc uri=udp://%s:%d do-timestamp=false buffer-size=2097152 ! queue ! tsparse ! queue ! tsdemux name=demux ",
         g_ctx.input_address, g_ctx.input_port);
     p += n; remaining -= n;
 
@@ -1047,6 +1047,10 @@ static char *build_pipeline_string(void) {
                 p += n; remaining -= n;
             }
 
+            /* videorate for consistent frame timing before encoder */
+            n = snprintf(p, remaining, "videorate ! queue ! ");
+            p += n; remaining -= n;
+
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
                 case VIDEO_CODEC_H264:
@@ -1069,11 +1073,24 @@ static char *build_pipeline_string(void) {
                         g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
-                    n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! queue ! mux.sink_%d ",
-                        g_ctx.video_bitrate,
-                        g_ctx.keyframe_interval,
-                        g_ctx.video_pid);
+                    /* avenc_mpeg2video with VBV for capped bitrate
+                     * bufsize = 0.5 seconds of bitrate for tight control
+                     * maxrate = bitrate to cap peaks
+                     * No minrate - let mux pad with null packets for CBR output
+                     * rc-init-occupancy = 90% of bufsize */
+                    {
+                        int bufsize = g_ctx.video_bitrate / 2;  /* 500ms buffer */
+                        int init_occupancy = bufsize * 9 / 10;  /* 90% initial fill */
+                        n = snprintf(p, remaining,
+                            "avenc_mpeg2video bitrate=%d maxrate=%d "
+                            "bufsize=%d rc-init-occupancy=%d gop-size=%d ! queue ! mux.sink_%d ",
+                            g_ctx.video_bitrate,
+                            g_ctx.video_bitrate,
+                            bufsize,
+                            init_occupancy,
+                            g_ctx.keyframe_interval,
+                            g_ctx.video_pid);
+                    }
                     break;
                 default:
                     n = 0;
@@ -1134,8 +1151,8 @@ static char *build_pipeline_string(void) {
         p += n; remaining -= n;
     }
 
-    /* Muxer - VBV constrains encoder so no overhead needed */
-    int mux_bitrate = g_ctx.video_bitrate + g_ctx.audio_bitrate;
+    /* Muxer - add 3% overhead for TS headers, PCR, PAT/PMT tables */
+    int mux_bitrate = (g_ctx.video_bitrate + g_ctx.audio_bitrate) * 103 / 100;
     n = snprintf(p, remaining,
         "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
         mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
