@@ -1124,11 +1124,11 @@ start_services() {
         log_warn "PHP-FPM service not found"
     fi
 
-    # Start Nginx
+    # Start Nginx (always restart to pick up new config)
     if command -v nginx &> /dev/null; then
-        log_info "Starting nginx..."
+        log_info "Restarting nginx..."
         systemctl enable nginx 2>/dev/null || true
-        systemctl start nginx || systemctl restart nginx
+        systemctl restart nginx
     fi
 
     # Verify services are running
