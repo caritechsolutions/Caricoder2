@@ -22,7 +22,7 @@
 #include <gst/gst.h>
 
 /* Version */
-#define VERSION "2.2.0"
+#define VERSION "2.3.0"
 
 /* Defaults */
 #define DEFAULT_VIDEO_BITRATE 5000000
@@ -141,20 +141,13 @@ typedef struct {
     int audio_channels;
     int audio_samplerate;
 
-    /* AAC encoder settings (avenc_aac) */
-    char aac_coder[16];         /* Coding algorithm: anmr, twoloop, fast */
-    int aac_is;                 /* Intensity stereo coding */
-    int aac_ms;                 /* Force M/S stereo coding */
-    int aac_pns;                /* Perceptual noise substitution */
-    int aac_tns;                /* Temporal noise shaping */
-    int aac_ltp;                /* Long term prediction */
-    int aac_pred;               /* AAC-Main prediction */
-    int aac_cutoff;             /* Audio cutoff bandwidth (0=auto) */
-    int aac_strict;             /* Standards compliance (-2 to 2) */
-
     /* Output settings */
     gboolean use_stdout;
     int tcp_port;
+    char udp_host[256];             /* UDP output host (empty = disabled) */
+    int udp_port;                   /* UDP output port */
+    int video_pid;              /* Video elementary stream PID (default 256/0x100) */
+    int audio_pid;              /* Audio elementary stream PID (default 257/0x101) */
 
     /* General settings */
     gboolean debug;
@@ -268,21 +261,13 @@ static void print_help(const char *prog) {
     printf("  --audio-samplerate HZ      Sample rate (default: 48000)\n");
     printf("\n");
 
-    printf("AAC ENCODER OPTIONS:\n");
-    printf("  --aac-coder CODER          anmr|twoloop|fast (default: fast)\n");
-    printf("  --aac-is / --no-aac-is     Enable/disable intensity stereo (default: on)\n");
-    printf("  --aac-ms / --no-aac-ms     Enable/disable M/S stereo coding (default: on)\n");
-    printf("  --aac-pns / --no-aac-pns   Enable/disable perceptual noise sub (default: on)\n");
-    printf("  --aac-tns / --no-aac-tns   Enable/disable temporal noise shaping (default: on)\n");
-    printf("  --aac-ltp / --no-aac-ltp   Enable/disable long term prediction (default: off)\n");
-    printf("  --aac-pred / --no-aac-pred Enable/disable AAC-Main prediction (default: off)\n");
-    printf("  --aac-cutoff HZ            Audio cutoff bandwidth, 0=auto (default: 0)\n");
-    printf("  --aac-strict N             Strictness, -2 to 2 (default: 0)\n");
-    printf("\n");
-
     printf("OUTPUT OPTIONS:\n");
     printf("  --stdout                   Output to stdout (for piping to tsp)\n");
     printf("  --tcp-port PORT            TCP server port (default: 8888)\n");
+    printf("  --udp-host HOST            UDP output host/multicast (enables UDP output)\n");
+    printf("  --udp-port PORT            UDP output port (default: 5000)\n");
+    printf("  --video-pid PID            Video elementary stream PID (default: 256/0x100)\n");
+    printf("  --audio-pid PID            Audio elementary stream PID (default: 257/0x101)\n");
     printf("\n");
 
     printf("GENERAL OPTIONS:\n");
@@ -350,20 +335,13 @@ static void init_context(void) {
     g_ctx.audio_channels = 2;
     g_ctx.audio_samplerate = DEFAULT_AUDIO_SAMPLERATE;
 
-    /* AAC encoder defaults (avenc_aac) */
-    strcpy(g_ctx.aac_coder, "fast");  /* fast coding for low latency */
-    g_ctx.aac_is = 1;                 /* intensity stereo enabled */
-    g_ctx.aac_ms = 1;                 /* M/S stereo enabled */
-    g_ctx.aac_pns = 1;                /* perceptual noise substitution enabled */
-    g_ctx.aac_tns = 1;                /* temporal noise shaping enabled */
-    g_ctx.aac_ltp = 0;                /* long term prediction disabled */
-    g_ctx.aac_pred = 0;               /* AAC-Main prediction disabled */
-    g_ctx.aac_cutoff = 0;             /* auto cutoff */
-    g_ctx.aac_strict = 0;             /* normal compliance */
-
     /* Output defaults */
     g_ctx.use_stdout = FALSE;
     g_ctx.tcp_port = DEFAULT_TCP_PORT;
+    g_ctx.udp_host[0] = '\0';         /* Empty = UDP output disabled */
+    g_ctx.udp_port = 5000;            /* Default UDP port */
+    g_ctx.video_pid = 256;            /* Default video PID 0x100 */
+    g_ctx.audio_pid = 257;            /* Default audio PID 0x101 */
 
     /* General defaults */
     g_ctx.debug = FALSE;
@@ -400,26 +378,16 @@ static int parse_args(int argc, char *argv[]) {
         OPT_PROFILE,
         OPT_PSY_TUNE,
         OPT_X264_OPTS,
-        /* AAC options */
-        OPT_AAC_CODER,
-        OPT_AAC_IS,
-        OPT_AAC_NO_IS,
-        OPT_AAC_MS,
-        OPT_AAC_NO_MS,
-        OPT_AAC_PNS,
-        OPT_AAC_NO_PNS,
-        OPT_AAC_TNS,
-        OPT_AAC_NO_TNS,
-        OPT_AAC_LTP,
-        OPT_AAC_NO_LTP,
-        OPT_AAC_PRED,
-        OPT_AAC_NO_PRED,
-        OPT_AAC_CUTOFF,
-        OPT_AAC_STRICT,
         /* Scaling options */
         OPT_SCALE_METHOD,
         OPT_SCALE_ADD_BORDERS,
-        OPT_SCALE_THREADS
+        OPT_SCALE_THREADS,
+        /* Output PID options */
+        OPT_VIDEO_PID,
+        OPT_AUDIO_PID,
+        /* UDP output options */
+        OPT_UDP_HOST,
+        OPT_UDP_PORT
     };
 
     static struct option long_options[] = {
@@ -453,22 +421,6 @@ static int parse_args(int argc, char *argv[]) {
         {"profile",            required_argument, 0, OPT_PROFILE},
         {"psy-tune",           required_argument, 0, OPT_PSY_TUNE},
         {"x264-opts",          required_argument, 0, OPT_X264_OPTS},
-        /* AAC encoder options */
-        {"aac-coder",          required_argument, 0, OPT_AAC_CODER},
-        {"aac-is",             no_argument,       0, OPT_AAC_IS},
-        {"no-aac-is",          no_argument,       0, OPT_AAC_NO_IS},
-        {"aac-ms",             no_argument,       0, OPT_AAC_MS},
-        {"no-aac-ms",          no_argument,       0, OPT_AAC_NO_MS},
-        {"aac-pns",            no_argument,       0, OPT_AAC_PNS},
-        {"no-aac-pns",         no_argument,       0, OPT_AAC_NO_PNS},
-        {"aac-tns",            no_argument,       0, OPT_AAC_TNS},
-        {"no-aac-tns",         no_argument,       0, OPT_AAC_NO_TNS},
-        {"aac-ltp",            no_argument,       0, OPT_AAC_LTP},
-        {"no-aac-ltp",         no_argument,       0, OPT_AAC_NO_LTP},
-        {"aac-pred",           no_argument,       0, OPT_AAC_PRED},
-        {"no-aac-pred",        no_argument,       0, OPT_AAC_NO_PRED},
-        {"aac-cutoff",         required_argument, 0, OPT_AAC_CUTOFF},
-        {"aac-strict",         required_argument, 0, OPT_AAC_STRICT},
         /* Scaling options */
         {"scale",              required_argument, 0, 's'},
         {"scale-method",       required_argument, 0, OPT_SCALE_METHOD},
@@ -484,6 +436,10 @@ static int parse_args(int argc, char *argv[]) {
         /* Output options */
         {"stdout",             no_argument,       0, 'o'},
         {"tcp-port",           required_argument, 0, 't'},
+        {"udp-host",           required_argument, 0, OPT_UDP_HOST},
+        {"udp-port",           required_argument, 0, OPT_UDP_PORT},
+        {"video-pid",          required_argument, 0, OPT_VIDEO_PID},
+        {"audio-pid",          required_argument, 0, OPT_AUDIO_PID},
         /* General options */
         {"debug",              no_argument,       0, 'd'},
         {"detect-only",        no_argument,       0, 'O'},
@@ -654,53 +610,6 @@ static int parse_args(int argc, char *argv[]) {
                 strncpy(g_ctx.x264_option_string, optarg, sizeof(g_ctx.x264_option_string) - 1);
                 break;
 
-            /* AAC encoder options */
-            case OPT_AAC_CODER:
-                strncpy(g_ctx.aac_coder, optarg, sizeof(g_ctx.aac_coder) - 1);
-                break;
-            case OPT_AAC_IS:
-                g_ctx.aac_is = 1;
-                break;
-            case OPT_AAC_NO_IS:
-                g_ctx.aac_is = 0;
-                break;
-            case OPT_AAC_MS:
-                g_ctx.aac_ms = 1;
-                break;
-            case OPT_AAC_NO_MS:
-                g_ctx.aac_ms = 0;
-                break;
-            case OPT_AAC_PNS:
-                g_ctx.aac_pns = 1;
-                break;
-            case OPT_AAC_NO_PNS:
-                g_ctx.aac_pns = 0;
-                break;
-            case OPT_AAC_TNS:
-                g_ctx.aac_tns = 1;
-                break;
-            case OPT_AAC_NO_TNS:
-                g_ctx.aac_tns = 0;
-                break;
-            case OPT_AAC_LTP:
-                g_ctx.aac_ltp = 1;
-                break;
-            case OPT_AAC_NO_LTP:
-                g_ctx.aac_ltp = 0;
-                break;
-            case OPT_AAC_PRED:
-                g_ctx.aac_pred = 1;
-                break;
-            case OPT_AAC_NO_PRED:
-                g_ctx.aac_pred = 0;
-                break;
-            case OPT_AAC_CUTOFF:
-                g_ctx.aac_cutoff = atoi(optarg);
-                break;
-            case OPT_AAC_STRICT:
-                g_ctx.aac_strict = atoi(optarg);
-                break;
-
             /* Scaling options */
             case OPT_SCALE_METHOD:
                 g_ctx.scale_method = atoi(optarg);
@@ -710,6 +619,22 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_SCALE_THREADS:
                 g_ctx.scale_threads = atoi(optarg);
+                break;
+
+            /* Output PID options */
+            case OPT_VIDEO_PID:
+                g_ctx.video_pid = atoi(optarg);
+                break;
+            case OPT_AUDIO_PID:
+                g_ctx.audio_pid = atoi(optarg);
+                break;
+
+            /* UDP output options */
+            case OPT_UDP_HOST:
+                strncpy(g_ctx.udp_host, optarg, sizeof(g_ctx.udp_host) - 1);
+                break;
+            case OPT_UDP_PORT:
+                g_ctx.udp_port = atoi(optarg);
                 break;
 
             default:
@@ -1086,8 +1011,9 @@ static char *build_pipeline_string(void) {
     int remaining = 8192;
     int n;
 
-    /* Queue settings - matching working gst-launch pipeline */
-    const char *queue_settings = "max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0";
+    /* Queue settings - leaky=2 (downstream) drops OLD buffers when queue fills
+     * This keeps newest data flowing, critical for live video streaming */
+    const char *queue_settings = "max-size-time=3000000000 max-size-buffers=0 max-size-bytes=0 leaky=2";
 
     /* Input: udpsrc -> tsparse -> tsdemux (no queue after udpsrc) */
     n = snprintf(p, remaining,
@@ -1128,9 +1054,10 @@ static char *build_pipeline_string(void) {
             /* Video encoder based on output codec */
             switch (g_ctx.video_out_codec) {
                 case VIDEO_CODEC_H264: {
-                    /* Build x264enc with all options */
+                    /* Build x264enc with all options
+                     * qos=false prevents dropping frames when running behind */
                     n = snprintf(p, remaining,
-                        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d "
+                        "x264enc tune=zerolatency qos=false speed-preset=%s bitrate=%d key-int-max=%d "
                         "bframes=%d ref=%d qp-min=%d qp-max=%d vbv-buf-capacity=%d "
                         "rc-lookahead=%d threads=%d sliced-threads=%s b-adapt=%s "
                         "cabac=%s trellis=%s aud=%s intra-refresh=%s interlaced=%s ",
@@ -1165,25 +1092,31 @@ static char *build_pipeline_string(void) {
                         p += n; remaining -= n;
                     }
 
-                    /* h264parse before mux for proper stream formatting */
-                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! mux. ");
+                    /* h264parse before mux for proper stream formatting
+                     * Add queue before mux to prevent backpressure from blocking video */
+                    n = snprintf(p, remaining, "! h264parse config-interval=-1 ! queue %s ! mux.sink_%d ",
+                        queue_settings, g_ctx.video_pid);
                     break;
                 }
                 case VIDEO_CODEC_H265:
                     /* x265enc with h265parse config-interval=-1 for proper muxing */
                     n = snprintf(p, remaining,
                         "x265enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
-                        "h265parse config-interval=-1 ! mux. ",
+                        "h265parse config-interval=-1 ! queue %s ! mux.sink_%d ",
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.video_bitrate / 1000,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        queue_settings,
+                        g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_MPEG2:
                     /* mpeg2 with mpegvideoparse before mux */
                     n = snprintf(p, remaining,
-                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! mux. ",
+                        "avenc_mpeg2video bitrate=%d gop-size=%d ! mpegvideoparse ! queue %s ! mux.sink_%d ",
                         g_ctx.video_bitrate,
-                        g_ctx.keyframe_interval);
+                        g_ctx.keyframe_interval,
+                        queue_settings,
+                        g_ctx.video_pid);
                     break;
                 default:
                     n = 0;
@@ -1208,56 +1141,37 @@ static char *build_pipeline_string(void) {
                 queue_settings, parser, decoder);
             p += n; remaining -= n;
 
-            /* Audio encoder with codec-specific options + parser before mux */
+            /* Audio encoder with codec-specific options + parser before mux
+             * Add queue before mux to prevent backpressure from blocking audio */
             switch (g_ctx.audio_out_codec) {
                 case AUDIO_CODEC_AAC:
-                    /* Set audio format via caps, then avenc_aac with all options */
+                    /* Set audio format via caps, then avenc_aac with basic settings */
                     n = snprintf(p, remaining,
                         "audio/x-raw,channels=%d,rate=%d ! "
-                        "avenc_aac bitrate=%d aac-coder=%s "
-                        "aac-is=%s aac-ms=%s aac-pns=%s aac-tns=%s aac-ltp=%s aac-pred=%s ",
+                        "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
                         g_ctx.audio_channels,
                         g_ctx.audio_samplerate,
                         g_ctx.audio_bitrate,
-                        g_ctx.aac_coder,
-                        g_ctx.aac_is ? "true" : "false",
-                        g_ctx.aac_ms ? "true" : "false",
-                        g_ctx.aac_pns ? "true" : "false",
-                        g_ctx.aac_tns ? "true" : "false",
-                        g_ctx.aac_ltp ? "true" : "false",
-                        g_ctx.aac_pred ? "true" : "false");
-                    p += n; remaining -= n;
-
-                    /* Add optional cutoff */
-                    if (g_ctx.aac_cutoff > 0) {
-                        n = snprintf(p, remaining, "cutoff=%d ", g_ctx.aac_cutoff);
-                        p += n; remaining -= n;
-                    }
-
-                    /* Add strict if non-default */
-                    if (g_ctx.aac_strict != 0) {
-                        n = snprintf(p, remaining, "strict=%d ", g_ctx.aac_strict);
-                        p += n; remaining -= n;
-                    }
-
-                    /* aacparse before mux */
-                    n = snprintf(p, remaining, "! aacparse ! mux. ");
+                        queue_settings,
+                        g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_AC3:
                     n = snprintf(p, remaining,
-                        "avenc_ac3 bitrate=%d ! ac3parse ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_ac3 bitrate=%d ! ac3parse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
                     break;
 
                 case AUDIO_CODEC_MP2:
                     n = snprintf(p, remaining,
-                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! mux. ", g_ctx.audio_bitrate);
+                        "avenc_mp2 bitrate=%d ! mpegaudioparse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
                     break;
 
                 default:
                     /* Fallback - should not reach here */
-                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! mux. ",
-                        g_ctx.audio_bitrate);
+                    n = snprintf(p, remaining, "avenc_aac bitrate=%d ! aacparse ! queue %s ! mux.sink_%d ",
+                        g_ctx.audio_bitrate, queue_settings, g_ctx.audio_pid);
             }
             p += n; remaining -= n;
         }
@@ -1267,12 +1181,23 @@ static char *build_pipeline_string(void) {
     }
     /* TODO: passthrough mode */
 
-    /* Muxer and output - single queue after mux */
-    n = snprintf(p, remaining, "mpegtsmux name=mux alignment=7 ! queue ! ");
+    /* Muxer and output - queue after mux uses same leaky settings to prevent stalls
+     * Use prog-map to assign video and audio to program 1 with specified PIDs
+     * Calculate mux bitrate as (video + audio) * 1.1 for CBR output with 10% overhead */
+    int mux_bitrate = (int)((g_ctx.video_bitrate + g_ctx.audio_bitrate) * 1.1);
+    n = snprintf(p, remaining,
+        "mpegtsmux name=mux alignment=7 bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue %s ! ",
+        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid, queue_settings);
     p += n; remaining -= n;
 
     if (g_ctx.use_stdout) {
-        n = snprintf(p, remaining, "fdsink fd=1");
+        /* filesink to /dev/stdout with unbuffered mode for immediate output */
+        n = snprintf(p, remaining, "filesink location=/dev/stdout buffer-mode=2 sync=false");
+    } else if (g_ctx.udp_host[0] != '\0') {
+        /* udpsink for UDP output - sync=false for live streaming */
+        n = snprintf(p, remaining,
+            "udpsink host=%s port=%d sync=false",
+            g_ctx.udp_host, g_ctx.udp_port);
     } else {
         /* tcpserversink with sync=false and sync-method for low latency */
         n = snprintf(p, remaining,

@@ -47,6 +47,15 @@ switch ($action) {
     case 'get':
         handle_get($id);
         break;
+    case 'probe_stream':
+        handle_probe_stream();
+        break;
+    case 'start_preview':
+        handle_start_preview();
+        break;
+    case 'stop_preview':
+        handle_stop_preview();
+        break;
     case 'inputs':
         handle_get_inputs();
         break;
@@ -409,7 +418,9 @@ function build_transcoder_config($input) {
         'output' => [
             'address' => $input['output_address'] ?? '',
             'port' => intval($input['output_port'] ?? 5000),
-            'api_port' => intval($input['api_port'] ?? 9200)
+            'api_port' => intval($input['api_port'] ?? 9200),
+            'video_pid' => intval($input['video_pid'] ?? 256),
+            'audio_pid' => intval($input['audio_pid'] ?? 257)
         ],
         'video' => [
             'mode' => $input['video_mode'] ?? 'transcode',
@@ -448,16 +459,7 @@ function build_transcoder_config($input) {
             'codec' => $input['audio_codec'] ?? 'aac',
             'bitrate' => intval($input['audio_bitrate'] ?? 128000),
             'channels' => intval($input['audio_channels'] ?? 2),
-            'samplerate' => intval($input['audio_samplerate'] ?? 48000),
-            'aac_coder' => $input['aac_coder'] ?? 'fast',
-            'aac_is' => !empty($input['aac_is']),
-            'aac_ms' => !empty($input['aac_ms']),
-            'aac_pns' => !empty($input['aac_pns']),
-            'aac_tns' => !empty($input['aac_tns']),
-            'aac_ltp' => !empty($input['aac_ltp']),
-            'aac_pred' => !empty($input['aac_pred']),
-            'aac_cutoff' => intval($input['aac_cutoff'] ?? 0),
-            'aac_strict' => intval($input['aac_strict'] ?? 0)
+            'samplerate' => intval($input['audio_samplerate'] ?? 48000)
         ]
     ];
 
@@ -505,6 +507,8 @@ function create_transcoder_service($id, $config) {
         'output_address' => $output['address'],
         'output_port' => $output['port'],
         'api_port' => $output['api_port'],
+        'video_pid' => $output['video_pid'] ?? 256,
+        'audio_pid' => $output['audio_pid'] ?? 257,
         'tsp_bitrate' => $tsp_bitrate,
 
         // Video settings
@@ -543,16 +547,7 @@ function create_transcoder_service($id, $config) {
         'audio_codec' => $audio['codec'],
         'audio_bitrate' => $audio['bitrate'],
         'audio_channels' => $audio['channels'],
-        'audio_samplerate' => $audio['samplerate'],
-        'aac_coder' => $audio['aac_coder'],
-        'aac_is' => $audio['aac_is'],
-        'aac_ms' => $audio['aac_ms'],
-        'aac_pns' => $audio['aac_pns'],
-        'aac_tns' => $audio['aac_tns'],
-        'aac_ltp' => $audio['aac_ltp'],
-        'aac_pred' => $audio['aac_pred'],
-        'aac_cutoff' => $audio['aac_cutoff'],
-        'aac_strict' => $audio['aac_strict']
+        'audio_samplerate' => $audio['samplerate']
     ];
 
     $result = call_cari_api('/transcoder/create', 'POST', $service_data);
@@ -585,6 +580,75 @@ function delete_transcoder_service($id) {
 }
 
 /**
+ * Probe a stream using ffprobe API
+ * Returns video/audio codec info, resolution, etc.
+ */
+function handle_probe_stream() {
+    $address = $_GET['address'] ?? '';
+
+    if (empty($address)) {
+        echo json_encode(['success' => false, 'error' => 'Stream address required']);
+        return;
+    }
+
+    // Build the stream URL - expect format like "239.1.1.1:5000"
+    // Convert to udp://@ADDRESS:PORT format for ffprobe
+    $stream_url = 'udp://@' . $address;
+
+    $api_data = [
+        'stream_url' => $stream_url
+    ];
+
+    $result = call_cari_api('/preview/media-info', 'POST', $api_data);
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to probe stream']);
+}
+
+/**
+ * Start player_preview for transcoder output
+ */
+function handle_start_preview() {
+    $input = json_decode(file_get_contents('php://input'), true);
+
+    $id = $input['id'] ?? '';
+    $input_address = $input['input_address'] ?? '';
+    $output_dir = $input['output_dir'] ?? '';
+    $api_port = intval($input['api_port'] ?? 0);
+
+    if (empty($input_address) || empty($output_dir) || $api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'Missing required parameters']);
+        return;
+    }
+
+    $api_data = [
+        'input_address' => $input_address,
+        'output_dir' => $output_dir,
+        'api_port' => $api_port,
+        'folder' => 'transcoder-' . $id
+    ];
+
+    $result = call_cari_api('/preview/start', 'POST', $api_data);
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to start preview']);
+}
+
+/**
+ * Stop player_preview for transcoder output
+ */
+function handle_stop_preview() {
+    $api_port = intval($_GET['api_port'] ?? 0);
+
+    if ($api_port === 0) {
+        echo json_encode(['success' => false, 'error' => 'API port required']);
+        return;
+    }
+
+    $result = call_cari_api("/preview/stop/{$api_port}", 'POST');
+
+    echo json_encode($result ?: ['success' => false, 'error' => 'Failed to stop preview']);
+}
+
+/**
  * Get metrics for all transcoders
  * Parses tsp bitrate_monitor output from log files
  */
@@ -604,14 +668,122 @@ function handle_all_metrics() {
 /**
  * Get metrics for a single transcoder
  * Parses the last bitrate_monitor output from the log file
+ * Also fetches input bitrate from linked input service
  */
 function get_transcoder_metrics($id) {
     $log_file = "/var/log/caritrans/transcoder-{$id}.log";
+    $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+    $service_file = "/etc/systemd/system/cari-transcoder@{$id}.service";
+
     $metrics = [
         'status' => 'offline',
-        'video_bitrate' => 0,
-        'audio_bitrate' => 0
+        'output_video_bitrate' => 0,
+        'output_audio_bitrate' => 0,
+        'output_total_bitrate' => 0,
+        'input_video_bitrate' => 0,
+        'input_audio_bitrate' => 0,
+        'input_format' => null,
+        'output_format' => null,
+        'video_pid' => 256,
+        'audio_pid' => 257
     ];
+
+    $input_api_port = null;
+    $input_address = null;
+
+    // Try to get input source from transcoder config file first
+    if (file_exists($config_file)) {
+        $config = parse_config($config_file);
+
+        // Get configured PIDs and api_port for output stream
+        $metrics['video_pid'] = intval($config['output']['video_pid'] ?? 256);
+        $metrics['audio_pid'] = intval($config['output']['audio_pid'] ?? 257);
+        $metrics['api_port'] = intval($config['output']['api_port'] ?? 9200);
+
+        // Get output format from config
+        $metrics['output_format'] = [
+            'video_codec' => $config['video']['codec'] ?? 'unknown',
+            'video_bitrate' => $config['video']['bitrate'] ?? 0,
+            'video_resolution' => ($config['video']['width'] ?? 'auto') . 'x' . ($config['video']['height'] ?? 'auto'),
+            'audio_codec' => $config['audio']['codec'] ?? 'aac',
+            'audio_bitrate' => $config['audio']['bitrate'] ?? 128000,
+            'audio_channels' => $config['audio']['channels'] ?? 2
+        ];
+
+        // Get linked input service
+        $source_service = $config['input']['source_service'] ?? null;
+        if ($source_service) {
+            $metrics['source_service'] = $source_service;
+            $input_config_file = CONFIG_PATH . '/inputs/' . $source_service . '.conf';
+            if (file_exists($input_config_file)) {
+                $input_config = parse_config($input_config_file);
+                $input_api_port = $input_config['output']['api_port'] ?? null;
+            }
+        }
+    }
+
+    // If no config file or no source_service, try to parse input address from service file
+    if (file_exists($service_file)) {
+        $service_content = file_get_contents($service_file);
+
+        // Parse --input ADDRESS:PORT from the ExecStart line
+        if (!$input_api_port && preg_match('/--input\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+            $input_address = $matches[1];
+            $input_port = $matches[2];
+            $metrics['input_address'] = $input_address . ':' . $input_port;
+
+            // Find an input whose output matches this address:port
+            $inputs_dir = CONFIG_PATH . '/inputs';
+            if (is_dir($inputs_dir)) {
+                foreach (glob("{$inputs_dir}/*.conf") as $input_file) {
+                    $input_config = parse_config($input_file);
+                    $out_addr = $input_config['output']['address'] ?? '';
+                    $out_port = $input_config['output']['port'] ?? '';
+
+                    if ($out_addr === $input_address && $out_port == $input_port) {
+                        $input_api_port = $input_config['output']['api_port'] ?? null;
+                        $input_id = basename($input_file, '.conf');
+                        $metrics['source_service'] = $input_id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Parse output address: -O ip ADDRESS:PORT
+        if (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
+        }
+    }
+
+    // Fetch input metrics if we found an API port
+    if ($input_api_port) {
+        $url = "http://127.0.0.1:{$input_api_port}/metrics";
+        $ctx = stream_context_create([
+            'http' => ['timeout' => 2, 'ignore_errors' => true]
+        ]);
+        $response = @file_get_contents($url, false, $ctx);
+
+        if ($response !== false) {
+            $input_data = json_decode($response, true);
+            if ($input_data && isset($input_data['pids'])) {
+                // Process PIDs to get video/audio bitrate
+                foreach ($input_data['pids'] as $pid => $pidData) {
+                    $bitrate = $pidData['current_bitrate'] ?? 0;
+                    if ($bitrate > 500000 && $metrics['input_video_bitrate'] === 0) {
+                        $metrics['input_video_bitrate'] = $bitrate;
+                    } elseif ($bitrate > 0 && $bitrate <= 500000) {
+                        $metrics['input_audio_bitrate'] += $bitrate;
+                    }
+                }
+
+                // Get input format from stream info
+                if (isset($input_data['stream_info'])) {
+                    $metrics['input_format'] = $input_data['stream_info'];
+                }
+            }
+        }
+    }
 
     // Check if service is running
     $service_name = "cari-transcoder@{$id}";
@@ -625,7 +797,7 @@ function get_transcoder_metrics($id) {
 
     $metrics['status'] = 'running';
 
-    // Try to read bitrate from log file (last few lines)
+    // Try to read output bitrate from log file (last few lines)
     if (file_exists($log_file) && is_readable($log_file)) {
         // Read last 20 lines of log file
         $lines = [];
@@ -647,30 +819,44 @@ function get_transcoder_metrics($id) {
         }
 
         // Parse bitrate_monitor output
-        // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0041 (65) bitrate: 1234567 bits/s
-        $video_pid = 65;  // Default video PID (0x41)
-        $audio_pid = 66;  // Default audio PID (0x42)
+        // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
+        // Note: Numbers may contain commas as thousand separators
+
+        $video_pid = $metrics['video_pid'];
+        $audio_pid = $metrics['audio_pid'];
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
-                if (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+(\d+)\s+bits\/s/', $line, $matches)) {
+                // Try per-PID format - match the configured PIDs
+                if (preg_match('/PID\s+0x[0-9a-fA-F]+\s+\((\d+)\)\s+bitrate:\s+([\d,]+)\s+bits\/s/', $line, $matches)) {
                     $pid = intval($matches[1]);
-                    $bitrate = intval($matches[2]);
+                    $bitrate = intval(str_replace(',', '', $matches[2]));
 
-                    if ($pid === $video_pid && $metrics['video_bitrate'] === 0) {
-                        $metrics['video_bitrate'] = $bitrate;
-                    } elseif ($pid === $audio_pid && $metrics['audio_bitrate'] === 0) {
-                        $metrics['audio_bitrate'] = $bitrate;
+                    if ($pid === $video_pid && $metrics['output_video_bitrate'] === 0) {
+                        $metrics['output_video_bitrate'] = $bitrate;
+                    } elseif ($pid === $audio_pid && $metrics['output_audio_bitrate'] === 0) {
+                        $metrics['output_audio_bitrate'] = $bitrate;
                     }
-
-                    // Stop if we have both
-                    if ($metrics['video_bitrate'] > 0 && $metrics['audio_bitrate'] > 0) {
-                        break;
+                }
+                // Fallback: try total TS bitrate format (for backwards compatibility)
+                elseif (preg_match('/TS bitrate:\s*([\d,]+)\s*bits\/s/', $line, $matches)) {
+                    $total_bitrate = intval(str_replace(',', '', $matches[1]));
+                    if ($metrics['output_total_bitrate'] === 0) {
+                        $metrics['output_total_bitrate'] = $total_bitrate;
                     }
                 }
             }
         }
+
+        // Calculate total from video + audio if we have per-PID values
+        if ($metrics['output_video_bitrate'] > 0 || $metrics['output_audio_bitrate'] > 0) {
+            $metrics['output_total_bitrate'] = $metrics['output_video_bitrate'] + $metrics['output_audio_bitrate'];
+        }
     }
+
+    // For backwards compatibility, also set video_bitrate/audio_bitrate
+    $metrics['video_bitrate'] = $metrics['output_video_bitrate'];
+    $metrics['audio_bitrate'] = $metrics['output_audio_bitrate'];
 
     return $metrics;
 }

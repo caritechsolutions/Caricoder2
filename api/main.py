@@ -188,6 +188,8 @@ class TranscoderService(BaseModel):
     output_address: str
     output_port: int
     api_port: int = 9200
+    video_pid: int = 256  # Video elementary stream PID (default 0x100)
+    audio_pid: int = 257  # Audio elementary stream PID (default 0x101)
     tsp_bitrate: int  # CBR bitrate for tsp output (video+audio+5%)
 
     # Video settings
@@ -227,15 +229,6 @@ class TranscoderService(BaseModel):
     audio_bitrate: int = 128000
     audio_channels: int = 2
     audio_samplerate: int = 48000
-    aac_coder: str = "fast"
-    aac_is: bool = True
-    aac_ms: bool = True
-    aac_pns: bool = True
-    aac_tns: bool = True
-    aac_ltp: bool = False
-    aac_pred: bool = False
-    aac_cutoff: int = 0
-    aac_strict: int = 0
 
     description: Optional[str] = None
 
@@ -1989,6 +1982,8 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
         f"--input {service_data.input_address}:{service_data.input_port}",
         f"--video-bitrate {service_data.video_bitrate}",
         f"--audio-bitrate {service_data.audio_bitrate}",
+        f"--video-pid {service_data.video_pid}",
+        f"--audio-pid {service_data.audio_pid}",
         "--stdout"
     ]
 
@@ -2069,39 +2064,15 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
         if service_data.audio_samplerate != 48000:
             transcoder_cmd_parts.append(f"--audio-samplerate {service_data.audio_samplerate}")
 
-        # AAC specific options - only include if changed from defaults
-        if service_data.audio_codec == "aac":
-            if service_data.aac_coder != "fast":
-                transcoder_cmd_parts.append(f"--aac-coder {service_data.aac_coder}")
-            # These are on by default in the transcoder, only pass if disabled
-            if not service_data.aac_is:
-                transcoder_cmd_parts.append("--no-aac-is")
-            if not service_data.aac_ms:
-                transcoder_cmd_parts.append("--no-aac-ms")
-            if not service_data.aac_pns:
-                transcoder_cmd_parts.append("--no-aac-pns")
-            if not service_data.aac_tns:
-                transcoder_cmd_parts.append("--no-aac-tns")
-            # These are off by default, only pass if enabled
-            if service_data.aac_ltp:
-                transcoder_cmd_parts.append("--aac-ltp")
-            if service_data.aac_pred:
-                transcoder_cmd_parts.append("--aac-pred")
-            if service_data.aac_cutoff > 0:
-                transcoder_cmd_parts.append(f"--aac-cutoff {service_data.aac_cutoff}")
-            if service_data.aac_strict != 0:
-                transcoder_cmd_parts.append(f"--aac-strict {service_data.aac_strict}")
-
     transcoder_cmd = " ".join(transcoder_cmd_parts)
 
-    # Build tsp command with null carrier for CBR output
-    # Using: tsp --bitrate X -I null -P regulate -P merge "transcoder_cmd" -P bitrate_monitor ... -P pcradjust -O ip
+    # Build tsp command using fork input - tsp spawns transcoder as child process
+    # This matches how other input tools (hls_input, rist_input, srt_input) work
+    # --buffer-size-mb 1 for fast startup
     tsp_cmd = (
-        f"tsp --bitrate {service_data.tsp_bitrate} -I null -P regulate "
-        f'-P merge "{transcoder_cmd}" '
-        f"-P bitrate_monitor --pid 65 --periodic-bitrate 5 "
-        f"-P bitrate_monitor --pid 66 --periodic-bitrate 5 "
-        f"-P pcradjust "
+        f'tsp --buffer-size-mb 1 -I fork "{transcoder_cmd} --stdout" '
+        f"-P bitrate_monitor --pid {service_data.video_pid} --periodic-bitrate 5 "
+        f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 5 "
         f"-O ip {service_data.output_address}:{service_data.output_port}"
     )
 
@@ -2118,7 +2089,7 @@ Type=simple
 User=root
 Group=root
 
-# Main process - tsp with cari-transcoder via merge
+# Main process - cari-transcoder piped through tsp for monitoring and UDP output
 ExecStart=/bin/bash -c '{tsp_cmd} 2>>{log_file}'
 ExecReload=/bin/kill -HUP $MAINPID
 
@@ -2151,6 +2122,11 @@ async def create_transcoder_service(service: TranscoderService):
     service_file = f"{SYSTEMD_DIR}/{service_name}.service"
 
     try:
+        # Ensure log directory exists
+        log_dir = "/var/log/caritrans"
+        os.makedirs(log_dir, exist_ok=True)
+        os.chmod(log_dir, 0o755)
+
         # Generate service content
         service_content = generate_transcoder_service_file(service)
 

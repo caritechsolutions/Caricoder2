@@ -16,7 +16,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
+GSTREAMER_VERSION="1.26.1"
 INSTALL_DIR="/opt/caritrans"
 CONFIG_DIR="/etc/caritrans"
 WEB_DIR="/var/www/caritrans"
@@ -24,7 +25,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/setup-caritranscoder-j6OYk"
+BRANCH="claude/av-sync-monitor-Y57VM"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
@@ -111,11 +112,12 @@ install_dependencies() {
     # FFmpeg (for stream analysis and fallback transcoding)
     apt-get install -y ffmpeg
 
-    # SRT support
-    apt-get install -y libsrt-dev libsrt1.5-openssl || apt-get install -y libsrt-dev || true
+    # SRT support - package names vary by Ubuntu version
+    # Ubuntu 24.04: libsrt-openssl-dev, Ubuntu 22.04: libsrt-openssl-dev, Ubuntu 20.04: libsrt-dev
+    apt-get install -y libsrt-openssl-dev 2>/dev/null || apt-get install -y libsrt-gnutls-dev 2>/dev/null || apt-get install -y libsrt-dev 2>/dev/null || true
 
     # SRT tools (srt-live-transmit for stream reception)
-    apt-get install -y srt-tools || true
+    apt-get install -y srt-tools 2>/dev/null || true
 
     # Build tools for librist
     apt-get install -y meson ninja-build cmake || true
@@ -161,19 +163,26 @@ install_tsduck() {
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
     # Determine TSDuck version and package name based on Ubuntu version
+    # Note: Ubuntu 24 packages use different ABI (libssl3t64, libcurl4t64) and won't work on older Ubuntu
+    # Available packages in repo: ubuntu20 (3.26-2349), ubuntu24 (3.43-4524)
+    # Ubuntu 22 must be downloaded from GitHub
     local TSDUCK_VERSION=""
     local UBUNTU_TAG=""
+    local DOWNLOAD_ONLY=false
 
     case "$VERSION_CODENAME" in
         noble|plucky|oracular)
             # Ubuntu 24.04+ - use latest TSDuck
-            TSDUCK_VERSION="3.42-4421"
+            TSDUCK_VERSION="3.43-4524"
             UBUNTU_TAG="ubuntu24"
             ;;
         jammy)
-            # Ubuntu 22.04 - use older version compatible with this release
-            TSDUCK_VERSION="3.37-3520"
+            # Ubuntu 22.04 - must download from GitHub (not in local repo, can't use ubuntu24 due to ABI changes)
+            # Note: 3.33-3139 is the latest version with ubuntu22 packages on GitHub
+            TSDUCK_VERSION="3.33-3139"
             UBUNTU_TAG="ubuntu22"
+            DOWNLOAD_ONLY=true
+            log_info "Ubuntu 22.04 detected, will download from GitHub"
             ;;
         focal)
             # Ubuntu 20.04 - use version that supports focal
@@ -183,7 +192,7 @@ install_tsduck() {
         *)
             # Unknown - try ubuntu24 package
             log_warn "Unknown Ubuntu version, trying ubuntu24 package"
-            TSDUCK_VERSION="3.42-4421"
+            TSDUCK_VERSION="3.43-4524"
             UBUNTU_TAG="ubuntu24"
             ;;
     esac
@@ -195,7 +204,8 @@ install_tsduck() {
     local FOUND_LOCAL=false
 
     # STEP 1: Check for local package matching the OS version (preferred method)
-    if [[ -d "$INSTALL_DIR/packages" ]]; then
+    # Skip if DOWNLOAD_ONLY is set (e.g., Ubuntu 22 where we don't have local package)
+    if [[ "$DOWNLOAD_ONLY" = false ]] && [[ -d "$INSTALL_DIR/packages" ]]; then
         # First try exact match for this Ubuntu version
         local LOCAL_DEB=$(find "$INSTALL_DIR/packages" -name "tsduck*${UBUNTU_TAG}*${ARCH}.deb" 2>/dev/null | head -1)
         if [[ -f "$LOCAL_DEB" ]]; then
@@ -287,13 +297,12 @@ install_tsduck() {
 
 # Install librist from local source (for ristreceiver)
 install_librist() {
-    log_step "Installing librist (RIST library) from local source..."
+    log_step "Installing librist (RIST library)..."
 
-    # Check if local librist source exists
-    if [[ ! -d "$INSTALL_DIR/librist-master" ]]; then
-        log_warn "librist source not found at $INSTALL_DIR/librist-master"
-        log_warn "RIST support will not be available"
-        return 1
+    # Check if already installed
+    if command -v ristreceiver &> /dev/null || [[ -f /usr/local/bin/ristreceiver ]]; then
+        log_info "librist already installed"
+        return 0
     fi
 
     cd /tmp
@@ -304,9 +313,18 @@ install_librist() {
         rm -rf librist-build
     fi
 
-    # Copy source to temp build directory
-    log_info "Copying librist source to build directory..."
-    cp -r "$INSTALL_DIR/librist-master" librist-build
+    # Check for local source first, otherwise download
+    if [[ -d "$INSTALL_DIR/librist-master" ]]; then
+        log_info "Using local librist source..."
+        cp -r "$INSTALL_DIR/librist-master" librist-build
+    else
+        log_info "Downloading librist from code.videolan.org..."
+        if ! git clone --depth 1 https://code.videolan.org/rist/librist.git librist-build; then
+            log_warn "Failed to download librist source"
+            log_warn "RIST support will not be available"
+            return 1
+        fi
+    fi
 
     cd librist-build
 
@@ -352,6 +370,201 @@ install_librist() {
     else
         log_warn "ristreceiver not found in PATH after install"
         log_warn "RIST support may not work"
+    fi
+}
+
+# Install GStreamer from source (for mpegtsmux bitrate property support)
+install_gstreamer() {
+    log_step "Installing GStreamer ${GSTREAMER_VERSION} from source..."
+
+    # Check if already installed
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local CURRENT_VERSION=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        if [[ "$CURRENT_VERSION" == "$GSTREAMER_VERSION" ]]; then
+            log_info "GStreamer ${GSTREAMER_VERSION} already installed"
+            return 0
+        else
+            log_info "Current GStreamer version: ${CURRENT_VERSION}, upgrading to ${GSTREAMER_VERSION}"
+        fi
+    fi
+
+    local BUILD_DIR="/tmp/gstreamer-build"
+    local JOBS=$(nproc)
+
+    # Install build dependencies
+    log_info "Installing GStreamer build dependencies..."
+
+    # Update CA certificates first to fix SSL issues
+    apt-get install -y ca-certificates
+    update-ca-certificates
+
+    apt-get install -y \
+        build-essential \
+        ninja-build \
+        pkg-config \
+        flex \
+        bison \
+        python3 \
+        python3-pip \
+        python3-gi \
+        python3-certifi \
+        libglib2.0-dev \
+        libgudev-1.0-dev \
+        liborc-0.4-dev \
+        libpango1.0-dev \
+        libcairo2-dev \
+        libasound2-dev \
+        libpulse-dev \
+        libx264-dev \
+        libx265-dev \
+        libvpx-dev \
+        libopus-dev \
+        libmp3lame-dev \
+        libfaad-dev \
+        libvorbis-dev \
+        libtheora-dev \
+        libflac-dev \
+        libspeex-dev \
+        libwebp-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libsoup2.4-dev \
+        libssl-dev \
+        libsrtp2-dev \
+        libnice-dev \
+        libtag1-dev \
+        libdv4-dev \
+        libmpeg2-4-dev \
+        libv4l-dev \
+        libxv-dev \
+        libxt-dev \
+        libxext-dev \
+        libgl-dev \
+        libegl-dev \
+        libdrm-dev \
+        libgbm-dev \
+        wayland-protocols \
+        libwayland-dev \
+        libgtk-3-dev \
+        libcurl4-openssl-dev \
+        libjson-glib-dev \
+        libsbc-dev \
+        libopencore-amrnb-dev \
+        libopencore-amrwb-dev \
+        libtwolame-dev \
+        libwavpack-dev \
+        libbs2b-dev \
+        libsndfile1-dev \
+        libass-dev \
+        libzbar-dev \
+        libchromaprint-dev \
+        librtmp-dev \
+        nasm \
+        yasm \
+        git \
+        cmake || true
+
+    # Install graphene library (prevents meson from downloading it)
+    apt-get install -y libgraphene-1.0-dev 2>/dev/null || true
+
+    # Optional packages that may not be available on all systems
+    apt-get install -y libfaac-dev libusrsctp-dev libwebrtc-audio-processing-dev \
+        liba52-0.7.4-dev libcdio-dev libdvdread-dev libdvdnav-dev \
+        libraw1394-dev libavc1394-dev libiec61883-dev libldac-dev libfdk-aac-dev 2>/dev/null || true
+
+    # Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
+    log_info "Installing Meson build system via pip..."
+    # Try standard pip upgrade first, then with --break-system-packages for newer systems
+    pip3 install --upgrade meson || pip3 install --break-system-packages --upgrade meson
+    # Ensure pip-installed meson is in PATH (installed to /usr/local/bin by pip as root)
+    export PATH="/usr/local/bin:$PATH"
+    hash -r  # Clear bash command cache
+    log_info "Using Meson version: $(meson --version)"
+
+    # Create build directory
+    log_info "Setting up build directory..."
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    # Download GStreamer monorepo
+    log_info "Downloading GStreamer ${GSTREAMER_VERSION}..."
+    if ! git clone --depth 1 --branch ${GSTREAMER_VERSION} \
+            https://gitlab.freedesktop.org/gstreamer/gstreamer.git; then
+        log_error "Failed to download GStreamer source"
+        rm -rf "${BUILD_DIR}"
+        return 1
+    fi
+    cd gstreamer
+
+    # Configure with meson
+    log_info "Configuring build with Meson..."
+    meson setup builddir \
+        --prefix=/usr/local \
+        --buildtype=release \
+        --strip \
+        -Dgpl=enabled \
+        -Dugly=enabled \
+        -Dbad=enabled \
+        -Dlibav=disabled \
+        -Ddevtools=disabled \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dtests=disabled \
+        -Dintrospection=disabled \
+        -Dnls=disabled \
+        -Dqt5=disabled \
+        -Dqt6=disabled \
+        -Dpython=disabled \
+        -Dvaapi=disabled \
+        -Dges=disabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        -Dsharp=disabled
+
+    # Build
+    log_info "Building GStreamer (this may take a while)..."
+    ninja -C builddir -j${JOBS}
+
+    # Install
+    log_info "Installing GStreamer..."
+    ninja -C builddir install
+
+    # Update library cache
+    ldconfig
+
+    # Update pkg-config path
+    cat > /etc/profile.d/gstreamer.sh << 'GSTENV'
+export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=/usr/local/bin:$PATH
+export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+GSTENV
+
+    # Source the environment for this session
+    export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    export PATH=/usr/local/bin:$PATH
+    export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+
+    # Cleanup
+    cd /
+    rm -rf "${BUILD_DIR}"
+
+    # Verify installation
+    if command -v /usr/local/bin/gst-launch-1.0 &> /dev/null; then
+        log_info "GStreamer ${GSTREAMER_VERSION} installed successfully"
+        /usr/local/bin/gst-launch-1.0 --version
+
+        # Check for mpegtsmux bitrate property
+        if /usr/local/bin/gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            log_info "mpegtsmux bitrate property available"
+        else
+            log_warn "mpegtsmux bitrate property not found (may still work)"
+        fi
+    else
+        log_error "GStreamer installation failed"
+        return 1
     fi
 }
 
@@ -991,6 +1204,17 @@ print_completion() {
     else
         echo -e "  librist:     ${YELLOW}Not Installed${NC}"
     fi
+    if command -v gst-launch-1.0 &> /dev/null; then
+        local GST_VER=$(gst-launch-1.0 --version 2>&1 | grep -oP 'GStreamer \K[0-9.]+' | head -1)
+        echo -e "  GStreamer:   ${GREEN}${GST_VER}${NC}"
+        if gst-inspect-1.0 mpegtsmux 2>/dev/null | grep -q "bitrate"; then
+            echo -e "  mpegtsmux:   ${GREEN}CBR bitrate available${NC}"
+        else
+            echo -e "  mpegtsmux:   ${YELLOW}CBR bitrate not available${NC}"
+        fi
+    else
+        echo -e "  GStreamer:   ${YELLOW}Not Installed${NC}"
+    fi
     echo ""
     echo -e "${BLUE}Web Interface:${NC}"
     echo -e "  URL:         ${GREEN}http://${SERVER_IP}:8080${NC}"
@@ -1023,11 +1247,12 @@ main() {
     check_root
     check_os
     install_dependencies
-    install_tsduck
-    install_librist
+    install_gstreamer
     create_user
     create_directories
     download_repo
+    install_tsduck
+    install_librist
     build_apps
     build_tools
     install_binaries
