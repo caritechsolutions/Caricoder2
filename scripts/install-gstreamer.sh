@@ -112,6 +112,15 @@ apt-get install -y \
     git \
     cmake
 
+# Install FFmpeg dev libraries for gst-libav plugin
+apt-get install -y \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libavfilter-dev \
+    libswresample-dev \
+    libswscale-dev || true
+
 # Install graphene library (prevents meson from downloading it with SSL issues)
 apt-get install -y libgraphene-1.0-dev 2>/dev/null || true
 
@@ -147,7 +156,7 @@ meson setup builddir \
     -Dgpl=enabled \
     -Dugly=enabled \
     -Dbad=enabled \
-    -Dlibav=disabled \
+    -Dlibav=enabled \
     -Ddevtools=disabled \
     -Ddoc=disabled \
     -Dexamples=disabled \
