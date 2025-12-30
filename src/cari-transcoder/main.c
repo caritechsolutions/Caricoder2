@@ -1134,8 +1134,8 @@ static char *build_pipeline_string(void) {
         p += n; remaining -= n;
     }
 
-    /* Muxer - calculate bitrate as (video + audio) * 1.1 for 10% overhead */
-    int mux_bitrate = (int)((g_ctx.video_bitrate + g_ctx.audio_bitrate) * 1.1);
+    /* Muxer - VBV constrains encoder so no overhead needed */
+    int mux_bitrate = g_ctx.video_bitrate + g_ctx.audio_bitrate;
     n = snprintf(p, remaining,
         "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
         mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
