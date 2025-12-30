@@ -1242,7 +1242,7 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
 
         return $ffprobe_result;
     } elseif ($type === 'rist' || strpos($url, 'rist://') === 0) {
-        // RIST input - prefer ristreceiver if available
+        // RIST input - use ristreceiver + ffprobe (avoids TSDuck dependency issues)
         $rist_receiver = trim(shell_exec('which ristreceiver 2>/dev/null') ?:
                          (file_exists('/usr/local/bin/ristreceiver') ? '/usr/local/bin/ristreceiver' : ''));
 
@@ -1254,31 +1254,29 @@ function scan_with_tsduck($url, $type, $srt_options = []) {
 
         if ($rist_receiver) {
             // Use ristreceiver to receive RIST and output to local multicast UDP
-            // ristreceiver requires -i (input) and -o (output) parameters
-            // We output to a multicast address and capture with tsp
+            // Then use ffprobe to analyze (more reliable than TSDuck)
             $local_port = rand(15000, 15999);
             $probe_multicast = "udp://239.7.7.7:{$local_port}";
 
-            // Start ristreceiver in background with timeout (auto-terminates, no pkill needed)
+            // Start ristreceiver in background with timeout
             $rist_cmd = sprintf(
-                'timeout 10 %s -i %s -o %s -S 0 -v -1 > /dev/null 2>&1 &',
+                'timeout 12 %s -i %s -o %s -S 0 -v -1 > /dev/null 2>&1 &',
                 $rist_receiver,
                 escapeshellarg($rist_url),
                 escapeshellarg($probe_multicast)
             );
             exec($rist_cmd);
 
-            // Give ristreceiver a moment to start
-            usleep(500000); // 500ms
+            // Give ristreceiver time to connect and start streaming
+            sleep(2);
 
-            // Capture from multicast with tsp (shorter timeout than ristreceiver)
-            $capture_cmd = sprintf(
-                'timeout 8 tsp -I ip 239.7.7.7:%d -O file %s 2>&1',
-                $local_port,
-                escapeshellarg($capture_file)
-            );
+            // Use ffprobe on the temp UDP (same as SRT scanning)
+            $ffprobe_result = scan_with_ffprobe("udp://@239.7.7.7:{$local_port}", 'udp');
+
+            // ristreceiver will auto-terminate due to timeout
+            return $ffprobe_result;
         } else {
-            // Fallback to TSDuck RIST plugin
+            // Fallback to TSDuck RIST plugin (if ristreceiver not available)
             $capture_cmd = sprintf(
                 'timeout 8 tsp -I rist %s -O file %s 2>&1',
                 escapeshellarg($rist_url),
