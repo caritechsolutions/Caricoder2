@@ -27,6 +27,11 @@ fi
 # Install build dependencies
 echo "[1/6] Installing build dependencies..."
 apt-get update
+
+# Update CA certificates first to fix SSL issues
+apt-get install -y ca-certificates
+update-ca-certificates
+
 apt-get install -y \
     build-essential \
     ninja-build \
@@ -36,6 +41,7 @@ apt-get install -y \
     python3 \
     python3-pip \
     python3-gi \
+    python3-certifi \
     libglib2.0-dev \
     libgudev-1.0-dev \
     liborc-0.4-dev \
@@ -105,6 +111,9 @@ apt-get install -y \
     yasm \
     git \
     cmake
+
+# Install graphene library (prevents meson from downloading it with SSL issues)
+apt-get install -y libgraphene-1.0-dev 2>/dev/null || true
 
 # Install newer Meson via pip (Ubuntu 20.04's meson is too old for GStreamer 1.26)
 echo "Installing Meson build system via pip..."

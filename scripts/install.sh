@@ -376,6 +376,11 @@ install_gstreamer() {
 
     # Install build dependencies
     log_info "Installing GStreamer build dependencies..."
+
+    # Update CA certificates first to fix SSL issues
+    apt-get install -y ca-certificates
+    update-ca-certificates
+
     apt-get install -y \
         build-essential \
         ninja-build \
@@ -385,6 +390,7 @@ install_gstreamer() {
         python3 \
         python3-pip \
         python3-gi \
+        python3-certifi \
         libglib2.0-dev \
         libgudev-1.0-dev \
         liborc-0.4-dev \
@@ -440,6 +446,9 @@ install_gstreamer() {
         yasm \
         git \
         cmake || true
+
+    # Install graphene library (prevents meson from downloading it)
+    apt-get install -y libgraphene-1.0-dev 2>/dev/null || true
 
     # Optional packages that may not be available on all systems
     apt-get install -y libfaac-dev libusrsctp-dev libwebrtc-audio-processing-dev \
