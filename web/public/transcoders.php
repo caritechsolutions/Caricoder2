@@ -974,11 +974,11 @@ async function startOutputPlayer() {
             document.getElementById('playerStatus').textContent = 'Loading...';
             document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
-            // Wait a moment for HLS segments to be generated, then start polling
+            // Wait for HLS segments to be generated (5 seconds for keyframe + encoding)
             setTimeout(() => {
                 const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
                 initOutputHlsPlayer(playlistUrl);
-            }, 3000);
+            }, 5000);
         } else {
             throw new Error(data.error || 'Failed to start preview');
         }
