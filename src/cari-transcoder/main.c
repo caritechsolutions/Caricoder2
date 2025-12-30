@@ -1013,7 +1013,7 @@ static char *build_pipeline_string(void) {
 
     /* Input: udpsrc -> queue -> tsparse -> queue -> tsdemux */
     n = snprintf(p, remaining,
-        "udpsrc uri=udp://%s:%d ! queue ! tsparse ! queue ! tsdemux name=demux ",
+        "udpsrc uri=udp://%s:%d do-timestamp=false buffer-size=2097152 ! queue ! tsparse ! queue ! tsdemux name=demux ",
         g_ctx.input_address, g_ctx.input_port);
     p += n; remaining -= n;
 
