@@ -163,10 +163,12 @@ install_tsduck() {
     log_info "Detected: $ARCH on $PRETTY_NAME ($VERSION_CODENAME)"
 
     # Determine TSDuck version and package name based on Ubuntu version
+    # Note: Ubuntu 24 packages use different ABI (libssl3t64, libcurl4t64) and won't work on older Ubuntu
     # Available packages in repo: ubuntu20 (3.26-2349), ubuntu24 (3.43-4524)
+    # Ubuntu 22 must be downloaded from GitHub
     local TSDUCK_VERSION=""
     local UBUNTU_TAG=""
-    local FALLBACK_TAG=""
+    local DOWNLOAD_ONLY=false
 
     case "$VERSION_CODENAME" in
         noble|plucky|oracular)
@@ -175,11 +177,11 @@ install_tsduck() {
             UBUNTU_TAG="ubuntu24"
             ;;
         jammy)
-            # Ubuntu 22.04 - try ubuntu24 package (no ubuntu22 in repo)
-            TSDUCK_VERSION="3.43-4524"
-            UBUNTU_TAG="ubuntu24"
-            FALLBACK_TAG="ubuntu24"
-            log_info "Ubuntu 22.04 detected, using Ubuntu 24 package"
+            # Ubuntu 22.04 - must download from GitHub (not in local repo, can't use ubuntu24 due to ABI changes)
+            TSDUCK_VERSION="3.37-3670"
+            UBUNTU_TAG="ubuntu22"
+            DOWNLOAD_ONLY=true
+            log_info "Ubuntu 22.04 detected, will download from GitHub"
             ;;
         focal)
             # Ubuntu 20.04 - use version that supports focal
@@ -201,7 +203,8 @@ install_tsduck() {
     local FOUND_LOCAL=false
 
     # STEP 1: Check for local package matching the OS version (preferred method)
-    if [[ -d "$INSTALL_DIR/packages" ]]; then
+    # Skip if DOWNLOAD_ONLY is set (e.g., Ubuntu 22 where we don't have local package)
+    if [[ "$DOWNLOAD_ONLY" = false ]] && [[ -d "$INSTALL_DIR/packages" ]]; then
         # First try exact match for this Ubuntu version
         local LOCAL_DEB=$(find "$INSTALL_DIR/packages" -name "tsduck*${UBUNTU_TAG}*${ARCH}.deb" 2>/dev/null | head -1)
         if [[ -f "$LOCAL_DEB" ]]; then
