@@ -491,6 +491,7 @@ let inputVideoHistory = [];
 let inputAudioHistory = [];
 let outputVideoHistory = [];
 let outputAudioHistory = [];
+let bitrateTimestamps = [];
 const MAX_HISTORY_POINTS = 60;
 
 // Filter transcoders
@@ -688,32 +689,53 @@ async function loadBitrateHistory(transcoderId) {
             const videoPid = data.video_pid;
             const audioPid = data.audio_pid;
 
-            // Load output history (video and audio)
+            // Build combined timeline from video and audio PIDs
+            const timelineMap = new Map();
+
+            // Add video data
             if (data.pids[videoPid] && data.pids[videoPid].history) {
                 for (const [ts, bitrate] of data.pids[videoPid].history) {
-                    outputVideoHistory.push(bitrate);
-                }
-            }
-            if (data.pids[audioPid] && data.pids[audioPid].history) {
-                for (const [ts, bitrate] of data.pids[audioPid].history) {
-                    outputAudioHistory.push(bitrate);
+                    if (!timelineMap.has(ts)) {
+                        timelineMap.set(ts, { video: 0, audio: 0 });
+                    }
+                    timelineMap.get(ts).video = bitrate;
                 }
             }
 
-            // Trim to max points
-            if (outputVideoHistory.length > MAX_HISTORY_POINTS) {
-                outputVideoHistory = outputVideoHistory.slice(-MAX_HISTORY_POINTS);
+            // Add audio data
+            if (data.pids[audioPid] && data.pids[audioPid].history) {
+                for (const [ts, bitrate] of data.pids[audioPid].history) {
+                    if (!timelineMap.has(ts)) {
+                        timelineMap.set(ts, { video: 0, audio: 0 });
+                    }
+                    timelineMap.get(ts).audio = bitrate;
+                }
             }
-            if (outputAudioHistory.length > MAX_HISTORY_POINTS) {
-                outputAudioHistory = outputAudioHistory.slice(-MAX_HISTORY_POINTS);
+
+            // Sort by timestamp and populate arrays
+            const sortedTimestamps = Array.from(timelineMap.keys()).sort((a, b) => a - b);
+
+            // Limit to last MAX_HISTORY_POINTS for display
+            const displayTimestamps = sortedTimestamps.slice(-MAX_HISTORY_POINTS);
+
+            // Reset arrays
+            outputVideoHistory = [];
+            outputAudioHistory = [];
+            bitrateTimestamps = [];
+
+            for (const ts of displayTimestamps) {
+                const values = timelineMap.get(ts);
+                outputVideoHistory.push(values.video);
+                outputAudioHistory.push(values.audio);
+                bitrateTimestamps.push(ts);
             }
 
             // Update chart with loaded history
             if (bitrateChart && outputVideoHistory.length > 0) {
-                const labels = Array(outputVideoHistory.length).fill('').map((_, i) => {
-                    const idx = outputVideoHistory.length - 1 - i;
-                    return idx % 12 === 0 ? `-${Math.floor(idx * 5 / 60)}m` : '';
-                }).reverse();
+                // Generate time labels from timestamps
+                const labels = bitrateTimestamps.map(ts => {
+                    return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+                });
 
                 bitrateChart.data.labels = labels;
                 bitrateChart.data.datasets[2].data = [...outputVideoHistory];
@@ -954,20 +976,22 @@ async function loadPreviewMetrics() {
             inputAudioHistory.push(metrics.input_audio_bitrate || 0);
             outputVideoHistory.push(metrics.output_video_bitrate || 0);
             outputAudioHistory.push(metrics.output_audio_bitrate || 0);
+            bitrateTimestamps.push(Math.floor(Date.now() / 1000));
 
             if (inputVideoHistory.length > MAX_HISTORY_POINTS) {
                 inputVideoHistory.shift();
                 inputAudioHistory.shift();
                 outputVideoHistory.shift();
                 outputAudioHistory.shift();
+                bitrateTimestamps.shift();
             }
 
             // Update chart
             if (bitrateChart) {
-                const labels = Array(inputVideoHistory.length).fill('').map((_, i) => {
-                    const idx = inputVideoHistory.length - 1 - i;
-                    return idx % 12 === 0 ? `-${Math.floor(idx * 5 / 60)}m` : '';
-                }).reverse();
+                // Generate time labels from timestamps
+                const labels = bitrateTimestamps.map(ts => {
+                    return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+                });
 
                 bitrateChart.data.labels = labels;
                 bitrateChart.data.datasets[0].data = [...inputVideoHistory];
@@ -1086,11 +1110,12 @@ function showPreview(id, name) {
     document.getElementById('playerStatus').textContent = 'Stopped';
     document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
 
-    // Reset history (4 series)
+    // Reset history (4 series + timestamps)
     inputVideoHistory = [];
     inputAudioHistory = [];
     outputVideoHistory = [];
     outputAudioHistory = [];
+    bitrateTimestamps = [];
 
     // Reset format displays
     document.getElementById('inputSourceName').textContent = '';
@@ -1159,6 +1184,7 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
     inputAudioHistory = [];
     outputVideoHistory = [];
     outputAudioHistory = [];
+    bitrateTimestamps = [];
 });
 
 // Fetch all transcoder metrics
