@@ -166,10 +166,14 @@ function handle_get_next_id() {
     $max_num = 0;
 
     if (is_dir($transcoders_dir)) {
-        $files = glob($transcoders_dir . '/' . $base_id . '_trans_*.conf');
+        // Look for both old format (_trans_) and new format (_transcoder_)
+        $files = array_merge(
+            glob($transcoders_dir . '/' . $base_id . '_transcoder_*.conf'),
+            glob($transcoders_dir . '/' . $base_id . '_trans_*.conf')
+        );
         foreach ($files as $file) {
             $filename = basename($file, '.conf');
-            if (preg_match('/_trans_(\d+)$/', $filename, $matches)) {
+            if (preg_match('/_(?:transcoder|trans)_(\d+)$/', $filename, $matches)) {
                 $num = intval($matches[1]);
                 if ($num > $max_num) {
                     $max_num = $num;
@@ -179,8 +183,8 @@ function handle_get_next_id() {
     }
 
     $next_num = $max_num + 1;
-    $next_id = $base_id . '_trans_' . $next_num;
-    $next_name = $base_id . '_trans_' . $next_num;
+    $next_id = $base_id . '_transcoder_' . $next_num;
+    $next_name = $base_id . '_transcoder_' . $next_num;
 
     echo json_encode([
         'success' => true,
