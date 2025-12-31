@@ -148,6 +148,7 @@ typedef struct {
     int udp_port;                   /* UDP output port */
     int video_pid;              /* Video elementary stream PID (default 256/0x100) */
     int audio_pid;              /* Audio elementary stream PID (default 257/0x101) */
+    int program_number;         /* MPEG-TS program number (default 1) */
 
     /* General settings */
     gboolean debug;
@@ -342,6 +343,7 @@ static void init_context(void) {
     g_ctx.udp_port = 5000;            /* Default UDP port */
     g_ctx.video_pid = 256;            /* Default video PID 0x100 */
     g_ctx.audio_pid = 257;            /* Default audio PID 0x101 */
+    g_ctx.program_number = 1;         /* Default program number */
 
     /* General defaults */
     g_ctx.debug = FALSE;
@@ -385,6 +387,7 @@ static int parse_args(int argc, char *argv[]) {
         /* Output PID options */
         OPT_VIDEO_PID,
         OPT_AUDIO_PID,
+        OPT_PROGRAM_NUMBER,
         /* UDP output options */
         OPT_UDP_HOST,
         OPT_UDP_PORT
@@ -440,6 +443,7 @@ static int parse_args(int argc, char *argv[]) {
         {"udp-port",           required_argument, 0, OPT_UDP_PORT},
         {"video-pid",          required_argument, 0, OPT_VIDEO_PID},
         {"audio-pid",          required_argument, 0, OPT_AUDIO_PID},
+        {"program-number",     required_argument, 0, OPT_PROGRAM_NUMBER},
         /* General options */
         {"debug",              no_argument,       0, 'd'},
         {"detect-only",        no_argument,       0, 'O'},
@@ -627,6 +631,9 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case OPT_AUDIO_PID:
                 g_ctx.audio_pid = atoi(optarg);
+                break;
+            case OPT_PROGRAM_NUMBER:
+                g_ctx.program_number = atoi(optarg);
                 break;
 
             /* UDP output options */
@@ -1065,8 +1072,10 @@ static char *build_pipeline_string(void) {
                         g_ctx.video_pid);
                     break;
                 case VIDEO_CODEC_H265:
+                    /* x265enc with zerolatency tune and h265parse for config interval */
                     n = snprintf(p, remaining,
-                        "x265enc bitrate=%d speed-preset=%s key-int-max=%d ! queue ! mux.sink_%d ",
+                        "x265enc bitrate=%d speed-preset=%s key-int-max=%d tune=zerolatency ! "
+                        "h265parse config-interval=1 ! queue ! mux.sink_%d ",
                         g_ctx.video_bitrate / 1000,
                         preset_to_gst_string(g_ctx.video_preset),
                         g_ctx.keyframe_interval,
@@ -1154,17 +1163,17 @@ static char *build_pipeline_string(void) {
     /* Muxer - add 3% overhead for TS headers, PCR, PAT/PMT tables */
     int mux_bitrate = (g_ctx.video_bitrate + g_ctx.audio_bitrate) * 103 / 100;
     n = snprintf(p, remaining,
-        "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=1,sink_%d=1\" ! queue ! ",
-        mux_bitrate, g_ctx.video_pid, g_ctx.audio_pid);
+        "mpegtsmux name=mux bitrate=%d prog-map=\"program_map,sink_%d=%d,sink_%d=%d\" ! queue ! ",
+        mux_bitrate, g_ctx.video_pid, g_ctx.program_number, g_ctx.audio_pid, g_ctx.program_number);
     p += n; remaining -= n;
 
     /* Output sink */
     if (g_ctx.use_stdout) {
         n = snprintf(p, remaining, "filesink location=/dev/stdout buffer-mode=2 sync=false");
     } else if (g_ctx.udp_host[0] != '\0') {
-        /* udpsink with sync=true async=true for proper timing */
+        /* udpsink with sync=true async=false for proper timing */
         n = snprintf(p, remaining,
-            "udpsink host=%s port=%d sync=true async=true",
+            "udpsink host=%s port=%d sync=true async=false",
             g_ctx.udp_host, g_ctx.udp_port);
     } else {
         n = snprintf(p, remaining,

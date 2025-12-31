@@ -433,7 +433,8 @@ function build_transcoder_config($input) {
             'port' => intval($input['output_port'] ?? 5000),
             'api_port' => intval($input['api_port'] ?? 9200),
             'video_pid' => intval($input['video_pid'] ?? 256),
-            'audio_pid' => intval($input['audio_pid'] ?? 257)
+            'audio_pid' => intval($input['audio_pid'] ?? 257),
+            'program_number' => intval($input['program_number'] ?? 1)
         ],
         'video' => [
             'mode' => $input['video_mode'] ?? 'transcode',
@@ -522,6 +523,7 @@ function create_transcoder_service($id, $config) {
         'api_port' => $output['api_port'],
         'video_pid' => $output['video_pid'] ?? 256,
         'audio_pid' => $output['audio_pid'] ?? 257,
+        'program_number' => $output['program_number'] ?? 1,
         'tsp_bitrate' => $tsp_bitrate,
 
         // Video settings
