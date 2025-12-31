@@ -2561,14 +2561,25 @@ async function loadBitrateHistory(inputId) {
         // Limit to last 720 points (1 hour at 5-second intervals) for display
         const displayTimestamps = sortedTimestamps.slice(-720);
 
+        // Carry forward last known values for missing data
+        let lastVideo = 0;
+        let lastAudio = 0;
+
         for (const ts of displayTimestamps) {
             const date = new Date(ts * 1000);
             const label = date.toLocaleTimeString();
             const values = timelineMap.get(ts);
 
-            bitrateChart.data.labels.push(label);
-            bitrateChart.data.datasets[0].data.push(values.video);
-            bitrateChart.data.datasets[1].data.push(values.audio);
+            // Update last known values if we have new data
+            if (values.video > 0) lastVideo = values.video;
+            if (values.audio > 0) lastAudio = values.audio;
+
+            // Only add entries where we have data
+            if (lastVideo > 0 || lastAudio > 0) {
+                bitrateChart.data.labels.push(label);
+                bitrateChart.data.datasets[0].data.push(lastVideo);
+                bitrateChart.data.datasets[1].data.push(lastAudio);
+            }
         }
 
         bitrateChart.update();
