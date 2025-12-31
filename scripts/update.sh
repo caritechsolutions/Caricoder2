@@ -568,6 +568,19 @@ build_tools() {
         fi
     fi
 
+    # Build cari-transcoder-abr (Multi-bitrate ABR transcoder)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-transcoder-abr" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-transcoder-abr"
+        log_info "Building cari-transcoder-abr..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder-abr installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder-abr (GStreamer dev packages may be missing)"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
