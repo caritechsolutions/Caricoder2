@@ -166,10 +166,14 @@ function handle_get_next_id() {
     $max_num = 0;
 
     if (is_dir($transcoders_dir)) {
-        $files = glob($transcoders_dir . '/' . $base_id . '_trans_*.conf');
+        // Look for both old format (_trans_) and new format (_transcoder_)
+        $files = array_merge(
+            glob($transcoders_dir . '/' . $base_id . '_transcoder_*.conf'),
+            glob($transcoders_dir . '/' . $base_id . '_trans_*.conf')
+        );
         foreach ($files as $file) {
             $filename = basename($file, '.conf');
-            if (preg_match('/_trans_(\d+)$/', $filename, $matches)) {
+            if (preg_match('/_(?:transcoder|trans)_(\d+)$/', $filename, $matches)) {
                 $num = intval($matches[1]);
                 if ($num > $max_num) {
                     $max_num = $num;
@@ -179,8 +183,8 @@ function handle_get_next_id() {
     }
 
     $next_num = $max_num + 1;
-    $next_id = $base_id . '_trans_' . $next_num;
-    $next_name = $base_id . '_trans_' . $next_num;
+    $next_id = $base_id . '_transcoder_' . $next_num;
+    $next_name = $base_id . '_transcoder_' . $next_num;
 
     echo json_encode([
         'success' => true,
@@ -238,7 +242,7 @@ function handle_create() {
         }
     }
 
-    $id = preg_replace('/[^a-z0-9-]/', '', strtolower($input['transcoder_id']));
+    $id = preg_replace('/[^a-z0-9_-]/', '', strtolower($input['transcoder_id']));
     if (empty($id)) {
         echo json_encode(['success' => false, 'error' => 'Invalid ID']);
         return;
@@ -429,7 +433,8 @@ function build_transcoder_config($input) {
             'port' => intval($input['output_port'] ?? 5000),
             'api_port' => intval($input['api_port'] ?? 9200),
             'video_pid' => intval($input['video_pid'] ?? 256),
-            'audio_pid' => intval($input['audio_pid'] ?? 257)
+            'audio_pid' => intval($input['audio_pid'] ?? 257),
+            'program_number' => intval($input['program_number'] ?? 1)
         ],
         'video' => [
             'mode' => $input['video_mode'] ?? 'transcode',
@@ -518,6 +523,7 @@ function create_transcoder_service($id, $config) {
         'api_port' => $output['api_port'],
         'video_pid' => $output['video_pid'] ?? 256,
         'audio_pid' => $output['audio_pid'] ?? 257,
+        'program_number' => $output['program_number'] ?? 1,
         'tsp_bitrate' => $tsp_bitrate,
 
         // Video settings

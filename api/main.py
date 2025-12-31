@@ -190,6 +190,7 @@ class TranscoderService(BaseModel):
     api_port: int = 9200
     video_pid: int = 256  # Video elementary stream PID (default 0x100)
     audio_pid: int = 257  # Audio elementary stream PID (default 0x101)
+    program_number: int = 1  # MPEG-TS program number
     tsp_bitrate: int  # CBR bitrate for tsp output (video+audio+5%)
 
     # Video settings
@@ -1983,7 +1984,8 @@ def generate_transcoder_service_file(service_data: TranscoderService) -> str:
         f"--video-bitrate {service_data.video_bitrate}",
         f"--audio-bitrate {service_data.audio_bitrate}",
         f"--video-pid {service_data.video_pid}",
-        f"--audio-pid {service_data.audio_pid}"
+        f"--audio-pid {service_data.audio_pid}",
+        f"--program-number {service_data.program_number}"
     ]
 
     # Video mode

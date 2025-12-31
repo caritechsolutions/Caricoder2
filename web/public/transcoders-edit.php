@@ -29,7 +29,8 @@ $config = [
         'port' => 5000,
         'api_port' => 9200,
         'video_pid' => 256,
-        'audio_pid' => 257
+        'audio_pid' => 257,
+        'program_number' => 1
     ],
     'video' => [
         'mode' => 'transcode',
@@ -209,11 +210,18 @@ include __DIR__ . '/../templates/header.php';
                                min="32" max="8190">
                         <div class="form-text">Default: 257 (0x101)</div>
                     </div>
-                    <div class="col-md-6 mb-3">
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Program Number</label>
+                        <input type="number" class="form-control" name="program_number"
+                               value="<?php echo htmlspecialchars($config['output']['program_number'] ?? '1'); ?>"
+                               min="1" max="65535">
+                        <div class="form-text">MPEG-TS program ID</div>
+                    </div>
+                    <div class="col-md-3 mb-3">
                         <label class="form-label">&nbsp;</label>
-                        <div class="alert alert-info py-2 mb-0 small">
+                        <div class="form-text mt-2">
                             <i class="bi bi-info-circle me-1"></i>
-                            PIDs must be unique. Video and audio PIDs are used for bitrate monitoring.
+                            PIDs must be unique
                         </div>
                     </div>
                 </div>
