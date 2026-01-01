@@ -2,18 +2,18 @@
  * CariTranscoder ABR - Multi-Bitrate MPEG-TS Transcoder
  * Copyright (c) 2024 CariTech Solutions
  *
- * Creates a single MPTS output with multiple programs (variants)
- * for Adaptive Bitrate streaming.
+ * Creates a single program MPEG-TS with multiple video streams
+ * (different resolutions/bitrates) and one audio stream for
+ * Adaptive Bitrate streaming.
  *
  * Usage:
  *   cari-transcoder-abr \
  *     --input 239.100.0.1:10000 \
- *     --variant "1:1920x1080:5000000:256" \
- *     --variant "2:1280x720:3000000:512" \
- *     --variant "3:854x480:1000000:768" \
- *     --audio-bitrate 128000 \
- *     --audio-pid 257 \
- *     --keyframe-interval 60 \
+ *     --variant "1920x1080:5000000:100" \
+ *     --variant "1280x720:3000000:200" \
+ *     --variant "854x480:1000000:300" \
+ *     --audio-pid 50 \
+ *     --program 1 \
  *     --output 239.100.0.101:5000
  */
 
@@ -29,7 +29,8 @@
 #define MAX_VARIANTS 8
 #define DEFAULT_KEYFRAME_INTERVAL 60
 #define DEFAULT_AUDIO_BITRATE 128000
-#define DEFAULT_AUDIO_PID 257
+#define DEFAULT_AUDIO_PID 50
+#define DEFAULT_PROGRAM 1
 #define DEFAULT_PRESET "superfast"
 
 /* Video codec types */
@@ -48,7 +49,6 @@ typedef enum {
 
 /* Variant configuration */
 typedef struct {
-    int program_number;
     int width;
     int height;
     int video_bitrate;      /* bits/second */
@@ -82,10 +82,13 @@ typedef struct {
     char video_preset[32];
     int keyframe_interval;
 
-    /* Audio settings (shared by all programs) */
+    /* Audio settings */
     AudioCodec audio_codec;
     int audio_bitrate;
     int audio_pid;
+
+    /* Program number (single program for all streams) */
+    int program_number;
 
     /* Output settings */
     char output_host[256];
@@ -137,10 +140,12 @@ static void print_help(const char *prog) {
     printf("Required Options:\n");
     printf("  -i, --input ADDRESS:PORT     Input multicast address and port\n");
     printf("  -v, --variant SPEC           Variant specification (can be repeated)\n");
-    printf("                               Format: PROGRAM:WIDTHxHEIGHT:BITRATE:VIDEO_PID\n");
-    printf("                               Example: 1:1920x1080:5000000:256\n");
+    printf("                               Format: WIDTHxHEIGHT:BITRATE:VIDEO_PID\n");
+    printf("                               Example: 1920x1080:5000000:100\n");
     printf("  -o, --output ADDRESS:PORT    Output multicast address and port\n");
     printf("\nOptional Options:\n");
+    printf("  --program N                  Program number for all streams (default: 1)\n");
+    printf("  --audio-pid PID              Audio PID (default: 50)\n");
     printf("  --video-codec CODEC          Video codec: h264 (default), h265, mpeg2\n");
     printf("  --video-preset PRESET        Encoder preset (default: superfast)\n");
     printf("  --keyframe-interval N        Keyframe interval in frames (default: 60)\n");
@@ -148,36 +153,36 @@ static void print_help(const char *prog) {
     printf("  --audio-bitrate RATE         Audio bitrate in bits/sec (default: 128000)\n");
     printf("  -d, --debug                  Enable debug output\n");
     printf("  -h, --help                   Show this help message\n");
-    printf("\nNote: Audio PID for each program is automatically set to VIDEO_PID + 1\n");
     printf("\nExample:\n");
     printf("  %s \\\n", prog);
     printf("    --input 239.100.0.1:10000 \\\n");
-    printf("    --variant 1:1920x1080:5000000:100 \\\n");
-    printf("    --variant 2:1280x720:3000000:200 \\\n");
-    printf("    --variant 3:854x480:1000000:300 \\\n");
+    printf("    --variant 1920x1080:5000000:100 \\\n");
+    printf("    --variant 1280x720:3000000:200 \\\n");
+    printf("    --variant 854x480:1000000:300 \\\n");
+    printf("    --audio-pid 50 \\\n");
     printf("    --output 239.100.0.101:5000\n");
-    printf("\n  This creates:\n");
-    printf("    Program 1: 1080p video PID 100, audio PID 101\n");
-    printf("    Program 2: 720p video PID 200, audio PID 201\n");
-    printf("    Program 3: 480p video PID 300, audio PID 301\n");
+    printf("\n  This creates a single program with:\n");
+    printf("    - Video PID 100: 1080p @ 5000 kbps\n");
+    printf("    - Video PID 200: 720p @ 3000 kbps\n");
+    printf("    - Video PID 300: 480p @ 1000 kbps\n");
+    printf("    - Audio PID 50: shared audio track\n");
 }
 
 /*
- * Parse variant specification: PROGRAM:WIDTHxHEIGHT:BITRATE:VIDEO_PID
+ * Parse variant specification: WIDTHxHEIGHT:BITRATE:VIDEO_PID
  */
 static int parse_variant(const char *spec, Variant *v) {
-    int program, width, height, bitrate, pid;
-    if (sscanf(spec, "%d:%dx%d:%d:%d", &program, &width, &height, &bitrate, &pid) != 5) {
+    int width, height, bitrate, pid;
+    if (sscanf(spec, "%dx%d:%d:%d", &width, &height, &bitrate, &pid) != 4) {
         fprintf(stderr, "Error: Invalid variant format: %s\n", spec);
-        fprintf(stderr, "Expected: PROGRAM:WIDTHxHEIGHT:BITRATE:VIDEO_PID\n");
+        fprintf(stderr, "Expected: WIDTHxHEIGHT:BITRATE:VIDEO_PID\n");
         return -1;
     }
-    /* MPEG-TS PIDs must be >= 64 (0x40), and we need video_pid + 1 for audio */
+    /* MPEG-TS PIDs must be >= 64 (0x40) */
     if (pid < 64) {
         fprintf(stderr, "Error: VIDEO_PID must be >= 64 (MPEG-TS requirement), got %d\n", pid);
         return -1;
     }
-    v->program_number = program;
     v->width = width;
     v->height = height;
     v->video_bitrate = bitrate;
@@ -222,6 +227,7 @@ static void init_context(void) {
     g_ctx.audio_codec = AUDIO_CODEC_AAC;
     g_ctx.audio_bitrate = DEFAULT_AUDIO_BITRATE;
     g_ctx.audio_pid = DEFAULT_AUDIO_PID;
+    g_ctx.program_number = DEFAULT_PROGRAM;
 
     g_ctx.running = 1;
     pthread_mutex_init(&g_ctx.lock, NULL);
@@ -232,7 +238,8 @@ static void init_context(void) {
  */
 static int parse_args(int argc, char *argv[]) {
     enum {
-        OPT_VIDEO_CODEC = 1000,
+        OPT_PROGRAM = 1000,
+        OPT_VIDEO_CODEC,
         OPT_VIDEO_PRESET,
         OPT_KEYFRAME_INTERVAL,
         OPT_AUDIO_CODEC,
@@ -244,6 +251,7 @@ static int parse_args(int argc, char *argv[]) {
         {"input",              required_argument, 0, 'i'},
         {"variant",            required_argument, 0, 'v'},
         {"output",             required_argument, 0, 'o'},
+        {"program",            required_argument, 0, OPT_PROGRAM},
         {"video-codec",        required_argument, 0, OPT_VIDEO_CODEC},
         {"video-preset",       required_argument, 0, OPT_VIDEO_PRESET},
         {"keyframe-interval",  required_argument, 0, OPT_KEYFRAME_INTERVAL},
@@ -293,6 +301,10 @@ static int parse_args(int argc, char *argv[]) {
                 g_ctx.output_port = atoi(colon + 1);
                 break;
 
+            case OPT_PROGRAM:
+                g_ctx.program_number = atoi(optarg);
+                break;
+
             case OPT_VIDEO_CODEC:
                 g_ctx.video_codec = parse_video_codec(optarg);
                 break;
@@ -315,6 +327,10 @@ static int parse_args(int argc, char *argv[]) {
 
             case OPT_AUDIO_PID:
                 g_ctx.audio_pid = atoi(optarg);
+                if (g_ctx.audio_pid < 64) {
+                    fprintf(stderr, "Error: AUDIO_PID must be >= 64 (MPEG-TS requirement), got %d\n", g_ctx.audio_pid);
+                    return -1;
+                }
                 break;
 
             case 'd':
@@ -530,7 +546,7 @@ static char *build_pipeline(void) {
         p += n; remaining -= n;
     }
 
-    /* Audio branch: demux -> parse -> decode -> encode -> tee to all programs */
+    /* Audio branch: demux -> parse -> decode -> encode -> mux */
     if (g_ctx.stream_info.audio_detected && audio_parser && audio_decoder) {
         n = snprintf(p, remaining,
             "demux. ! queue max-size-buffers=100 ! %s ! %s ! "
@@ -538,38 +554,28 @@ static char *build_pipeline(void) {
             audio_parser, audio_decoder);
         p += n; remaining -= n;
 
-        /* Audio encoder followed by tee */
+        /* Audio encoder */
         switch (g_ctx.audio_codec) {
             case AUDIO_CODEC_AAC:
                 n = snprintf(p, remaining,
-                    "fdkaacenc bitrate=%d ! tee name=audiotee ",
-                    g_ctx.audio_bitrate);
+                    "fdkaacenc bitrate=%d ! queue ! mux.sink_%d ",
+                    g_ctx.audio_bitrate, g_ctx.audio_pid);
                 break;
             case AUDIO_CODEC_AC3:
                 n = snprintf(p, remaining,
-                    "avenc_ac3 bitrate=%d ! tee name=audiotee ",
-                    g_ctx.audio_bitrate);
+                    "avenc_ac3 bitrate=%d ! queue ! mux.sink_%d ",
+                    g_ctx.audio_bitrate, g_ctx.audio_pid);
                 break;
             case AUDIO_CODEC_MP2:
                 n = snprintf(p, remaining,
-                    "avenc_mp2 bitrate=%d ! tee name=audiotee ",
-                    g_ctx.audio_bitrate);
+                    "avenc_mp2 bitrate=%d ! queue ! mux.sink_%d ",
+                    g_ctx.audio_bitrate, g_ctx.audio_pid);
                 break;
         }
         p += n; remaining -= n;
-
-        /* Connect audio tee to each program's audio PID (video_pid + 1) */
-        for (i = 0; i < g_ctx.num_variants; i++) {
-            Variant *v = &g_ctx.variants[i];
-            int audio_pid = v->video_pid + 1;
-            n = snprintf(p, remaining,
-                "audiotee. ! queue ! mux.sink_%d ",
-                audio_pid);
-            p += n; remaining -= n;
-        }
     }
 
-    /* Muxer with prog-map for all variants */
+    /* Muxer with prog-map - all streams in ONE program */
     /* Calculate total bitrate */
     int total_video_bitrate = 0;
     for (i = 0; i < g_ctx.num_variants; i++) {
@@ -577,7 +583,7 @@ static char *build_pipeline(void) {
     }
     int mux_bitrate = (total_video_bitrate + g_ctx.audio_bitrate) * 103 / 100;
 
-    /* Build prog-map string: sink_VID=PROG,sink_AUD=PROG for each program */
+    /* Build prog-map string: all sinks assigned to same program */
     char prog_map[1024];
     char *pm = prog_map;
     int pm_remaining = sizeof(prog_map);
@@ -585,12 +591,19 @@ static char *build_pipeline(void) {
     pm += snprintf(pm, pm_remaining, "program_map");
     pm_remaining = sizeof(prog_map) - (pm - prog_map);
 
+    /* Add all video sinks to the program */
     for (i = 0; i < g_ctx.num_variants; i++) {
         Variant *v = &g_ctx.variants[i];
-        int audio_pid = v->video_pid + 1;
-        int len = snprintf(pm, pm_remaining, ",sink_%d=%d,sink_%d=%d",
-            v->video_pid, v->program_number,
-            audio_pid, v->program_number);
+        int len = snprintf(pm, pm_remaining, ",sink_%d=%d",
+            v->video_pid, g_ctx.program_number);
+        pm += len;
+        pm_remaining -= len;
+    }
+
+    /* Add audio sink to the program */
+    if (g_ctx.stream_info.audio_detected) {
+        int len = snprintf(pm, pm_remaining, ",sink_%d=%d",
+            g_ctx.audio_pid, g_ctx.program_number);
         pm += len;
         pm_remaining -= len;
     }
@@ -616,7 +629,7 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
             GError *err = NULL;
             gchar *debug = NULL;
             gst_message_parse_error(msg, &err, &debug);
-            fprintf(stderr, "Error: %s\n", err->message);
+            fprintf(stderr, "Pipeline error: %s\n", err->message);
             if (debug && g_ctx.debug) {
                 fprintf(stderr, "Debug: %s\n", debug);
             }
@@ -682,19 +695,21 @@ static int run_pipeline(void) {
 
     gst_element_set_state(g_ctx.pipeline, GST_STATE_PLAYING);
 
-    printf("Transcoding %d variants to udp://%s:%d\n",
-        g_ctx.num_variants, g_ctx.output_host, g_ctx.output_port);
+    printf("Transcoding to udp://%s:%d\n",
+        g_ctx.output_host, g_ctx.output_port);
     printf("Press Ctrl+C to stop.\n\n");
 
-    /* Print variant info */
+    /* Print program info */
+    printf("Program %d:\n", g_ctx.program_number);
     for (int i = 0; i < g_ctx.num_variants; i++) {
         Variant *v = &g_ctx.variants[i];
-        printf("  Program %d: %dx%d @ %d kbps (video PID %d, audio PID %d)\n",
-            v->program_number, v->width, v->height,
-            v->video_bitrate / 1000, v->video_pid, v->video_pid + 1);
+        printf("  Video PID %d: %dx%d @ %d kbps\n",
+            v->video_pid, v->width, v->height, v->video_bitrate / 1000);
     }
-    printf("  Audio: %d kbps (same stream to all programs)\n",
-        g_ctx.audio_bitrate / 1000);
+    if (g_ctx.stream_info.audio_detected) {
+        printf("  Audio PID %d: %d kbps\n",
+            g_ctx.audio_pid, g_ctx.audio_bitrate / 1000);
+    }
 
     g_ctx.main_loop = g_main_loop_new(NULL, FALSE);
     g_main_loop_run(g_ctx.main_loop);
