@@ -70,6 +70,10 @@ $config = [
         'bitrate' => 128000,
         'channels' => 2,
         'samplerate' => 48000
+    ],
+    'abr' => [
+        'enabled' => false,
+        'variant_count' => 0
     ]
 ];
 
@@ -396,6 +400,84 @@ include __DIR__ . '/../templates/header.php';
             </div>
         </div>
 
+        <!-- ABR Mode -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-layers me-2"></i>ABR Mode (Multi-Bitrate)</h5>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" name="abr_enabled" id="abrEnabled"
+                           <?php echo config_bool($config['abr']['enabled'] ?? false) ? 'checked' : ''; ?>
+                           onchange="toggleAbrMode()">
+                    <label class="form-check-label" for="abrEnabled">Enable</label>
+                </div>
+            </div>
+            <div class="card-body" id="abrOptions">
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle me-1"></i>
+                    ABR mode creates multiple video quality variants in a single MPEG-TS program.
+                    All variants share the same audio track and keyframe interval.
+                </div>
+
+                <div id="variantsList">
+                    <?php
+                    $variant_count = intval($config['abr']['variant_count'] ?? 0);
+                    if ($variant_count > 0):
+                        for ($i = 0; $i < $variant_count; $i++):
+                            $width = $config['abr']["variant_{$i}_width"] ?? 1920;
+                            $height = $config['abr']["variant_{$i}_height"] ?? 1080;
+                            $bitrate = $config['abr']["variant_{$i}_bitrate"] ?? 5000000;
+                            $video_pid = $config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100);
+                    ?>
+                    <div class="variant-row row mb-3" data-index="<?php echo $i; ?>">
+                        <div class="col-md-2">
+                            <label class="form-label">Resolution</label>
+                            <select class="form-select variant-resolution" onchange="updateVariantResolution(this)">
+                                <option value="1920x1080" <?php echo ($width == 1920 && $height == 1080) ? 'selected' : ''; ?>>1920x1080</option>
+                                <option value="1280x720" <?php echo ($width == 1280 && $height == 720) ? 'selected' : ''; ?>>1280x720</option>
+                                <option value="854x480" <?php echo ($width == 854 && $height == 480) ? 'selected' : ''; ?>>854x480</option>
+                                <option value="640x360" <?php echo ($width == 640 && $height == 360) ? 'selected' : ''; ?>>640x360</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Width</label>
+                            <input type="number" class="form-control variant-width" value="<?php echo $width; ?>" min="320" max="3840">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Height</label>
+                            <input type="number" class="form-control variant-height" value="<?php echo $height; ?>" min="180" max="2160">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Bitrate (bps)</label>
+                            <input type="number" class="form-control variant-bitrate" value="<?php echo $bitrate; ?>" min="100000" max="50000000" step="100000">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Video PID</label>
+                            <input type="number" class="form-control variant-pid" value="<?php echo $video_pid; ?>" min="64" max="8190">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">&nbsp;</label>
+                            <button type="button" class="btn btn-danger w-100" onclick="removeVariant(this)">
+                                <i class="bi bi-trash"></i> Remove
+                            </button>
+                        </div>
+                    </div>
+                    <?php
+                        endfor;
+                    endif;
+                    ?>
+                </div>
+
+                <button type="button" class="btn btn-success" onclick="addVariant()">
+                    <i class="bi bi-plus-lg me-1"></i>Add Variant
+                </button>
+
+                <div class="form-text mt-2">
+                    PIDs must be >= 64 and unique. Audio PID is configured separately below.
+                </div>
+            </div>
+        </div>
+
         <!-- Video Scaling -->
         <div class="card mb-4">
             <div class="card-header">
@@ -604,7 +686,119 @@ document.addEventListener('DOMContentLoaded', function() {
     toggleVideoOptions();
     toggleAudioOptions();
     toggleScalingOptions();
+    toggleAbrMode();
 });
+
+// ABR Mode Functions
+function toggleAbrMode() {
+    const enabled = document.getElementById('abrEnabled').checked;
+    const abrOptions = document.getElementById('abrOptions');
+    const videoCard = document.querySelector('.card-header h5 i.bi-camera-video')?.closest('.card');
+    const scalingCard = document.getElementById('scalingEnabled')?.closest('.card');
+
+    // Show/hide ABR options
+    abrOptions.style.opacity = enabled ? '1' : '0.5';
+    const abrInputs = abrOptions.querySelectorAll('input, select, button');
+    abrInputs.forEach(el => {
+        if (!el.id.includes('abrEnabled')) {
+            el.disabled = !enabled;
+        }
+    });
+
+    // When ABR is enabled, hide scaling options (ABR does its own scaling)
+    if (scalingCard) {
+        scalingCard.style.display = enabled ? 'none' : '';
+    }
+
+    // Update video card to show it's for all variants
+    if (videoCard) {
+        const badge = videoCard.querySelector('.badge');
+        if (badge) {
+            badge.textContent = enabled ? 'Common for all variants' : 'Software Encoder';
+        }
+    }
+}
+
+let variantCounter = <?php echo max(0, intval($config['abr']['variant_count'] ?? 0)); ?>;
+
+function addVariant() {
+    const variantsList = document.getElementById('variantsList');
+    const index = variantCounter++;
+    const defaultPid = 100 + (index * 100);
+
+    const html = `
+        <div class="variant-row row mb-3" data-index="${index}">
+            <div class="col-md-2">
+                <label class="form-label">Resolution</label>
+                <select class="form-select variant-resolution" onchange="updateVariantResolution(this)">
+                    <option value="1920x1080" ${index === 0 ? 'selected' : ''}>1920x1080</option>
+                    <option value="1280x720" ${index === 1 ? 'selected' : ''}>1280x720</option>
+                    <option value="854x480" ${index === 2 ? 'selected' : ''}>854x480</option>
+                    <option value="640x360">640x360</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Width</label>
+                <input type="number" class="form-control variant-width" value="${index === 0 ? 1920 : (index === 1 ? 1280 : 854)}" min="320" max="3840">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Height</label>
+                <input type="number" class="form-control variant-height" value="${index === 0 ? 1080 : (index === 1 ? 720 : 480)}" min="180" max="2160">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Bitrate (bps)</label>
+                <input type="number" class="form-control variant-bitrate" value="${index === 0 ? 5000000 : (index === 1 ? 2500000 : 1000000)}" min="100000" max="50000000" step="100000">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Video PID</label>
+                <input type="number" class="form-control variant-pid" value="${defaultPid}" min="64" max="8190">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">&nbsp;</label>
+                <button type="button" class="btn btn-danger w-100" onclick="removeVariant(this)">
+                    <i class="bi bi-trash"></i> Remove
+                </button>
+            </div>
+        </div>
+    `;
+
+    variantsList.insertAdjacentHTML('beforeend', html);
+}
+
+function removeVariant(btn) {
+    const row = btn.closest('.variant-row');
+    if (row) {
+        row.remove();
+    }
+}
+
+function updateVariantResolution(select) {
+    const row = select.closest('.variant-row');
+    const widthInput = row.querySelector('.variant-width');
+    const heightInput = row.querySelector('.variant-height');
+    const value = select.value;
+
+    if (value !== 'custom') {
+        const [w, h] = value.split('x');
+        widthInput.value = w;
+        heightInput.value = h;
+    }
+}
+
+function collectVariants() {
+    const variants = [];
+    const rows = document.querySelectorAll('.variant-row');
+    rows.forEach(row => {
+        variants.push({
+            width: parseInt(row.querySelector('.variant-width').value) || 1920,
+            height: parseInt(row.querySelector('.variant-height').value) || 1080,
+            bitrate: parseInt(row.querySelector('.variant-bitrate').value) || 5000000,
+            video_pid: parseInt(row.querySelector('.variant-pid').value) || 100
+        });
+    });
+    return variants;
+}
 
 function toggleVideoOptions() {
     const mode = document.getElementById('videoMode').value;
@@ -654,10 +848,21 @@ document.getElementById('transcoderForm').addEventListener('submit', async funct
     // Convert checkboxes to boolean
     const checkboxes = ['sliced_threads', 'cabac', 'trellis', 'aud', 'intra_refresh', 'interlaced',
                         'scaling_enabled', 'add_borders', 'deinterlace',
-                        'aac_is', 'aac_ms', 'aac_pns', 'aac_tns', 'aac_ltp', 'aac_pred'];
+                        'aac_is', 'aac_ms', 'aac_pns', 'aac_tns', 'aac_ltp', 'aac_pred',
+                        'abr_enabled'];
     checkboxes.forEach(name => {
         data[name] = formData.has(name);
     });
+
+    // Collect ABR variants if ABR mode is enabled
+    if (data.abr_enabled) {
+        const variants = collectVariants();
+        if (variants.length === 0) {
+            alert('ABR mode is enabled but no variants are configured. Please add at least one variant.');
+            return;
+        }
+        data.variants = variants;
+    }
 
     const isNew = <?php echo $is_new ? 'true' : 'false'; ?>;
     const action = isNew ? 'create' : 'update';
