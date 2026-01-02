@@ -179,6 +179,14 @@ class RISTInputService(BaseModel):
     description: Optional[str] = None
 
 
+class ABRVariant(BaseModel):
+    """Model for ABR variant (video quality level)"""
+    width: int = 1920
+    height: int = 1080
+    bitrate: int = 5000000  # bits/sec
+    video_pid: int = 100
+
+
 class TranscoderService(BaseModel):
     """Model for creating transcoder service with tsp CBR output"""
     id: str
@@ -230,6 +238,10 @@ class TranscoderService(BaseModel):
     audio_bitrate: int = 128000
     audio_channels: int = 2
     audio_samplerate: int = 48000
+
+    # ABR settings
+    abr_enabled: bool = False
+    variants: Optional[List[ABRVariant]] = None
 
     description: Optional[str] = None
 
@@ -1971,10 +1983,104 @@ async def scan_stream(request: StreamScanRequest):
 # Transcoder Service Management
 # ----------------------------------------------------------------------------
 
+def generate_abr_transcoder_service_file(service_data: TranscoderService, log_file: str) -> str:
+    """Generate systemd service file for ABR transcoder with multiple variants"""
+
+    # Build cari-transcoder-abr command
+    transcoder_cmd_parts = [
+        "/usr/local/bin/cari-transcoder-abr",
+        f"--input {service_data.input_address}:{service_data.input_port}"
+    ]
+
+    # Add each variant
+    for variant in service_data.variants:
+        transcoder_cmd_parts.append(
+            f'--variant "{variant.width}x{variant.height}:{variant.bitrate}:{variant.video_pid}"'
+        )
+
+    # Audio settings
+    transcoder_cmd_parts.append(f"--audio-pid {service_data.audio_pid}")
+    transcoder_cmd_parts.append(f"--audio-bitrate {service_data.audio_bitrate}")
+
+    # Video codec and preset (common to all variants)
+    if service_data.video_codec != "h264":
+        transcoder_cmd_parts.append(f"--video-codec {service_data.video_codec}")
+    if service_data.video_preset != "superfast":
+        transcoder_cmd_parts.append(f"--video-preset {service_data.video_preset}")
+    if service_data.keyframe_interval != 60:
+        transcoder_cmd_parts.append(f"--keyframe-interval {service_data.keyframe_interval}")
+
+    # Audio codec
+    if service_data.audio_codec != "aac":
+        transcoder_cmd_parts.append(f"--audio-codec {service_data.audio_codec}")
+
+    # Program number
+    if service_data.program_number != 1:
+        transcoder_cmd_parts.append(f"--program {service_data.program_number}")
+
+    # Output
+    transcoder_cmd_parts.append(f"--output {service_data.output_address}:{service_data.output_port}")
+
+    transcoder_cmd = " ".join(transcoder_cmd_parts)
+
+    # Build tsp monitoring command for all video PIDs plus audio
+    # Monitor each variant's video PID
+    tsp_monitor_parts = [f"tsp -I ip {service_data.output_address}:{service_data.output_port}"]
+    for variant in service_data.variants:
+        tsp_monitor_parts.append(f"-P bitrate_monitor --pid {variant.video_pid} --periodic-bitrate 2")
+    tsp_monitor_parts.append(f"-P bitrate_monitor --pid {service_data.audio_pid} --periodic-bitrate 2")
+    tsp_monitor_parts.append("-O drop")
+    tsp_monitor_cmd = " ".join(tsp_monitor_parts)
+
+    description = service_data.description or f"CariTranscoder ABR - {service_data.name}"
+
+    service_content = f"""[Unit]
+Description={description}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Main ABR transcoder process with direct UDP output
+# tsp monitor starts in background after 2 second delay for bitrate monitoring
+ExecStart=/bin/bash -c '(sleep 2 && {tsp_monitor_cmd} >>{log_file} 2>&1) & exec {transcoder_cmd}'
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behavior
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cari-transcoder-{service_data.id}
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return service_content
+
+
 def generate_transcoder_service_file(service_data: TranscoderService) -> str:
     """Generate systemd service file for transcoder with tsp CBR output"""
 
     log_file = f"/var/log/caritrans/transcoder-{service_data.id}.log"
+
+    # Check if ABR mode is enabled
+    is_abr = service_data.abr_enabled and service_data.variants and len(service_data.variants) > 0
+
+    if is_abr:
+        return generate_abr_transcoder_service_file(service_data, log_file)
 
     # Build cari-transcoder command - only include essential options
     # The transcoder uses sensible defaults, so we only pass what's needed

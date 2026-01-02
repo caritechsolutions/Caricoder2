@@ -419,10 +419,13 @@ function handle_status($id) {
  * Build transcoder config array from input
  */
 function build_transcoder_config($input) {
+    $is_abr = !empty($input['abr_enabled']);
+
     $config = [
         'general' => [
             'name' => $input['name'] ?? '',
-            'enabled' => true
+            'enabled' => true,
+            'abr_enabled' => $is_abr
         ],
         'input' => [
             'address' => $input['input_address'] ?? '',
@@ -477,6 +480,20 @@ function build_transcoder_config($input) {
         ]
     ];
 
+    // Handle ABR variants
+    if ($is_abr && isset($input['variants']) && is_array($input['variants'])) {
+        $config['abr'] = [
+            'enabled' => true,
+            'variant_count' => count($input['variants'])
+        ];
+        foreach ($input['variants'] as $i => $variant) {
+            $config['abr']["variant_{$i}_width"] = intval($variant['width'] ?? 1920);
+            $config['abr']["variant_{$i}_height"] = intval($variant['height'] ?? 1080);
+            $config['abr']["variant_{$i}_bitrate"] = intval($variant['bitrate'] ?? 5000000);
+            $config['abr']["variant_{$i}_video_pid"] = intval($variant['video_pid'] ?? (100 + $i * 100));
+        }
+    }
+
     return $config;
 }
 
@@ -507,9 +524,21 @@ function create_transcoder_service($id, $config) {
     $scaling = $config['scaling'];
     $input = $config['input'];
     $output = $config['output'];
+    $general = $config['general'];
+    $is_abr = !empty($general['abr_enabled']) && isset($config['abr']);
 
     // Calculate tsp bitrate (video + audio + 5% overhead)
-    $total_bitrate = $video['bitrate'] + $audio['bitrate'];
+    if ($is_abr) {
+        // For ABR, sum all variant bitrates
+        $total_video_bitrate = 0;
+        $variant_count = $config['abr']['variant_count'] ?? 0;
+        for ($i = 0; $i < $variant_count; $i++) {
+            $total_video_bitrate += $config['abr']["variant_{$i}_bitrate"] ?? 0;
+        }
+        $total_bitrate = $total_video_bitrate + $audio['bitrate'];
+    } else {
+        $total_bitrate = $video['bitrate'] + $audio['bitrate'];
+    }
     $tsp_bitrate = intval($total_bitrate * 1.05);
 
     // Build service data for Python API
@@ -562,8 +591,26 @@ function create_transcoder_service($id, $config) {
         'audio_codec' => $audio['codec'],
         'audio_bitrate' => $audio['bitrate'],
         'audio_channels' => $audio['channels'],
-        'audio_samplerate' => $audio['samplerate']
+        'audio_samplerate' => $audio['samplerate'],
+
+        // ABR settings
+        'abr_enabled' => $is_abr
     ];
+
+    // Add ABR variants if enabled
+    if ($is_abr) {
+        $variants = [];
+        $variant_count = $config['abr']['variant_count'] ?? 0;
+        for ($i = 0; $i < $variant_count; $i++) {
+            $variants[] = [
+                'width' => $config['abr']["variant_{$i}_width"] ?? 1920,
+                'height' => $config['abr']["variant_{$i}_height"] ?? 1080,
+                'bitrate' => $config['abr']["variant_{$i}_bitrate"] ?? 5000000,
+                'video_pid' => $config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100)
+            ];
+        }
+        $service_data['variants'] = $variants;
+    }
 
     $result = call_cari_api('/transcoder/create', 'POST', $service_data);
 
@@ -730,18 +777,40 @@ function handle_metrics_history() {
     }
 
     $config = parse_config($config_file);
-    $video_pid = intval($config['output']['video_pid'] ?? 256);
     $audio_pid = intval($config['output']['audio_pid'] ?? 257);
+
+    // Check for ABR mode with multiple video PIDs
+    $is_abr = !empty($config['abr']['enabled']) && config_bool($config['abr']['enabled']);
+    $video_pids = [];
+
+    if ($is_abr && isset($config['abr']['variant_count'])) {
+        $variant_count = intval($config['abr']['variant_count']);
+        for ($i = 0; $i < $variant_count; $i++) {
+            $pid = intval($config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100));
+            $video_pids[] = $pid;
+        }
+    }
+
+    // Fall back to single video PID if not ABR or no variants
+    if (empty($video_pids)) {
+        $video_pids[] = intval($config['output']['video_pid'] ?? 256);
+    }
+
+    // Build initial history structure
+    $pids_data = [];
+    foreach ($video_pids as $pid) {
+        $pids_data[$pid] = ['history' => [], 'is_video' => true];
+    }
+    $pids_data[$audio_pid] = ['history' => [], 'is_video' => false];
 
     $history = [
         'success' => true,
         'transcoder_id' => $id,
-        'video_pid' => $video_pid,
+        'video_pids' => $video_pids,
+        'video_pid' => $video_pids[0],  // First video PID for backwards compatibility
         'audio_pid' => $audio_pid,
-        'pids' => [
-            $video_pid => ['history' => []],
-            $audio_pid => ['history' => []]
-        ]
+        'is_abr' => $is_abr,
+        'pids' => $pids_data
     ];
 
     if (!file_exists($log_file) || !is_readable($log_file)) {
@@ -764,8 +833,12 @@ function handle_metrics_history() {
         fgets($fp); // Skip partial line
     }
 
-    $video_history = [];
-    $audio_history = [];
+    // Initialize history arrays for each PID
+    $pid_histories = [];
+    foreach ($video_pids as $pid) {
+        $pid_histories[$pid] = [];
+    }
+    $pid_histories[$audio_pid] = [];
 
     // Parse bitrate_monitor output lines
     // Format: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
@@ -783,10 +856,9 @@ function handle_metrics_history() {
             // Convert to unix timestamp
             $timestamp = strtotime(str_replace('/', '-', $timestamp_str));
 
-            if ($pid === $video_pid) {
-                $video_history[] = [$timestamp, $bitrate];
-            } elseif ($pid === $audio_pid) {
-                $audio_history[] = [$timestamp, $bitrate];
+            // Store in appropriate history array if this PID is tracked
+            if (isset($pid_histories[$pid])) {
+                $pid_histories[$pid][] = [$timestamp, $bitrate];
             }
         }
     }
@@ -794,15 +866,12 @@ function handle_metrics_history() {
 
     // Keep last 300 samples (about 10 minutes at 2-second intervals)
     $max_samples = 300;
-    if (count($video_history) > $max_samples) {
-        $video_history = array_slice($video_history, -$max_samples);
+    foreach ($pid_histories as $pid => $hist) {
+        if (count($hist) > $max_samples) {
+            $pid_histories[$pid] = array_slice($hist, -$max_samples);
+        }
+        $history['pids'][$pid]['history'] = $pid_histories[$pid];
     }
-    if (count($audio_history) > $max_samples) {
-        $audio_history = array_slice($audio_history, -$max_samples);
-    }
-
-    $history['pids'][$video_pid]['history'] = $video_history;
-    $history['pids'][$audio_pid]['history'] = $audio_history;
 
     echo json_encode($history);
 }

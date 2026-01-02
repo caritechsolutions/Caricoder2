@@ -118,17 +118,19 @@ download_latest() {
 
     local DOWNLOAD_OK=false
     if command -v wget &> /dev/null; then
-        if wget --no-check-certificate -q -O repo.tar.gz "$TARBALL_URL"; then
+        # Use wget with timeout and progress bar
+        if wget --no-check-certificate --timeout=60 --tries=2 --progress=bar:force -O repo.tar.gz "$TARBALL_URL" 2>&1; then
             DOWNLOAD_OK=true
         fi
     else
-        if curl -k -L -f -o repo.tar.gz "$TARBALL_URL" 2>/dev/null; then
+        # Use curl with timeout and progress bar
+        if curl -k -L -f --connect-timeout 30 --max-time 120 --progress-bar -o repo.tar.gz "$TARBALL_URL"; then
             DOWNLOAD_OK=true
         fi
     fi
 
     if [[ "$DOWNLOAD_OK" = false ]] || [[ ! -f repo.tar.gz ]] || [[ ! -s repo.tar.gz ]]; then
-        log_error "Failed to download repository"
+        log_error "Failed to download repository (check network connection)"
         exit 1
     fi
 
@@ -563,6 +565,19 @@ build_tools() {
             log_info "cari-transcoder installed to /usr/local/bin/"
         else
             log_warn "Failed to build cari-transcoder (GStreamer dev packages may be missing)"
+        fi
+    fi
+
+    # Build cari-transcoder-abr (Multi-bitrate ABR transcoder)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-transcoder-abr" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-transcoder-abr"
+        log_info "Building cari-transcoder-abr..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-transcoder-abr installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-transcoder-abr (GStreamer dev packages may be missing)"
         fi
     fi
 
