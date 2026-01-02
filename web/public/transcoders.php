@@ -50,6 +50,41 @@ function getResolution($config) {
     // When scaling is disabled, resolution is preserved from input
     return '';
 }
+
+// Helper function to check if transcoder is ABR mode
+function isAbrMode($config) {
+    return !empty($config['abr']['enabled']) && config_bool($config['abr']['enabled']);
+}
+
+// Helper function to get ABR variants info
+function getAbrVariants($config) {
+    $variants = [];
+    if (!isAbrMode($config)) {
+        return $variants;
+    }
+    $variant_count = intval($config['abr']['variant_count'] ?? 0);
+    for ($i = 0; $i < $variant_count; $i++) {
+        $variants[] = [
+            'width' => $config['abr']["variant_{$i}_width"] ?? 1920,
+            'height' => $config['abr']["variant_{$i}_height"] ?? 1080,
+            'bitrate' => $config['abr']["variant_{$i}_bitrate"] ?? 5000000,
+            'video_pid' => $config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100)
+        ];
+    }
+    return $variants;
+}
+
+// Helper function to get total configured bitrate for ABR
+function getAbrTotalBitrate($config) {
+    $total = 0;
+    $variants = getAbrVariants($config);
+    foreach ($variants as $variant) {
+        $total += $variant['bitrate'];
+    }
+    // Add audio bitrate
+    $total += intval($config['audio']['bitrate'] ?? 128000);
+    return $total;
+}
 ?>
 
 <style>
@@ -189,7 +224,9 @@ function getResolution($config) {
                         $config = $transcoder['config'] ?? [];
                         $videoCodec = $config['video']['codec'] ?? 'h264';
                         $audioCodec = $config['audio']['codec'] ?? 'aac';
-                        $videoBitrate = $config['video']['bitrate'] ?? 0;
+                        $isAbr = isAbrMode($config);
+                        $abrVariants = $isAbr ? getAbrVariants($config) : [];
+                        $videoBitrate = $isAbr ? getAbrTotalBitrate($config) - ($config['audio']['bitrate'] ?? 128000) : ($config['video']['bitrate'] ?? 0);
                         $audioBitrate = $config['audio']['bitrate'] ?? 0;
                         $inputAddr = ($config['input']['address'] ?? '') . ':' . ($config['input']['port'] ?? '');
                         $outputAddr = ($config['output']['address'] ?? '') . ':' . ($config['output']['port'] ?? '');
@@ -209,10 +246,19 @@ function getResolution($config) {
                             <strong><?php echo htmlspecialchars($transcoder['name']); ?></strong>
                         </td>
                         <td>
+                            <?php if ($isAbr): ?>
+                            <span class="badge bg-info codec-badge"><?php echo getCodecDisplay($videoCodec); ?></span>
+                            <span class="badge bg-warning text-dark codec-badge">ABR</span>
+                            <br>
+                            <?php foreach ($abrVariants as $idx => $variant): ?>
+                            <small class="text-muted"><?php echo $variant['width']; ?>x<?php echo $variant['height']; ?> @ <?php echo format_bitrate($variant['bitrate']); ?></small><?php if ($idx < count($abrVariants) - 1): ?><br><?php endif; ?>
+                            <?php endforeach; ?>
+                            <?php else: ?>
                             <span class="badge bg-info codec-badge"><?php echo getCodecDisplay($videoCodec); ?></span>
                             <?php if ($resolution): ?><small class="text-muted ms-1"><?php echo $resolution; ?></small><?php endif; ?>
                             <br>
                             <small class="text-muted"><?php echo format_bitrate($videoBitrate); ?></small>
+                            <?php endif; ?>
                         </td>
                         <td>
                             <span class="badge bg-secondary codec-badge"><?php echo getCodecDisplay($audioCodec); ?></span>
@@ -343,9 +389,10 @@ function getResolution($config) {
                             <div class="card-header py-2 bg-success bg-opacity-10">
                                 <strong><i class="bi bi-box-arrow-right me-1"></i>Output Format</strong>
                                 <small class="text-muted ms-2" id="outputAddressName"></small>
+                                <span id="outputFormatAbrBadge" class="badge bg-warning text-dark ms-2 d-none">ABR</span>
                             </div>
                             <div class="card-body py-2">
-                                <div class="row small">
+                                <div class="row small" id="outputFormatStandard">
                                     <div class="col-6">
                                         <div class="mb-1"><span class="text-muted">Video:</span> <span id="outputVideoCodec">-</span></div>
                                         <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="outputResolution">-</span></div>
@@ -354,6 +401,11 @@ function getResolution($config) {
                                         <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodec">-</span></div>
                                         <div><span class="text-muted">Channels:</span> <span id="outputAudioChannels">-</span></div>
                                     </div>
+                                </div>
+                                <div id="outputFormatAbr" class="d-none small">
+                                    <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodecAbr">-</span> (<span id="outputAudioChannelsAbr">-</span>)</div>
+                                    <div class="text-muted mb-1">Video Streams:</div>
+                                    <div id="outputVideoStreamsList"></div>
                                 </div>
                             </div>
                         </div>
@@ -383,15 +435,24 @@ function getResolution($config) {
                         <div class="card">
                             <div class="card-header py-2">
                                 <strong><i class="bi bi-box-arrow-right me-1 text-success"></i>Output Bitrate</strong>
+                                <span id="outputAbrBadge" class="badge bg-warning text-dark ms-2 d-none">ABR</span>
                             </div>
                             <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center mb-1">
-                                    <span class="text-muted small">Video</span>
-                                    <span class="fw-bold text-success" id="monitorOutputVideoBitrate">-</span>
+                                <div id="outputBitrateContainer">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <span class="text-muted small">Video</span>
+                                        <span class="fw-bold text-success" id="monitorOutputVideoBitrate">-</span>
+                                    </div>
                                 </div>
+                                <div id="outputVideoPidsList"></div>
                                 <div class="d-flex justify-content-between align-items-center">
                                     <span class="text-muted small">Audio</span>
                                     <span class="fw-bold text-success" id="monitorOutputAudioBitrate">-</span>
+                                </div>
+                                <hr class="my-1 d-none" id="outputTotalSeparator">
+                                <div class="d-flex justify-content-between align-items-center d-none" id="outputTotalRow">
+                                    <span class="text-muted small fw-bold">Total</span>
+                                    <span class="fw-bold text-success" id="monitorOutputTotalBitrate">-</span>
                                 </div>
                             </div>
                         </div>
@@ -1204,8 +1265,45 @@ async function loadPreviewMetrics() {
             // Update bitrate displays
             document.getElementById('monitorInputVideoBitrate').textContent = formatBitrate(metrics.input_video_bitrate || 0);
             document.getElementById('monitorInputAudioBitrate').textContent = formatBitrate(metrics.input_audio_bitrate || 0);
-            document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
             document.getElementById('monitorOutputAudioBitrate').textContent = formatBitrate(metrics.output_audio_bitrate || 0);
+
+            // Handle ABR mode with multiple video PIDs
+            const isAbr = metrics.is_abr && metrics.video_bitrates_by_pid && Object.keys(metrics.video_bitrates_by_pid).length > 1;
+            window.currentIsAbr = isAbr;
+
+            if (isAbr) {
+                // Show ABR badge
+                document.getElementById('outputAbrBadge').classList.remove('d-none');
+
+                // Hide single video row, show per-PID rows
+                document.getElementById('outputBitrateContainer').classList.add('d-none');
+
+                // Build per-PID bitrate list
+                const pidsList = document.getElementById('outputVideoPidsList');
+                pidsList.innerHTML = '';
+                let totalVideoBitrate = 0;
+
+                for (const [pid, bitrate] of Object.entries(metrics.video_bitrates_by_pid)) {
+                    totalVideoBitrate += bitrate;
+                    const row = document.createElement('div');
+                    row.className = 'd-flex justify-content-between align-items-center mb-1';
+                    row.innerHTML = `<span class="text-muted small">Video PID ${pid}</span><span class="fw-bold text-success">${formatBitrate(bitrate)}</span>`;
+                    pidsList.appendChild(row);
+                }
+
+                // Show total row
+                document.getElementById('outputTotalSeparator').classList.remove('d-none');
+                document.getElementById('outputTotalRow').classList.remove('d-none');
+                document.getElementById('monitorOutputTotalBitrate').textContent = formatBitrate(metrics.output_total_bitrate || 0);
+            } else {
+                // Standard mode - single video
+                document.getElementById('outputAbrBadge').classList.add('d-none');
+                document.getElementById('outputBitrateContainer').classList.remove('d-none');
+                document.getElementById('outputVideoPidsList').innerHTML = '';
+                document.getElementById('outputTotalSeparator').classList.add('d-none');
+                document.getElementById('outputTotalRow').classList.add('d-none');
+                document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
+            }
 
             // Add to history (4 series: input video, input audio, output video, output audio)
             inputVideoHistory.push(metrics.input_video_bitrate || 0);
@@ -1331,21 +1429,59 @@ async function loadOutputMediaInfo(outputAddress) {
             return;
         }
 
-        // Update video info
-        if (data.video) {
-            document.getElementById('outputVideoCodec').textContent =
-                (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
-            document.getElementById('outputResolution').textContent =
-                data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
-        }
+        // Check if we have multiple video streams (ABR mode)
+        const videoStreams = data.videos || (data.video ? [data.video] : []);
+        const isAbr = videoStreams.length > 1;
 
-        // Update audio info (use first track)
-        if (data.audio && data.audio.length > 0) {
-            const track = data.audio[0];
-            document.getElementById('outputAudioCodec').textContent =
-                (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
-            document.getElementById('outputAudioChannels').textContent =
-                track.channels ? `${track.channels} ch` : '-';
+        if (isAbr) {
+            // Show ABR format display
+            document.getElementById('outputFormatAbrBadge').classList.remove('d-none');
+            document.getElementById('outputFormatStandard').classList.add('d-none');
+            document.getElementById('outputFormatAbr').classList.remove('d-none');
+
+            // Update audio info
+            if (data.audio && data.audio.length > 0) {
+                const track = data.audio[0];
+                document.getElementById('outputAudioCodecAbr').textContent =
+                    (track.codec || '-').toUpperCase() + (track.profile ? ` ${track.profile}` : '');
+                document.getElementById('outputAudioChannelsAbr').textContent =
+                    track.channels ? `${track.channels} ch` : '-';
+            }
+
+            // Build video streams list
+            const videosList = document.getElementById('outputVideoStreamsList');
+            videosList.innerHTML = '';
+            for (const video of videoStreams) {
+                const row = document.createElement('div');
+                row.className = 'ms-2 mb-1';
+                const codec = (video.codec || '-').toUpperCase();
+                const resolution = video.width && video.height ? `${video.width}x${video.height}` : '-';
+                const pid = video.pid ? ` (PID ${video.pid})` : '';
+                row.innerHTML = `<small>${codec} ${resolution}${pid}</small>`;
+                videosList.appendChild(row);
+            }
+        } else {
+            // Standard single-video format display
+            document.getElementById('outputFormatAbrBadge').classList.add('d-none');
+            document.getElementById('outputFormatStandard').classList.remove('d-none');
+            document.getElementById('outputFormatAbr').classList.add('d-none');
+
+            // Update video info
+            if (data.video) {
+                document.getElementById('outputVideoCodec').textContent =
+                    (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
+                document.getElementById('outputResolution').textContent =
+                    data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
+            }
+
+            // Update audio info (use first track)
+            if (data.audio && data.audio.length > 0) {
+                const track = data.audio[0];
+                document.getElementById('outputAudioCodec').textContent =
+                    (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
+                document.getElementById('outputAudioChannels').textContent =
+                    track.channels ? `${track.channels} ch` : '-';
+            }
         }
     } catch (e) {
         console.error('Failed to load output media info:', e);
