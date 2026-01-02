@@ -572,10 +572,23 @@ let avsyncChart = null;
 let avsyncUpdateInterval = null;
 let inputVideoHistory = [];
 let inputAudioHistory = [];
-let outputVideoHistory = [];
+let outputVideoHistory = [];  // For non-ABR: single video stream
 let outputAudioHistory = [];
 let bitrateTimestamps = [];
+let outputVideoPidsHistory = {};  // For ABR: per-PID video history {pid: [bitrates]}
+let currentVideoPids = [];  // List of video PIDs for current ABR transcoder
+let currentIsAbr = false;  // Whether current transcoder is ABR mode
 const MAX_HISTORY_POINTS = 60;
+
+// Color palette for ABR video PIDs
+const VIDEO_PID_COLORS = [
+    '#198754',  // Green
+    '#0d6efd',  // Blue
+    '#6f42c1',  // Purple
+    '#d63384',  // Pink
+    '#fd7e14',  // Orange
+    '#20c997',  // Teal
+];
 
 // Filter transcoders
 function filterTranscoders() {
@@ -677,54 +690,49 @@ function initBitrateChart() {
         bitrateChart.destroy();
     }
 
+    // Base datasets: Input Video, Input Audio, Output Audio
+    // For non-ABR, we add a single Output Video dataset
+    // For ABR, we add per-PID video datasets dynamically
+    const datasets = [
+        {
+            label: 'Input Video',
+            data: [],
+            borderColor: '#0dcaf0',
+            backgroundColor: 'rgba(13, 202, 240, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2
+        },
+        {
+            label: 'Input Audio',
+            data: [],
+            borderColor: '#6edff6',
+            backgroundColor: 'rgba(110, 223, 246, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 1,
+            borderDash: [5, 5]
+        },
+        {
+            label: 'Output Audio',
+            data: [],
+            borderColor: '#75b798',
+            backgroundColor: 'rgba(117, 183, 152, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 1,
+            borderDash: [5, 5]
+        }
+    ];
+
     bitrateChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: [],
-            datasets: [
-                {
-                    label: 'Input Video',
-                    data: [],
-                    borderColor: '#0dcaf0',
-                    backgroundColor: 'rgba(13, 202, 240, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Input Audio',
-                    data: [],
-                    borderColor: '#6edff6',
-                    backgroundColor: 'rgba(110, 223, 246, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1,
-                    borderDash: [5, 5]
-                },
-                {
-                    label: 'Output Video',
-                    data: [],
-                    borderColor: '#198754',
-                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Output Audio',
-                    data: [],
-                    borderColor: '#75b798',
-                    backgroundColor: 'rgba(117, 183, 152, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1,
-                    borderDash: [5, 5]
-                }
-            ]
+            datasets: datasets
         },
         options: {
             responsive: true,
@@ -734,7 +742,7 @@ function initBitrateChart() {
                 mode: 'index'
             },
             plugins: {
-                legend: { display: false },
+                legend: { display: true, position: 'bottom', labels: { boxWidth: 12, padding: 10 } },
                 tooltip: {
                     callbacks: {
                         label: function(context) {
@@ -762,6 +770,57 @@ function initBitrateChart() {
     });
 }
 
+// Add video PID datasets to chart for ABR mode
+function setupAbrChartDatasets(videoPids) {
+    if (!bitrateChart) return;
+
+    // Remove any existing output video datasets (indices 3+)
+    while (bitrateChart.data.datasets.length > 3) {
+        bitrateChart.data.datasets.pop();
+    }
+
+    // Add a dataset for each video PID
+    videoPids.forEach((pid, idx) => {
+        const color = VIDEO_PID_COLORS[idx % VIDEO_PID_COLORS.length];
+        bitrateChart.data.datasets.push({
+            label: `Video PID ${pid}`,
+            data: [],
+            borderColor: color,
+            backgroundColor: color + '1A',  // 10% opacity
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2
+        });
+    });
+
+    bitrateChart.update('none');
+}
+
+// Add single video dataset for non-ABR mode
+function setupStandardChartDatasets() {
+    if (!bitrateChart) return;
+
+    // Remove any existing output video datasets (indices 3+)
+    while (bitrateChart.data.datasets.length > 3) {
+        bitrateChart.data.datasets.pop();
+    }
+
+    // Add single output video dataset
+    bitrateChart.data.datasets.push({
+        label: 'Output Video',
+        data: [],
+        borderColor: '#198754',
+        backgroundColor: 'rgba(25, 135, 84, 0.1)',
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2
+    });
+
+    bitrateChart.update('none');
+}
+
 // Load historical bitrate data for output
 async function loadBitrateHistory(transcoderId) {
     try {
@@ -769,20 +828,32 @@ async function loadBitrateHistory(transcoderId) {
         const data = await response.json();
 
         if (data.success && data.pids) {
-            const videoPid = data.video_pid;
             const audioPid = data.audio_pid;
+            const isAbr = data.is_abr && data.video_pids && data.video_pids.length > 1;
 
-            // Build combined timeline from video and audio PIDs
-            // Video and audio samples alternate, so we need to track which has data
+            // Store ABR state
+            currentIsAbr = isAbr;
+            currentVideoPids = isAbr ? data.video_pids : [data.video_pid];
+
+            // Setup chart datasets based on ABR mode
+            if (isAbr) {
+                setupAbrChartDatasets(currentVideoPids);
+            } else {
+                setupStandardChartDatasets();
+            }
+
+            // Build combined timeline from all PIDs
             const timelineMap = new Map();
 
-            // Add video data
-            if (data.pids[videoPid] && data.pids[videoPid].history) {
-                for (const [ts, bitrate] of data.pids[videoPid].history) {
-                    if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: null, audio: null });
+            // Add video data for all video PIDs
+            for (const pid of currentVideoPids) {
+                if (data.pids[pid] && data.pids[pid].history) {
+                    for (const [ts, bitrate] of data.pids[pid].history) {
+                        if (!timelineMap.has(ts)) {
+                            timelineMap.set(ts, { videos: {}, audio: null });
+                        }
+                        timelineMap.get(ts).videos[pid] = bitrate;
                     }
-                    timelineMap.get(ts).video = bitrate;
                 }
             }
 
@@ -790,7 +861,7 @@ async function loadBitrateHistory(transcoderId) {
             if (data.pids[audioPid] && data.pids[audioPid].history) {
                 for (const [ts, bitrate] of data.pids[audioPid].history) {
                     if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: null, audio: null });
+                        timelineMap.set(ts, { videos: {}, audio: null });
                     }
                     timelineMap.get(ts).audio = bitrate;
                 }
@@ -803,43 +874,75 @@ async function loadBitrateHistory(transcoderId) {
             outputVideoHistory = [];
             outputAudioHistory = [];
             bitrateTimestamps = [];
+            outputVideoPidsHistory = {};
+            for (const pid of currentVideoPids) {
+                outputVideoPidsHistory[pid] = [];
+            }
 
             // Carry forward last known values for missing data
-            let lastVideo = 0;
+            let lastVideos = {};
+            for (const pid of currentVideoPids) {
+                lastVideos[pid] = 0;
+            }
             let lastAudio = 0;
 
             for (const ts of sortedTimestamps) {
                 const values = timelineMap.get(ts);
 
-                // Update last known values if we have new data
-                if (values.video !== null) lastVideo = values.video;
+                // Update last known values
+                for (const pid of currentVideoPids) {
+                    if (values.videos[pid] !== undefined) {
+                        lastVideos[pid] = values.videos[pid];
+                    }
+                }
                 if (values.audio !== null) lastAudio = values.audio;
 
-                // Only add entries where we have BOTH values (skip until we have both)
-                if (lastVideo > 0 || lastAudio > 0) {
-                    outputVideoHistory.push(lastVideo);
+                // Check if we have any data
+                const hasAnyVideo = Object.values(lastVideos).some(v => v > 0);
+                if (hasAnyVideo || lastAudio > 0) {
+                    for (const pid of currentVideoPids) {
+                        outputVideoPidsHistory[pid].push(lastVideos[pid]);
+                    }
+                    // For non-ABR compatibility, sum all video bitrates
+                    outputVideoHistory.push(Object.values(lastVideos).reduce((a, b) => a + b, 0));
                     outputAudioHistory.push(lastAudio);
                     bitrateTimestamps.push(ts);
                 }
             }
 
             // Limit to last MAX_HISTORY_POINTS for display
-            if (outputVideoHistory.length > MAX_HISTORY_POINTS) {
-                outputVideoHistory = outputVideoHistory.slice(-MAX_HISTORY_POINTS);
-                outputAudioHistory = outputAudioHistory.slice(-MAX_HISTORY_POINTS);
-                bitrateTimestamps = bitrateTimestamps.slice(-MAX_HISTORY_POINTS);
+            if (bitrateTimestamps.length > MAX_HISTORY_POINTS) {
+                const start = bitrateTimestamps.length - MAX_HISTORY_POINTS;
+                outputVideoHistory = outputVideoHistory.slice(start);
+                outputAudioHistory = outputAudioHistory.slice(start);
+                bitrateTimestamps = bitrateTimestamps.slice(start);
+                for (const pid of currentVideoPids) {
+                    outputVideoPidsHistory[pid] = outputVideoPidsHistory[pid].slice(start);
+                }
             }
 
             // Update chart with loaded history
-            if (bitrateChart && outputVideoHistory.length > 0) {
-                // Generate time labels from timestamps
+            if (bitrateChart && bitrateTimestamps.length > 0) {
                 const labels = bitrateTimestamps.map(ts => {
                     return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
                 });
 
                 bitrateChart.data.labels = labels;
-                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+                // Dataset 2 is Output Audio (indices 0, 1, 2 are Input Video, Input Audio, Output Audio)
+                bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+
+                // Datasets 3+ are video PIDs
+                if (isAbr) {
+                    currentVideoPids.forEach((pid, idx) => {
+                        if (bitrateChart.data.datasets[3 + idx]) {
+                            bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                        }
+                    });
+                } else {
+                    if (bitrateChart.data.datasets[3]) {
+                        bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                    }
+                }
                 bitrateChart.update('none');
             }
         }
@@ -986,8 +1089,22 @@ async function loadInputBitrateHistory(inputId) {
             bitrateChart.data.labels = labels;
             bitrateChart.data.datasets[0].data = [...inputVideoHistory];
             bitrateChart.data.datasets[1].data = [...inputAudioHistory];
-            bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-            bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+            // Dataset 2 is now Output Audio
+            bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+            // Dataset 3+ are output video PIDs
+            if (currentIsAbr) {
+                // For ABR, we need to update per-PID data
+                currentVideoPids.forEach((pid, idx) => {
+                    if (bitrateChart.data.datasets[3 + idx] && outputVideoPidsHistory[pid]) {
+                        bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                    }
+                });
+            } else {
+                // For non-ABR, dataset 3 is the single output video
+                if (bitrateChart.data.datasets[3]) {
+                    bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                }
+            }
             bitrateChart.update('none');
         }
     } catch (e) {
@@ -1305,12 +1422,23 @@ async function loadPreviewMetrics() {
                 document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
             }
 
-            // Add to history (4 series: input video, input audio, output video, output audio)
+            // Add to history
             inputVideoHistory.push(metrics.input_video_bitrate || 0);
             inputAudioHistory.push(metrics.input_audio_bitrate || 0);
-            outputVideoHistory.push(metrics.output_video_bitrate || 0);
             outputAudioHistory.push(metrics.output_audio_bitrate || 0);
             bitrateTimestamps.push(Math.floor(Date.now() / 1000));
+
+            // For ABR mode, update per-PID video history
+            if (currentIsAbr && metrics.video_bitrates_by_pid) {
+                for (const pid of currentVideoPids) {
+                    if (!outputVideoPidsHistory[pid]) {
+                        outputVideoPidsHistory[pid] = [];
+                    }
+                    outputVideoPidsHistory[pid].push(metrics.video_bitrates_by_pid[pid] || 0);
+                }
+            }
+            // Always update combined video history for compatibility
+            outputVideoHistory.push(metrics.output_video_bitrate || 0);
 
             if (inputVideoHistory.length > MAX_HISTORY_POINTS) {
                 inputVideoHistory.shift();
@@ -1318,6 +1446,13 @@ async function loadPreviewMetrics() {
                 outputVideoHistory.shift();
                 outputAudioHistory.shift();
                 bitrateTimestamps.shift();
+                if (currentIsAbr) {
+                    for (const pid of currentVideoPids) {
+                        if (outputVideoPidsHistory[pid]) {
+                            outputVideoPidsHistory[pid].shift();
+                        }
+                    }
+                }
             }
 
             // Update chart
@@ -1330,8 +1465,20 @@ async function loadPreviewMetrics() {
                 bitrateChart.data.labels = labels;
                 bitrateChart.data.datasets[0].data = [...inputVideoHistory];
                 bitrateChart.data.datasets[1].data = [...inputAudioHistory];
-                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+                // Dataset 2 is Output Audio
+                bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+                // Dataset 3+ are output video PIDs
+                if (currentIsAbr) {
+                    currentVideoPids.forEach((pid, idx) => {
+                        if (bitrateChart.data.datasets[3 + idx] && outputVideoPidsHistory[pid]) {
+                            bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                        }
+                    });
+                } else {
+                    if (bitrateChart.data.datasets[3]) {
+                        bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                    }
+                }
                 bitrateChart.update('none');
             }
 
@@ -1514,12 +1661,15 @@ async function showPreview(id, name) {
     document.getElementById('playerStatus').textContent = 'Stopped';
     document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
 
-    // Reset history (4 series + timestamps)
+    // Reset history (all series + timestamps)
     inputVideoHistory = [];
     inputAudioHistory = [];
     outputVideoHistory = [];
     outputAudioHistory = [];
     bitrateTimestamps = [];
+    outputVideoPidsHistory = {};
+    currentVideoPids = [];
+    currentIsAbr = false;
 
     // Reset format displays
     document.getElementById('inputSourceName').textContent = '';
@@ -1596,6 +1746,9 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
     outputVideoHistory = [];
     outputAudioHistory = [];
     bitrateTimestamps = [];
+    outputVideoPidsHistory = {};
+    currentVideoPids = [];
+    currentIsAbr = false;
 });
 
 // Fetch all transcoder metrics

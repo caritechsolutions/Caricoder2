@@ -1774,12 +1774,14 @@ async def get_media_info(request: MediaInfoRequest):
                     "pid": pid
                 }
 
-                # Add to videos array for ABR support
-                media_info["videos"].append(video_info)
+                # Only add video streams that have valid resolution (skip streams that haven't decoded yet)
+                if video_info["width"] > 0 and video_info["height"] > 0:
+                    # Add to videos array for ABR support
+                    media_info["videos"].append(video_info)
 
-                # Also set first video for backwards compatibility
-                if media_info["video"] is None:
-                    media_info["video"] = video_info
+                    # Also set first video for backwards compatibility
+                    if media_info["video"] is None:
+                        media_info["video"] = video_info
 
             elif stream.get("codec_type") == "audio":
                 media_info["audio"].append({
