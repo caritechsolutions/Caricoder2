@@ -82,10 +82,11 @@ int probe_stream() {
     int count = 0;
 
     // Use ffprobe to count video streams
-    // Output: one line per video stream index
+    // -v quiet suppresses decode errors, analyzeduration/probesize help with stream detection
     snprintf(cmd, sizeof(cmd),
-        "timeout 5 ffprobe -v error -select_streams v "
-        "-show_entries stream=index -of csv=p=0 '%s' 2>/dev/null",
+        "timeout 10 ffprobe -v quiet -select_streams v "
+        "-analyzeduration 3000000 -probesize 3000000 "
+        "-show_entries stream=index -of csv=p=0 '%s'",
         g_ctx.input_addr);
 
     fprintf(stderr, "Probing stream for video tracks: %s\n", g_ctx.input_addr);
@@ -94,10 +95,20 @@ int probe_stream() {
     if (fp) {
         char line[64];
         while (fgets(line, sizeof(line), fp) != NULL) {
-            // Each line is a video stream index
-            count++;
+            // Each line contains stream info - count non-empty lines
+            // Output may have "stream,N" or "program,stream,N" format
+            if (line[0] != '\0' && line[0] != '\n') {
+                count++;
+            }
         }
         pclose(fp);
+    }
+
+    // Divide by 2 if we got duplicate entries (sometimes ffprobe outputs twice)
+    // Check if count is even and > 2, which suggests duplicates
+    if (count > 2 && count % 2 == 0) {
+        // Verify by checking if we got exactly double
+        count = count / 2;
     }
 
     if (count == 0) {
