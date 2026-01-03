@@ -162,7 +162,7 @@ int clear_output_dir() {
     }
 
     struct dirent *entry;
-    char filepath[1024];
+    char filepath[512];  // output_dir (256) + "/" + d_name (255)
 
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -176,7 +176,7 @@ int clear_output_dir() {
             DIR *subdir = opendir(filepath);
             if (subdir) {
                 struct dirent *subentry;
-                char subpath[1024];
+                char subpath[768];  // filepath (512) + "/" + d_name (255)
                 while ((subentry = readdir(subdir)) != NULL) {
                     if (subentry->d_type == DT_REG) {
                         snprintf(subpath, sizeof(subpath), "%s/%s", filepath, subentry->d_name);
@@ -332,7 +332,7 @@ void run_multi_variant_ffmpeg(int video_count) {
     argv[argc++] = "-hls_segment_filename";
     argv[argc++] = segment_pattern;
     argv[argc++] = "-master_pl_name";
-    argv[argc++] = "playlist.m3u8";  // Master playlist in output_dir
+    argv[argc++] = "../playlist.m3u8";  // Master playlist goes up to output_dir from v%v/
     argv[argc++] = "-var_stream_map";
     argv[argc++] = var_stream_map;
     argv[argc++] = output_pattern;
