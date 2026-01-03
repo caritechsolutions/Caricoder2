@@ -39,9 +39,8 @@ typedef struct {
     volatile int running;
     pid_t ffmpeg_child;
     pthread_mutex_t lock;
-    int video_stream_count;   // Number of video streams detected
-    int video_bitrates[MAX_VIDEO_STREAMS];  // Bitrate per video stream in bps
-    int probed;               // 1 if stream has been probed
+    int video_stream_count;   // Number of video streams (from CLI)
+    int video_bitrates[MAX_VIDEO_STREAMS];  // Bitrate per video stream in bps (from CLI)
 } AppContext;
 
 AppContext g_ctx;
@@ -53,6 +52,8 @@ void print_help(const char *prog) {
     printf("  --input ADDRESS:PORT         Input UDP multicast address (required)\n");
     printf("  --output-dir PATH            Output directory for HLS files (required)\n");
     printf("  --api-port PORT              REST API port (required)\n");
+    printf("  --variants COUNT             Number of video variants (default: 1)\n");
+    printf("  --bitrate RATE               Bitrate in bps for each variant (can specify multiple)\n");
     printf("  --duration SECONDS           Segment duration (default: %d)\n", DEFAULT_DURATION);
     printf("  --live-segments COUNT        Number of live segments (default: %d)\n", DEFAULT_LIVE_SEGMENTS);
     printf("  --help                       Show this help\n");
@@ -60,9 +61,10 @@ void print_help(const char *prog) {
     printf("  GET  /health     - Health check\n");
     printf("  POST /keepalive  - Keep the preview alive (call every 30s)\n");
     printf("  GET  /status     - Get status {segments, ready, playlist, variants}\n");
-    printf("\nFeatures:\n");
-    printf("  - Auto-detects ABR streams with multiple video qualities\n");
-    printf("  - Generates multi-variant HLS master playlist for quality switching\n");
+    printf("\nExamples:\n");
+    printf("  Single stream:  %s --input 239.0.0.1:5500 --output-dir /tmp/hls --api-port 8081\n", prog);
+    printf("  ABR (2 variants): %s --input 239.0.0.1:5500 --output-dir /tmp/hls --api-port 8081 \\\n", prog);
+    printf("                    --variants 2 --bitrate 8000000 --bitrate 4000000\n");
 }
 
 void init_context() {
@@ -72,83 +74,7 @@ void init_context() {
     g_ctx.last_keepalive = time(NULL);
     g_ctx.running = 1;
     g_ctx.video_stream_count = 1;  // Default to 1
-    g_ctx.probed = 0;
     pthread_mutex_init(&g_ctx.lock, NULL);
-}
-
-// Probe stream to detect number of video streams and their bitrates
-int probe_stream() {
-    char cmd[512];
-    FILE *fp;
-    int count = 0;
-
-    // Initialize bitrates to 0
-    for (int i = 0; i < MAX_VIDEO_STREAMS; i++) {
-        g_ctx.video_bitrates[i] = 0;
-    }
-
-    // Use ffprobe to get video stream count and bitrates
-    // -v quiet suppresses decode errors, analyzeduration/probesize help with stream detection
-    snprintf(cmd, sizeof(cmd),
-        "timeout 10 ffprobe -v quiet -select_streams v "
-        "-analyzeduration 3000000 -probesize 3000000 "
-        "-show_entries stream=index,bit_rate -of csv=p=0 '%s'",
-        g_ctx.input_addr);
-
-    fprintf(stderr, "Probing stream for video tracks: %s\n", g_ctx.input_addr);
-
-    fp = popen(cmd, "r");
-    if (fp) {
-        char line[128];
-        while (fgets(line, sizeof(line), fp) != NULL && count < MAX_VIDEO_STREAMS) {
-            // Each line: "index,bitrate" or just "index" if bitrate unknown
-            if (line[0] != '\0' && line[0] != '\n') {
-                long bitrate = 0;
-
-                // Parse index and bitrate (bitrate may be "N/A" or missing)
-                // Format: "index,bitrate" - we only need the bitrate
-                char *comma = strchr(line, ',');
-                if (comma) {
-                    bitrate = atol(comma + 1);  // Will be 0 if "N/A" or invalid
-                }
-
-                // Store bitrate for this stream
-                if (count < MAX_VIDEO_STREAMS) {
-                    g_ctx.video_bitrates[count] = (int)bitrate;
-                    count++;
-                }
-            }
-        }
-        pclose(fp);
-    }
-
-    // If bitrates weren't detected, estimate based on typical values
-    // Higher resolution = higher bitrate (rough estimate)
-    if (count > 0 && g_ctx.video_bitrates[0] == 0) {
-        fprintf(stderr, "Bitrates not in stream metadata, using estimates\n");
-        // Estimate: 8Mbps for first (highest), decreasing for others
-        int base_bitrate = 8000000;
-        for (int i = 0; i < count; i++) {
-            g_ctx.video_bitrates[i] = base_bitrate / (i + 1);
-        }
-    }
-
-    if (count == 0) {
-        fprintf(stderr, "Warning: No video streams detected, defaulting to 1\n");
-        count = 1;
-        g_ctx.video_bitrates[0] = 2000000;  // Default 2 Mbps
-    } else if (count > MAX_VIDEO_STREAMS) {
-        fprintf(stderr, "Warning: Found %d video streams, limiting to %d\n", count, MAX_VIDEO_STREAMS);
-        count = MAX_VIDEO_STREAMS;
-    }
-
-    fprintf(stderr, "Detected %d video stream(s):\n", count);
-    for (int i = 0; i < count; i++) {
-        fprintf(stderr, "  Stream %d: %d bps (%.2f Mbps)\n",
-                i, g_ctx.video_bitrates[i], g_ctx.video_bitrates[i] / 1000000.0);
-    }
-
-    return count;
 }
 
 // Count .ts segment files in output directory (recursive for variants)
@@ -167,7 +93,7 @@ int count_segments() {
                 count++;
             }
         } else if (entry->d_type == DT_DIR && entry->d_name[0] == 'v') {
-            // Check variant subdirectories (v0, v1, v2, etc.)
+            // Check variant subdirectories (v0, v1, etc.)
             snprintf(subdir_path, sizeof(subdir_path), "%s/%s", g_ctx.output_dir, entry->d_name);
             DIR *subdir = opendir(subdir_path);
             if (subdir) {
@@ -201,7 +127,7 @@ int clear_output_dir() {
     }
 
     struct dirent *entry;
-    char filepath[512];  // output_dir (256) + "/" + d_name (255)
+    char filepath[512];
 
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -215,7 +141,7 @@ int clear_output_dir() {
             DIR *subdir = opendir(filepath);
             if (subdir) {
                 struct dirent *subentry;
-                char subpath[768];  // filepath (512) + "/" + d_name (255)
+                char subpath[768];
                 while ((subentry = readdir(subdir)) != NULL) {
                     if (subentry->d_type == DT_REG) {
                         snprintf(subpath, sizeof(subpath), "%s/%s", filepath, subentry->d_name);
@@ -235,7 +161,6 @@ int clear_output_dir() {
 }
 
 // Create variant subdirectories for multi-variant HLS
-// Each variant has video+audio muxed together, so we only need video_count directories
 int create_variant_dirs(int video_count) {
     char dirpath[512];
     for (int i = 0; i < video_count; i++) {
@@ -314,18 +239,16 @@ void run_single_stream_ffmpeg() {
 
 // Build and run multi-variant ffmpeg command for ABR
 // Uses muxed audio approach: each variant contains video+audio together
-// This is more compatible than audio groups (works with VLC, all browsers)
 void run_multi_variant_ffmpeg(int video_count) {
-    // We need to build a dynamic command with variable number of -map options
     char *argv[128];
     int argc = 0;
 
     char duration_str[16], list_size_str[16];
     char segment_pattern[512];
     char output_pattern[512];
-    char var_stream_map[512];
+    char var_stream_map[1024];
     char input_url[256];
-    char map_args[MAX_VIDEO_STREAMS * 2][16];  // video + audio map args
+    char map_args[MAX_VIDEO_STREAMS][16];
 
     snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
     snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
@@ -335,21 +258,19 @@ void run_multi_variant_ffmpeg(int video_count) {
     // Add UDP buffer settings to input URL
     snprintf(input_url, sizeof(input_url), "%s?fifo_size=5000000&overrun_nonfatal=1", g_ctx.input_addr);
 
-    // Build var_stream_map with muxed audio and bandwidth hints:
+    // Build var_stream_map with muxed audio and bandwidth:
     // "v:0,a:0,bandwidth=8000000 v:1,a:1,bandwidth=4000000"
-    // This duplicates audio but is universally compatible
-    // Bandwidth hints ensure correct ABR behavior in the master playlist
     var_stream_map[0] = '\0';
     for (int i = 0; i < video_count; i++) {
         char entry[128];
         int bandwidth = g_ctx.video_bitrates[i];
-        // Add ~200kbps for audio
+        // Add ~200kbps for audio overhead
         if (bandwidth > 0) {
             bandwidth += 200000;
         }
         snprintf(entry, sizeof(entry), "%sv:%d,a:%d,bandwidth=%d",
                  (i > 0 ? " " : ""), i, i, bandwidth);
-        strcat(var_stream_map, entry);
+        strncat(var_stream_map, entry, sizeof(var_stream_map) - strlen(var_stream_map) - 1);
     }
 
     // Build argument list
@@ -363,7 +284,6 @@ void run_multi_variant_ffmpeg(int video_count) {
     argv[argc++] = input_url;
 
     // Map video streams first, then audio streams (one per video)
-    // This creates output streams: v0, v1, ..., a0, a1, ...
     for (int i = 0; i < video_count; i++) {
         snprintf(map_args[i], sizeof(map_args[i]), "0:v:%d", i);
         argv[argc++] = "-map";
@@ -411,18 +331,12 @@ void run_multi_variant_ffmpeg(int video_count) {
 void* ffmpeg_manager_thread(void *arg) {
     (void)arg;
 
-    // Probe stream once at startup
-    if (!g_ctx.probed) {
-        g_ctx.video_stream_count = probe_stream();
-        g_ctx.probed = 1;
-
-        // Create variant directories if multi-stream
-        if (g_ctx.video_stream_count > 1) {
-            if (create_variant_dirs(g_ctx.video_stream_count) != 0) {
-                fprintf(stderr, "ERROR: Failed to create variant directories\n");
-                g_ctx.running = 0;
-                return NULL;
-            }
+    // Create variant directories if multi-stream
+    if (g_ctx.video_stream_count > 1) {
+        if (create_variant_dirs(g_ctx.video_stream_count) != 0) {
+            fprintf(stderr, "ERROR: Failed to create variant directories\n");
+            g_ctx.running = 0;
+            return NULL;
         }
     }
 
@@ -472,7 +386,6 @@ void* monitor_thread(void *arg) {
         pthread_mutex_lock(&g_ctx.lock);
         g_ctx.segment_count = count_segments();
         // For multi-variant, need segments from all variant directories
-        // Each variant has video+audio muxed, so just video_count directories
         int min_segments = 3 * g_ctx.video_stream_count;
         g_ctx.ready = (g_ctx.segment_count >= min_segments) ? 1 : 0;
         pthread_mutex_unlock(&g_ctx.lock);
@@ -572,10 +485,10 @@ int main(int argc, char *argv[]) {
     init_context();
 
     int has_input = 0, has_output = 0, has_port = 0;
+    int bitrate_count = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
-            // Build UDP URL from address:port
             const char *addr_port = argv[++i];
             snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "udp://%s", addr_port);
             has_input = 1;
@@ -585,6 +498,16 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
             g_ctx.api_port = atoi(argv[++i]);
             has_port = 1;
+        } else if (strcmp(argv[i], "--variants") == 0 && i + 1 < argc) {
+            g_ctx.video_stream_count = atoi(argv[++i]);
+            if (g_ctx.video_stream_count < 1) g_ctx.video_stream_count = 1;
+            if (g_ctx.video_stream_count > MAX_VIDEO_STREAMS) g_ctx.video_stream_count = MAX_VIDEO_STREAMS;
+        } else if (strcmp(argv[i], "--bitrate") == 0 && i + 1 < argc) {
+            if (bitrate_count < MAX_VIDEO_STREAMS) {
+                g_ctx.video_bitrates[bitrate_count++] = atoi(argv[++i]);
+            } else {
+                ++i;  // Skip the value
+            }
         } else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) {
             g_ctx.duration = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--live-segments") == 0 && i + 1 < argc) {
@@ -605,6 +528,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // If bitrates not specified, use defaults
+    if (bitrate_count == 0) {
+        for (int i = 0; i < g_ctx.video_stream_count; i++) {
+            // Default: 8Mbps for first, halving for each subsequent
+            g_ctx.video_bitrates[i] = 8000000 / (i + 1);
+        }
+    }
+
     // Build playlist path
     snprintf(g_ctx.playlist_path, sizeof(g_ctx.playlist_path), "%s/playlist.m3u8", g_ctx.output_dir);
 
@@ -621,6 +552,11 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Input:  %s\n", g_ctx.input_addr);
     fprintf(stderr, "Output: %s\n", g_ctx.output_dir);
     fprintf(stderr, "API Port: %d\n", g_ctx.api_port);
+    fprintf(stderr, "Variants: %d\n", g_ctx.video_stream_count);
+    for (int i = 0; i < g_ctx.video_stream_count; i++) {
+        fprintf(stderr, "  Variant %d: %d bps (%.2f Mbps)\n",
+                i, g_ctx.video_bitrates[i], g_ctx.video_bitrates[i] / 1000000.0);
+    }
     fprintf(stderr, "Segment Duration: %d seconds\n", g_ctx.duration);
     fprintf(stderr, "Live Segments: %d\n", g_ctx.live_segments);
     fprintf(stderr, "Keepalive Timeout: %d seconds\n", KEEPALIVE_TIMEOUT);

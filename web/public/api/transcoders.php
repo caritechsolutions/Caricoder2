@@ -676,6 +676,8 @@ function handle_start_preview() {
     $input_address = $input['input_address'] ?? '';
     $output_dir = $input['output_dir'] ?? '';
     $api_port = intval($input['api_port'] ?? 0);
+    $variants = intval($input['variants'] ?? 1);
+    $bitrates = $input['bitrates'] ?? [];
 
     if (empty($input_address) || empty($output_dir) || $api_port === 0) {
         echo json_encode(['success' => false, 'error' => 'Missing required parameters']);
@@ -686,7 +688,9 @@ function handle_start_preview() {
         'input_address' => $input_address,
         'output_dir' => $output_dir,
         'api_port' => $api_port,
-        'folder' => 'transcoder-' . $id
+        'folder' => 'transcoder-' . $id,
+        'variants' => $variants,
+        'bitrates' => $bitrates
     ];
 
     $result = call_cari_api('/preview/start', 'POST', $api_data);
@@ -918,11 +922,15 @@ function get_transcoder_metrics($id) {
 
         if ($is_abr && isset($config['abr']['variant_count'])) {
             $variant_count = intval($config['abr']['variant_count']);
+            $variant_bitrates = [];
             for ($i = 0; $i < $variant_count; $i++) {
                 $pid = intval($config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100));
                 $video_pids[] = $pid;
+                $variant_bitrates[] = intval($config['abr']["variant_{$i}_bitrate"] ?? 5000000);
             }
             $metrics['video_pids'] = $video_pids;
+            $metrics['variant_count'] = $variant_count;
+            $metrics['variant_bitrates'] = $variant_bitrates;
         }
 
         // Fall back to single video PID if not ABR or no variants

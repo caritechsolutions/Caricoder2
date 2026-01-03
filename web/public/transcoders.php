@@ -1654,6 +1654,9 @@ async function showPreview(id, name) {
     window.inputFormatLoaded = false;
     window.outputFormatLoaded = false;
     window.currentOutputAddress = null;
+    window.previewStarted = false;
+    window.variantCount = 1;
+    window.variantBitrates = [];
 
     // Reset player state
     if (outputHlsPlayer) {
@@ -1667,8 +1670,8 @@ async function showPreview(id, name) {
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');
     document.getElementById('playerStatus').className = 'badge bg-secondary';
-    document.getElementById('playerStatus').textContent = 'Stopped';
-    document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+    document.getElementById('playerStatus').textContent = 'Ready';
+    document.getElementById('videoStatusText').textContent = 'Starting preview in background...';
 
     // Reset quality selector and CC button
     const qualitySelector = document.getElementById('qualitySelector');
@@ -1719,8 +1722,8 @@ async function showPreview(id, name) {
     // Load historical output bitrate data first (await to ensure it's ready before input history)
     await loadBitrateHistory(id);
 
-    // Load initial metrics (this will trigger input history loading after source_service is known)
-    loadPreviewMetrics();
+    // Load initial metrics - wait for it to get output_address and start preview
+    await loadPreviewMetricsAndStartPreview();
 
     // Load A/V sync data and full continuity error count
     loadAVSyncHistory(id);
@@ -1741,6 +1744,113 @@ async function showPreview(id, name) {
     previewModal.show();
 }
 
+// Load metrics and start preview immediately (called once when modal opens)
+async function loadPreviewMetricsAndStartPreview() {
+    const id = document.getElementById('previewId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/transcoders.php?action=all_metrics`);
+        const data = await response.json();
+
+        if (data.success && data.transcoders && data.transcoders[id]) {
+            const metrics = data.transcoders[id];
+
+            // Store output address
+            if (metrics.output_address) {
+                window.currentOutputAddress = metrics.output_address;
+            }
+
+            // Store api_port
+            if (metrics.api_port) {
+                document.getElementById('previewApiPort').value = metrics.api_port;
+            }
+
+            // Store ABR variant info
+            if (metrics.is_abr && metrics.variant_count > 1) {
+                window.variantCount = metrics.variant_count;
+                window.variantBitrates = metrics.variant_bitrates || [];
+            }
+
+            // Start preview in background if we have output address
+            if (window.currentOutputAddress && !window.previewStarted) {
+                await startPreviewInBackground();
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load metrics for preview:', e);
+    }
+}
+
+// Start preview in background (called when modal opens)
+async function startPreviewInBackground() {
+    const id = document.getElementById('previewId').value;
+    const apiPort = document.getElementById('previewApiPort').value;
+    const outputAddress = window.currentOutputAddress;
+
+    if (!outputAddress || !apiPort) {
+        return;
+    }
+
+    const folderName = `transcoder-${id}`;
+    const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
+    const previewPort = parseInt(apiPort) + 100;
+
+    try {
+        // Check if preview is already running
+        try {
+            const statusResponse = await fetch(`http://${window.location.hostname}:${previewPort}/status`);
+            if (statusResponse.ok) {
+                // Preview already running, just set up keepalive
+                window.previewStarted = true;
+                currentPreviewPort = previewPort;
+                document.getElementById('videoStatusText').textContent = 'Preview ready - click Start to play';
+
+                // Start keepalive
+                if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
+                outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
+                return;
+            }
+        } catch (e) {
+            // Preview not running, continue to start it
+        }
+
+        // Build request with variants and bitrates
+        const requestBody = {
+            id: id,
+            input_address: outputAddress,
+            output_dir: outputDir,
+            api_port: previewPort,
+            variants: window.variantCount || 1,
+            bitrates: window.variantBitrates || []
+        };
+
+        const response = await fetch('api/transcoders.php?action=start_preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            window.previewStarted = true;
+            currentPreviewPort = previewPort;
+            document.getElementById('videoStatusText').textContent = 'Buffering in background...';
+
+            // Start keepalive immediately
+            if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
+            outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
+        } else {
+            console.error('Failed to start preview:', result.error);
+            document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+        }
+    } catch (e) {
+        console.error('Failed to start preview in background:', e);
+        document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+    }
+}
+
 // Cleanup on modal close
 document.getElementById('previewModal').addEventListener('hidden.bs.modal', function() {
     if (previewInterval) {
@@ -1753,10 +1863,25 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
         avsyncUpdateInterval = null;
     }
 
+    // Stop keepalive
+    if (outputKeepaliveInterval) {
+        clearInterval(outputKeepaliveInterval);
+        outputKeepaliveInterval = null;
+    }
+
     // Stop player if running
     if (outputPlayerRunning) {
         stopOutputPlayer();
+    } else if (window.previewStarted && currentPreviewPort) {
+        // Stop background preview even if player wasn't started
+        fetch(`api/transcoders.php?action=stop_preview&api_port=${currentPreviewPort}`, {
+            method: 'POST'
+        }).catch(e => console.error('Failed to stop preview:', e));
     }
+
+    // Reset state
+    window.previewStarted = false;
+    currentPreviewPort = null;
 
     inputVideoHistory = [];
     inputAudioHistory = [];
@@ -1876,7 +2001,7 @@ async function waitForPlaylistReady(previewPort, playlistUrl, maxAttempts = 30) 
     initOutputHlsPlayer(playlistUrl);
 }
 
-// Start output player preview
+// Start output player preview (connects to already-running preview)
 async function startOutputPlayer() {
     const id = document.getElementById('previewId').value;
     const apiPort = document.getElementById('previewApiPort').value;
@@ -1890,46 +2015,28 @@ async function startOutputPlayer() {
     document.getElementById('startPlayerBtn').classList.add('d-none');
     document.getElementById('stopPlayerBtn').classList.remove('d-none');
     document.getElementById('playerStatus').className = 'badge bg-warning me-2';
-    document.getElementById('playerStatus').textContent = 'Starting...';
-    document.getElementById('videoStatusText').textContent = 'Starting preview...';
+    document.getElementById('playerStatus').textContent = 'Connecting...';
+    document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
     try {
-        // Start player_preview for the output stream
-        // Use /preview/ path to match inputs page structure
         const folderName = `transcoder-${id}`;
-        const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
-        const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
+        const previewPort = parseInt(apiPort) + 100;
 
-        const response = await fetch('api/transcoders.php?action=start_preview', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                id: id,
-                input_address: outputAddress,
-                output_dir: outputDir,
-                api_port: previewPort
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            outputPlayerRunning = true;
-            currentPreviewPort = previewPort;
-            document.getElementById('playerStatus').className = 'badge bg-info';
-            document.getElementById('playerStatus').textContent = 'Loading...';
-            document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
-
-            // Start keepalive (every 30 seconds)
-            if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
-            outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
-
-            // Poll for playlist readiness instead of fixed timeout
-            const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
-            await waitForPlaylistReady(previewPort, playlistUrl);
-        } else {
-            throw new Error(data.error || 'Failed to start preview');
+        // If preview wasn't started in background, start it now
+        if (!window.previewStarted) {
+            await startPreviewInBackground();
         }
+
+        // Mark player as running
+        outputPlayerRunning = true;
+
+        // Update status
+        document.getElementById('playerStatus').className = 'badge bg-info';
+        document.getElementById('playerStatus').textContent = 'Loading...';
+
+        // Wait for playlist to be ready and connect
+        const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
+        await waitForPlaylistReady(previewPort, playlistUrl);
     } catch (e) {
         console.error('Failed to start output player:', e);
         document.getElementById('playerStatus').className = 'badge bg-danger me-2';
@@ -1971,7 +2078,9 @@ async function stopOutputPlayer() {
         console.error('Failed to stop preview:', e);
     }
 
+    // Reset state
     outputPlayerRunning = false;
+    window.previewStarted = false;
     ccEnabled = false;
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');

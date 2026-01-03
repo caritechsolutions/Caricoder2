@@ -1558,6 +1558,8 @@ class PreviewStart(BaseModel):
     output_dir: str     # e.g., "/var/www/html/caritrans/preview/bet"
     api_port: int       # e.g., 10100
     folder: str         # e.g., "bet" (for log file naming)
+    variants: int = 1   # Number of video variants (for ABR)
+    bitrates: list = [] # Bitrates for each variant in bps
 
 
 def is_preview_running(api_port: int) -> bool:
@@ -1608,6 +1610,14 @@ async def start_preview(preview: PreviewStart):
             "--output-dir", preview.output_dir,
             "--api-port", str(preview.api_port)
         ]
+
+        # Add variants if more than 1
+        if preview.variants > 1:
+            cmd.extend(["--variants", str(preview.variants)])
+
+        # Add bitrates for each variant
+        for bitrate in preview.bitrates:
+            cmd.extend(["--bitrate", str(bitrate)])
 
         # Open log file for output
         with open(log_file, 'w') as log_f:
