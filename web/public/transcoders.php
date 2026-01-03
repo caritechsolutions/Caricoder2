@@ -331,8 +331,16 @@ function getAbrTotalBitrate($config) {
                 <div class="card mb-3">
                     <div class="card-header py-2 d-flex justify-content-between align-items-center">
                         <strong><i class="bi bi-play-circle me-1"></i>Output Preview</strong>
-                        <div>
-                            <span id="playerStatus" class="badge bg-secondary me-2">Stopped</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="playerStatus" class="badge bg-secondary">Stopped</span>
+                            <!-- Quality Selector (hidden until multiple levels available) -->
+                            <select id="qualitySelector" class="form-select form-select-sm d-none" style="width: auto; min-width: 90px;" title="Video Quality">
+                                <option value="-1">Auto</option>
+                            </select>
+                            <!-- CC Button (hidden until captions available) -->
+                            <button id="ccBtn" class="btn btn-sm btn-outline-secondary d-none" title="Closed Captions" onclick="toggleClosedCaptions()">
+                                <i class="bi bi-badge-cc"></i>
+                            </button>
                             <button class="btn btn-sm btn-success" id="startPlayerBtn" onclick="startOutputPlayer()">
                                 <i class="bi bi-play-fill me-1"></i>Start
                             </button>
@@ -1653,13 +1661,22 @@ async function showPreview(id, name) {
         outputHlsPlayer = null;
     }
     outputPlayerRunning = false;
+    ccEnabled = false;
     document.getElementById('outputVideo').classList.add('d-none');
     document.getElementById('videoLoadingOverlay').classList.remove('d-none');
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');
-    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
+    document.getElementById('playerStatus').className = 'badge bg-secondary';
     document.getElementById('playerStatus').textContent = 'Stopped';
     document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+
+    // Reset quality selector and CC button
+    const qualitySelector = document.getElementById('qualitySelector');
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    document.getElementById('ccBtn').classList.add('d-none');
+    document.getElementById('ccBtn').classList.remove('btn-primary');
+    document.getElementById('ccBtn').classList.add('btn-outline-secondary');
 
     // Reset history (all series + timestamps)
     inputVideoHistory = [];
@@ -1811,6 +1828,7 @@ let outputHlsPlayer = null;
 let outputPlayerRunning = false;
 let outputKeepaliveInterval = null;
 let currentPreviewPort = null;
+let ccEnabled = false;
 
 // Send keepalive to preview via API
 async function sendOutputKeepalive() {
@@ -1920,62 +1938,174 @@ async function stopOutputPlayer() {
     }
 
     outputPlayerRunning = false;
+    ccEnabled = false;
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');
-    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
+    document.getElementById('playerStatus').className = 'badge bg-secondary';
     document.getElementById('playerStatus').textContent = 'Stopped';
     document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+
+    // Reset quality selector and CC button
+    const qualitySelector = document.getElementById('qualitySelector');
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    document.getElementById('ccBtn').classList.add('d-none');
+    document.getElementById('ccBtn').classList.remove('btn-primary');
+    document.getElementById('ccBtn').classList.add('btn-outline-secondary');
 }
 
 // Initialize HLS player for output
 function initOutputHlsPlayer(playlistUrl) {
     const video = document.getElementById('outputVideo');
+    const qualitySelector = document.getElementById('qualitySelector');
+    const ccBtn = document.getElementById('ccBtn');
 
     if (outputHlsPlayer) {
         outputHlsPlayer.destroy();
         outputHlsPlayer = null;
     }
 
+    // Reset quality selector
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    ccBtn.classList.add('d-none');
+
     if (Hls.isSupported()) {
         outputHlsPlayer = new Hls({
             liveSyncDurationCount: 3,
-            liveMaxLatencyDurationCount: 6
+            liveMaxLatencyDurationCount: 6,
+            enableCEA708Captions: true,  // Enable CEA-608/708 caption extraction
+            captionsTextTrack1Label: 'Captions',
+            captionsTextTrack1LanguageCode: 'en'
         });
 
         outputHlsPlayer.loadSource(playlistUrl);
         outputHlsPlayer.attachMedia(video);
 
-        outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+        // Handle manifest parsed - populate quality levels
+        outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
-            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').className = 'badge bg-success';
             document.getElementById('playerStatus').textContent = 'Playing';
             video.play();
+
+            // Populate quality selector if multiple levels available
+            const levels = outputHlsPlayer.levels;
+            if (levels && levels.length > 1) {
+                qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+                levels.forEach((level, index) => {
+                    const height = level.height || 'Unknown';
+                    const bitrate = level.bitrate ? Math.round(level.bitrate / 1000) + ' kbps' : '';
+                    const label = height + 'p' + (bitrate ? ' (' + bitrate + ')' : '');
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = label;
+                    qualitySelector.appendChild(option);
+                });
+                qualitySelector.classList.remove('d-none');
+                console.log('Quality levels available:', levels.length);
+            }
         });
+
+        // Handle subtitle tracks update
+        outputHlsPlayer.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function(event, data) {
+            if (data.subtitleTracks && data.subtitleTracks.length > 0) {
+                ccBtn.classList.remove('d-none');
+                console.log('Subtitle tracks available:', data.subtitleTracks.length);
+            }
+        });
+
+        // Also check for CEA-608/708 captions via cues
+        outputHlsPlayer.on(Hls.Events.CUES_PARSED, function(event, data) {
+            if (data.type === 'captions' && data.cues && data.cues.length > 0) {
+                ccBtn.classList.remove('d-none');
+                console.log('CEA captions detected');
+            }
+        });
+
+        // Quality selector change handler
+        qualitySelector.onchange = function() {
+            if (outputHlsPlayer) {
+                const level = parseInt(this.value);
+                outputHlsPlayer.currentLevel = level;
+                console.log('Quality changed to level:', level, level === -1 ? '(Auto)' : '');
+            }
+        };
 
         outputHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
             console.error('HLS error:', data);
             if (data.fatal) {
-                document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+                document.getElementById('playerStatus').className = 'badge bg-danger';
                 document.getElementById('playerStatus').textContent = 'Error';
                 document.getElementById('videoStatusText').textContent = 'Playback error';
             }
         });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari native HLS
+        // Safari native HLS - quality selection handled by Safari
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', function() {
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
-            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').className = 'badge bg-success';
             document.getElementById('playerStatus').textContent = 'Playing';
             video.play();
+
+            // Check for text tracks (captions)
+            if (video.textTracks && video.textTracks.length > 0) {
+                ccBtn.classList.remove('d-none');
+            }
         });
     } else {
         document.getElementById('videoStatusText').textContent = 'HLS not supported in this browser';
-        document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+        document.getElementById('playerStatus').className = 'badge bg-danger';
         document.getElementById('playerStatus').textContent = 'Unsupported';
     }
+}
+
+// Toggle closed captions
+function toggleClosedCaptions() {
+    const video = document.getElementById('outputVideo');
+    const ccBtn = document.getElementById('ccBtn');
+
+    ccEnabled = !ccEnabled;
+
+    if (ccEnabled) {
+        ccBtn.classList.remove('btn-outline-secondary');
+        ccBtn.classList.add('btn-primary');
+
+        // Enable captions
+        if (outputHlsPlayer && outputHlsPlayer.subtitleTracks && outputHlsPlayer.subtitleTracks.length > 0) {
+            outputHlsPlayer.subtitleTrack = 0;  // Enable first subtitle track
+        }
+
+        // Also try native text tracks
+        if (video.textTracks) {
+            for (let i = 0; i < video.textTracks.length; i++) {
+                if (video.textTracks[i].kind === 'captions' || video.textTracks[i].kind === 'subtitles') {
+                    video.textTracks[i].mode = 'showing';
+                    break;
+                }
+            }
+        }
+    } else {
+        ccBtn.classList.remove('btn-primary');
+        ccBtn.classList.add('btn-outline-secondary');
+
+        // Disable captions
+        if (outputHlsPlayer) {
+            outputHlsPlayer.subtitleTrack = -1;  // Disable subtitle track
+        }
+
+        // Also disable native text tracks
+        if (video.textTracks) {
+            for (let i = 0; i < video.textTracks.length; i++) {
+                video.textTracks[i].mode = 'hidden';
+            }
+        }
+    }
+
+    console.log('Closed captions:', ccEnabled ? 'enabled' : 'disabled');
 }
 </script>
 

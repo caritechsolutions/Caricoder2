@@ -2,6 +2,7 @@
  * player_preview.c - HLS Preview Generator using FFmpeg
  *
  * Creates HLS stream for web preview with proper keyframe alignment.
+ * Supports multi-variant HLS for ABR streams with multiple video qualities.
  * Uses FFmpeg instead of tsp for better codec compatibility.
  */
 
@@ -23,6 +24,7 @@
 #define KEEPALIVE_TIMEOUT 60  // Seconds before shutdown if no keepalive
 #define DEFAULT_DURATION 2    // Segment duration in seconds
 #define DEFAULT_LIVE_SEGMENTS 5
+#define MAX_VIDEO_STREAMS 8   // Maximum number of video variants supported
 
 typedef struct {
     char input_addr[128];     // Full input URL (udp://addr:port)
@@ -37,6 +39,8 @@ typedef struct {
     volatile int running;
     pid_t ffmpeg_child;
     pthread_mutex_t lock;
+    int video_stream_count;   // Number of video streams detected
+    int probed;               // 1 if stream has been probed
 } AppContext;
 
 AppContext g_ctx;
@@ -54,7 +58,10 @@ void print_help(const char *prog) {
     printf("\nAPI Endpoints:\n");
     printf("  GET  /health     - Health check\n");
     printf("  POST /keepalive  - Keep the preview alive (call every 30s)\n");
-    printf("  GET  /status     - Get status {segments, ready, playlist}\n");
+    printf("  GET  /status     - Get status {segments, ready, playlist, variants}\n");
+    printf("\nFeatures:\n");
+    printf("  - Auto-detects ABR streams with multiple video qualities\n");
+    printf("  - Generates multi-variant HLS master playlist for quality switching\n");
 }
 
 void init_context() {
@@ -63,21 +70,78 @@ void init_context() {
     g_ctx.live_segments = DEFAULT_LIVE_SEGMENTS;
     g_ctx.last_keepalive = time(NULL);
     g_ctx.running = 1;
+    g_ctx.video_stream_count = 1;  // Default to 1
+    g_ctx.probed = 0;
     pthread_mutex_init(&g_ctx.lock, NULL);
 }
 
-// Count .ts segment files in output directory
+// Probe stream to detect number of video streams
+int probe_stream() {
+    char cmd[512];
+    FILE *fp;
+    int count = 0;
+
+    // Use ffprobe to count video streams
+    // Output: one line per video stream index
+    snprintf(cmd, sizeof(cmd),
+        "timeout 5 ffprobe -v error -select_streams v "
+        "-show_entries stream=index -of csv=p=0 '%s' 2>/dev/null",
+        g_ctx.input_addr);
+
+    fprintf(stderr, "Probing stream for video tracks: %s\n", g_ctx.input_addr);
+
+    fp = popen(cmd, "r");
+    if (fp) {
+        char line[64];
+        while (fgets(line, sizeof(line), fp) != NULL) {
+            // Each line is a video stream index
+            count++;
+        }
+        pclose(fp);
+    }
+
+    if (count == 0) {
+        fprintf(stderr, "Warning: No video streams detected, defaulting to 1\n");
+        count = 1;
+    } else if (count > MAX_VIDEO_STREAMS) {
+        fprintf(stderr, "Warning: Found %d video streams, limiting to %d\n", count, MAX_VIDEO_STREAMS);
+        count = MAX_VIDEO_STREAMS;
+    }
+
+    fprintf(stderr, "Detected %d video stream(s)\n", count);
+    return count;
+}
+
+// Count .ts segment files in output directory (recursive for variants)
 int count_segments() {
     DIR *dir = opendir(g_ctx.output_dir);
     if (!dir) return 0;
 
     int count = 0;
     struct dirent *entry;
+    char subdir_path[512];
+
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_REG) {
             const char *ext = strrchr(entry->d_name, '.');
             if (ext && strcmp(ext, ".ts") == 0) {
                 count++;
+            }
+        } else if (entry->d_type == DT_DIR && entry->d_name[0] == 'v') {
+            // Check variant subdirectories (v0, v1, v2, etc.)
+            snprintf(subdir_path, sizeof(subdir_path), "%s/%s", g_ctx.output_dir, entry->d_name);
+            DIR *subdir = opendir(subdir_path);
+            if (subdir) {
+                struct dirent *subentry;
+                while ((subentry = readdir(subdir)) != NULL) {
+                    if (subentry->d_type == DT_REG) {
+                        const char *ext = strrchr(subentry->d_name, '.');
+                        if (ext && strcmp(ext, ".ts") == 0) {
+                            count++;
+                        }
+                    }
+                }
+                closedir(subdir);
             }
         }
     }
@@ -85,7 +149,7 @@ int count_segments() {
     return count;
 }
 
-// Clear output directory
+// Clear output directory including variant subdirectories
 int clear_output_dir() {
     DIR *dir = opendir(g_ctx.output_dir);
     if (!dir) {
@@ -99,16 +163,48 @@ int clear_output_dir() {
 
     struct dirent *entry;
     char filepath[1024];
+
     while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_REG) {
-            snprintf(filepath, sizeof(filepath), "%s/%s", g_ctx.output_dir, entry->d_name);
-            if (unlink(filepath) != 0) {
-                fprintf(stderr, "Warning: Could not delete %s: %s\n", filepath, strerror(errno));
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", g_ctx.output_dir, entry->d_name);
+
+        if (entry->d_type == DT_DIR) {
+            // Recursively clear subdirectory
+            DIR *subdir = opendir(filepath);
+            if (subdir) {
+                struct dirent *subentry;
+                char subpath[1024];
+                while ((subentry = readdir(subdir)) != NULL) {
+                    if (subentry->d_type == DT_REG) {
+                        snprintf(subpath, sizeof(subpath), "%s/%s", filepath, subentry->d_name);
+                        unlink(subpath);
+                    }
+                }
+                closedir(subdir);
             }
+            rmdir(filepath);
+        } else if (entry->d_type == DT_REG) {
+            unlink(filepath);
         }
     }
     closedir(dir);
     fprintf(stderr, "Cleared output directory: %s\n", g_ctx.output_dir);
+    return 0;
+}
+
+// Create variant subdirectories for multi-variant HLS
+int create_variant_dirs(int count) {
+    char dirpath[512];
+    for (int i = 0; i < count; i++) {
+        snprintf(dirpath, sizeof(dirpath), "%s/v%d", g_ctx.output_dir, i);
+        if (mkdir(dirpath, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "ERROR: Cannot create variant directory: %s\n", dirpath);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -127,20 +223,9 @@ void cleanup_and_exit() {
     fprintf(stderr, "Cleaning up...\n");
     kill_ffmpeg_child();
 
-    // Clear HLS files on exit
-    DIR *dir = opendir(g_ctx.output_dir);
-    if (dir) {
-        struct dirent *entry;
-        char filepath[1024];
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type == DT_REG) {
-                snprintf(filepath, sizeof(filepath), "%s/%s", g_ctx.output_dir, entry->d_name);
-                unlink(filepath);
-            }
-        }
-        closedir(dir);
-        fprintf(stderr, "Cleaned up HLS files\n");
-    }
+    // Clear HLS files on exit (including subdirectories)
+    clear_output_dir();
+    fprintf(stderr, "Cleaned up HLS files\n");
 }
 
 void signal_handler(int sig) {
@@ -148,55 +233,153 @@ void signal_handler(int sig) {
     g_ctx.running = 0;
 }
 
+// Build and run single-stream ffmpeg command
+void run_single_stream_ffmpeg() {
+    char duration_str[16], list_size_str[16];
+    char segment_pattern[512];
+
+    snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
+    snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
+    snprintf(segment_pattern, sizeof(segment_pattern), "%s/segment-%%06d.ts", g_ctx.output_dir);
+
+    char *argv[] = {
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-fflags", "+genpts",
+        "-i", g_ctx.input_addr,
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-f", "hls",
+        "-hls_time", duration_str,
+        "-hls_list_size", list_size_str,
+        "-hls_flags", "delete_segments+independent_segments",
+        "-hls_segment_type", "mpegts",
+        "-hls_segment_filename", segment_pattern,
+        g_ctx.playlist_path,
+        NULL
+    };
+
+    fprintf(stderr, "Starting ffmpeg (single-stream):");
+    for (int i = 0; argv[i]; i++) {
+        fprintf(stderr, " %s", argv[i]);
+    }
+    fprintf(stderr, "\n");
+
+    execvp("ffmpeg", argv);
+    perror("execvp ffmpeg failed");
+    _exit(1);
+}
+
+// Build and run multi-variant ffmpeg command for ABR
+void run_multi_variant_ffmpeg(int video_count) {
+    // We need to build a dynamic command with variable number of -map options
+    // Maximum args: base(~20) + map pairs(video_count * 4) + var_stream_map + output
+    char *argv[128];
+    int argc = 0;
+
+    char duration_str[16], list_size_str[16];
+    char segment_pattern[512];
+    char output_pattern[512];
+    char var_stream_map[256];
+    char map_args[MAX_VIDEO_STREAMS][2][16];  // [stream][v/a][string]
+
+    snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
+    snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
+    snprintf(segment_pattern, sizeof(segment_pattern), "%s/v%%v/segment-%%06d.ts", g_ctx.output_dir);
+    snprintf(output_pattern, sizeof(output_pattern), "%s/v%%v/stream.m3u8", g_ctx.output_dir);
+
+    // Build var_stream_map: "v:0,a:0 v:1,a:0 v:2,a:0 ..."
+    var_stream_map[0] = '\0';
+    for (int i = 0; i < video_count; i++) {
+        char entry[32];
+        snprintf(entry, sizeof(entry), "%sv:%d,a:0", (i > 0 ? " " : ""), i);
+        strcat(var_stream_map, entry);
+    }
+
+    // Build argument list
+    argv[argc++] = "ffmpeg";
+    argv[argc++] = "-hide_banner";
+    argv[argc++] = "-loglevel";
+    argv[argc++] = "warning";
+    argv[argc++] = "-fflags";
+    argv[argc++] = "+genpts";
+    argv[argc++] = "-i";
+    argv[argc++] = g_ctx.input_addr;
+
+    // Add -map arguments for each video stream + audio
+    for (int i = 0; i < video_count; i++) {
+        snprintf(map_args[i][0], sizeof(map_args[i][0]), "0:v:%d", i);
+        snprintf(map_args[i][1], sizeof(map_args[i][1]), "0:a:0");
+        argv[argc++] = "-map";
+        argv[argc++] = map_args[i][0];
+        argv[argc++] = "-map";
+        argv[argc++] = map_args[i][1];
+    }
+
+    argv[argc++] = "-c";
+    argv[argc++] = "copy";
+    argv[argc++] = "-f";
+    argv[argc++] = "hls";
+    argv[argc++] = "-hls_time";
+    argv[argc++] = duration_str;
+    argv[argc++] = "-hls_list_size";
+    argv[argc++] = list_size_str;
+    argv[argc++] = "-hls_flags";
+    argv[argc++] = "delete_segments+independent_segments";
+    argv[argc++] = "-hls_segment_type";
+    argv[argc++] = "mpegts";
+    argv[argc++] = "-hls_segment_filename";
+    argv[argc++] = segment_pattern;
+    argv[argc++] = "-master_pl_name";
+    argv[argc++] = "playlist.m3u8";  // Master playlist in output_dir
+    argv[argc++] = "-var_stream_map";
+    argv[argc++] = var_stream_map;
+    argv[argc++] = output_pattern;
+    argv[argc] = NULL;
+
+    fprintf(stderr, "Starting ffmpeg (multi-variant, %d streams):", video_count);
+    for (int i = 0; argv[i]; i++) {
+        fprintf(stderr, " %s", argv[i]);
+    }
+    fprintf(stderr, "\n");
+
+    execvp("ffmpeg", argv);
+    perror("execvp ffmpeg failed");
+    _exit(1);
+}
+
 void* ffmpeg_manager_thread(void *arg) {
     (void)arg;
 
-    while (g_ctx.running) {
-        char duration_str[16], list_size_str[16];
-        char segment_pattern[512];
+    // Probe stream once at startup
+    if (!g_ctx.probed) {
+        g_ctx.video_stream_count = probe_stream();
+        g_ctx.probed = 1;
 
-        snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
-        snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
-        snprintf(segment_pattern, sizeof(segment_pattern), "%s/segment-%%06d.ts", g_ctx.output_dir);
-
-        // Build ffmpeg command
-        // ffmpeg -i udp://addr:port -c:v copy -c:a copy -f hls [options] playlist.m3u8
-        char *argv[] = {
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-fflags", "+genpts",
-            "-i", g_ctx.input_addr,
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-f", "hls",
-            "-hls_time", duration_str,
-            "-hls_list_size", list_size_str,
-            "-hls_flags", "delete_segments+independent_segments",
-            "-hls_segment_type", "mpegts",
-            "-hls_segment_filename", segment_pattern,
-            g_ctx.playlist_path,
-            NULL
-        };
-
-        // Log the command
-        fprintf(stderr, "Starting ffmpeg:");
-        for (int i = 0; argv[i]; i++) {
-            fprintf(stderr, " %s", argv[i]);
+        // Create variant directories if multi-stream
+        if (g_ctx.video_stream_count > 1) {
+            if (create_variant_dirs(g_ctx.video_stream_count) != 0) {
+                fprintf(stderr, "ERROR: Failed to create variant directories\n");
+                g_ctx.running = 0;
+                return NULL;
+            }
         }
-        fprintf(stderr, "\n");
+    }
 
+    while (g_ctx.running) {
         // Fork and exec
         pid_t pid = fork();
         if (pid == 0) {
             // Child process
             prctl(PR_SET_PDEATHSIG, SIGKILL);
 
-            // Redirect stderr to /dev/null to reduce noise (or keep for debugging)
-            // freopen("/dev/null", "w", stderr);
-
-            execvp("ffmpeg", argv);
-            perror("execvp ffmpeg failed");
+            if (g_ctx.video_stream_count > 1) {
+                run_multi_variant_ffmpeg(g_ctx.video_stream_count);
+            } else {
+                run_single_stream_ffmpeg();
+            }
+            // Should never reach here
             _exit(1);
         } else if (pid > 0) {
             g_ctx.ffmpeg_child = pid;
@@ -229,7 +412,9 @@ void* monitor_thread(void *arg) {
     while (g_ctx.running) {
         pthread_mutex_lock(&g_ctx.lock);
         g_ctx.segment_count = count_segments();
-        g_ctx.ready = (g_ctx.segment_count >= 3) ? 1 : 0;
+        // For multi-variant, need more segments to be ready
+        int min_segments = (g_ctx.video_stream_count > 1) ? 3 * g_ctx.video_stream_count : 3;
+        g_ctx.ready = (g_ctx.segment_count >= min_segments) ? 1 : 0;
         pthread_mutex_unlock(&g_ctx.lock);
 
         usleep(500000);  // Check every 500ms
@@ -293,6 +478,7 @@ static enum MHD_Result api_handler(void *cls, struct MHD_Connection *connection,
         int segments = g_ctx.segment_count;
         int ready = g_ctx.ready;
         time_t last_ka = g_ctx.last_keepalive;
+        int variants = g_ctx.video_stream_count;
         pthread_mutex_unlock(&g_ctx.lock);
 
         time_t now = time(NULL);
@@ -301,8 +487,8 @@ static enum MHD_Result api_handler(void *cls, struct MHD_Connection *connection,
 
         char response[512];
         snprintf(response, sizeof(response),
-                "{\"segments\":%d,\"ready\":%s,\"playlist\":\"playlist.m3u8\",\"ttl\":%d}",
-                segments, ready ? "true" : "false", ttl);
+                "{\"segments\":%d,\"ready\":%s,\"playlist\":\"playlist.m3u8\",\"ttl\":%d,\"variants\":%d}",
+                segments, ready ? "true" : "false", ttl, variants);
 
         mhd_response = MHD_create_response_from_buffer(
             strlen(response), (void *)response, MHD_RESPMEM_MUST_COPY);
@@ -334,7 +520,7 @@ int main(int argc, char *argv[]) {
             snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "udp://%s", addr_port);
             has_input = 1;
         } else if (strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc) {
-            strncpy(g_ctx.output_dir, argv[++i], sizeof(g_ctx.output_dir) - 1);
+            snprintf(g_ctx.output_dir, sizeof(g_ctx.output_dir), "%s", argv[++i]);
             has_output = 1;
         } else if (strcmp(argv[i], "--api-port") == 0 && i + 1 < argc) {
             g_ctx.api_port = atoi(argv[++i]);
