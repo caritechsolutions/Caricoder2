@@ -207,18 +207,17 @@ int clear_output_dir() {
 }
 
 // Create variant subdirectories for multi-variant HLS
-// count = number of video streams, but we need count+1 dirs for audio (v0, v1, ..., vN for audio)
+// Each variant has video+audio muxed together, so we only need video_count directories
 int create_variant_dirs(int video_count) {
     char dirpath[512];
-    // Create video_count + 1 directories: v0..v(N-1) for video, vN for audio
-    for (int i = 0; i <= video_count; i++) {
+    for (int i = 0; i < video_count; i++) {
         snprintf(dirpath, sizeof(dirpath), "%s/v%d", g_ctx.output_dir, i);
         if (mkdir(dirpath, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "ERROR: Cannot create variant directory: %s\n", dirpath);
             return -1;
         }
     }
-    fprintf(stderr, "Created %d variant directories (v0..v%d)\n", video_count + 1, video_count);
+    fprintf(stderr, "Created %d variant directories (v0..v%d)\n", video_count, video_count - 1);
     return 0;
 }
 
@@ -286,6 +285,8 @@ void run_single_stream_ffmpeg() {
 }
 
 // Build and run multi-variant ffmpeg command for ABR
+// Uses muxed audio approach: each variant contains video+audio together
+// This is more compatible than audio groups (works with VLC, all browsers)
 void run_multi_variant_ffmpeg(int video_count) {
     // We need to build a dynamic command with variable number of -map options
     char *argv[128];
@@ -296,7 +297,7 @@ void run_multi_variant_ffmpeg(int video_count) {
     char output_pattern[512];
     char var_stream_map[512];
     char input_url[256];
-    char map_args[MAX_VIDEO_STREAMS][16];  // video map args
+    char map_args[MAX_VIDEO_STREAMS * 2][16];  // video + audio map args
 
     snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
     snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
@@ -306,16 +307,15 @@ void run_multi_variant_ffmpeg(int video_count) {
     // Add UDP buffer settings to input URL
     snprintf(input_url, sizeof(input_url), "%s?fifo_size=5000000&overrun_nonfatal=1", g_ctx.input_addr);
 
-    // Build var_stream_map using audio groups:
-    // "v:0,agroup:audio v:1,agroup:audio ... a:0,agroup:audio"
-    // This allows multiple video variants to share one audio rendition
+    // Build var_stream_map with muxed audio (like GStreamer tee):
+    // "v:0,a:0 v:1,a:1" - each video paired with its own audio copy
+    // This duplicates audio but is universally compatible
     var_stream_map[0] = '\0';
     for (int i = 0; i < video_count; i++) {
         char entry[64];
-        snprintf(entry, sizeof(entry), "%sv:%d,agroup:audio", (i > 0 ? " " : ""), i);
+        snprintf(entry, sizeof(entry), "%sv:%d,a:%d", (i > 0 ? " " : ""), i, i);
         strcat(var_stream_map, entry);
     }
-    strcat(var_stream_map, " a:0,agroup:audio");
 
     // Build argument list
     argv[argc++] = "ffmpeg";
@@ -327,16 +327,19 @@ void run_multi_variant_ffmpeg(int video_count) {
     argv[argc++] = "-i";
     argv[argc++] = input_url;
 
-    // Map all video streams first
+    // Map video streams first, then audio streams (one per video)
+    // This creates output streams: v0, v1, ..., a0, a1, ...
     for (int i = 0; i < video_count; i++) {
         snprintf(map_args[i], sizeof(map_args[i]), "0:v:%d", i);
         argv[argc++] = "-map";
         argv[argc++] = map_args[i];
     }
 
-    // Map audio once (will be shared via audio group)
-    argv[argc++] = "-map";
-    argv[argc++] = "0:a:0";
+    // Map audio once per video variant (the "tee" effect)
+    for (int i = 0; i < video_count; i++) {
+        argv[argc++] = "-map";
+        argv[argc++] = "0:a:0";
+    }
 
     argv[argc++] = "-c";
     argv[argc++] = "copy";
@@ -433,10 +436,9 @@ void* monitor_thread(void *arg) {
     while (g_ctx.running) {
         pthread_mutex_lock(&g_ctx.lock);
         g_ctx.segment_count = count_segments();
-        // For multi-variant, need segments from all streams (video + audio)
-        // With N video streams, we have N+1 total streams (including audio)
-        int stream_count = (g_ctx.video_stream_count > 1) ? g_ctx.video_stream_count + 1 : 1;
-        int min_segments = 3 * stream_count;
+        // For multi-variant, need segments from all variant directories
+        // Each variant has video+audio muxed, so just video_count directories
+        int min_segments = 3 * g_ctx.video_stream_count;
         g_ctx.ready = (g_ctx.segment_count >= min_segments) ? 1 : 0;
         pthread_mutex_unlock(&g_ctx.lock);
 
