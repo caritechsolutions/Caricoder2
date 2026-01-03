@@ -207,15 +207,18 @@ int clear_output_dir() {
 }
 
 // Create variant subdirectories for multi-variant HLS
-int create_variant_dirs(int count) {
+// count = number of video streams, but we need count+1 dirs for audio (v0, v1, ..., vN for audio)
+int create_variant_dirs(int video_count) {
     char dirpath[512];
-    for (int i = 0; i < count; i++) {
+    // Create video_count + 1 directories: v0..v(N-1) for video, vN for audio
+    for (int i = 0; i <= video_count; i++) {
         snprintf(dirpath, sizeof(dirpath), "%s/v%d", g_ctx.output_dir, i);
         if (mkdir(dirpath, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "ERROR: Cannot create variant directory: %s\n", dirpath);
             return -1;
         }
     }
+    fprintf(stderr, "Created %d variant directories (v0..v%d)\n", video_count + 1, video_count);
     return 0;
 }
 
@@ -430,8 +433,10 @@ void* monitor_thread(void *arg) {
     while (g_ctx.running) {
         pthread_mutex_lock(&g_ctx.lock);
         g_ctx.segment_count = count_segments();
-        // For multi-variant, need more segments to be ready
-        int min_segments = (g_ctx.video_stream_count > 1) ? 3 * g_ctx.video_stream_count : 3;
+        // For multi-variant, need segments from all streams (video + audio)
+        // With N video streams, we have N+1 total streams (including audio)
+        int stream_count = (g_ctx.video_stream_count > 1) ? g_ctx.video_stream_count + 1 : 1;
+        int min_segments = 3 * stream_count;
         g_ctx.ready = (g_ctx.segment_count >= min_segments) ? 1 : 0;
         pthread_mutex_unlock(&g_ctx.lock);
 
