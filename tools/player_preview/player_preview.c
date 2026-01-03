@@ -285,28 +285,34 @@ void run_single_stream_ffmpeg() {
 // Build and run multi-variant ffmpeg command for ABR
 void run_multi_variant_ffmpeg(int video_count) {
     // We need to build a dynamic command with variable number of -map options
-    // Maximum args: base(~20) + map pairs(video_count * 4) + var_stream_map + output
     char *argv[128];
     int argc = 0;
 
     char duration_str[16], list_size_str[16];
     char segment_pattern[512];
     char output_pattern[512];
-    char var_stream_map[256];
-    char map_args[MAX_VIDEO_STREAMS][2][16];  // [stream][v/a][string]
+    char var_stream_map[512];
+    char input_url[256];
+    char map_args[MAX_VIDEO_STREAMS][16];  // video map args
 
     snprintf(duration_str, sizeof(duration_str), "%d", g_ctx.duration);
     snprintf(list_size_str, sizeof(list_size_str), "%d", g_ctx.live_segments);
     snprintf(segment_pattern, sizeof(segment_pattern), "%s/v%%v/segment-%%06d.ts", g_ctx.output_dir);
     snprintf(output_pattern, sizeof(output_pattern), "%s/v%%v/stream.m3u8", g_ctx.output_dir);
 
-    // Build var_stream_map: "v:0,a:0 v:1,a:0 v:2,a:0 ..."
+    // Add UDP buffer settings to input URL
+    snprintf(input_url, sizeof(input_url), "%s?fifo_size=5000000&overrun_nonfatal=1", g_ctx.input_addr);
+
+    // Build var_stream_map using audio groups:
+    // "v:0,agroup:audio v:1,agroup:audio ... a:0,agroup:audio"
+    // This allows multiple video variants to share one audio rendition
     var_stream_map[0] = '\0';
     for (int i = 0; i < video_count; i++) {
-        char entry[32];
-        snprintf(entry, sizeof(entry), "%sv:%d,a:0", (i > 0 ? " " : ""), i);
+        char entry[64];
+        snprintf(entry, sizeof(entry), "%sv:%d,agroup:audio", (i > 0 ? " " : ""), i);
         strcat(var_stream_map, entry);
     }
+    strcat(var_stream_map, " a:0,agroup:audio");
 
     // Build argument list
     argv[argc++] = "ffmpeg";
@@ -316,17 +322,18 @@ void run_multi_variant_ffmpeg(int video_count) {
     argv[argc++] = "-fflags";
     argv[argc++] = "+genpts";
     argv[argc++] = "-i";
-    argv[argc++] = g_ctx.input_addr;
+    argv[argc++] = input_url;
 
-    // Add -map arguments for each video stream + audio
+    // Map all video streams first
     for (int i = 0; i < video_count; i++) {
-        snprintf(map_args[i][0], sizeof(map_args[i][0]), "0:v:%d", i);
-        snprintf(map_args[i][1], sizeof(map_args[i][1]), "0:a:0");
+        snprintf(map_args[i], sizeof(map_args[i]), "0:v:%d", i);
         argv[argc++] = "-map";
-        argv[argc++] = map_args[i][0];
-        argv[argc++] = "-map";
-        argv[argc++] = map_args[i][1];
+        argv[argc++] = map_args[i];
     }
+
+    // Map audio once (will be shared via audio group)
+    argv[argc++] = "-map";
+    argv[argc++] = "0:a:0";
 
     argv[argc++] = "-c";
     argv[argc++] = "copy";
@@ -343,7 +350,7 @@ void run_multi_variant_ffmpeg(int video_count) {
     argv[argc++] = "-hls_segment_filename";
     argv[argc++] = segment_pattern;
     argv[argc++] = "-master_pl_name";
-    argv[argc++] = "../playlist.m3u8";  // Master playlist goes up to output_dir from v%v/
+    argv[argc++] = "playlist.m3u8";
     argv[argc++] = "-var_stream_map";
     argv[argc++] = var_stream_map;
     argv[argc++] = output_pattern;
