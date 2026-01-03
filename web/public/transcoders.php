@@ -1840,6 +1840,42 @@ async function sendOutputKeepalive() {
     }
 }
 
+// Wait for playlist to be ready by polling player_preview status
+async function waitForPlaylistReady(previewPort, playlistUrl, maxAttempts = 30) {
+    const statusText = document.getElementById('videoStatusText');
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (!outputPlayerRunning) {
+            // Player was stopped while waiting
+            return;
+        }
+
+        try {
+            const response = await fetch(`http://${window.location.hostname}:${previewPort}/status`);
+            if (response.ok) {
+                const status = await response.json();
+                statusText.textContent = `Buffering... (${status.segments || 0} segments)`;
+
+                if (status.ready) {
+                    // Playlist is ready, start the player
+                    initOutputHlsPlayer(playlistUrl);
+                    return;
+                }
+            }
+        } catch (e) {
+            // Preview server not responding yet, keep trying
+            statusText.textContent = `Starting preview... (${attempt + 1}s)`;
+        }
+
+        // Wait 1 second before next check
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // Timeout - try to play anyway
+    console.warn('Playlist ready timeout, attempting to play anyway');
+    initOutputHlsPlayer(playlistUrl);
+}
+
 // Start output player preview
 async function startOutputPlayer() {
     const id = document.getElementById('previewId').value;
@@ -1880,7 +1916,7 @@ async function startOutputPlayer() {
         if (data.success) {
             outputPlayerRunning = true;
             currentPreviewPort = previewPort;
-            document.getElementById('playerStatus').className = 'badge bg-info me-2';
+            document.getElementById('playerStatus').className = 'badge bg-info';
             document.getElementById('playerStatus').textContent = 'Loading...';
             document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
@@ -1888,11 +1924,9 @@ async function startOutputPlayer() {
             if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
             outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
 
-            // Wait for HLS segments to be generated (5 seconds for keyframe + encoding)
-            setTimeout(() => {
-                const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
-                initOutputHlsPlayer(playlistUrl);
-            }, 5000);
+            // Poll for playlist readiness instead of fixed timeout
+            const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
+            await waitForPlaylistReady(previewPort, playlistUrl);
         } else {
             throw new Error(data.error || 'Failed to start preview');
         }
