@@ -40,6 +40,7 @@ typedef struct {
     pid_t ffmpeg_child;
     pthread_mutex_t lock;
     int video_stream_count;   // Number of video streams detected
+    int video_bitrates[MAX_VIDEO_STREAMS];  // Bitrate per video stream in bps
     int probed;               // 1 if stream has been probed
 } AppContext;
 
@@ -75,51 +76,78 @@ void init_context() {
     pthread_mutex_init(&g_ctx.lock, NULL);
 }
 
-// Probe stream to detect number of video streams
+// Probe stream to detect number of video streams and their bitrates
 int probe_stream() {
     char cmd[512];
     FILE *fp;
     int count = 0;
 
-    // Use ffprobe to count video streams
+    // Initialize bitrates to 0
+    for (int i = 0; i < MAX_VIDEO_STREAMS; i++) {
+        g_ctx.video_bitrates[i] = 0;
+    }
+
+    // Use ffprobe to get video stream count and bitrates
     // -v quiet suppresses decode errors, analyzeduration/probesize help with stream detection
     snprintf(cmd, sizeof(cmd),
         "timeout 10 ffprobe -v quiet -select_streams v "
         "-analyzeduration 3000000 -probesize 3000000 "
-        "-show_entries stream=index -of csv=p=0 '%s'",
+        "-show_entries stream=index,bit_rate -of csv=p=0 '%s'",
         g_ctx.input_addr);
 
     fprintf(stderr, "Probing stream for video tracks: %s\n", g_ctx.input_addr);
 
     fp = popen(cmd, "r");
     if (fp) {
-        char line[64];
-        while (fgets(line, sizeof(line), fp) != NULL) {
-            // Each line contains stream info - count non-empty lines
-            // Output may have "stream,N" or "program,stream,N" format
+        char line[128];
+        while (fgets(line, sizeof(line), fp) != NULL && count < MAX_VIDEO_STREAMS) {
+            // Each line: "index,bitrate" or just "index" if bitrate unknown
             if (line[0] != '\0' && line[0] != '\n') {
-                count++;
+                long bitrate = 0;
+
+                // Parse index and bitrate (bitrate may be "N/A" or missing)
+                // Format: "index,bitrate" - we only need the bitrate
+                char *comma = strchr(line, ',');
+                if (comma) {
+                    bitrate = atol(comma + 1);  // Will be 0 if "N/A" or invalid
+                }
+
+                // Store bitrate for this stream
+                if (count < MAX_VIDEO_STREAMS) {
+                    g_ctx.video_bitrates[count] = (int)bitrate;
+                    count++;
+                }
             }
         }
         pclose(fp);
     }
 
-    // Divide by 2 if we got duplicate entries (sometimes ffprobe outputs twice)
-    // Check if count is even and > 2, which suggests duplicates
-    if (count > 2 && count % 2 == 0) {
-        // Verify by checking if we got exactly double
-        count = count / 2;
+    // If bitrates weren't detected, estimate based on typical values
+    // Higher resolution = higher bitrate (rough estimate)
+    if (count > 0 && g_ctx.video_bitrates[0] == 0) {
+        fprintf(stderr, "Bitrates not in stream metadata, using estimates\n");
+        // Estimate: 8Mbps for first (highest), decreasing for others
+        int base_bitrate = 8000000;
+        for (int i = 0; i < count; i++) {
+            g_ctx.video_bitrates[i] = base_bitrate / (i + 1);
+        }
     }
 
     if (count == 0) {
         fprintf(stderr, "Warning: No video streams detected, defaulting to 1\n");
         count = 1;
+        g_ctx.video_bitrates[0] = 2000000;  // Default 2 Mbps
     } else if (count > MAX_VIDEO_STREAMS) {
         fprintf(stderr, "Warning: Found %d video streams, limiting to %d\n", count, MAX_VIDEO_STREAMS);
         count = MAX_VIDEO_STREAMS;
     }
 
-    fprintf(stderr, "Detected %d video stream(s)\n", count);
+    fprintf(stderr, "Detected %d video stream(s):\n", count);
+    for (int i = 0; i < count; i++) {
+        fprintf(stderr, "  Stream %d: %d bps (%.2f Mbps)\n",
+                i, g_ctx.video_bitrates[i], g_ctx.video_bitrates[i] / 1000000.0);
+    }
+
     return count;
 }
 
@@ -307,13 +335,20 @@ void run_multi_variant_ffmpeg(int video_count) {
     // Add UDP buffer settings to input URL
     snprintf(input_url, sizeof(input_url), "%s?fifo_size=5000000&overrun_nonfatal=1", g_ctx.input_addr);
 
-    // Build var_stream_map with muxed audio (like GStreamer tee):
-    // "v:0,a:0 v:1,a:1" - each video paired with its own audio copy
+    // Build var_stream_map with muxed audio and bandwidth hints:
+    // "v:0,a:0,bandwidth=8000000 v:1,a:1,bandwidth=4000000"
     // This duplicates audio but is universally compatible
+    // Bandwidth hints ensure correct ABR behavior in the master playlist
     var_stream_map[0] = '\0';
     for (int i = 0; i < video_count; i++) {
-        char entry[64];
-        snprintf(entry, sizeof(entry), "%sv:%d,a:%d", (i > 0 ? " " : ""), i, i);
+        char entry[128];
+        int bandwidth = g_ctx.video_bitrates[i];
+        // Add ~200kbps for audio
+        if (bandwidth > 0) {
+            bandwidth += 200000;
+        }
+        snprintf(entry, sizeof(entry), "%sv:%d,a:%d,bandwidth=%d",
+                 (i > 0 ? " " : ""), i, i, bandwidth);
         strcat(var_stream_map, entry);
     }
 
