@@ -2008,7 +2008,11 @@ function initOutputHlsPlayer(playlistUrl) {
         outputHlsPlayer = new Hls({
             liveSyncDurationCount: 3,
             liveMaxLatencyDurationCount: 6,
-            enableCEA708Captions: true,  // Enable CEA-608/708 caption extraction
+            liveDurationInfinity: true,      // Live stream has infinite duration
+            liveBackBufferLength: 0,         // Don't keep back buffer for live
+            maxBufferLength: 30,             // Max buffer length
+            maxMaxBufferLength: 60,          // Max buffer when switching quality
+            enableCEA708Captions: true,      // Enable CEA-608/708 caption extraction
             captionsTextTrack1Label: 'Captions',
             captionsTextTrack1LanguageCode: 'en'
         });
