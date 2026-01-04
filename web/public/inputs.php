@@ -342,20 +342,145 @@ function getTypeBadgeColor($type) {
                 <div class="row mb-3">
                     <!-- Video Player Section -->
                     <div class="col-lg-8">
-                        <div id="videoContainer" class="position-relative bg-dark rounded" style="aspect-ratio: 16/9; max-height: 400px;">
-                            <!-- Placeholder with Play Button -->
-                            <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
-                                <i class="bi bi-play-circle display-1 mb-3"></i>
-                                <span id="videoStatusText">Click to start preview</span>
+                        <div class="card">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <strong><i class="bi bi-play-circle me-1"></i>Input Preview</strong>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span id="inputPlayerStatus" class="badge bg-secondary">Stopped</span>
+                                    <!-- Stats Toggle Button -->
+                                    <button id="inputStatsToggleBtn" class="btn btn-sm btn-outline-info d-none" title="Player Statistics" onclick="toggleInputPlayerStats()">
+                                        <i class="bi bi-speedometer2"></i>
+                                    </button>
+                                </div>
                             </div>
-                            <!-- Loading Spinner -->
-                            <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
-                                <div class="spinner-border text-light mb-3" role="status"></div>
-                                <span>Loading stream...</span>
-                                <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
+                            <div class="card-body p-0">
+                                <div id="videoContainer" class="position-relative bg-dark" style="aspect-ratio: 16/9; max-height: 350px;">
+                                    <!-- Placeholder with Play Button -->
+                                    <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
+                                        <i class="bi bi-play-circle display-1 mb-3"></i>
+                                        <span id="videoStatusText">Click to start preview</span>
+                                    </div>
+                                    <!-- Loading Spinner -->
+                                    <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
+                                        <div class="spinner-border text-light mb-3" role="status"></div>
+                                        <span>Loading stream...</span>
+                                        <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
+                                    </div>
+                                    <!-- Video Element -->
+                                    <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                                </div>
+
+                                <!-- HLS Player Stats Panel (hidden by default) -->
+                                <div id="inputPlayerStatsPanel" class="player-stats-panel d-none">
+                                    <div class="stats-grid">
+                                        <!-- Buffer Gauge -->
+                                        <div class="stat-card">
+                                            <div class="stat-header">
+                                                <i class="bi bi-collection"></i>
+                                                <span>Buffer</span>
+                                            </div>
+                                            <div class="stat-gauge">
+                                                <div class="gauge-bar">
+                                                    <div id="inputBufferGaugeFill" class="gauge-fill" style="width: 0%"></div>
+                                                </div>
+                                                <div class="gauge-value"><span id="inputBufferValue">0.0</span>s</div>
+                                            </div>
+                                            <div class="stat-label" id="inputBufferStatus">Waiting</div>
+                                        </div>
+
+                                        <!-- Latency -->
+                                        <div class="stat-card">
+                                            <div class="stat-header">
+                                                <i class="bi bi-clock-history"></i>
+                                                <span>Latency</span>
+                                            </div>
+                                            <div class="stat-value-large">
+                                                <span id="inputLatencyValue">--</span><span class="stat-unit">s</span>
+                                            </div>
+                                            <div class="stat-label">Behind live</div>
+                                        </div>
+
+                                        <!-- Bandwidth -->
+                                        <div class="stat-card">
+                                            <div class="stat-header">
+                                                <i class="bi bi-speedometer"></i>
+                                                <span>Bandwidth</span>
+                                            </div>
+                                            <div class="stat-value-large">
+                                                <span id="inputBandwidthValue">--</span><span class="stat-unit">Mbps</span>
+                                            </div>
+                                            <div class="stat-sparkline">
+                                                <canvas id="inputBandwidthSparkline" height="24"></canvas>
+                                            </div>
+                                        </div>
+
+                                        <!-- Current Quality -->
+                                        <div class="stat-card">
+                                            <div class="stat-header">
+                                                <i class="bi bi-badge-hd"></i>
+                                                <span>Quality</span>
+                                            </div>
+                                            <div class="stat-value-large">
+                                                <span id="inputCurrentQualityValue">--</span>
+                                            </div>
+                                            <div class="stat-label" id="inputCurrentQualityBitrate">--</div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Second Row: Frame Stats & Network -->
+                                    <div class="stats-grid stats-grid-2col mt-2">
+                                        <!-- Frame Stats -->
+                                        <div class="stat-card stat-card-wide">
+                                            <div class="stat-header">
+                                                <i class="bi bi-film"></i>
+                                                <span>Frame Statistics</span>
+                                            </div>
+                                            <div class="stat-row-list">
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">Decoded</span>
+                                                    <span class="stat-row-value" id="inputFramesDecoded">0</span>
+                                                </div>
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">Dropped</span>
+                                                    <span class="stat-row-value">
+                                                        <span id="inputFramesDropped">0</span>
+                                                        <span id="inputFramesDroppedIndicator" class="status-dot status-dot-ok"></span>
+                                                    </span>
+                                                </div>
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">FPS</span>
+                                                    <span class="stat-row-value" id="inputCurrentFps">--</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Network Stats -->
+                                        <div class="stat-card stat-card-wide">
+                                            <div class="stat-header">
+                                                <i class="bi bi-wifi"></i>
+                                                <span>Network</span>
+                                            </div>
+                                            <div class="stat-row-list">
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">TTFB</span>
+                                                    <span class="stat-row-value"><span id="inputTtfbValue">--</span> ms</span>
+                                                </div>
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">Fragments</span>
+                                                    <span class="stat-row-value" id="inputFragmentsLoaded">0</span>
+                                                </div>
+                                                <div class="stat-row">
+                                                    <span class="stat-row-label">Stalls</span>
+                                                    <span class="stat-row-value">
+                                                        <span id="inputStallCount">0</span>
+                                                        <span id="inputStallIndicator" class="status-dot status-dot-ok"></span>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <!-- Video Element -->
-                            <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
                         </div>
                     </div>
 
@@ -1124,6 +1249,116 @@ function getTypeBadgeColor($type) {
     font-size: 1.1rem;
     font-weight: 600;
     font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+}
+
+/* HLS Player Stats Panel */
+.player-stats-panel {
+    background: linear-gradient(135deg, #1a1d24 0%, #2d3748 100%);
+    padding: 16px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+.stats-grid-2col {
+    grid-template-columns: repeat(2, 1fr);
+}
+.stat-card {
+    background: rgba(255,255,255,0.05);
+    border-radius: 12px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(10px);
+    transition: all 0.2s ease;
+}
+.stat-card:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+}
+.stat-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #9ca3af;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+.stat-header i { font-size: 0.85rem; opacity: 0.7; }
+.stat-value-large {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.1;
+}
+.stat-unit {
+    font-size: 0.9rem;
+    font-weight: 400;
+    color: #9ca3af;
+    margin-left: 2px;
+}
+.stat-label {
+    font-size: 0.7rem;
+    color: #6b7280;
+    margin-top: 4px;
+}
+.stat-gauge { display: flex; align-items: center; gap: 10px; }
+.gauge-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.gauge-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+    border-radius: 4px;
+    transition: width 0.3s ease, background 0.3s ease;
+}
+.gauge-fill.warning { background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%); }
+.gauge-fill.critical { background: linear-gradient(90deg, #ef4444 0%, #f87171 100%); }
+.gauge-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+    min-width: 50px;
+    text-align: right;
+}
+.stat-sparkline { margin-top: 8px; height: 24px; }
+.stat-sparkline canvas { width: 100%; }
+.stat-row-list { display: flex; flex-direction: column; gap: 8px; }
+.stat-row { display: flex; justify-content: space-between; align-items: center; }
+.stat-row-label { color: #9ca3af; font-size: 0.8rem; }
+.stat-row-value {
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot-ok { background: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+.status-dot-warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
+.status-dot-error { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+#inputStatsToggleBtn.active {
+    background-color: #0dcaf0;
+    border-color: #0dcaf0;
+    color: #000;
+}
+@media (max-width: 768px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .stats-grid-2col { grid-template-columns: 1fr; }
+    .stat-value-large { font-size: 1.4rem; }
+}
+@media (max-width: 480px) {
+    .stats-grid { grid-template-columns: 1fr; }
+    .player-stats-panel { padding: 12px; }
+    .stat-card { padding: 12px; }
 }
 </style>
 
@@ -2339,6 +2574,9 @@ function initHlsPlayer(playlistUrl) {
         hlsPlayer.loadSource(playlistUrl);
         hlsPlayer.attachMedia(video);
 
+        // Hook HLS stats events for player statistics panel
+        hookInputHlsStatsEvents(hlsPlayer);
+
         hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
             // Hide loading, show video
             document.getElementById('videoLoading').classList.remove('d-flex');
@@ -2403,6 +2641,20 @@ function cleanupPreview() {
         clearInterval(srtStatsInterval);
         srtStatsInterval = null;
     }
+
+    // Stop stats updates and reset stats panel
+    stopInputStatsUpdate();
+    if (typeof resetInputPlayerStats === 'function') {
+        resetInputPlayerStats();
+    }
+    const statsPanel = document.getElementById('inputPlayerStatsPanel');
+    if (statsPanel) statsPanel.classList.add('d-none');
+    const statsBtn = document.getElementById('inputStatsToggleBtn');
+    if (statsBtn) {
+        statsBtn.classList.add('d-none');
+        statsBtn.classList.remove('active');
+    }
+    inputStatsVisible = false;
 
     // Destroy HLS player
     if (hlsPlayer) {
@@ -2961,6 +3213,221 @@ window.addEventListener('beforeunload', function() {
     if (ristStatsInterval) clearInterval(ristStatsInterval);
     if (srtStatsInterval) clearInterval(srtStatsInterval);
 });
+
+// ============================================
+// Input HLS Player Statistics
+// ============================================
+
+let inputStatsVisible = false;
+let inputStatsUpdateInterval = null;
+let inputBandwidthHistory = [];
+let inputFragmentsLoaded = 0;
+let inputStallCount = 0;
+let inputLastDecodedFrames = 0;
+let inputLastFrameTime = 0;
+let inputBandwidthSparklineCtx = null;
+
+function toggleInputPlayerStats() {
+    const panel = document.getElementById('inputPlayerStatsPanel');
+    const btn = document.getElementById('inputStatsToggleBtn');
+    inputStatsVisible = !inputStatsVisible;
+    if (inputStatsVisible) {
+        panel.classList.remove('d-none');
+        btn.classList.add('active');
+        startInputStatsUpdate();
+    } else {
+        panel.classList.add('d-none');
+        btn.classList.remove('active');
+        stopInputStatsUpdate();
+    }
+}
+
+function startInputStatsUpdate() {
+    if (inputStatsUpdateInterval) return;
+    const canvas = document.getElementById('inputBandwidthSparkline');
+    if (canvas) inputBandwidthSparklineCtx = canvas.getContext('2d');
+    inputStatsUpdateInterval = setInterval(updateInputPlayerStats, 500);
+    updateInputPlayerStats();
+}
+
+function stopInputStatsUpdate() {
+    if (inputStatsUpdateInterval) {
+        clearInterval(inputStatsUpdateInterval);
+        inputStatsUpdateInterval = null;
+    }
+}
+
+function updateInputPlayerStats() {
+    if (!hlsPlayer) return;
+    const video = document.getElementById('previewVideo');
+    updateInputBufferStats(video);
+    updateInputLatencyStats();
+    updateInputBandwidthStats();
+    updateInputQualityStats();
+    updateInputFrameStats(video);
+    updateInputNetworkStats();
+}
+
+function updateInputBufferStats(video) {
+    if (!video || video.readyState < 2) return;
+    const buffered = video.buffered;
+    const currentTime = video.currentTime;
+    let bufferLength = 0;
+    for (let i = 0; i < buffered.length; i++) {
+        if (buffered.start(i) <= currentTime && buffered.end(i) > currentTime) {
+            bufferLength = buffered.end(i) - currentTime;
+            break;
+        }
+    }
+    document.getElementById('inputBufferValue').textContent = bufferLength.toFixed(1);
+    const bufferPercent = Math.min(100, (bufferLength / 10) * 100);
+    const fill = document.getElementById('inputBufferGaugeFill');
+    fill.style.width = bufferPercent + '%';
+    fill.classList.remove('warning', 'critical');
+    if (bufferLength < 1) {
+        fill.classList.add('critical');
+        document.getElementById('inputBufferStatus').textContent = 'Critical';
+    } else if (bufferLength < 3) {
+        fill.classList.add('warning');
+        document.getElementById('inputBufferStatus').textContent = 'Low';
+    } else {
+        document.getElementById('inputBufferStatus').textContent = 'Healthy';
+    }
+}
+
+function updateInputLatencyStats() {
+    const el = document.getElementById('inputLatencyValue');
+    if (hlsPlayer && hlsPlayer.latency !== undefined) {
+        el.textContent = hlsPlayer.latency.toFixed(1);
+    } else if (hlsPlayer && hlsPlayer.targetLatency !== undefined) {
+        el.textContent = hlsPlayer.targetLatency.toFixed(1);
+    } else {
+        el.textContent = '--';
+    }
+}
+
+function updateInputBandwidthStats() {
+    const el = document.getElementById('inputBandwidthValue');
+    if (hlsPlayer && hlsPlayer.bandwidthEstimate) {
+        const bwMbps = hlsPlayer.bandwidthEstimate / 1000000;
+        el.textContent = bwMbps.toFixed(1);
+        inputBandwidthHistory.push(bwMbps);
+        if (inputBandwidthHistory.length > 30) inputBandwidthHistory.shift();
+        drawInputBandwidthSparkline();
+    } else {
+        el.textContent = '--';
+    }
+}
+
+function drawInputBandwidthSparkline() {
+    if (!inputBandwidthSparklineCtx || inputBandwidthHistory.length < 2) return;
+    const canvas = inputBandwidthSparklineCtx.canvas;
+    const width = canvas.width = canvas.offsetWidth * 2;
+    const height = canvas.height = 48;
+    inputBandwidthSparklineCtx.clearRect(0, 0, width, height);
+    const max = Math.max(...inputBandwidthHistory) * 1.1 || 1;
+    const stepX = width / (inputBandwidthHistory.length - 1);
+    inputBandwidthSparklineCtx.beginPath();
+    inputBandwidthSparklineCtx.strokeStyle = '#10b981';
+    inputBandwidthSparklineCtx.lineWidth = 2;
+    inputBandwidthHistory.forEach((val, i) => {
+        const x = i * stepX;
+        const y = height - (val / max) * (height - 4) - 2;
+        if (i === 0) inputBandwidthSparklineCtx.moveTo(x, y);
+        else inputBandwidthSparklineCtx.lineTo(x, y);
+    });
+    inputBandwidthSparklineCtx.stroke();
+    inputBandwidthSparklineCtx.lineTo(width, height);
+    inputBandwidthSparklineCtx.lineTo(0, height);
+    inputBandwidthSparklineCtx.closePath();
+    const gradient = inputBandwidthSparklineCtx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, 'rgba(16, 185, 129, 0.3)');
+    gradient.addColorStop(1, 'rgba(16, 185, 129, 0.05)');
+    inputBandwidthSparklineCtx.fillStyle = gradient;
+    inputBandwidthSparklineCtx.fill();
+}
+
+function updateInputQualityStats() {
+    const qualityValue = document.getElementById('inputCurrentQualityValue');
+    const qualityBitrate = document.getElementById('inputCurrentQualityBitrate');
+    if (hlsPlayer && hlsPlayer.levels && hlsPlayer.currentLevel >= 0) {
+        const level = hlsPlayer.levels[hlsPlayer.currentLevel];
+        if (level) {
+            qualityValue.textContent = (level.height || 'Auto') + 'p';
+            qualityBitrate.textContent = (level.bitrate / 1000000).toFixed(1) + ' Mbps';
+        }
+    } else {
+        qualityValue.textContent = 'Auto';
+        qualityBitrate.textContent = '--';
+    }
+}
+
+function updateInputFrameStats(video) {
+    if (!video.getVideoPlaybackQuality) return;
+    const quality = video.getVideoPlaybackQuality();
+    document.getElementById('inputFramesDecoded').textContent = quality.totalVideoFrames.toLocaleString();
+    document.getElementById('inputFramesDropped').textContent = quality.droppedVideoFrames.toLocaleString();
+    const dropRate = quality.totalVideoFrames > 0 ? (quality.droppedVideoFrames / quality.totalVideoFrames) * 100 : 0;
+    const indicator = document.getElementById('inputFramesDroppedIndicator');
+    indicator.className = 'status-dot';
+    if (dropRate < 0.1) indicator.classList.add('status-dot-ok');
+    else if (dropRate < 1) indicator.classList.add('status-dot-warning');
+    else indicator.classList.add('status-dot-error');
+    const now = performance.now();
+    if (inputLastFrameTime > 0) {
+        const framesDelta = quality.totalVideoFrames - inputLastDecodedFrames;
+        const timeDelta = (now - inputLastFrameTime) / 1000;
+        if (timeDelta > 0) {
+            document.getElementById('inputCurrentFps').textContent = (framesDelta / timeDelta).toFixed(1);
+        }
+    }
+    inputLastDecodedFrames = quality.totalVideoFrames;
+    inputLastFrameTime = now;
+}
+
+function updateInputNetworkStats() {
+    if (hlsPlayer && hlsPlayer.ttfbEstimate) {
+        document.getElementById('inputTtfbValue').textContent = Math.round(hlsPlayer.ttfbEstimate);
+    }
+    document.getElementById('inputFragmentsLoaded').textContent = inputFragmentsLoaded.toLocaleString();
+    document.getElementById('inputStallCount').textContent = inputStallCount.toLocaleString();
+    const indicator = document.getElementById('inputStallIndicator');
+    indicator.className = 'status-dot';
+    if (inputStallCount === 0) indicator.classList.add('status-dot-ok');
+    else if (inputStallCount < 3) indicator.classList.add('status-dot-warning');
+    else indicator.classList.add('status-dot-error');
+}
+
+function resetInputPlayerStats() {
+    inputBandwidthHistory = [];
+    inputFragmentsLoaded = 0;
+    inputStallCount = 0;
+    inputLastDecodedFrames = 0;
+    inputLastFrameTime = 0;
+    document.getElementById('inputBufferValue').textContent = '0.0';
+    document.getElementById('inputBufferGaugeFill').style.width = '0%';
+    document.getElementById('inputBufferStatus').textContent = 'Waiting';
+    document.getElementById('inputLatencyValue').textContent = '--';
+    document.getElementById('inputBandwidthValue').textContent = '--';
+    document.getElementById('inputCurrentQualityValue').textContent = '--';
+    document.getElementById('inputCurrentQualityBitrate').textContent = '--';
+    document.getElementById('inputFramesDecoded').textContent = '0';
+    document.getElementById('inputFramesDropped').textContent = '0';
+    document.getElementById('inputCurrentFps').textContent = '--';
+    document.getElementById('inputTtfbValue').textContent = '--';
+    document.getElementById('inputFragmentsLoaded').textContent = '0';
+    document.getElementById('inputStallCount').textContent = '0';
+}
+
+function hookInputHlsStatsEvents(hls) {
+    document.getElementById('inputStatsToggleBtn').classList.remove('d-none');
+    document.getElementById('inputPlayerStatus').className = 'badge bg-success';
+    document.getElementById('inputPlayerStatus').textContent = 'Playing';
+    hls.on(Hls.Events.FRAG_LOADED, function() { inputFragmentsLoaded++; });
+    hls.on(Hls.Events.ERROR, function(event, data) {
+        if (data.details === 'bufferStalledError') inputStallCount++;
+    });
+}
 </script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>

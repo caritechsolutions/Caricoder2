@@ -149,6 +149,285 @@ function getAbrTotalBitrate($config) {
 .badge.avsync-ok { background-color: #16a34a !important; }
 .badge.avsync-warning { background-color: #d97706 !important; }
 .badge.avsync-error { background-color: #dc2626 !important; }
+
+/* HLS Player Stats Panel */
+.player-stats-panel {
+    background: linear-gradient(135deg, #1a1d24 0%, #2d3748 100%);
+    padding: 16px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+.stats-grid-2col {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.stat-card {
+    background: rgba(255,255,255,0.05);
+    border-radius: 12px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(10px);
+    transition: all 0.2s ease;
+}
+
+.stat-card:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+}
+
+.stat-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #9ca3af;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+
+.stat-header i {
+    font-size: 0.85rem;
+    opacity: 0.7;
+}
+
+.stat-value-large {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.1;
+}
+
+.stat-unit {
+    font-size: 0.9rem;
+    font-weight: 400;
+    color: #9ca3af;
+    margin-left: 2px;
+}
+
+.stat-label {
+    font-size: 0.7rem;
+    color: #6b7280;
+    margin-top: 4px;
+}
+
+/* Buffer Gauge */
+.stat-gauge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.gauge-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.gauge-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+    border-radius: 4px;
+    transition: width 0.3s ease, background 0.3s ease;
+}
+
+.gauge-fill.warning {
+    background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%);
+}
+
+.gauge-fill.critical {
+    background: linear-gradient(90deg, #ef4444 0%, #f87171 100%);
+}
+
+.gauge-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+    min-width: 50px;
+    text-align: right;
+}
+
+/* Sparkline */
+.stat-sparkline {
+    margin-top: 8px;
+    height: 24px;
+}
+
+.stat-sparkline canvas {
+    width: 100%;
+}
+
+/* Row Lists */
+.stat-row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.stat-row-label {
+    color: #9ca3af;
+    font-size: 0.8rem;
+}
+
+.stat-row-value {
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Status Dots */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot-ok {
+    background: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.status-dot-warning {
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+
+.status-dot-error {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+/* Quality Levels List */
+.quality-levels-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.quality-level-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+.quality-level-item.active {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.quality-level-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid #4b5563;
+    flex-shrink: 0;
+}
+
+.quality-level-item.active .quality-level-indicator {
+    background: #10b981;
+    border-color: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.quality-level-info {
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.quality-level-resolution {
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.quality-level-bitrate {
+    color: #9ca3af;
+    font-size: 0.8rem;
+}
+
+.quality-level-bar-container {
+    flex: 1;
+    max-width: 120px;
+    height: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.quality-level-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+    border-radius: 2px;
+}
+
+.quality-level-item.active .quality-level-bar {
+    background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+}
+
+/* Stats Toggle Button Active State */
+#statsToggleBtn.active {
+    background-color: #0dcaf0;
+    border-color: #0dcaf0;
+    color: #000;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .stats-grid-2col {
+        grid-template-columns: 1fr;
+    }
+
+    .stat-value-large {
+        font-size: 1.4rem;
+    }
+
+    .quality-level-bar-container {
+        display: none;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .player-stats-panel {
+        padding: 12px;
+    }
+
+    .stat-card {
+        padding: 12px;
+    }
+}
 </style>
 
 <div class="container-fluid py-4">
@@ -341,6 +620,10 @@ function getAbrTotalBitrate($config) {
                             <button id="ccBtn" class="btn btn-sm btn-outline-secondary d-none" title="Closed Captions" onclick="toggleClosedCaptions()">
                                 <i class="bi bi-badge-cc"></i>
                             </button>
+                            <!-- Stats Toggle Button -->
+                            <button id="statsToggleBtn" class="btn btn-sm btn-outline-info d-none" title="Player Statistics" onclick="togglePlayerStats()">
+                                <i class="bi bi-speedometer2"></i>
+                            </button>
                             <button class="btn btn-sm btn-success" id="startPlayerBtn" onclick="startOutputPlayer()">
                                 <i class="bi bi-play-fill me-1"></i>Start
                             </button>
@@ -358,6 +641,129 @@ function getAbrTotalBitrate($config) {
                                 </div>
                             </div>
                             <video id="outputVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                        </div>
+
+                        <!-- HLS Player Stats Panel (hidden by default) -->
+                        <div id="playerStatsPanel" class="player-stats-panel d-none">
+                            <div class="stats-grid">
+                                <!-- Buffer Gauge -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-collection"></i>
+                                        <span>Buffer</span>
+                                    </div>
+                                    <div class="stat-gauge">
+                                        <div class="gauge-bar">
+                                            <div id="bufferGaugeFill" class="gauge-fill" style="width: 0%"></div>
+                                        </div>
+                                        <div class="gauge-value"><span id="bufferValue">0.0</span>s</div>
+                                    </div>
+                                    <div class="stat-label" id="bufferStatus">Waiting</div>
+                                </div>
+
+                                <!-- Latency -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-clock-history"></i>
+                                        <span>Latency</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="latencyValue">--</span><span class="stat-unit">s</span>
+                                    </div>
+                                    <div class="stat-label">Behind live</div>
+                                </div>
+
+                                <!-- Bandwidth -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-speedometer"></i>
+                                        <span>Bandwidth</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="bandwidthValue">--</span><span class="stat-unit">Mbps</span>
+                                    </div>
+                                    <div class="stat-sparkline">
+                                        <canvas id="bandwidthSparkline" height="24"></canvas>
+                                    </div>
+                                </div>
+
+                                <!-- Current Quality -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-badge-hd"></i>
+                                        <span>Quality</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="currentQualityValue">--</span>
+                                    </div>
+                                    <div class="stat-label" id="currentQualityBitrate">--</div>
+                                </div>
+                            </div>
+
+                            <!-- Second Row: Frame Stats & Network -->
+                            <div class="stats-grid stats-grid-2col mt-2">
+                                <!-- Frame Stats -->
+                                <div class="stat-card stat-card-wide">
+                                    <div class="stat-header">
+                                        <i class="bi bi-film"></i>
+                                        <span>Frame Statistics</span>
+                                    </div>
+                                    <div class="stat-row-list">
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Decoded</span>
+                                            <span class="stat-row-value" id="framesDecoded">0</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Dropped</span>
+                                            <span class="stat-row-value">
+                                                <span id="framesDropped">0</span>
+                                                <span id="framesDroppedIndicator" class="status-dot status-dot-ok"></span>
+                                            </span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">FPS</span>
+                                            <span class="stat-row-value" id="currentFps">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Network Stats -->
+                                <div class="stat-card stat-card-wide">
+                                    <div class="stat-header">
+                                        <i class="bi bi-wifi"></i>
+                                        <span>Network</span>
+                                    </div>
+                                    <div class="stat-row-list">
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">TTFB</span>
+                                            <span class="stat-row-value"><span id="ttfbValue">--</span> ms</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Fragments</span>
+                                            <span class="stat-row-value" id="fragmentsLoaded">0</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Stalls</span>
+                                            <span class="stat-row-value">
+                                                <span id="stallCount">0</span>
+                                                <span id="stallIndicator" class="status-dot status-dot-ok"></span>
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Quality Levels Visual -->
+                            <div class="stat-card mt-2">
+                                <div class="stat-header">
+                                    <i class="bi bi-sliders"></i>
+                                    <span>Quality Levels</span>
+                                    <span id="abrModeIndicator" class="badge bg-success ms-auto">Auto ABR</span>
+                                </div>
+                                <div id="qualityLevelsList" class="quality-levels-list">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2095,6 +2501,14 @@ async function stopOutputPlayer() {
     document.getElementById('ccBtn').classList.add('d-none');
     document.getElementById('ccBtn').classList.remove('btn-primary');
     document.getElementById('ccBtn').classList.add('btn-outline-secondary');
+
+    // Reset and hide stats panel
+    document.getElementById('statsToggleBtn').classList.add('d-none');
+    document.getElementById('statsToggleBtn').classList.remove('active');
+    document.getElementById('playerStatsPanel').classList.add('d-none');
+    statsVisible = false;
+    stopStatsUpdate();
+    resetPlayerStats();
 }
 
 // Initialize HLS player for output
@@ -2128,6 +2542,9 @@ function initOutputHlsPlayer(playlistUrl) {
 
         outputHlsPlayer.loadSource(playlistUrl);
         outputHlsPlayer.attachMedia(video);
+
+        // Hook stats events
+        hookHlsStatsEvents(outputHlsPlayer);
 
         // Handle manifest parsed - populate quality levels
         outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
@@ -2253,6 +2670,386 @@ function toggleClosedCaptions() {
     }
 
     console.log('Closed captions:', ccEnabled ? 'enabled' : 'disabled');
+}
+
+// ============================================
+// HLS Player Statistics
+// ============================================
+
+let statsVisible = false;
+let statsUpdateInterval = null;
+let bandwidthHistory = [];
+let fragmentsLoaded = 0;
+let stallCount = 0;
+let lastDecodedFrames = 0;
+let lastFrameTime = 0;
+let bandwidthSparklineCtx = null;
+
+// Toggle stats panel visibility
+function togglePlayerStats() {
+    const panel = document.getElementById('playerStatsPanel');
+    const btn = document.getElementById('statsToggleBtn');
+
+    statsVisible = !statsVisible;
+
+    if (statsVisible) {
+        panel.classList.remove('d-none');
+        btn.classList.add('active');
+        startStatsUpdate();
+    } else {
+        panel.classList.add('d-none');
+        btn.classList.remove('active');
+        stopStatsUpdate();
+    }
+}
+
+// Start stats update interval
+function startStatsUpdate() {
+    if (statsUpdateInterval) return;
+
+    // Initialize sparkline
+    const canvas = document.getElementById('bandwidthSparkline');
+    if (canvas) {
+        bandwidthSparklineCtx = canvas.getContext('2d');
+    }
+
+    statsUpdateInterval = setInterval(updatePlayerStats, 500);
+    updatePlayerStats(); // Initial update
+}
+
+// Stop stats update interval
+function stopStatsUpdate() {
+    if (statsUpdateInterval) {
+        clearInterval(statsUpdateInterval);
+        statsUpdateInterval = null;
+    }
+}
+
+// Update all player stats
+function updatePlayerStats() {
+    if (!outputHlsPlayer || !outputPlayerRunning) return;
+
+    const video = document.getElementById('outputVideo');
+
+    // Buffer level
+    updateBufferStats(video);
+
+    // Latency
+    updateLatencyStats();
+
+    // Bandwidth
+    updateBandwidthStats();
+
+    // Current quality
+    updateQualityStats();
+
+    // Frame stats
+    updateFrameStats(video);
+
+    // Network stats
+    updateNetworkStats();
+
+    // Quality levels list
+    updateQualityLevelsList();
+}
+
+// Update buffer gauge
+function updateBufferStats(video) {
+    if (!video || video.readyState < 2) return;
+
+    const buffered = video.buffered;
+    const currentTime = video.currentTime;
+    let bufferLength = 0;
+
+    for (let i = 0; i < buffered.length; i++) {
+        if (buffered.start(i) <= currentTime && buffered.end(i) > currentTime) {
+            bufferLength = buffered.end(i) - currentTime;
+            break;
+        }
+    }
+
+    const bufferValue = document.getElementById('bufferValue');
+    const bufferGaugeFill = document.getElementById('bufferGaugeFill');
+    const bufferStatus = document.getElementById('bufferStatus');
+
+    bufferValue.textContent = bufferLength.toFixed(1);
+
+    // Max buffer for gauge: 10 seconds
+    const bufferPercent = Math.min(100, (bufferLength / 10) * 100);
+    bufferGaugeFill.style.width = bufferPercent + '%';
+
+    // Color coding
+    bufferGaugeFill.classList.remove('warning', 'critical');
+    if (bufferLength < 1) {
+        bufferGaugeFill.classList.add('critical');
+        bufferStatus.textContent = 'Critical';
+    } else if (bufferLength < 3) {
+        bufferGaugeFill.classList.add('warning');
+        bufferStatus.textContent = 'Low';
+    } else {
+        bufferStatus.textContent = 'Healthy';
+    }
+}
+
+// Update latency display
+function updateLatencyStats() {
+    const latencyValue = document.getElementById('latencyValue');
+
+    if (outputHlsPlayer && outputHlsPlayer.latency !== undefined) {
+        latencyValue.textContent = outputHlsPlayer.latency.toFixed(1);
+    } else if (outputHlsPlayer && outputHlsPlayer.targetLatency !== undefined) {
+        latencyValue.textContent = outputHlsPlayer.targetLatency.toFixed(1);
+    } else {
+        latencyValue.textContent = '--';
+    }
+}
+
+// Update bandwidth stats and sparkline
+function updateBandwidthStats() {
+    const bandwidthValue = document.getElementById('bandwidthValue');
+
+    if (outputHlsPlayer && outputHlsPlayer.bandwidthEstimate) {
+        const bwMbps = outputHlsPlayer.bandwidthEstimate / 1000000;
+        bandwidthValue.textContent = bwMbps.toFixed(1);
+
+        // Add to history
+        bandwidthHistory.push(bwMbps);
+        if (bandwidthHistory.length > 30) {
+            bandwidthHistory.shift();
+        }
+
+        // Draw sparkline
+        drawBandwidthSparkline();
+    } else {
+        bandwidthValue.textContent = '--';
+    }
+}
+
+// Draw bandwidth sparkline
+function drawBandwidthSparkline() {
+    if (!bandwidthSparklineCtx || bandwidthHistory.length < 2) return;
+
+    const canvas = bandwidthSparklineCtx.canvas;
+    const width = canvas.width = canvas.offsetWidth * 2;
+    const height = canvas.height = 48;
+
+    bandwidthSparklineCtx.clearRect(0, 0, width, height);
+
+    const max = Math.max(...bandwidthHistory) * 1.1 || 1;
+    const min = 0;
+    const range = max - min;
+
+    const stepX = width / (bandwidthHistory.length - 1);
+
+    // Draw line
+    bandwidthSparklineCtx.beginPath();
+    bandwidthSparklineCtx.strokeStyle = '#10b981';
+    bandwidthSparklineCtx.lineWidth = 2;
+
+    bandwidthHistory.forEach((val, i) => {
+        const x = i * stepX;
+        const y = height - ((val - min) / range) * (height - 4) - 2;
+
+        if (i === 0) {
+            bandwidthSparklineCtx.moveTo(x, y);
+        } else {
+            bandwidthSparklineCtx.lineTo(x, y);
+        }
+    });
+
+    bandwidthSparklineCtx.stroke();
+
+    // Draw fill
+    bandwidthSparklineCtx.lineTo(width, height);
+    bandwidthSparklineCtx.lineTo(0, height);
+    bandwidthSparklineCtx.closePath();
+
+    const gradient = bandwidthSparklineCtx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, 'rgba(16, 185, 129, 0.3)');
+    gradient.addColorStop(1, 'rgba(16, 185, 129, 0.05)');
+    bandwidthSparklineCtx.fillStyle = gradient;
+    bandwidthSparklineCtx.fill();
+}
+
+// Update current quality display
+function updateQualityStats() {
+    const qualityValue = document.getElementById('currentQualityValue');
+    const qualityBitrate = document.getElementById('currentQualityBitrate');
+    const abrIndicator = document.getElementById('abrModeIndicator');
+
+    if (outputHlsPlayer && outputHlsPlayer.levels && outputHlsPlayer.currentLevel >= 0) {
+        const level = outputHlsPlayer.levels[outputHlsPlayer.currentLevel];
+        if (level) {
+            qualityValue.textContent = (level.height || 'Auto') + 'p';
+            const bitrateMbps = (level.bitrate / 1000000).toFixed(1);
+            qualityBitrate.textContent = bitrateMbps + ' Mbps';
+        }
+    } else {
+        qualityValue.textContent = 'Auto';
+        qualityBitrate.textContent = '--';
+    }
+
+    // ABR mode indicator
+    if (outputHlsPlayer) {
+        const isAuto = outputHlsPlayer.autoLevelEnabled;
+        abrIndicator.textContent = isAuto ? 'Auto ABR' : 'Manual';
+        abrIndicator.className = isAuto ? 'badge bg-success ms-auto' : 'badge bg-secondary ms-auto';
+    }
+}
+
+// Update frame statistics
+function updateFrameStats(video) {
+    const framesDecoded = document.getElementById('framesDecoded');
+    const framesDropped = document.getElementById('framesDropped');
+    const framesDroppedIndicator = document.getElementById('framesDroppedIndicator');
+    const currentFps = document.getElementById('currentFps');
+
+    if (video.getVideoPlaybackQuality) {
+        const quality = video.getVideoPlaybackQuality();
+
+        framesDecoded.textContent = quality.totalVideoFrames.toLocaleString();
+        framesDropped.textContent = quality.droppedVideoFrames.toLocaleString();
+
+        // Dropped frames indicator
+        const dropRate = quality.totalVideoFrames > 0
+            ? (quality.droppedVideoFrames / quality.totalVideoFrames) * 100
+            : 0;
+
+        framesDroppedIndicator.className = 'status-dot';
+        if (dropRate < 0.1) {
+            framesDroppedIndicator.classList.add('status-dot-ok');
+        } else if (dropRate < 1) {
+            framesDroppedIndicator.classList.add('status-dot-warning');
+        } else {
+            framesDroppedIndicator.classList.add('status-dot-error');
+        }
+
+        // Calculate FPS
+        const now = performance.now();
+        if (lastFrameTime > 0) {
+            const framesDelta = quality.totalVideoFrames - lastDecodedFrames;
+            const timeDelta = (now - lastFrameTime) / 1000;
+            if (timeDelta > 0) {
+                const fps = framesDelta / timeDelta;
+                currentFps.textContent = fps.toFixed(1);
+            }
+        }
+        lastDecodedFrames = quality.totalVideoFrames;
+        lastFrameTime = now;
+    }
+}
+
+// Update network stats
+function updateNetworkStats() {
+    const ttfbValue = document.getElementById('ttfbValue');
+    const fragmentsLoadedEl = document.getElementById('fragmentsLoaded');
+    const stallCountEl = document.getElementById('stallCount');
+    const stallIndicator = document.getElementById('stallIndicator');
+
+    if (outputHlsPlayer && outputHlsPlayer.ttfbEstimate) {
+        ttfbValue.textContent = Math.round(outputHlsPlayer.ttfbEstimate);
+    }
+
+    fragmentsLoadedEl.textContent = fragmentsLoaded.toLocaleString();
+    stallCountEl.textContent = stallCount.toLocaleString();
+
+    // Stall indicator
+    stallIndicator.className = 'status-dot';
+    if (stallCount === 0) {
+        stallIndicator.classList.add('status-dot-ok');
+    } else if (stallCount < 3) {
+        stallIndicator.classList.add('status-dot-warning');
+    } else {
+        stallIndicator.classList.add('status-dot-error');
+    }
+}
+
+// Update quality levels visual list
+function updateQualityLevelsList() {
+    const list = document.getElementById('qualityLevelsList');
+    if (!outputHlsPlayer || !outputHlsPlayer.levels || outputHlsPlayer.levels.length === 0) {
+        list.innerHTML = '<div class="text-muted small">No quality levels available</div>';
+        return;
+    }
+
+    const levels = outputHlsPlayer.levels;
+    const currentLevel = outputHlsPlayer.currentLevel;
+    const maxBitrate = Math.max(...levels.map(l => l.bitrate || 0));
+
+    let html = '';
+    levels.forEach((level, index) => {
+        const isActive = index === currentLevel;
+        const height = level.height || 'Unknown';
+        const bitrateMbps = ((level.bitrate || 0) / 1000000).toFixed(1);
+        const barWidth = maxBitrate > 0 ? ((level.bitrate || 0) / maxBitrate) * 100 : 0;
+
+        html += `
+            <div class="quality-level-item ${isActive ? 'active' : ''}">
+                <div class="quality-level-indicator"></div>
+                <div class="quality-level-info">
+                    <span class="quality-level-resolution">${height}p</span>
+                    <span class="quality-level-bitrate">${bitrateMbps} Mbps</span>
+                </div>
+                <div class="quality-level-bar-container">
+                    <div class="quality-level-bar" style="width: ${barWidth}%"></div>
+                </div>
+            </div>
+        `;
+    });
+
+    list.innerHTML = html;
+}
+
+// Reset player stats
+function resetPlayerStats() {
+    bandwidthHistory = [];
+    fragmentsLoaded = 0;
+    stallCount = 0;
+    lastDecodedFrames = 0;
+    lastFrameTime = 0;
+
+    // Reset UI
+    document.getElementById('bufferValue').textContent = '0.0';
+    document.getElementById('bufferGaugeFill').style.width = '0%';
+    document.getElementById('bufferStatus').textContent = 'Waiting';
+    document.getElementById('latencyValue').textContent = '--';
+    document.getElementById('bandwidthValue').textContent = '--';
+    document.getElementById('currentQualityValue').textContent = '--';
+    document.getElementById('currentQualityBitrate').textContent = '--';
+    document.getElementById('framesDecoded').textContent = '0';
+    document.getElementById('framesDropped').textContent = '0';
+    document.getElementById('currentFps').textContent = '--';
+    document.getElementById('ttfbValue').textContent = '--';
+    document.getElementById('fragmentsLoaded').textContent = '0';
+    document.getElementById('stallCount').textContent = '0';
+    document.getElementById('qualityLevelsList').innerHTML = '';
+}
+
+// Hook HLS events for stats (called from initOutputHlsPlayer)
+function hookHlsStatsEvents(hls) {
+    // Show stats button when player is ready
+    document.getElementById('statsToggleBtn').classList.remove('d-none');
+
+    // Fragment loaded event
+    hls.on(Hls.Events.FRAG_LOADED, function(event, data) {
+        fragmentsLoaded++;
+    });
+
+    // Buffer stalled event
+    hls.on(Hls.Events.ERROR, function(event, data) {
+        if (data.details === 'bufferStalledError') {
+            stallCount++;
+        }
+    });
+
+    // Level switched event
+    hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {
+        console.log('Level switched to:', data.level);
+        if (statsVisible) {
+            updateQualityStats();
+            updateQualityLevelsList();
+        }
+    });
 }
 </script>
 
