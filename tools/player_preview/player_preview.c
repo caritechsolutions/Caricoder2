@@ -258,18 +258,12 @@ void run_multi_variant_ffmpeg(int video_count) {
     // Add UDP buffer settings to input URL
     snprintf(input_url, sizeof(input_url), "%s?fifo_size=5000000&overrun_nonfatal=1", g_ctx.input_addr);
 
-    // Build var_stream_map with muxed audio and bandwidth:
-    // "v:0,a:0,bandwidth=8000000 v:1,a:1,bandwidth=4000000"
+    // Build var_stream_map with muxed audio (like GStreamer tee):
+    // "v:0,a:0 v:1,a:1" - each video paired with its own audio copy
     var_stream_map[0] = '\0';
     for (int i = 0; i < video_count; i++) {
-        char entry[128];
-        int bandwidth = g_ctx.video_bitrates[i];
-        // Add ~200kbps for audio overhead
-        if (bandwidth > 0) {
-            bandwidth += 200000;
-        }
-        snprintf(entry, sizeof(entry), "%sv:%d,a:%d,bandwidth=%d",
-                 (i > 0 ? " " : ""), i, i, bandwidth);
+        char entry[64];
+        snprintf(entry, sizeof(entry), "%sv:%d,a:%d", (i > 0 ? " " : ""), i, i);
         strncat(var_stream_map, entry, sizeof(var_stream_map) - strlen(var_stream_map) - 1);
     }
 
