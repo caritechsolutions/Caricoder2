@@ -489,8 +489,13 @@ int main(int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
+            // Build UDP URL from address:port (avoid doubling udp:// prefix)
             const char *addr_port = argv[++i];
-            snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "udp://%s", addr_port);
+            if (strncmp(addr_port, "udp://", 6) == 0) {
+                snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "%s", addr_port);
+            } else {
+                snprintf(g_ctx.input_addr, sizeof(g_ctx.input_addr), "udp://%s", addr_port);
+            }
             has_input = 1;
         } else if (strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc) {
             snprintf(g_ctx.output_dir, sizeof(g_ctx.output_dir), "%s", argv[++i]);
