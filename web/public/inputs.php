@@ -122,9 +122,6 @@ include __DIR__ . '/../templates/header.php';
                             <div class="bitrate-cell" id="bitrate-<?php echo $input['id']; ?>">
                                 <?php if ($apiPort): ?>
                                 <span class="bitrate-video">-</span> / <span class="bitrate-audio">-</span>
-                                <button class="btn btn-link btn-sm p-0 ms-2 preview-btn" onclick="showPreview('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>', '<?php echo strtolower($input['type'] ?? 'udp'); ?>', <?php echo $apiPort ?? 'null'; ?>)" title="Preview stream">
-                                    <i class="bi bi-play-circle"></i>
-                                </button>
                                 <?php else: ?>
                                 <small class="text-muted">N/A</small>
                                 <?php endif; ?>
@@ -135,6 +132,9 @@ include __DIR__ . '/../templates/header.php';
                                 <?php if ($input['status'] === 'running'): ?>
                                 <button class="btn btn-outline-warning" onclick="stopService('inputs', '<?php echo $input['id']; ?>')" title="Stop">
                                     <i class="bi bi-stop-fill"></i>
+                                </button>
+                                <button class="btn btn-outline-info" onclick="showPreview('<?php echo $input['id']; ?>', '<?php echo htmlspecialchars($input['name']); ?>', '<?php echo strtolower($input['type'] ?? 'udp'); ?>', <?php echo $apiPort ?? 'null'; ?>)" title="Monitor">
+                                    <i class="bi bi-graph-up"></i>
                                 </button>
                                 <?php else: ?>
                                 <button class="btn btn-outline-success" onclick="startService('inputs', '<?php echo $input['id']; ?>')" title="Start">
@@ -332,43 +332,41 @@ function getTypeBadgeColor($type) {
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-play-circle me-2"></i>Preview - <span id="previewInputName"></span></h5>
+                <h5 class="modal-title"><i class="bi bi-graph-up me-2"></i>Input Monitor - <span id="previewInputName"></span></h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="previewInputId">
+                <input type="hidden" id="previewApiPort" value="">
 
-                <!-- Video Player and Stream Info Row -->
-                <div class="row mb-3">
-                    <!-- Video Player Section -->
-                    <div class="col-lg-8">
-                        <div class="card">
-                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                                <strong><i class="bi bi-play-circle me-1"></i>Input Preview</strong>
-                                <div class="d-flex align-items-center gap-2">
-                                    <span id="inputPlayerStatus" class="badge bg-secondary">Stopped</span>
-                                    <!-- Stats Toggle Button -->
-                                    <button id="inputStatsToggleBtn" class="btn btn-sm btn-outline-info d-none" title="Player Statistics" onclick="toggleInputPlayerStats()">
-                                        <i class="bi bi-speedometer2"></i>
-                                    </button>
+                <!-- Video Player Section -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-play-circle me-1"></i>Input Preview</strong>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="inputPlayerStatus" class="badge bg-secondary">Stopped</span>
+                            <!-- Stats Toggle Button -->
+                            <button id="inputStatsToggleBtn" class="btn btn-sm btn-outline-info d-none" title="Player Statistics" onclick="toggleInputPlayerStats()">
+                                <i class="bi bi-speedometer2"></i>
+                            </button>
+                            <button class="btn btn-sm btn-success" id="startInputPlayerBtn" onclick="startInputPlayer()">
+                                <i class="bi bi-play-fill me-1"></i>Start
+                            </button>
+                            <button class="btn btn-sm btn-danger d-none" id="stopInputPlayerBtn" onclick="stopInputPlayer()">
+                                <i class="bi bi-stop-fill me-1"></i>Stop
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="ratio ratio-16x9 bg-dark position-relative" style="max-height: 300px;">
+                            <div id="videoLoadingOverlay" class="position-absolute top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center">
+                                <div class="text-center text-white">
+                                    <i class="bi bi-tv fs-1 text-muted"></i>
+                                    <div id="videoStatusText" class="mt-2 text-muted">Click Start to preview input</div>
                                 </div>
                             </div>
-                            <div class="card-body p-0">
-                                <div id="videoContainer" class="position-relative bg-dark" style="aspect-ratio: 16/9; max-height: 350px;">
-                                    <!-- Placeholder with Play Button -->
-                                    <div id="videoPlaceholder" class="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center text-white">
-                                        <i class="bi bi-play-circle display-1 mb-3"></i>
-                                        <span id="videoStatusText">Click to start preview</span>
-                                    </div>
-                                    <!-- Loading Spinner -->
-                                    <div id="videoLoading" class="position-absolute top-0 start-0 w-100 h-100 d-none flex-column align-items-center justify-content-center text-white">
-                                        <div class="spinner-border text-light mb-3" role="status"></div>
-                                        <span>Loading stream...</span>
-                                        <small class="text-muted mt-2" id="videoLoadingStatus">Waiting for segments...</small>
-                                    </div>
-                                    <!-- Video Element -->
-                                    <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
-                                </div>
+                            <video id="previewVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                        </div>
 
                                 <!-- HLS Player Stats Panel (hidden by default) -->
                                 <div id="inputPlayerStatsPanel" class="player-stats-panel d-none">
@@ -483,93 +481,133 @@ function getTypeBadgeColor($type) {
                             </div>
                         </div>
                     </div>
+                </div>
 
-                    <!-- Stream Info Panel -->
-                    <div class="col-lg-4">
+                <!-- Status Bar -->
+                <div class="alert alert-info mb-3 py-2" id="monitorStatus">
+                    <i class="bi bi-activity me-1"></i>
+                    <span id="monitorStatusText">Connecting...</span>
+                </div>
+
+                <!-- Format Information Row -->
+                <div class="row mb-3">
+                    <!-- Input Format -->
+                    <div class="col-md-6">
                         <div class="card h-100">
-                            <div class="card-header py-2">
-                                <strong><i class="bi bi-info-circle me-1"></i>Stream Info</strong>
-                                <button class="btn btn-sm btn-outline-secondary float-end" onclick="refreshMediaInfo()" title="Refresh">
-                                    <i class="bi bi-arrow-clockwise"></i>
-                                </button>
+                            <div class="card-header py-2 bg-info bg-opacity-10">
+                                <strong><i class="bi bi-box-arrow-in-right me-1"></i>Input Format</strong>
+                                <small class="text-muted ms-2" id="inputSourceName"></small>
                             </div>
-                            <div class="card-body p-2" id="streamInfoBody">
-                                <div class="text-center text-muted py-4" id="streamInfoLoading">
-                                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                                    Loading stream info...
-                                </div>
-                                <div id="streamInfoContent" style="display: none;">
-                                    <!-- Video Info -->
-                                    <div class="mb-3">
-                                        <h6 class="text-primary mb-2"><i class="bi bi-camera-video me-1"></i>Video</h6>
-                                        <table class="table table-sm table-borderless mb-0">
-                                            <tr><td class="text-muted" style="width:40%">Codec</td><td id="infoVideoCodec">-</td></tr>
-                                            <tr><td class="text-muted">Resolution</td><td id="infoVideoRes">-</td></tr>
-                                            <tr><td class="text-muted">Frame Rate</td><td id="infoVideoFps">-</td></tr>
-                                            <tr><td class="text-muted">Profile</td><td id="infoVideoProfile">-</td></tr>
-                                        </table>
+                            <div class="card-body py-2">
+                                <div class="row small">
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Video:</span> <span id="inputVideoCodec">-</span></div>
+                                        <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="inputResolution">-</span></div>
                                     </div>
-                                    <!-- Audio Info -->
-                                    <div>
-                                        <h6 class="text-success mb-2"><i class="bi bi-volume-up me-1"></i>Audio</h6>
-                                        <div id="infoAudioTracks">
-                                            <!-- Audio tracks will be inserted here -->
-                                        </div>
+                                    <div class="col-6">
+                                        <div class="mb-1"><span class="text-muted">Audio:</span> <span id="inputAudioCodec">-</span></div>
+                                        <div><span class="text-muted">Channels:</span> <span id="inputAudioChannels">-</span></div>
                                     </div>
                                 </div>
-                                <div id="streamInfoError" class="text-danger text-center py-3" style="display: none;">
-                                    <i class="bi bi-exclamation-triangle me-1"></i>
-                                    <span id="streamInfoErrorText">Failed to load</span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Output Destination -->
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header py-2 bg-success bg-opacity-10">
+                                <strong><i class="bi bi-box-arrow-right me-1"></i>Output Destination</strong>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="small">
+                                    <div class="mb-1"><span class="text-muted">Address:</span> <span id="outputDestAddress" class="font-monospace">-</span></div>
+                                    <div><span class="text-muted">Protocol:</span> <span id="outputDestProtocol">-</span></div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Bitrate Stats -->
+                <!-- Current Bitrate Stats -->
                 <div class="row mb-3">
                     <div class="col-md-6">
-                        <div class="card bg-light">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <strong><i class="bi bi-box-arrow-in-right me-1 text-info"></i>Video Bitrate</strong>
+                            </div>
                             <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Video Bitrate</span>
-                                    <span class="fw-bold text-primary" id="graphVideoBitrate">-</span>
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <span class="text-muted small">Bitrate</span>
+                                    <span class="fw-bold text-info" id="graphVideoBitrate">-</span>
                                 </div>
-                                <div class="d-flex justify-content-between align-items-center mt-1">
-                                    <small class="text-muted">PID</small>
-                                    <small id="graphVideoPid">-</small>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted small">PID</span>
+                                    <span id="graphVideoPid">-</span>
                                 </div>
                             </div>
                         </div>
                     </div>
                     <div class="col-md-6">
-                        <div class="card bg-light">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <strong><i class="bi bi-box-arrow-in-right me-1 text-success"></i>Audio Bitrate</strong>
+                            </div>
                             <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted">Audio Bitrate</span>
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <span class="text-muted small">Bitrate</span>
                                     <span class="fw-bold text-success" id="graphAudioBitrate">-</span>
                                 </div>
-                                <div class="d-flex justify-content-between align-items-center mt-1">
-                                    <small class="text-muted">PID(s)</small>
-                                    <small id="graphAudioPid">-</small>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <span class="text-muted small">PID(s)</span>
+                                    <span id="graphAudioPid">-</span>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Bitrate Graph Canvas -->
+                <!-- Bitrate Graph -->
                 <div class="card mb-3">
                     <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                        <strong><i class="bi bi-graph-up me-1"></i>Bitrate Monitor</strong>
+                        <strong><i class="bi bi-graph-up me-1"></i>Bitrate History</strong>
                         <small class="text-muted">
                             <span id="graphStatus" class="badge bg-success">Live</span>
                             Last update: <span id="graphLastUpdate">-</span>
                         </small>
                     </div>
                     <div class="card-body">
-                        <div class="position-relative" style="height: 180px;">
+                        <div class="row mb-2">
+                            <div class="col-6 text-center">
+                                <span style="color: #0dcaf0;" class="fw-bold small">● Video</span>
+                            </div>
+                            <div class="col-6 text-center">
+                                <span style="color: #198754;" class="fw-bold small">● Audio</span>
+                            </div>
+                        </div>
+                        <div class="position-relative" style="height: 200px;">
                             <canvas id="bitrateChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stream Health -->
+                <div class="card mb-3">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                        <strong><i class="bi bi-heart-pulse me-1"></i>Stream Health</strong>
+                        <span id="healthStatus" class="badge bg-success">OK</span>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span class="text-muted small">Continuity Errors (recent)</span>
+                            <span class="fw-bold" id="continuityErrorCount">0</span>
+                        </div>
+                        <div id="continuityErrorDetails" class="mt-2 small text-muted d-none">
+                            <div class="fw-semibold">Errors by PID:</div>
+                            <div id="continuityErrorsByPid"></div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Continuity errors indicate packet loss in the source stream
                         </div>
                     </div>
                 </div>
@@ -2246,15 +2284,37 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
     currentInputType = inputType;
     currentInputApiPort = apiPort;
     document.getElementById('previewInputId').value = inputId;
+    document.getElementById('previewApiPort').value = apiPort || '';
     document.getElementById('previewInputName').textContent = inputName;
 
-    // Reset video player UI
-    document.getElementById('videoPlaceholder').classList.remove('d-none');
-    document.getElementById('videoPlaceholder').classList.add('d-flex');
-    document.getElementById('videoLoading').classList.remove('d-flex');
-    document.getElementById('videoLoading').classList.add('d-none');
+    // Reset video player UI - show overlay with Start prompt
+    document.getElementById('videoLoadingOverlay').classList.remove('d-none');
+    document.getElementById('videoLoadingOverlay').classList.add('d-flex');
     document.getElementById('previewVideo').classList.add('d-none');
-    document.getElementById('videoStatusText').textContent = 'Starting preview...';
+    document.getElementById('videoStatusText').textContent = 'Click Start to preview input';
+
+    // Reset player buttons
+    document.getElementById('startInputPlayerBtn').classList.remove('d-none');
+    document.getElementById('stopInputPlayerBtn').classList.add('d-none');
+    document.getElementById('inputPlayerStatus').className = 'badge bg-secondary';
+    document.getElementById('inputPlayerStatus').textContent = 'Stopped';
+
+    // Reset status bar
+    document.getElementById('monitorStatus').className = 'alert alert-info mb-3 py-2';
+    document.getElementById('monitorStatusText').textContent = 'Connecting...';
+
+    // Reset format info
+    document.getElementById('inputSourceName').textContent = inputName;
+    document.getElementById('inputVideoCodec').textContent = '-';
+    document.getElementById('inputResolution').textContent = '-';
+    document.getElementById('inputAudioCodec').textContent = '-';
+    document.getElementById('inputAudioChannels').textContent = '-';
+
+    // Reset stream health
+    document.getElementById('healthStatus').className = 'badge bg-success';
+    document.getElementById('healthStatus').textContent = 'OK';
+    document.getElementById('continuityErrorCount').textContent = '0';
+    document.getElementById('continuityErrorDetails').classList.add('d-none');
 
     // Initialize chart if needed
     if (!bitrateChart) {
@@ -2266,16 +2326,16 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
                 datasets: [{
                     label: 'Video',
                     data: [],
-                    borderColor: '#2563eb',
-                    backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                    borderColor: '#0dcaf0',
+                    backgroundColor: 'rgba(13, 202, 240, 0.1)',
                     fill: true,
                     tension: 0.3,
                     pointRadius: 0
                 }, {
                     label: 'Audio',
                     data: [],
-                    borderColor: '#16a34a',
-                    backgroundColor: 'rgba(22, 163, 74, 0.1)',
+                    borderColor: '#198754',
+                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
                     fill: true,
                     tension: 0.3,
                     pointRadius: 0
@@ -2457,16 +2517,8 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
     }
     previewModal.show();
 
-    // Reset stream info panel
-    document.getElementById('streamInfoLoading').style.display = 'block';
-    document.getElementById('streamInfoContent').style.display = 'none';
-    document.getElementById('streamInfoError').style.display = 'none';
-
-    // Start player_preview
-    await startPreview(inputId);
-
-    // Load media info (don't await - let it load in background)
-    loadMediaInfo(inputId);
+    // Load format info from the API
+    loadInputFormatInfo(inputId);
 
     // Load historical bitrate data and A/V sync data in parallel
     await Promise.all([
@@ -2474,14 +2526,15 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
         loadAVSyncHistory(inputId)
     ]);
 
+    // Update status bar
+    document.getElementById('monitorStatus').className = 'alert alert-success mb-3 py-2';
+    document.getElementById('monitorStatusText').textContent = 'Monitoring input stream';
+
     // Start live graph updates
     graphUpdateInterval = setInterval(() => updateBitrateGraph(inputId), 5000);
 
     // Start A/V sync updates (every 5 minutes = 300000ms)
     avsyncUpdateInterval = setInterval(() => loadAVSyncHistory(inputId), 300000);
-
-    // Start keepalive (every 30 seconds)
-    previewKeepaliveInterval = setInterval(() => sendPreviewKeepalive(inputId), 30000);
 
     // Load and start RIST stats updates if input type is RIST
     if (inputType === 'rist' && apiPort) {
@@ -2503,27 +2556,104 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
     }, { once: true });
 }
 
+// Start input player button handler
+async function startInputPlayer() {
+    const inputId = currentPreviewId;
+    if (!inputId) return;
+
+    // Update button states
+    document.getElementById('startInputPlayerBtn').classList.add('d-none');
+    document.getElementById('stopInputPlayerBtn').classList.remove('d-none');
+    document.getElementById('inputPlayerStatus').className = 'badge bg-warning';
+    document.getElementById('inputPlayerStatus').textContent = 'Starting...';
+
+    // Start keepalive for preview
+    previewKeepaliveInterval = setInterval(() => sendPreviewKeepalive(inputId), 30000);
+
+    await startPreview(inputId);
+}
+
+// Stop input player button handler
+function stopInputPlayer() {
+    // Stop keepalive
+    if (previewKeepaliveInterval) {
+        clearInterval(previewKeepaliveInterval);
+        previewKeepaliveInterval = null;
+    }
+
+    // Stop stats updates
+    stopInputStatsUpdate();
+
+    // Stop the preview status polling
+    if (previewStatusInterval) {
+        clearInterval(previewStatusInterval);
+        previewStatusInterval = null;
+    }
+
+    // Destroy HLS player
+    if (hlsPlayer) {
+        hlsPlayer.destroy();
+        hlsPlayer = null;
+    }
+
+    // Reset video element
+    const video = document.getElementById('previewVideo');
+    if (video) {
+        video.pause();
+        video.src = '';
+        video.classList.add('d-none');
+    }
+
+    // Show overlay again
+    document.getElementById('videoLoadingOverlay').classList.remove('d-none');
+    document.getElementById('videoLoadingOverlay').classList.add('d-flex');
+    document.getElementById('videoStatusText').textContent = 'Click Start to preview input';
+
+    // Update button states
+    document.getElementById('startInputPlayerBtn').classList.remove('d-none');
+    document.getElementById('stopInputPlayerBtn').classList.add('d-none');
+    document.getElementById('inputPlayerStatus').className = 'badge bg-secondary';
+    document.getElementById('inputPlayerStatus').textContent = 'Stopped';
+
+    // Hide and reset stats
+    document.getElementById('inputStatsToggleBtn').classList.add('d-none');
+    document.getElementById('inputPlayerStatsPanel').classList.add('d-none');
+    if (typeof resetInputPlayerStats === 'function') {
+        resetInputPlayerStats();
+    }
+
+    // Stop the preview process on server
+    if (currentPreviewId) {
+        fetch(`api/inputs.php?action=preview_stop&id=${currentPreviewId}`, { method: 'POST' })
+            .catch(e => console.error('Failed to stop preview:', e));
+    }
+}
+
 // Start preview and wait for it to be ready
 async function startPreview(inputId) {
     try {
-        // Show loading state
-        document.getElementById('videoPlaceholder').classList.remove('d-flex');
-        document.getElementById('videoPlaceholder').classList.add('d-none');
-        document.getElementById('videoLoading').classList.remove('d-none');
-        document.getElementById('videoLoading').classList.add('d-flex');
-        document.getElementById('videoLoadingStatus').textContent = 'Starting preview...';
+        // Show loading state in overlay
+        const overlay = document.getElementById('videoLoadingOverlay');
+        overlay.innerHTML = `
+            <div class="text-center text-white">
+                <div class="spinner-border text-light mb-3" role="status"></div>
+                <div id="videoStatusText" class="text-muted">Starting preview...</div>
+            </div>
+        `;
 
         // Start preview via API
         const startResponse = await fetch(`api/inputs.php?action=preview_start&id=${inputId}`, { method: 'POST' });
         const startData = await startResponse.json();
 
         if (!startData.success) {
-            document.getElementById('videoLoadingStatus').textContent = 'Error: ' + (startData.error || 'Failed to start');
+            document.getElementById('videoStatusText').textContent = 'Error: ' + (startData.error || 'Failed to start');
+            document.getElementById('inputPlayerStatus').className = 'badge bg-danger';
+            document.getElementById('inputPlayerStatus').textContent = 'Error';
             return;
         }
 
         const playlistUrl = startData.playlist_url;
-        document.getElementById('videoLoadingStatus').textContent = 'Waiting for segments...';
+        document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
         // Poll for ready status
         let attempts = 0;
@@ -2538,14 +2668,16 @@ async function startPreview(inputId) {
                 if (statusData.ready) {
                     clearInterval(previewStatusInterval);
                     previewStatusInterval = null;
-                    document.getElementById('videoLoadingStatus').textContent = 'Loading player...';
+                    document.getElementById('videoStatusText').textContent = 'Loading player...';
                     initHlsPlayer(playlistUrl);
                 } else if (statusData.running) {
-                    document.getElementById('videoLoadingStatus').textContent = `Buffering... (${statusData.segments || 0} segments)`;
+                    document.getElementById('videoStatusText').textContent = `Buffering... (${statusData.segments || 0} segments)`;
                 } else if (attempts >= maxAttempts) {
                     clearInterval(previewStatusInterval);
                     previewStatusInterval = null;
-                    document.getElementById('videoLoadingStatus').textContent = 'Timeout waiting for stream';
+                    document.getElementById('videoStatusText').textContent = 'Timeout waiting for stream';
+                    document.getElementById('inputPlayerStatus').className = 'badge bg-danger';
+                    document.getElementById('inputPlayerStatus').textContent = 'Timeout';
                 }
             } catch (e) {
                 console.error('Status check failed:', e);
@@ -2554,7 +2686,9 @@ async function startPreview(inputId) {
 
     } catch (e) {
         console.error('Failed to start preview:', e);
-        document.getElementById('videoLoadingStatus').textContent = 'Error: ' + e.message;
+        document.getElementById('videoStatusText').textContent = 'Error: ' + e.message;
+        document.getElementById('inputPlayerStatus').className = 'badge bg-danger';
+        document.getElementById('inputPlayerStatus').textContent = 'Error';
     }
 }
 
@@ -2578,30 +2712,83 @@ function initHlsPlayer(playlistUrl) {
         hookInputHlsStatsEvents(hlsPlayer);
 
         hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
-            // Hide loading, show video
-            document.getElementById('videoLoading').classList.remove('d-flex');
-            document.getElementById('videoLoading').classList.add('d-none');
+            // Hide overlay, show video
+            document.getElementById('videoLoadingOverlay').classList.remove('d-flex');
+            document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
             video.play().catch(e => console.log('Autoplay blocked:', e));
+
+            // Update status
+            document.getElementById('inputPlayerStatus').className = 'badge bg-success';
+            document.getElementById('inputPlayerStatus').textContent = 'Playing';
         });
 
         hlsPlayer.on(Hls.Events.ERROR, function(event, data) {
             console.error('HLS error:', data);
             if (data.fatal) {
-                document.getElementById('videoLoadingStatus').textContent = 'Playback error: ' + data.type;
+                document.getElementById('videoStatusText').textContent = 'Playback error: ' + data.type;
+                document.getElementById('inputPlayerStatus').className = 'badge bg-danger';
+                document.getElementById('inputPlayerStatus').textContent = 'Error';
             }
         });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         // Safari native HLS
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', function() {
-            document.getElementById('videoLoading').classList.remove('d-flex');
-            document.getElementById('videoLoading').classList.add('d-none');
+            document.getElementById('videoLoadingOverlay').classList.remove('d-flex');
+            document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
             video.play().catch(e => console.log('Autoplay blocked:', e));
+
+            // Update status
+            document.getElementById('inputPlayerStatus').className = 'badge bg-success';
+            document.getElementById('inputPlayerStatus').textContent = 'Playing';
         });
     } else {
-        document.getElementById('videoLoadingStatus').textContent = 'HLS not supported in this browser';
+        document.getElementById('videoStatusText').textContent = 'HLS not supported in this browser';
+        document.getElementById('inputPlayerStatus').className = 'badge bg-danger';
+        document.getElementById('inputPlayerStatus').textContent = 'Error';
+    }
+}
+
+// Load input format info for the Format Information section
+async function loadInputFormatInfo(inputId) {
+    try {
+        // Fetch input details from API
+        const response = await fetch(`api/inputs.php?action=get&id=${inputId}`);
+        const data = await response.json();
+
+        if (data.success && data.data) {
+            const input = data.data;
+
+            // Set output destination info
+            if (input.output_ip && input.output_port) {
+                document.getElementById('outputDestAddress').textContent = `${input.output_ip}:${input.output_port}`;
+                document.getElementById('outputDestProtocol').textContent = 'UDP';
+            }
+        }
+
+        // Also try to get media info if available from bitrate data
+        const bitrateResponse = await fetch(`api/inputs.php?action=bitrate_history&id=${inputId}`);
+        const bitrateData = await bitrateResponse.json();
+
+        if (bitrateData.success && bitrateData.latest) {
+            // Try to get format info from latest data if codec info is available
+            if (bitrateData.latest.video_codec) {
+                document.getElementById('inputVideoCodec').textContent = bitrateData.latest.video_codec;
+            }
+            if (bitrateData.latest.resolution) {
+                document.getElementById('inputResolution').textContent = bitrateData.latest.resolution;
+            }
+            if (bitrateData.latest.audio_codec) {
+                document.getElementById('inputAudioCodec').textContent = bitrateData.latest.audio_codec;
+            }
+            if (bitrateData.latest.audio_channels) {
+                document.getElementById('inputAudioChannels').textContent = bitrateData.latest.audio_channels;
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load format info:', e);
     }
 }
 
@@ -2673,77 +2860,6 @@ function cleanupPreview() {
     currentPreviewId = null;
     currentInputType = null;
     currentInputApiPort = null;
-}
-
-// Load media info via ffprobe
-async function loadMediaInfo(inputId) {
-    try {
-        document.getElementById('streamInfoLoading').style.display = 'block';
-        document.getElementById('streamInfoContent').style.display = 'none';
-        document.getElementById('streamInfoError').style.display = 'none';
-
-        const response = await fetch(`api/inputs.php?action=preview_media_info&id=${inputId}`);
-        const data = await response.json();
-
-        if (!data.success) {
-            document.getElementById('streamInfoLoading').style.display = 'none';
-            document.getElementById('streamInfoError').style.display = 'block';
-            document.getElementById('streamInfoErrorText').textContent = data.error || 'Failed to load';
-            return;
-        }
-
-        // Update video info
-        if (data.video) {
-            document.getElementById('infoVideoCodec').textContent = data.video.codec + (data.video.profile ? ` (${data.video.profile})` : '');
-            document.getElementById('infoVideoRes').textContent = data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
-            document.getElementById('infoVideoFps').textContent = data.video.fps ? `${Math.round(data.video.fps * 100) / 100} fps` : '-';
-            document.getElementById('infoVideoProfile').textContent = data.video.pix_fmt || '-';
-        } else {
-            document.getElementById('infoVideoCodec').textContent = 'No video';
-            document.getElementById('infoVideoRes').textContent = '-';
-            document.getElementById('infoVideoFps').textContent = '-';
-            document.getElementById('infoVideoProfile').textContent = '-';
-        }
-
-        // Update audio info
-        const audioContainer = document.getElementById('infoAudioTracks');
-        audioContainer.innerHTML = '';
-
-        if (data.audio && data.audio.length > 0) {
-            data.audio.forEach((track, idx) => {
-                const trackDiv = document.createElement('div');
-                trackDiv.className = 'mb-2 pb-2' + (idx < data.audio.length - 1 ? ' border-bottom' : '');
-                trackDiv.innerHTML = `
-                    <table class="table table-sm table-borderless mb-0">
-                        <tr><td class="text-muted" style="width:40%">Track ${idx + 1}</td><td>${track.codec}${track.profile ? ' (' + track.profile + ')' : ''}</td></tr>
-                        <tr><td class="text-muted">Channels</td><td>${track.channels}ch${track.channel_layout ? ' (' + track.channel_layout + ')' : ''}</td></tr>
-                        <tr><td class="text-muted">Sample Rate</td><td>${track.sample_rate ? (track.sample_rate / 1000) + ' kHz' : '-'}</td></tr>
-                        <tr><td class="text-muted">Language</td><td>${track.language || 'und'}</td></tr>
-                    </table>
-                `;
-                audioContainer.appendChild(trackDiv);
-            });
-        } else {
-            audioContainer.innerHTML = '<span class="text-muted">No audio tracks</span>';
-        }
-
-        // Show content
-        document.getElementById('streamInfoLoading').style.display = 'none';
-        document.getElementById('streamInfoContent').style.display = 'block';
-
-    } catch (e) {
-        console.error('Failed to load media info:', e);
-        document.getElementById('streamInfoLoading').style.display = 'none';
-        document.getElementById('streamInfoError').style.display = 'block';
-        document.getElementById('streamInfoErrorText').textContent = e.message;
-    }
-}
-
-// Refresh media info (called by button)
-function refreshMediaInfo() {
-    if (currentPreviewId) {
-        loadMediaInfo(currentPreviewId);
-    }
 }
 
 // Load historical bitrate data
