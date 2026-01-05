@@ -491,75 +491,40 @@ function getTypeBadgeColor($type) {
 
                 <!-- Format Information Row -->
                 <div class="row mb-3">
-                    <!-- Input Format -->
+                    <!-- Input Stream -->
                     <div class="col-md-6">
                         <div class="card h-100">
-                            <div class="card-header py-2 bg-info bg-opacity-10">
-                                <strong><i class="bi bi-box-arrow-in-right me-1"></i>Input Format</strong>
-                                <small class="text-muted ms-2" id="inputSourceName"></small>
+                            <div class="card-header py-2 bg-info bg-opacity-10 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <strong><i class="bi bi-box-arrow-in-right me-1"></i>Input Stream</strong>
+                                    <small class="text-muted ms-2" id="inputSourceName"></small>
+                                </div>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="refreshStreamInfo()" title="Refresh stream info">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
                             </div>
                             <div class="card-body py-2">
-                                <div class="row small">
-                                    <div class="col-6">
-                                        <div class="mb-1"><span class="text-muted">Video:</span> <span id="inputVideoCodec">-</span></div>
-                                        <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="inputResolution">-</span></div>
-                                    </div>
-                                    <div class="col-6">
-                                        <div class="mb-1"><span class="text-muted">Audio:</span> <span id="inputAudioCodec">-</span></div>
-                                        <div><span class="text-muted">Channels:</span> <span id="inputAudioChannels">-</span></div>
+                                <div id="inputStreamInfo">
+                                    <div class="text-center text-muted py-2">
+                                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                                        Loading stream info...
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <!-- Output Destination -->
+                    <!-- Output Stream -->
                     <div class="col-md-6">
                         <div class="card h-100">
                             <div class="card-header py-2 bg-success bg-opacity-10">
-                                <strong><i class="bi bi-box-arrow-right me-1"></i>Output Destination</strong>
+                                <strong><i class="bi bi-box-arrow-right me-1"></i>Output Stream</strong>
+                                <small class="text-muted ms-2 font-monospace" id="outputDestAddress">-</small>
                             </div>
                             <div class="card-body py-2">
-                                <div class="small">
-                                    <div class="mb-1"><span class="text-muted">Address:</span> <span id="outputDestAddress" class="font-monospace">-</span></div>
-                                    <div><span class="text-muted">Protocol:</span> <span id="outputDestProtocol">-</span></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Current Bitrate Stats -->
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <div class="card">
-                            <div class="card-header py-2">
-                                <strong><i class="bi bi-box-arrow-in-right me-1 text-info"></i>Video Bitrate</strong>
-                            </div>
-                            <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center mb-1">
-                                    <span class="text-muted small">Bitrate</span>
-                                    <span class="fw-bold text-info" id="graphVideoBitrate">-</span>
-                                </div>
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted small">PID</span>
-                                    <span id="graphVideoPid">-</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-6">
-                        <div class="card">
-                            <div class="card-header py-2">
-                                <strong><i class="bi bi-box-arrow-in-right me-1 text-success"></i>Audio Bitrate</strong>
-                            </div>
-                            <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center mb-1">
-                                    <span class="text-muted small">Bitrate</span>
-                                    <span class="fw-bold text-success" id="graphAudioBitrate">-</span>
-                                </div>
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <span class="text-muted small">PID(s)</span>
-                                    <span id="graphAudioPid">-</span>
+                                <div id="outputStreamInfo">
+                                    <div class="text-center text-muted py-2">
+                                        Loading...
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -821,13 +786,6 @@ function getTypeBadgeColor($type) {
                             </div>
                         </div>
                     </div>
-                </div>
-
-                <!-- Output Info -->
-                <div class="d-flex justify-content-end">
-                    <small class="text-muted">
-                        Output: <span id="graphOutputAddr" class="font-monospace">-</span>
-                    </small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2303,12 +2261,20 @@ async function showPreview(inputId, inputName, inputType = 'udp', apiPort = null
     document.getElementById('monitorStatus').className = 'alert alert-info mb-3 py-2';
     document.getElementById('monitorStatusText').textContent = 'Connecting...';
 
-    // Reset format info
+    // Reset stream info panels
     document.getElementById('inputSourceName').textContent = inputName;
-    document.getElementById('inputVideoCodec').textContent = '-';
-    document.getElementById('inputResolution').textContent = '-';
-    document.getElementById('inputAudioCodec').textContent = '-';
-    document.getElementById('inputAudioChannels').textContent = '-';
+    document.getElementById('inputStreamInfo').innerHTML = `
+        <div class="text-center text-muted py-2">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            Loading stream info...
+        </div>
+    `;
+    document.getElementById('outputStreamInfo').innerHTML = `
+        <div class="text-center text-muted py-2">
+            Loading...
+        </div>
+    `;
+    document.getElementById('outputDestAddress').textContent = '-';
 
     // Reset stream health
     document.getElementById('healthStatus').className = 'badge bg-success';
@@ -2751,6 +2717,9 @@ function initHlsPlayer(playlistUrl) {
     }
 }
 
+// Store current input config for stream info updates
+let currentInputConfig = null;
+
 // Load input format info for the Format Information section
 async function loadInputFormatInfo(inputId) {
     try {
@@ -2758,37 +2727,231 @@ async function loadInputFormatInfo(inputId) {
         const response = await fetch(`api/inputs.php?action=get&id=${inputId}`);
         const data = await response.json();
 
-        if (data.success && data.data) {
-            const input = data.data;
+        if (data.id) {
+            currentInputConfig = data;
 
-            // Set output destination info
-            if (input.output_ip && input.output_port) {
-                document.getElementById('outputDestAddress').textContent = `${input.output_ip}:${input.output_port}`;
-                document.getElementById('outputDestProtocol').textContent = 'UDP';
+            // Set output destination in header
+            if (data.output && data.output.address && data.output.port) {
+                document.getElementById('outputDestAddress').textContent = `${data.output.address}:${data.output.port}`;
             }
         }
 
-        // Also try to get media info if available from bitrate data
-        const bitrateResponse = await fetch(`api/inputs.php?action=bitrate_history&id=${inputId}`);
-        const bitrateData = await bitrateResponse.json();
+        // Try to get media info from the stream
+        loadStreamMediaInfo(inputId);
 
-        if (bitrateData.success && bitrateData.latest) {
-            // Try to get format info from latest data if codec info is available
-            if (bitrateData.latest.video_codec) {
-                document.getElementById('inputVideoCodec').textContent = bitrateData.latest.video_codec;
-            }
-            if (bitrateData.latest.resolution) {
-                document.getElementById('inputResolution').textContent = bitrateData.latest.resolution;
-            }
-            if (bitrateData.latest.audio_codec) {
-                document.getElementById('inputAudioCodec').textContent = bitrateData.latest.audio_codec;
-            }
-            if (bitrateData.latest.audio_channels) {
-                document.getElementById('inputAudioChannels').textContent = bitrateData.latest.audio_channels;
-            }
-        }
+        // Load initial metrics for output stream
+        updateOutputStreamInfo();
+
     } catch (e) {
         console.error('Failed to load format info:', e);
+        document.getElementById('inputStreamInfo').innerHTML = `
+            <div class="text-danger small"><i class="bi bi-exclamation-triangle me-1"></i>Failed to load stream info</div>
+        `;
+    }
+}
+
+// Load media info from the stream using ffprobe
+async function loadStreamMediaInfo(inputId) {
+    try {
+        const response = await fetch(`api/inputs.php?action=preview_media_info&id=${inputId}`);
+        const data = await response.json();
+
+        if (data.success) {
+            renderInputStreamInfo(data);
+        } else {
+            // Fallback to basic config info
+            renderBasicInputInfo();
+        }
+    } catch (e) {
+        console.error('Failed to load media info:', e);
+        renderBasicInputInfo();
+    }
+}
+
+// Render input stream info with full PID details
+function renderInputStreamInfo(mediaInfo) {
+    const container = document.getElementById('inputStreamInfo');
+    let html = '<div class="small">';
+
+    // Video info
+    if (mediaInfo.video) {
+        const v = mediaInfo.video;
+        const resolution = (v.width && v.height) ? `${v.width}x${v.height}` : '';
+        const codecInfo = v.codec + (v.profile ? ` (${v.profile})` : '');
+        html += `
+            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
+                <div>
+                    <i class="bi bi-camera-video text-info me-1"></i>
+                    <span class="fw-semibold">Video</span>
+                </div>
+                <span class="badge bg-info">PID ${v.pid || currentInputConfig?.video_pid || '-'}</span>
+            </div>
+            <div class="row mb-2">
+                <div class="col-6"><span class="text-muted">Codec:</span> ${codecInfo}</div>
+                <div class="col-6"><span class="text-muted">Resolution:</span> ${resolution || '-'}</div>
+            </div>
+        `;
+    }
+
+    // Audio info
+    if (mediaInfo.audio && mediaInfo.audio.length > 0) {
+        html += `
+            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
+                <div>
+                    <i class="bi bi-volume-up text-success me-1"></i>
+                    <span class="fw-semibold">Audio (${mediaInfo.audio.length} track${mediaInfo.audio.length > 1 ? 's' : ''})</span>
+                </div>
+            </div>
+        `;
+
+        mediaInfo.audio.forEach((a, idx) => {
+            const lang = a.language && a.language !== 'und' ? a.language.toUpperCase() : '';
+            const channels = a.channels ? `${a.channels}ch` : '';
+            const channelLayout = a.channel_layout ? ` (${a.channel_layout})` : '';
+            html += `
+                <div class="d-flex justify-content-between align-items-center ${idx < mediaInfo.audio.length - 1 ? 'mb-1' : ''}">
+                    <div>
+                        <span class="badge bg-success me-1">PID ${a.pid || '-'}</span>
+                        ${a.codec || '-'} ${channels}${channelLayout}
+                    </div>
+                    ${lang ? `<span class="badge bg-secondary">${lang}</span>` : ''}
+                </div>
+            `;
+        });
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+// Render basic input info from config when media info unavailable
+function renderBasicInputInfo() {
+    const container = document.getElementById('inputStreamInfo');
+
+    if (!currentInputConfig) {
+        container.innerHTML = '<div class="text-muted small">No stream info available</div>';
+        return;
+    }
+
+    let html = '<div class="small">';
+
+    // Video PID
+    if (currentInputConfig.video_pid) {
+        html += `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div><i class="bi bi-camera-video text-info me-1"></i><span class="fw-semibold">Video</span></div>
+                <span class="badge bg-info">PID ${currentInputConfig.video_pid}</span>
+            </div>
+        `;
+    }
+
+    // Audio PIDs
+    if (currentInputConfig.audio_pids && currentInputConfig.audio_pids.length > 0) {
+        html += `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div><i class="bi bi-volume-up text-success me-1"></i><span class="fw-semibold">Audio</span></div>
+                <div>
+        `;
+        currentInputConfig.audio_pids.forEach(pid => {
+            html += `<span class="badge bg-success me-1">PID ${pid}</span>`;
+        });
+        html += '</div></div>';
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+// Update output stream info with live bitrates
+async function updateOutputStreamInfo() {
+    if (!currentPreviewId) return;
+
+    try {
+        const response = await fetch(`api/inputs.php?action=metrics&id=${currentPreviewId}`);
+        const data = await response.json();
+
+        if (data.success && data.pids) {
+            renderOutputStreamInfo(data.pids);
+        }
+    } catch (e) {
+        console.error('Failed to update output stream info:', e);
+    }
+}
+
+// Render output stream info with live bitrates
+function renderOutputStreamInfo(pidsData) {
+    const container = document.getElementById('outputStreamInfo');
+
+    if (!pidsData || Object.keys(pidsData).length === 0) {
+        container.innerHTML = '<div class="text-muted small">No output data available</div>';
+        return;
+    }
+
+    let html = '<div class="small">';
+    let totalBitrate = 0;
+
+    // Get configured video/audio PIDs
+    const videoPid = currentInputConfig?.video_pid;
+    const audioPids = currentInputConfig?.audio_pids || [];
+
+    // Video PID
+    if (videoPid && pidsData[videoPid]) {
+        const bitrate = pidsData[videoPid].current_bitrate || 0;
+        totalBitrate += bitrate;
+        html += `
+            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
+                <div>
+                    <i class="bi bi-camera-video text-info me-1"></i>
+                    <span class="badge bg-info">PID ${videoPid}</span>
+                    <span class="ms-1">Video</span>
+                </div>
+                <span class="fw-bold text-info">${formatBitrate(bitrate)}</span>
+            </div>
+        `;
+    }
+
+    // Audio PIDs
+    audioPids.forEach((pid, idx) => {
+        if (pidsData[pid]) {
+            const bitrate = pidsData[pid].current_bitrate || 0;
+            totalBitrate += bitrate;
+            html += `
+                <div class="d-flex justify-content-between align-items-center ${idx < audioPids.length - 1 ? 'mb-1' : 'mb-2'}">
+                    <div>
+                        <i class="bi bi-volume-up text-success me-1"></i>
+                        <span class="badge bg-success">PID ${pid}</span>
+                        <span class="ms-1">Audio</span>
+                    </div>
+                    <span class="fw-bold text-success">${formatBitrate(bitrate)}</span>
+                </div>
+            `;
+        }
+    });
+
+    // Total bitrate
+    if (totalBitrate > 0) {
+        html += `
+            <div class="d-flex justify-content-between align-items-center pt-2 border-top">
+                <span class="text-muted">Total</span>
+                <span class="fw-bold">${formatBitrate(totalBitrate)}</span>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+// Refresh stream info
+function refreshStreamInfo() {
+    if (currentPreviewId) {
+        document.getElementById('inputStreamInfo').innerHTML = `
+            <div class="text-center text-muted py-2">
+                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                Loading stream info...
+            </div>
+        `;
+        loadStreamMediaInfo(currentPreviewId);
     }
 }
 
@@ -2860,6 +3023,7 @@ function cleanupPreview() {
     currentPreviewId = null;
     currentInputType = null;
     currentInputApiPort = null;
+    currentInputConfig = null;
 }
 
 // Load historical bitrate data
@@ -2955,17 +3119,6 @@ async function loadBitrateHistory(inputId) {
         document.getElementById('graphStatus').className = 'badge bg-success';
         document.getElementById('graphStatus').textContent = 'Live';
         document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
-        document.getElementById('graphOutputAddr').textContent = data.output_address || '-';
-
-        // Update current stats from last sample
-        if (displayTimestamps.length > 0) {
-            const lastTs = displayTimestamps[displayTimestamps.length - 1];
-            const lastValues = timelineMap.get(lastTs);
-            document.getElementById('graphVideoBitrate').textContent = formatBitrate(lastValues.video);
-            document.getElementById('graphAudioBitrate').textContent = formatBitrate(lastValues.audio);
-            document.getElementById('graphVideoPid').textContent = videoPid || '-';
-            document.getElementById('graphAudioPid').textContent = audioPids.join(', ') || '-';
-        }
 
     } catch (e) {
         console.error('Failed to load history:', e);
@@ -2989,30 +3142,49 @@ async function updateBitrateGraph(inputId) {
         document.getElementById('graphStatus').className = 'badge bg-success';
         document.getElementById('graphStatus').textContent = 'Live';
         document.getElementById('graphLastUpdate').textContent = new Date().toLocaleTimeString();
-        document.getElementById('graphOutputAddr').textContent = data.output_address || '-';
 
-        // Process PIDs
-        let videoPid = null, audioPids = [];
+        // Update output stream info with live bitrates
+        if (data.pids) {
+            renderOutputStreamInfo(data.pids);
+        }
+
+        // Process PIDs for chart - use configured PIDs if available
         let videoBitrate = 0, audioBitrate = 0;
 
         if (data.pids) {
-            for (const [pid, pidData] of Object.entries(data.pids)) {
-                const bitrate = pidData.current_bitrate || 0;
-                if (bitrate > 500000 && !videoPid) {
-                    videoPid = pid;
-                    videoBitrate = bitrate;
-                } else {
-                    audioPids.push(pid);
-                    audioBitrate += bitrate;
+            const videoPid = currentInputConfig?.video_pid;
+            const audioPids = currentInputConfig?.audio_pids || [];
+
+            // Get video bitrate from configured PID or detect by size
+            if (videoPid && data.pids[videoPid]) {
+                videoBitrate = data.pids[videoPid].current_bitrate || 0;
+            } else {
+                // Fallback: use largest bitrate as video
+                for (const [pid, pidData] of Object.entries(data.pids)) {
+                    const bitrate = pidData.current_bitrate || 0;
+                    if (bitrate > 500000 && bitrate > videoBitrate) {
+                        videoBitrate = bitrate;
+                    }
+                }
+            }
+
+            // Get audio bitrate from configured PIDs
+            if (audioPids.length > 0) {
+                audioPids.forEach(pid => {
+                    if (data.pids[pid]) {
+                        audioBitrate += data.pids[pid].current_bitrate || 0;
+                    }
+                });
+            } else {
+                // Fallback: sum all non-video bitrates
+                for (const [pid, pidData] of Object.entries(data.pids)) {
+                    const bitrate = pidData.current_bitrate || 0;
+                    if (bitrate <= 500000) {
+                        audioBitrate += bitrate;
+                    }
                 }
             }
         }
-
-        // Update stats display
-        document.getElementById('graphVideoBitrate').textContent = formatBitrate(videoBitrate);
-        document.getElementById('graphAudioBitrate').textContent = formatBitrate(audioBitrate);
-        document.getElementById('graphVideoPid').textContent = videoPid || '-';
-        document.getElementById('graphAudioPid').textContent = audioPids.join(', ') || '-';
 
         // Update chart
         const now = new Date().toLocaleTimeString();
