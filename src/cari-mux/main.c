@@ -203,10 +203,18 @@ static int load_config(mux_state_t *state) {
 
 /*
  * Build TSDuck tsp command arguments
+ *
+ * TSDuck merge works by running subprocess commands:
+ *   tsp -I null --bitrate X \
+ *       -P merge 'tsp -I ip addr1:port1 -O drop' \
+ *       -P merge 'tsp -I ip addr2:port2 -O drop' \
+ *       -P pat ... -P sdt ... -P regulate \
+ *       -O ip output:port
  */
 static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
     int argc = 0;
     static char bitrate_str[32];
+    static char merge_cmds[MAX_SERVICES][512];
     static char service_args[MAX_SERVICES][16][256];
 
     /* Command */
@@ -217,36 +225,36 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
     argv[argc++] = "-b";
     argv[argc++] = bitrate_str;
 
-    /* First input: null packet generator (sets overall bitrate) */
+    /* Input: null packet generator (sets overall bitrate, provides stuffing) */
     argv[argc++] = "-I";
     argv[argc++] = "null";
     argv[argc++] = "--bitrate";
     argv[argc++] = bitrate_str;
 
-    /* Add inputs for each service */
-    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
+    /* Add merge plugin for each service (each runs a subprocess) */
+    for (int i = 0; i < state->service_count && argc < max_args - 30; i++) {
         mux_service_t *svc = &state->services[i];
 
-        snprintf(service_args[i][0], sizeof(service_args[i][0]),
-                 "%s:%d", svc->source_address, svc->source_port);
+        /* Build the merge command - runs another tsp that reads the SPTS */
+        snprintf(merge_cmds[i], sizeof(merge_cmds[i]),
+                 "tsp -I ip %s:%d -O drop",
+                 svc->source_address, svc->source_port);
 
-        argv[argc++] = "-I";
-        argv[argc++] = "ip";
-        argv[argc++] = service_args[i][0];
+        argv[argc++] = "-P";
+        argv[argc++] = "merge";
+        argv[argc++] = merge_cmds[i];
     }
 
-    /* Merge plugin */
-    argv[argc++] = "-P";
-    argv[argc++] = "merge";
-
-    /* PAT plugin - remap services */
+    /* PAT plugin - create new PAT with our service mappings */
     argv[argc++] = "-P";
     argv[argc++] = "pat";
-    for (int i = 0; i < state->service_count && argc < max_args - 10; i++) {
+    argv[argc++] = "--create";
+    argv[argc++] = "--nit";  /* Include NIT PID reference */
+    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
         mux_service_t *svc = &state->services[i];
         snprintf(service_args[i][1], sizeof(service_args[i][1]),
-                 "%d=%d", i + 1, svc->program_number);
-        argv[argc++] = "--service";
+                 "%d/%d", svc->program_number, svc->pmt_pid);
+        argv[argc++] = "--add-service";
         argv[argc++] = service_args[i][1];
     }
 
@@ -276,7 +284,7 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
         argv[argc++] = service_args[i][4];
     }
 
-    /* PCR adjust */
+    /* PCR adjust - synchronize PCR across merged streams */
     static char pcr_ref_str[32];
     snprintf(pcr_ref_str, sizeof(pcr_ref_str), "%d", state->pcr_reference_service);
     argv[argc++] = "-P";
@@ -288,7 +296,7 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
     argv[argc++] = "-P";
     argv[argc++] = "regulate";
 
-    /* Output to UDP */
+    /* Output to UDP multicast */
     static char output_addr[128];
     snprintf(output_addr, sizeof(output_addr), "%s:%d",
              state->output_address, state->output_port);
