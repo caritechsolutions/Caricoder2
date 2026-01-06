@@ -233,9 +233,10 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
     for (int i = 0; i < state->service_count && argc < max_args - 30; i++) {
         mux_service_t *svc = &state->services[i];
 
-        /* Build the merge command - runs another tsp that reads the SPTS */
+        /* Build the merge command - runs another tsp that reads the SPTS
+         * tsp without -O outputs to stdout, which merge captures */
         snprintf(merge_cmds[i], sizeof(merge_cmds[i]),
-                 "tsp -I ip %s:%d -O drop",
+                 "tsp -I ip %s:%d",
                  svc->source_address, svc->source_port);
 
         argv[argc++] = "-P";
