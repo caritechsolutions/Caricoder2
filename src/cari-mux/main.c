@@ -245,23 +245,17 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
         argv[argc++] = merge_cmds[i];
     }
 
-    /* PAT plugin - create new PAT with our service mappings */
+    /* PAT plugin - let merge handle PAT merging, just set TS ID */
+    static char tsid_str[32];
+    snprintf(tsid_str, sizeof(tsid_str), "%d", state->ts_id);
     argv[argc++] = "-P";
     argv[argc++] = "pat";
-    argv[argc++] = "--create";
-    argv[argc++] = "--nit";  /* Include NIT PID reference */
-    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
-        mux_service_t *svc = &state->services[i];
-        snprintf(service_args[i][1], sizeof(service_args[i][1]),
-                 "%d/%d", svc->program_number, svc->pmt_pid);
-        argv[argc++] = "--add-service";
-        argv[argc++] = service_args[i][1];
-    }
+    argv[argc++] = "--ts-id";
+    argv[argc++] = tsid_str;
 
-    /* SDT plugin - set service names and types */
+    /* SDT plugin - update service names and types from merged streams */
     argv[argc++] = "-P";
     argv[argc++] = "sdt";
-    argv[argc++] = "--create";
     for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
         mux_service_t *svc = &state->services[i];
 
