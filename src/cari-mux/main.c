@@ -243,46 +243,13 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
         argv[argc++] = merge_cmds[i];
     }
 
-    /* PAT plugin - let merge handle PAT merging, just set TS ID */
-    static char tsid_str[32];
-    snprintf(tsid_str, sizeof(tsid_str), "%d", state->ts_id);
-    argv[argc++] = "-P";
-    argv[argc++] = "pat";
-    argv[argc++] = "--ts-id";
-    argv[argc++] = tsid_str;
+    /*
+     * Note: The merge plugin automatically handles PAT/SDT merging.
+     * Each merged SPTS contributes its services to the combined PAT/SDT.
+     * No need for explicit pat/sdt plugins for basic merging.
+     */
 
-    /* SDT plugin - update service names and types from merged streams */
-    argv[argc++] = "-P";
-    argv[argc++] = "sdt";
-    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
-        mux_service_t *svc = &state->services[i];
-
-        /* Service name */
-        snprintf(service_args[i][2], sizeof(service_args[i][2]),
-                 "%d=%s", svc->program_number, svc->service_name);
-        argv[argc++] = "--service-name";
-        argv[argc++] = service_args[i][2];
-
-        /* Service provider */
-        snprintf(service_args[i][3], sizeof(service_args[i][3]),
-                 "%d=%s", svc->program_number, svc->service_provider);
-        argv[argc++] = "--service-provider";
-        argv[argc++] = service_args[i][3];
-
-        /* Service type */
-        snprintf(service_args[i][4], sizeof(service_args[i][4]),
-                 "%d=%d", svc->program_number, svc->service_type);
-        argv[argc++] = "--service-type";
-        argv[argc++] = service_args[i][4];
-    }
-
-    /* PCR adjust - synchronize PCR across merged streams */
-    static char pcr_ref_str[32];
-    snprintf(pcr_ref_str, sizeof(pcr_ref_str), "%d", state->pcr_reference_service);
-    argv[argc++] = "-P";
-    argv[argc++] = "pcradjust";
-    argv[argc++] = "--reference-service";
-    argv[argc++] = pcr_ref_str;
+    (void)service_args;  /* Unused for now - merge handles PSI */
 
     /* Regulate for CBR output */
     argv[argc++] = "-P";
