@@ -9,15 +9,15 @@ Type=simple
 User=root
 Group=root
 
-# Configuration - uses EnvironmentFile to get CONFIG_DIR
-EnvironmentFile=-/etc/caritrans/caritrans.env
+# Configuration
+Environment="CONFIG_DIR=/etc/caritrans"
 Environment="RUN_DIR=/run/caritrans"
 Environment="LOG_DIR=/var/log/caritrans"
 # TSDuck path
 Environment="PATH=/usr/bin:/usr/local/bin:/opt/tsduck/bin"
 
 # Main process - cari-mux reads config and forks tsp
-ExecStart=/usr/local/bin/cari-mux --config /home/user/Caricoder2/config/muxers/%i.conf
+ExecStart=/usr/local/bin/cari-mux --config ${CONFIG_DIR}/muxers/%i.conf
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart behavior
