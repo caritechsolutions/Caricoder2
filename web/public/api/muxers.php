@@ -11,7 +11,7 @@ require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
 
 // CariTranscoder API URL (Python FastAPI running as root for systemd control)
-define('CARI_API_URL', 'http://127.0.0.1:8000');
+define('CARI_API_URL', 'http://127.0.0.1:8081');
 
 // Check authentication
 if (!auth_is_logged_in()) {

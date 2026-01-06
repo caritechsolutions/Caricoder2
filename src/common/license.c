@@ -28,7 +28,8 @@
 
 /* Public key for license verification (embedded) */
 /* In production, this would be your actual RSA public key */
-static const char *LICENSE_PUBLIC_KEY =
+/* Currently unused - will be used when crypto verification is implemented */
+static const char *LICENSE_PUBLIC_KEY __attribute__((unused)) =
 "-----BEGIN PUBLIC KEY-----\n"
 "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWi\n"
 "Placeholder_Key_Replace_With_Real_Key_In_Production_AAAAAAAAAAAAAAAAAAAA\n"
