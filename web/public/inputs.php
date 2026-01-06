@@ -2768,6 +2768,16 @@ async function loadStreamMediaInfo(inputId) {
     }
 }
 
+// Helper to convert PID to decimal (handles hex like "0x44" or decimal strings)
+function pidToDecimal(pid) {
+    if (pid === null || pid === undefined) return '-';
+    const pidStr = String(pid);
+    if (pidStr.startsWith('0x') || pidStr.startsWith('0X')) {
+        return parseInt(pidStr, 16);
+    }
+    return parseInt(pidStr, 10) || pidStr;
+}
+
 // Render input stream info with full PID details
 function renderInputStreamInfo(mediaInfo) {
     const container = document.getElementById('inputStreamInfo');
@@ -2776,19 +2786,21 @@ function renderInputStreamInfo(mediaInfo) {
     // Video info
     if (mediaInfo.video) {
         const v = mediaInfo.video;
-        const resolution = (v.width && v.height) ? `${v.width}x${v.height}` : '';
+        const resolution = (v.width && v.height) ? `${v.width}x${v.height}` : '-';
         const codecInfo = v.codec + (v.profile ? ` (${v.profile})` : '');
+        const pid = pidToDecimal(v.pid || currentInputConfig?.video_pid);
+
         html += `
-            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
-                <div>
-                    <i class="bi bi-camera-video text-info me-1"></i>
+            <div class="mb-3">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-camera-video text-info me-2"></i>
                     <span class="fw-semibold">Video</span>
                 </div>
-                <span class="badge bg-info">PID ${v.pid || currentInputConfig?.video_pid || '-'}</span>
-            </div>
-            <div class="row mb-2">
-                <div class="col-6"><span class="text-muted">Codec:</span> ${codecInfo}</div>
-                <div class="col-6"><span class="text-muted">Resolution:</span> ${resolution || '-'}</div>
+                <table class="table table-sm table-borderless mb-0 ms-3">
+                    <tr><td class="text-muted py-0" style="width:80px">Format</td><td class="py-0">${codecInfo}</td></tr>
+                    <tr><td class="text-muted py-0">Resolution</td><td class="py-0">${resolution}</td></tr>
+                    <tr><td class="text-muted py-0">PID</td><td class="py-0"><span class="badge bg-info">${pid}</span></td></tr>
+                </table>
             </div>
         `;
     }
@@ -2796,28 +2808,31 @@ function renderInputStreamInfo(mediaInfo) {
     // Audio info
     if (mediaInfo.audio && mediaInfo.audio.length > 0) {
         html += `
-            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
-                <div>
-                    <i class="bi bi-volume-up text-success me-1"></i>
+            <div>
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-volume-up text-success me-2"></i>
                     <span class="fw-semibold">Audio (${mediaInfo.audio.length} track${mediaInfo.audio.length > 1 ? 's' : ''})</span>
                 </div>
-            </div>
         `;
 
         mediaInfo.audio.forEach((a, idx) => {
-            const lang = a.language && a.language !== 'und' ? a.language.toUpperCase() : '';
-            const channels = a.channels ? `${a.channels}ch` : '';
-            const channelLayout = a.channel_layout ? ` (${a.channel_layout})` : '';
+            const lang = a.language && a.language !== 'und' ? a.language.toUpperCase() : '-';
+            const channels = a.channels ? `${a.channels}ch` : '-';
+            const channelLayout = a.channel_layout ? ` ${a.channel_layout}` : '';
+            const codec = a.codec || '-';
+            const pid = pidToDecimal(a.pid);
+
             html += `
-                <div class="d-flex justify-content-between align-items-center ${idx < mediaInfo.audio.length - 1 ? 'mb-1' : ''}">
-                    <div>
-                        <span class="badge bg-success me-1">PID ${a.pid || '-'}</span>
-                        ${a.codec || '-'} ${channels}${channelLayout}
-                    </div>
-                    ${lang ? `<span class="badge bg-secondary">${lang}</span>` : ''}
-                </div>
+                <table class="table table-sm table-borderless mb-${idx < mediaInfo.audio.length - 1 ? '2' : '0'} ms-3">
+                    ${mediaInfo.audio.length > 1 ? `<tr><td colspan="2" class="py-0 text-muted small">Track ${idx + 1}</td></tr>` : ''}
+                    <tr><td class="text-muted py-0" style="width:80px">Format</td><td class="py-0">${codec} ${channels}${channelLayout}</td></tr>
+                    <tr><td class="text-muted py-0">Language</td><td class="py-0">${lang}</td></tr>
+                    <tr><td class="text-muted py-0">PID</td><td class="py-0"><span class="badge bg-success">${pid}</span></td></tr>
+                </table>
             `;
         });
+
+        html += '</div>';
     }
 
     html += '</div>';
@@ -2837,10 +2852,16 @@ function renderBasicInputInfo() {
 
     // Video PID
     if (currentInputConfig.video_pid) {
+        const pid = pidToDecimal(currentInputConfig.video_pid);
         html += `
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <div><i class="bi bi-camera-video text-info me-1"></i><span class="fw-semibold">Video</span></div>
-                <span class="badge bg-info">PID ${currentInputConfig.video_pid}</span>
+            <div class="mb-3">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-camera-video text-info me-2"></i>
+                    <span class="fw-semibold">Video</span>
+                </div>
+                <table class="table table-sm table-borderless mb-0 ms-3">
+                    <tr><td class="text-muted py-0" style="width:80px">PID</td><td class="py-0"><span class="badge bg-info">${pid}</span></td></tr>
+                </table>
             </div>
         `;
     }
@@ -2848,14 +2869,17 @@ function renderBasicInputInfo() {
     // Audio PIDs
     if (currentInputConfig.audio_pids && currentInputConfig.audio_pids.length > 0) {
         html += `
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <div><i class="bi bi-volume-up text-success me-1"></i><span class="fw-semibold">Audio</span></div>
-                <div>
+            <div>
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-volume-up text-success me-2"></i>
+                    <span class="fw-semibold">Audio</span>
+                </div>
+                <table class="table table-sm table-borderless mb-0 ms-3">
         `;
         currentInputConfig.audio_pids.forEach(pid => {
-            html += `<span class="badge bg-success me-1">PID ${pid}</span>`;
+            html += `<tr><td class="text-muted py-0" style="width:80px">PID</td><td class="py-0"><span class="badge bg-success">${pidToDecimal(pid)}</span></td></tr>`;
         });
-        html += '</div></div>';
+        html += '</table></div>';
     }
 
     html += '</div>';
@@ -2890,43 +2914,63 @@ function renderOutputStreamInfo(pidsData) {
     let html = '<div class="small">';
     let totalBitrate = 0;
 
-    // Get configured video/audio PIDs
-    const videoPid = currentInputConfig?.video_pid;
-    const audioPids = currentInputConfig?.audio_pids || [];
+    // Separate video and audio PIDs by bitrate (video typically > 500kbps)
+    const videoPids = [];
+    const audioPids = [];
 
-    // Video PID
-    if (videoPid && pidsData[videoPid]) {
-        const bitrate = pidsData[videoPid].current_bitrate || 0;
+    for (const [pid, pidData] of Object.entries(pidsData)) {
+        const bitrate = pidData.current_bitrate || 0;
         totalBitrate += bitrate;
-        html += `
-            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
-                <div>
-                    <i class="bi bi-camera-video text-info me-1"></i>
-                    <span class="badge bg-info">PID ${videoPid}</span>
-                    <span class="ms-1">Video</span>
-                </div>
-                <span class="fw-bold text-info">${formatBitrate(bitrate)}</span>
-            </div>
-        `;
+        if (bitrate > 500000) {
+            videoPids.push({ pid: pidToDecimal(pid), bitrate, name: pidData.name || '' });
+        } else if (bitrate > 0) {
+            audioPids.push({ pid: pidToDecimal(pid), bitrate, name: pidData.name || '' });
+        }
     }
 
-    // Audio PIDs
-    audioPids.forEach((pid, idx) => {
-        if (pidsData[pid]) {
-            const bitrate = pidsData[pid].current_bitrate || 0;
-            totalBitrate += bitrate;
-            html += `
-                <div class="d-flex justify-content-between align-items-center ${idx < audioPids.length - 1 ? 'mb-1' : 'mb-2'}">
-                    <div>
-                        <i class="bi bi-volume-up text-success me-1"></i>
-                        <span class="badge bg-success">PID ${pid}</span>
-                        <span class="ms-1">Audio</span>
-                    </div>
-                    <span class="fw-bold text-success">${formatBitrate(bitrate)}</span>
+    // Video section
+    if (videoPids.length > 0) {
+        html += `
+            <div class="mb-3">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-camera-video text-info me-2"></i>
+                    <span class="fw-semibold">Video</span>
                 </div>
+                <table class="table table-sm table-borderless mb-0 ms-3">
+        `;
+        videoPids.forEach(v => {
+            html += `
+                <tr>
+                    <td class="text-muted py-0" style="width:50px">PID</td>
+                    <td class="py-0"><span class="badge bg-info">${v.pid}</span></td>
+                    <td class="py-0 text-end fw-bold text-info">${formatBitrate(v.bitrate)}</td>
+                </tr>
             `;
-        }
-    });
+        });
+        html += '</table></div>';
+    }
+
+    // Audio section
+    if (audioPids.length > 0) {
+        html += `
+            <div class="mb-3">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-volume-up text-success me-2"></i>
+                    <span class="fw-semibold">Audio</span>
+                </div>
+                <table class="table table-sm table-borderless mb-0 ms-3">
+        `;
+        audioPids.forEach(a => {
+            html += `
+                <tr>
+                    <td class="text-muted py-0" style="width:50px">PID</td>
+                    <td class="py-0"><span class="badge bg-success">${a.pid}</span></td>
+                    <td class="py-0 text-end fw-bold text-success">${formatBitrate(a.bitrate)}</td>
+                </tr>
+            `;
+        });
+        html += '</table></div>';
+    }
 
     // Total bitrate
     if (totalBitrate > 0) {
