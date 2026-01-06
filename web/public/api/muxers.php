@@ -10,6 +10,9 @@ require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
 
+// CariTranscoder API URL (Python FastAPI running as root for systemd control)
+define('CARI_API_URL', 'http://127.0.0.1:8000');
+
 // Check authentication
 if (!auth_is_logged_in()) {
     http_response_code(401);
@@ -77,6 +80,36 @@ function get_service_types() {
         0x1F => 'HEVC TV',
         0x20 => 'HEVC UHD TV'
     ];
+}
+
+/**
+ * Call CariTranscoder API (Python FastAPI running as root for systemd control)
+ */
+function call_cari_api($endpoint, $method = 'GET', $data = null) {
+    $url = CARI_API_URL . $endpoint;
+
+    $options = [
+        'http' => [
+            'method' => $method,
+            'timeout' => 10,
+            'ignore_errors' => true,
+            'header' => "Content-Type: application/json\r\n"
+        ]
+    ];
+
+    if ($data !== null && in_array($method, ['POST', 'PUT', 'PATCH'])) {
+        $options['http']['content'] = json_encode($data);
+    }
+
+    $context = stream_context_create($options);
+    $response = @file_get_contents($url, false, $context);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Failed to connect to CariTranscoder API'];
+    }
+
+    $result = json_decode($response, true);
+    return $result ?: ['success' => false, 'error' => 'Invalid API response'];
 }
 
 /**
@@ -502,7 +535,7 @@ function handle_delete($id) {
 }
 
 /**
- * Start muxer using systemd
+ * Start muxer using systemd via cari-api
  */
 function handle_start($id) {
     if (empty($id)) {
@@ -524,21 +557,16 @@ function handle_start($id) {
         return;
     }
 
-    // Start via systemd
-    $service_name = "cari-mux@{$id}.service";
-    exec("sudo systemctl start " . escapeshellarg($service_name) . " 2>&1", $output, $ret);
+    // Start via cari-api (Python FastAPI running as root)
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'start',
+        'service_name' => "cari-mux@$id"
+    ]);
 
-    // Wait and check status
-    usleep(500000); // 0.5 seconds
-
-    if (get_mux_status($id) === 'running') {
+    if ($result && isset($result['success']) && $result['success']) {
         echo json_encode(['success' => true, 'message' => 'Muxer started successfully']);
     } else {
-        // Try to get error from journalctl
-        $error_output = [];
-        exec("sudo journalctl -u " . escapeshellarg($service_name) . " -n 5 --no-pager 2>&1", $error_output);
-        $error_msg = !empty($error_output) ? implode("\n", array_slice($error_output, -3)) : 'Check system logs';
-        echo json_encode(['success' => false, 'error' => 'Muxer failed to start: ' . $error_msg]);
+        echo json_encode(['success' => false, 'error' => $result['error'] ?? 'Failed to start muxer']);
     }
 }
 
@@ -683,15 +711,15 @@ function handle_stop($id) {
 }
 
 /**
- * Stop mux process using systemd
+ * Stop mux process using systemd via cari-api
  */
 function stop_mux($id) {
-    $service_name = "cari-mux@{$id}.service";
-    exec("sudo systemctl stop " . escapeshellarg($service_name) . " 2>&1", $output, $ret);
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'stop',
+        'service_name' => "cari-mux@$id"
+    ]);
 
-    // Wait and verify
-    usleep(500000);
-    return get_mux_status($id) === 'stopped';
+    return $result && isset($result['success']) && $result['success'];
 }
 
 /**
