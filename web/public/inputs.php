@@ -2153,6 +2153,7 @@ let avsyncUpdateInterval = null;
 let previewKeepaliveInterval = null;
 let previewStatusInterval = null;
 let hlsPlayer = null;
+let inputPlayerRunning = false;
 let currentPreviewId = null;
 let currentInputType = null;
 let currentInputApiPort = null;
@@ -2527,6 +2528,9 @@ async function startInputPlayer() {
     const inputId = currentPreviewId;
     if (!inputId) return;
 
+    // Mark player as running
+    inputPlayerRunning = true;
+
     // Update button states
     document.getElementById('startInputPlayerBtn').classList.add('d-none');
     document.getElementById('stopInputPlayerBtn').classList.remove('d-none');
@@ -2541,6 +2545,9 @@ async function startInputPlayer() {
 
 // Stop input player button handler
 function stopInputPlayer() {
+    // Mark player as not running
+    inputPlayerRunning = false;
+
     // Stop keepalive
     if (previewKeepaliveInterval) {
         clearInterval(previewKeepaliveInterval);
@@ -2570,10 +2577,15 @@ function stopInputPlayer() {
         video.classList.add('d-none');
     }
 
-    // Show overlay again
-    document.getElementById('videoLoadingOverlay').classList.remove('d-none');
-    document.getElementById('videoLoadingOverlay').classList.add('d-flex');
-    document.getElementById('videoStatusText').textContent = 'Click Start to preview input';
+    // Show overlay again - reset to clean state without spinner
+    const overlay = document.getElementById('videoLoadingOverlay');
+    overlay.innerHTML = `
+        <div class="text-center text-white">
+            <div id="videoStatusText" class="text-muted">Click Start to preview input</div>
+        </div>
+    `;
+    overlay.classList.remove('d-none');
+    overlay.classList.add('d-flex');
 
     // Update button states
     document.getElementById('startInputPlayerBtn').classList.remove('d-none');
@@ -2678,6 +2690,9 @@ function initHlsPlayer(playlistUrl) {
         hookInputHlsStatsEvents(hlsPlayer);
 
         hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+            // Guard against race condition if stop was clicked
+            if (!inputPlayerRunning) return;
+
             // Hide overlay, show video
             document.getElementById('videoLoadingOverlay').classList.remove('d-flex');
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
@@ -2701,6 +2716,9 @@ function initHlsPlayer(playlistUrl) {
         // Safari native HLS
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', function() {
+            // Guard against race condition if stop was clicked
+            if (!inputPlayerRunning) return;
+
             document.getElementById('videoLoadingOverlay').classList.remove('d-flex');
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');

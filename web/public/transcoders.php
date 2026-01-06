@@ -2455,6 +2455,9 @@ async function startOutputPlayer() {
 
 // Stop output player preview
 async function stopOutputPlayer() {
+    // Mark player as not running immediately to prevent race conditions
+    outputPlayerRunning = false;
+
     const id = document.getElementById('previewId').value;
     const apiPort = document.getElementById('previewApiPort').value;
     const previewPort = parseInt(apiPort) + 100;
@@ -2473,6 +2476,8 @@ async function stopOutputPlayer() {
     }
 
     const video = document.getElementById('outputVideo');
+    video.pause();
+    video.src = '';
     video.classList.add('d-none');
     document.getElementById('videoLoadingOverlay').classList.remove('d-none');
 
@@ -2485,7 +2490,6 @@ async function stopOutputPlayer() {
     }
 
     // Reset state
-    outputPlayerRunning = false;
     window.previewStarted = false;
     ccEnabled = false;
     document.getElementById('startPlayerBtn').classList.remove('d-none');
@@ -2548,6 +2552,9 @@ function initOutputHlsPlayer(playlistUrl) {
 
         // Handle manifest parsed - populate quality levels
         outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
+            // Guard against race condition if stop was clicked
+            if (!outputPlayerRunning) return;
+
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
             document.getElementById('playerStatus').className = 'badge bg-success';
@@ -2609,6 +2616,9 @@ function initOutputHlsPlayer(playlistUrl) {
         // Safari native HLS - quality selection handled by Safari
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', function() {
+            // Guard against race condition if stop was clicked
+            if (!outputPlayerRunning) return;
+
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
             document.getElementById('playerStatus').className = 'badge bg-success';
