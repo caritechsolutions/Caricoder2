@@ -1,9 +1,9 @@
 /*
- * CariTranscoder - Mux Application
+ * CariTranscoder - TSDuck Mux Application
  * Copyright (c) 2024 CariTech Solutions
  *
- * Multiplexes multiple SPTS into MPTS or performs stream manipulation.
- * Integrates with TSDuck for advanced PSI/SI operations.
+ * Reads muxer configuration and executes TSDuck tsp command
+ * to multiplex multiple SPTS into MPTS with PSI/SI generation.
  */
 
 #define _GNU_SOURCE
@@ -13,27 +13,32 @@
 #include <unistd.h>
 #include <signal.h>
 #include <getopt.h>
-#include <pthread.h>
-#include <gst/gst.h>
-#include <gst/app/gstappsrc.h>
-#include <gst/app/gstappsink.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #include "config.h"
 #include "logging.h"
-#include "ring_buffer.h"
-#include "ts_packet.h"
-#include "license.h"
 
-#define MAX_INPUTS 16
+#define VERSION "2.0.0"
+#define MAX_SERVICES 16
+#define MAX_CMD_LEN 8192
+#define MAX_ARGS 256
 
-/* Input source */
+/* Service definition */
 typedef struct {
-    char buffer_name[128];
-    ring_buffer_t *buffer;
+    int enabled;
+    char source_type[32];
+    char source_id[64];
+    char source_address[64];
+    int source_port;
     int program_number;
-    pthread_t thread;
-    volatile int running;
-} mux_input_t;
+    char service_name[128];
+    char service_provider[128];
+    int service_type;
+    int pmt_pid;
+    int is_pcr_reference;
+} mux_service_t;
 
 /* Mux state */
 typedef struct {
@@ -41,35 +46,32 @@ typedef struct {
     char config_file[256];
     char id[64];
     char name[128];
-    char mode[32];              /* mpts, spts, remux */
 
-    /* Inputs */
-    mux_input_t inputs[MAX_INPUTS];
-    int input_count;
+    /* Output settings */
+    int output_bitrate;
+    char output_address[64];
+    int output_port;
 
-    /* Output */
-    char output_buffer_name[128];
-    ring_buffer_t *output_buffer;
+    /* Network settings */
+    int network_id;
+    char network_name[64];
+    int ts_id;
+    int original_network_id;
 
-    /* GStreamer */
-    GstElement *pipeline;
-    GstElement *muxer;
-    GstElement *appsink;
-    GMainLoop *main_loop;
+    /* PSI intervals */
+    int pat_interval;
+    int pmt_interval;
+    int sdt_interval;
+    int nit_interval;
 
-    /* TSDuck settings */
-    int tsduck_enabled;
-    int regulate_bitrate;
-    int target_bitrate;
-    int pcr_restamp;
+    /* Services */
+    mux_service_t services[MAX_SERVICES];
+    int service_count;
+    int pcr_reference_service;
 
-    /* Statistics */
-    uint64_t packets_in;
-    uint64_t packets_out;
-
-    /* State */
+    /* Runtime */
     volatile int running;
-    license_info_t license;
+    pid_t tsp_pid;
 } mux_state_t;
 
 static mux_state_t g_state = {0};
@@ -78,11 +80,10 @@ static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
         CARI_LOG_INFO("Received signal %d, shutting down...", signum);
         g_state.running = 0;
-        for (int i = 0; i < g_state.input_count; i++) {
-            g_state.inputs[i].running = 0;
-        }
-        if (g_state.main_loop) {
-            g_main_loop_quit(g_state.main_loop);
+
+        /* Forward signal to tsp child process */
+        if (g_state.tsp_pid > 0) {
+            kill(g_state.tsp_pid, SIGTERM);
         }
     }
 }
@@ -92,197 +93,390 @@ static int load_config(mux_state_t *state) {
         return -1;
     }
 
+    /* Muxer identification */
     strncpy(state->id,
-            config_get_string(&state->config, "muxer", "id", "mux-001"),
+            config_get_string(&state->config, "muxer", "id", "mux-1"),
             sizeof(state->id) - 1);
 
     strncpy(state->name,
-            config_get_string(&state->config, "muxer", "name", "Unnamed Mux"),
+            config_get_string(&state->config, "muxer", "name", state->id),
             sizeof(state->name) - 1);
 
-    strncpy(state->mode,
-            config_get_string(&state->config, "muxer", "mode", "mpts"),
-            sizeof(state->mode) - 1);
+    /* Output settings */
+    state->output_bitrate = config_get_int(&state->config, "output", "output_bitrate", 20000000);
+    strncpy(state->output_address,
+            config_get_string(&state->config, "output", "address", "239.1.1.1"),
+            sizeof(state->output_address) - 1);
+    state->output_port = config_get_int(&state->config, "output", "port", 5000);
 
-    /* Output buffer */
-    strncpy(state->output_buffer_name,
-            config_get_string(&state->config, "output", "buffer_name", state->id),
-            sizeof(state->output_buffer_name) - 1);
+    /* Network settings */
+    state->network_id = config_get_int(&state->config, "network", "network_id", 1);
+    strncpy(state->network_name,
+            config_get_string(&state->config, "network", "network_name", "CariTrans"),
+            sizeof(state->network_name) - 1);
+    state->ts_id = config_get_int(&state->config, "network", "ts_id", 1);
+    state->original_network_id = config_get_int(&state->config, "network", "original_network_id", 1);
 
-    /* TSDuck settings */
-    state->tsduck_enabled = config_get_bool(&state->config, "tsduck", "enabled", false);
-    state->regulate_bitrate = config_get_bool(&state->config, "tsduck", "regulate_bitrate", false);
-    state->target_bitrate = config_get_int(&state->config, "tsduck", "target_bitrate", 0);
-    state->pcr_restamp = config_get_bool(&state->config, "tsduck", "pcr_restamp", true);
+    /* PSI intervals */
+    state->pat_interval = config_get_int(&state->config, "tsduck", "pat_interval", 100);
+    state->pmt_interval = config_get_int(&state->config, "tsduck", "pmt_interval", 100);
+    state->sdt_interval = config_get_int(&state->config, "tsduck", "sdt_interval", 500);
+    state->nit_interval = config_get_int(&state->config, "tsduck", "nit_interval", 10000);
 
-    /* Parse input sources from programs section */
-    state->input_count = 0;
-    for (int i = 1; i <= MAX_INPUTS; i++) {
-        char key[64];
-        snprintf(key, sizeof(key), "program.%d.enabled", i);
-        if (!config_get_bool(&state->config, "programs", key, false)) {
+    /* Parse services */
+    state->service_count = 0;
+    state->pcr_reference_service = 0;
+
+    for (int i = 1; i <= MAX_SERVICES; i++) {
+        char key[128];
+
+        snprintf(key, sizeof(key), "service.%d.enabled", i);
+        if (!config_get_bool(&state->config, "services", key, false)) {
             continue;
         }
 
-        mux_input_t *input = &state->inputs[state->input_count];
+        mux_service_t *svc = &state->services[state->service_count];
+        svc->enabled = 1;
 
-        snprintf(key, sizeof(key), "program.%d.source", i);
-        strncpy(input->buffer_name,
-                config_get_string(&state->config, "programs", key, ""),
-                sizeof(input->buffer_name) - 1);
+        snprintf(key, sizeof(key), "service.%d.source_type", i);
+        strncpy(svc->source_type,
+                config_get_string(&state->config, "services", key, "input"),
+                sizeof(svc->source_type) - 1);
 
-        snprintf(key, sizeof(key), "program.%d.number", i);
-        input->program_number = config_get_int(&state->config, "programs", key, i);
+        snprintf(key, sizeof(key), "service.%d.source_id", i);
+        strncpy(svc->source_id,
+                config_get_string(&state->config, "services", key, ""),
+                sizeof(svc->source_id) - 1);
 
-        if (input->buffer_name[0]) {
-            state->input_count++;
-            CARI_LOG_INFO("Input %d: %s (program %d)", state->input_count,
-                     input->buffer_name, input->program_number);
+        snprintf(key, sizeof(key), "service.%d.source_address", i);
+        strncpy(svc->source_address,
+                config_get_string(&state->config, "services", key, ""),
+                sizeof(svc->source_address) - 1);
+
+        snprintf(key, sizeof(key), "service.%d.source_port", i);
+        svc->source_port = config_get_int(&state->config, "services", key, 0);
+
+        snprintf(key, sizeof(key), "service.%d.program_number", i);
+        svc->program_number = config_get_int(&state->config, "services", key, 1000 + i);
+
+        snprintf(key, sizeof(key), "service.%d.service_name", i);
+        strncpy(svc->service_name,
+                config_get_string(&state->config, "services", key, ""),
+                sizeof(svc->service_name) - 1);
+
+        snprintf(key, sizeof(key), "service.%d.service_provider", i);
+        strncpy(svc->service_provider,
+                config_get_string(&state->config, "services", key, "CariTrans"),
+                sizeof(svc->service_provider) - 1);
+
+        snprintf(key, sizeof(key), "service.%d.service_type", i);
+        svc->service_type = config_get_int(&state->config, "services", key, 0x01);
+
+        snprintf(key, sizeof(key), "service.%d.pmt_pid", i);
+        svc->pmt_pid = config_get_int(&state->config, "services", key, 256 + state->service_count * 256);
+
+        snprintf(key, sizeof(key), "service.%d.is_pcr_reference", i);
+        svc->is_pcr_reference = config_get_bool(&state->config, "services", key, false);
+
+        if (svc->is_pcr_reference && state->pcr_reference_service == 0) {
+            state->pcr_reference_service = svc->program_number;
+        }
+
+        if (svc->source_address[0] && svc->source_port > 0) {
+            state->service_count++;
+            CARI_LOG_INFO("Service %d: %s (%s:%d) -> Program %d",
+                     state->service_count, svc->service_name,
+                     svc->source_address, svc->source_port, svc->program_number);
         }
     }
 
-    CARI_LOG_INFO("Configured: %s (%s) - Mode: %s, Inputs: %d",
-             state->name, state->id, state->mode, state->input_count);
+    /* Default PCR reference to first service if not set */
+    if (state->pcr_reference_service == 0 && state->service_count > 0) {
+        state->pcr_reference_service = state->services[0].program_number;
+    }
+
+    CARI_LOG_INFO("Configured: %s (%s) - %d services, %d bps output",
+             state->name, state->id, state->service_count, state->output_bitrate);
 
     return 0;
 }
 
-/* Input reader thread */
-static void* input_reader_func(void *arg) {
-    mux_input_t *input = (mux_input_t *)arg;
-    ts_packet_raw_t packets[7];
+/*
+ * Build TSDuck tsp command arguments
+ */
+static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
+    int argc = 0;
+    static char bitrate_str[32];
+    static char service_args[MAX_SERVICES][16][256];
 
-    while (input->running) {
-        int count = ring_buffer_read_batch(input->buffer, packets, 7);
-        if (count > 0) {
-            /* TODO: Push to muxer pipeline */
-            ring_buffer_heartbeat(input->buffer);
-            g_state.packets_in += count;
-        } else {
-            usleep(1000);
-        }
+    /* Command */
+    argv[argc++] = "tsp";
+
+    /* Global bitrate */
+    snprintf(bitrate_str, sizeof(bitrate_str), "%d", state->output_bitrate);
+    argv[argc++] = "-b";
+    argv[argc++] = bitrate_str;
+
+    /* First input: null packet generator (sets overall bitrate) */
+    argv[argc++] = "-I";
+    argv[argc++] = "null";
+    argv[argc++] = "--bitrate";
+    argv[argc++] = bitrate_str;
+
+    /* Add inputs for each service */
+    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
+        mux_service_t *svc = &state->services[i];
+
+        snprintf(service_args[i][0], sizeof(service_args[i][0]),
+                 "%s:%d", svc->source_address, svc->source_port);
+
+        argv[argc++] = "-I";
+        argv[argc++] = "ip";
+        argv[argc++] = service_args[i][0];
     }
 
-    return NULL;
+    /* Merge plugin */
+    argv[argc++] = "-P";
+    argv[argc++] = "merge";
+
+    /* PAT plugin - remap services */
+    argv[argc++] = "-P";
+    argv[argc++] = "pat";
+    for (int i = 0; i < state->service_count && argc < max_args - 10; i++) {
+        mux_service_t *svc = &state->services[i];
+        snprintf(service_args[i][1], sizeof(service_args[i][1]),
+                 "%d=%d", i + 1, svc->program_number);
+        argv[argc++] = "--service";
+        argv[argc++] = service_args[i][1];
+    }
+
+    /* SDT plugin - set service names and types */
+    argv[argc++] = "-P";
+    argv[argc++] = "sdt";
+    argv[argc++] = "--create";
+    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
+        mux_service_t *svc = &state->services[i];
+
+        /* Service name */
+        snprintf(service_args[i][2], sizeof(service_args[i][2]),
+                 "%d=%s", svc->program_number, svc->service_name);
+        argv[argc++] = "--service-name";
+        argv[argc++] = service_args[i][2];
+
+        /* Service provider */
+        snprintf(service_args[i][3], sizeof(service_args[i][3]),
+                 "%d=%s", svc->program_number, svc->service_provider);
+        argv[argc++] = "--service-provider";
+        argv[argc++] = service_args[i][3];
+
+        /* Service type */
+        snprintf(service_args[i][4], sizeof(service_args[i][4]),
+                 "%d=%d", svc->program_number, svc->service_type);
+        argv[argc++] = "--service-type";
+        argv[argc++] = service_args[i][4];
+    }
+
+    /* PCR adjust */
+    static char pcr_ref_str[32];
+    snprintf(pcr_ref_str, sizeof(pcr_ref_str), "%d", state->pcr_reference_service);
+    argv[argc++] = "-P";
+    argv[argc++] = "pcradjust";
+    argv[argc++] = "--reference-service";
+    argv[argc++] = pcr_ref_str;
+
+    /* Regulate for CBR output */
+    argv[argc++] = "-P";
+    argv[argc++] = "regulate";
+
+    /* Output to UDP */
+    static char output_addr[128];
+    snprintf(output_addr, sizeof(output_addr), "%s:%d",
+             state->output_address, state->output_port);
+    argv[argc++] = "-O";
+    argv[argc++] = "ip";
+    argv[argc++] = output_addr;
+
+    /* Null terminate */
+    argv[argc] = NULL;
+
+    return argc;
 }
 
-/* Output callback */
-static GstFlowReturn on_new_sample(GstAppSink *appsink, gpointer user_data) {
-    mux_state_t *state = (mux_state_t *)user_data;
-    GstSample *sample = gst_app_sink_pull_sample(appsink);
-    if (!sample) return GST_FLOW_ERROR;
-
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    GstMapInfo map;
-
-    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        size_t offset = 0;
-        while (offset + TS_PACKET_SIZE <= map.size) {
-            ts_packet_raw_t *packet = (ts_packet_raw_t *)(map.data + offset);
-            if (ts_packet_valid(packet)) {
-                ring_buffer_write(state->output_buffer, packet);
-                state->packets_out++;
-            }
-            offset += TS_PACKET_SIZE;
+/*
+ * Print the command that will be executed
+ */
+static void print_command(char **argv) {
+    fprintf(stderr, "Executing: ");
+    for (int i = 0; argv[i] != NULL; i++) {
+        /* Quote arguments with spaces */
+        if (strchr(argv[i], ' ')) {
+            fprintf(stderr, "\"%s\" ", argv[i]);
+        } else {
+            fprintf(stderr, "%s ", argv[i]);
         }
-        ring_buffer_heartbeat(state->output_buffer);
-        gst_buffer_unmap(buffer, &map);
+    }
+    fprintf(stderr, "\n");
+}
+
+/*
+ * Execute TSDuck tsp command
+ */
+static int run_tsp(mux_state_t *state) {
+    char *argv[MAX_ARGS];
+
+    int argc = build_tsp_args(state, argv, MAX_ARGS);
+    if (argc <= 0) {
+        CARI_LOG_ERROR("Failed to build tsp arguments");
+        return -1;
     }
 
-    gst_sample_unref(sample);
-    return GST_FLOW_OK;
+    print_command(argv);
+
+    /* Fork and exec */
+    pid_t pid = fork();
+    if (pid < 0) {
+        CARI_LOG_ERROR("Fork failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process - execute tsp */
+        execvp("tsp", argv);
+
+        /* If exec fails */
+        fprintf(stderr, "Failed to execute tsp: %s\n", strerror(errno));
+        _exit(127);
+    }
+
+    /* Parent process */
+    state->tsp_pid = pid;
+    CARI_LOG_INFO("Started tsp process with PID %d", pid);
+
+    /* Wait for child to exit */
+    int status;
+    while (state->running) {
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result == pid) {
+            /* Child exited */
+            if (WIFEXITED(status)) {
+                int exit_code = WEXITSTATUS(status);
+                CARI_LOG_INFO("tsp exited with code %d", exit_code);
+                return exit_code;
+            } else if (WIFSIGNALED(status)) {
+                CARI_LOG_INFO("tsp killed by signal %d", WTERMSIG(status));
+                return -1;
+            }
+            break;
+        } else if (result < 0 && errno != EINTR) {
+            CARI_LOG_ERROR("waitpid error: %s", strerror(errno));
+            break;
+        }
+
+        /* Sleep briefly to avoid busy waiting */
+        usleep(100000);  /* 100ms */
+    }
+
+    /* If we're stopping, ensure child is terminated */
+    if (!state->running && state->tsp_pid > 0) {
+        kill(state->tsp_pid, SIGTERM);
+        waitpid(state->tsp_pid, &status, 0);
+    }
+
+    state->tsp_pid = 0;
+    return 0;
 }
 
 static void print_usage(const char *prog) {
-    printf("CariTranscoder Mux - v1.0.0\n");
-    printf("Usage: %s -c <config_file> [options]\n", prog);
+    printf("CariTranscoder Mux (TSDuck) - v%s\n", VERSION);
+    printf("Multiplexes SPTS streams into MPTS using TSDuck\n\n");
+    printf("Usage: %s -c <config_file> [options]\n\n", prog);
+    printf("Options:\n");
+    printf("  -c, --config FILE    Configuration file (required)\n");
+    printf("  -d, --debug          Enable debug logging\n");
+    printf("  -t, --test           Test mode - print command without executing\n");
+    printf("  -h, --help           Show this help\n");
+    printf("\n");
+    printf("The configuration file should contain:\n");
+    printf("  [muxer]     - id, name\n");
+    printf("  [output]    - output_bitrate, address, port\n");
+    printf("  [network]   - network_id, network_name, ts_id\n");
+    printf("  [tsduck]    - pat_interval, pmt_interval, sdt_interval\n");
+    printf("  [services]  - service.N.enabled, source_address, program_number, etc.\n");
 }
 
 int main(int argc, char *argv[]) {
-    int opt, debug = 0;
+    int opt, debug = 0, test_mode = 0;
     const char *config_file = NULL;
 
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
         {"debug", no_argument, 0, 'd'},
+        {"test", no_argument, 0, 't'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "c:dh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:dth", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c': config_file = optarg; break;
             case 'd': debug = 1; break;
+            case 't': test_mode = 1; break;
             case 'h': print_usage(argv[0]); return 0;
             default: return 1;
         }
     }
 
     if (!config_file) {
-        fprintf(stderr, "Configuration file required\n");
+        fprintf(stderr, "Configuration file required (-c)\n");
+        print_usage(argv[0]);
         return 1;
     }
 
+    /* Initialize logging */
     log_config_t log_cfg = LOG_CONFIG_DEFAULT;
     strncpy(log_cfg.ident, "cari-mux", sizeof(log_cfg.ident));
     if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
     log_init(&log_cfg);
 
-    CARI_LOG_INFO("CariTranscoder Mux starting...");
+    CARI_LOG_INFO("CariTranscoder Mux (TSDuck) v%s starting...", VERSION);
 
+    /* Load configuration */
     strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
-    if (load_config(&g_state) != 0) return 1;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
-
-    gst_init(&argc, &argv);
-
-    /* Open input buffers */
-    for (int i = 0; i < g_state.input_count; i++) {
-        g_state.inputs[i].buffer = ring_buffer_open(g_state.inputs[i].buffer_name, NULL, false);
-        if (!g_state.inputs[i].buffer) {
-            CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.inputs[i].buffer_name);
-            return 1;
-        }
-    }
-
-    /* Create output buffer */
-    ring_buffer_options_t rb_opts = RING_BUFFER_OPTIONS_DEFAULT;
-    g_state.output_buffer = ring_buffer_open(g_state.output_buffer_name, &rb_opts, true);
-    if (!g_state.output_buffer) {
-        CARI_LOG_ERROR("Failed to create output buffer");
+    if (load_config(&g_state) != 0) {
+        CARI_LOG_ERROR("Failed to load configuration");
         return 1;
     }
 
-    /* Start input reader threads */
+    if (g_state.service_count == 0) {
+        CARI_LOG_ERROR("No services configured");
+        return 1;
+    }
+
+    /* Test mode - just print command and exit */
+    if (test_mode) {
+        char *argv_tsp[MAX_ARGS];
+        build_tsp_args(&g_state, argv_tsp, MAX_ARGS);
+        print_command(argv_tsp);
+        config_free(&g_state.config);
+        log_shutdown();
+        return 0;
+    }
+
+    /* Set up signal handlers */
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_DFL);
+
     g_state.running = 1;
-    for (int i = 0; i < g_state.input_count; i++) {
-        g_state.inputs[i].running = 1;
-        pthread_create(&g_state.inputs[i].thread, NULL, input_reader_func, &g_state.inputs[i]);
-    }
 
-    CARI_LOG_INFO("Mux %s started with %d inputs", g_state.id, g_state.input_count);
-
-    /* Simple loop - in real implementation, use GStreamer pipeline */
-    while (g_state.running) {
-        sleep(1);
-        CARI_LOG_DEBUG("Stats: %lu in, %lu out", g_state.packets_in, g_state.packets_out);
-    }
+    /* Run tsp */
+    int ret = run_tsp(&g_state);
 
     /* Cleanup */
-    CARI_LOG_INFO("Shutting down...");
-
-    for (int i = 0; i < g_state.input_count; i++) {
-        g_state.inputs[i].running = 0;
-        pthread_join(g_state.inputs[i].thread, NULL);
-        ring_buffer_close(g_state.inputs[i].buffer, false);
-    }
-
-    ring_buffer_close(g_state.output_buffer, true);
+    CARI_LOG_INFO("Mux %s shutting down", g_state.id);
     config_free(&g_state.config);
     log_shutdown();
 
-    return 0;
+    return ret;
 }

@@ -1,21 +1,14 @@
-# CariTranscoder - Mux Application Makefile
+# CariTranscoder - TSDuck Mux Application Makefile
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -g -I../common
-LDFLAGS = -L../common -lcaricommon -lpthread -lrt -lssl -lcrypto
-
-# GStreamer flags
-GST_CFLAGS = $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 2>/dev/null)
-GST_LIBS = $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 2>/dev/null)
-
-CFLAGS += $(GST_CFLAGS)
-LDFLAGS += $(GST_LIBS)
+LDFLAGS = -L../common -lcaricommon -lpthread
 
 SRCS = main.c
 OBJS = $(SRCS:.c=.o)
 BIN = cari-mux
 
-.PHONY: all clean
+.PHONY: all clean install
 
 all: $(BIN)
 
@@ -27,3 +20,6 @@ $(BIN): $(OBJS) ../common/libcaricommon.a
 
 clean:
 	rm -f $(OBJS) $(BIN)
+
+install: $(BIN)
+	install -m 755 $(BIN) /usr/local/bin/

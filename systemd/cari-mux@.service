@@ -6,40 +6,29 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=caritrans
-Group=caritrans
+User=root
+Group=root
 
-# Configuration
-Environment="CONFIG_DIR=/etc/caritrans"
+# Configuration - uses EnvironmentFile to get CONFIG_DIR
+EnvironmentFile=-/etc/caritrans/caritrans.env
 Environment="RUN_DIR=/run/caritrans"
 Environment="LOG_DIR=/var/log/caritrans"
-Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0"
 # TSDuck path
-Environment="PATH=/usr/bin:/usr/local/bin"
+Environment="PATH=/usr/bin:/usr/local/bin:/opt/tsduck/bin"
 
-# Main process
-ExecStart=/usr/local/bin/cari-mux --config ${CONFIG_DIR}/muxers/%i.conf
+# Main process - cari-mux reads config and forks tsp
+ExecStart=/usr/local/bin/cari-mux --config /home/user/Caricoder2/config/muxers/%i.conf
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart behavior
-Restart=always
+Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Watchdog
-WatchdogSec=30
-
 # Resource limits
 LimitNOFILE=65535
 LimitNPROC=4096
-
-# Security
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
 
 # Logging
 StandardOutput=journal

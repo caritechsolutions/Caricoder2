@@ -221,22 +221,13 @@ function handle_list() {
 }
 
 /**
- * Get muxer status (running/stopped)
+ * Get muxer status (running/stopped) via systemd
  */
 function get_mux_status($id) {
-    // Check if tsp process is running with this mux ID
-    $pid_file = '/run/caritrans/mux-' . $id . '.pid';
-    if (file_exists($pid_file)) {
-        $pid = trim(file_get_contents($pid_file));
-        if ($pid && file_exists("/proc/$pid")) {
-            return 'running';
-        }
-    }
+    $service_name = "cari-mux@{$id}.service";
+    exec("systemctl is-active " . escapeshellarg($service_name) . " 2>/dev/null", $output, $ret);
 
-    // Alternative: check via pgrep
-    $escaped_id = escapeshellarg($id);
-    exec("pgrep -f 'tsp.*mux.*{$escaped_id}' 2>/dev/null", $output, $ret);
-    if ($ret === 0 && !empty($output)) {
+    if ($ret === 0 && !empty($output) && trim($output[0]) === 'active') {
         return 'running';
     }
 
@@ -511,7 +502,7 @@ function handle_delete($id) {
 }
 
 /**
- * Start muxer
+ * Start muxer using systemd
  */
 function handle_start($id) {
     if (empty($id)) {
@@ -533,39 +524,21 @@ function handle_start($id) {
         return;
     }
 
-    $config = parse_config($config_file);
+    // Start via systemd
+    $service_name = "cari-mux@{$id}.service";
+    exec("sudo systemctl start " . escapeshellarg($service_name) . " 2>&1", $output, $ret);
 
-    // Build TSDuck command
-    $cmd = build_tsduck_command($id, $config);
-    if (!$cmd) {
-        echo json_encode(['success' => false, 'error' => 'Failed to build TSDuck command']);
-        return;
-    }
-
-    // Ensure run directory exists
-    if (!is_dir('/run/caritrans')) {
-        @mkdir('/run/caritrans', 0755, true);
-    }
-
-    // Start tsp in background
-    $log_file = '/var/log/caritrans/mux-' . $id . '.log';
-    $pid_file = '/run/caritrans/mux-' . $id . '.pid';
-
-    // Ensure log directory exists
-    if (!is_dir('/var/log/caritrans')) {
-        @mkdir('/var/log/caritrans', 0755, true);
-    }
-
-    $full_cmd = "nohup {$cmd} > {$log_file} 2>&1 & echo \$! > {$pid_file}";
-    exec($full_cmd, $output, $ret);
-
-    // Wait a moment and check if it started
+    // Wait and check status
     usleep(500000); // 0.5 seconds
 
     if (get_mux_status($id) === 'running') {
         echo json_encode(['success' => true, 'message' => 'Muxer started successfully']);
     } else {
-        echo json_encode(['success' => false, 'error' => 'Muxer failed to start - check logs']);
+        // Try to get error from journalctl
+        $error_output = [];
+        exec("sudo journalctl -u " . escapeshellarg($service_name) . " -n 5 --no-pager 2>&1", $error_output);
+        $error_msg = !empty($error_output) ? implode("\n", array_slice($error_output, -3)) : 'Check system logs';
+        echo json_encode(['success' => false, 'error' => 'Muxer failed to start: ' . $error_msg]);
     }
 }
 
@@ -710,25 +683,11 @@ function handle_stop($id) {
 }
 
 /**
- * Stop mux process
+ * Stop mux process using systemd
  */
 function stop_mux($id) {
-    $pid_file = '/run/caritrans/mux-' . $id . '.pid';
-
-    // Try to stop using PID file
-    if (file_exists($pid_file)) {
-        $pid = trim(file_get_contents($pid_file));
-        if ($pid && is_numeric($pid)) {
-            // Kill process and children
-            exec("kill {$pid} 2>/dev/null");
-            exec("pkill -P {$pid} 2>/dev/null");
-            @unlink($pid_file);
-        }
-    }
-
-    // Also try pkill as backup
-    $escaped_id = escapeshellarg($id);
-    exec("pkill -f 'tsp.*mux.*{$escaped_id}' 2>/dev/null");
+    $service_name = "cari-mux@{$id}.service";
+    exec("sudo systemctl stop " . escapeshellarg($service_name) . " 2>&1", $output, $ret);
 
     // Wait and verify
     usleep(500000);
