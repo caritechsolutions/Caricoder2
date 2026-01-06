@@ -581,6 +581,26 @@ build_tools() {
         fi
     fi
 
+    # Build cari-mux (TSDuck-based muxer)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-mux" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-mux"
+        log_info "Building cari-mux..."
+        make clean 2>/dev/null || true
+        # First build the common library if needed
+        if [[ -d "$TEMP_DIR/caritrans_latest/src/common" ]]; then
+            cd "$TEMP_DIR/caritrans_latest/src/common"
+            make clean 2>/dev/null || true
+            make || log_warn "Failed to build common library"
+            cd "$TEMP_DIR/caritrans_latest/src/cari-mux"
+        fi
+        if make; then
+            make install
+            log_info "cari-mux installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-mux"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
