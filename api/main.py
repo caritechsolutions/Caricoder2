@@ -1558,6 +1558,8 @@ class PreviewStart(BaseModel):
     output_dir: str     # e.g., "/var/www/html/caritrans/preview/bet"
     api_port: int       # e.g., 10100
     folder: str         # e.g., "bet" (for log file naming)
+    variants: int = 1   # Number of video variants (for ABR)
+    bitrates: list = [] # Bitrates for each variant in bps
 
 
 def is_preview_running(api_port: int) -> bool:
@@ -1608,6 +1610,14 @@ async def start_preview(preview: PreviewStart):
             "--output-dir", preview.output_dir,
             "--api-port", str(preview.api_port)
         ]
+
+        # Add variants if more than 1
+        if preview.variants > 1:
+            cmd.extend(["--variants", str(preview.variants)])
+
+        # Add bitrates for each variant
+        for bitrate in preview.bitrates:
+            cmd.extend(["--bitrate", str(bitrate)])
 
         # Open log file for output
         with open(log_file, 'w') as log_f:
@@ -1730,24 +1740,59 @@ async def get_media_info(request: MediaInfoRequest):
         media_info = {
             "success": True,
             "video": None,
+            "videos": [],  # For ABR mode with multiple video streams
             "audio": [],
             "programs": []
         }
 
-        # Extract video info
+        # Extract video info - collect all video streams for ABR support
         for stream in data.get("streams", []):
             if stream.get("codec_type") == "video":
-                media_info["video"] = {
+                # Parse PID from hex format (e.g., "0x64" -> 100)
+                pid_str = stream.get("id", "")
+                pid = None
+                if pid_str:
+                    try:
+                        if pid_str.startswith("0x"):
+                            pid = int(pid_str, 16)
+                        else:
+                            pid = int(pid_str)
+                    except ValueError:
+                        pid = pid_str
+
+                # Parse frame rate safely
+                fps = 0
+                r_frame_rate = stream.get("r_frame_rate", "0/1")
+                try:
+                    if "/" in str(r_frame_rate):
+                        num, den = r_frame_rate.split("/")
+                        fps = float(num) / float(den) if float(den) != 0 else 0
+                    else:
+                        fps = float(r_frame_rate)
+                except (ValueError, ZeroDivisionError):
+                    fps = 0
+
+                video_info = {
                     "codec": stream.get("codec_name", "unknown").upper(),
                     "profile": stream.get("profile", ""),
                     "width": stream.get("width", 0),
                     "height": stream.get("height", 0),
-                    "fps": eval(stream.get("r_frame_rate", "0/1")) if "/" in str(stream.get("r_frame_rate", "0")) else float(stream.get("r_frame_rate", 0)),
+                    "fps": fps,
                     "pix_fmt": stream.get("pix_fmt", ""),
                     "level": stream.get("level", ""),
                     "bitrate": int(stream.get("bit_rate", 0)) if stream.get("bit_rate") else None,
-                    "pid": stream.get("id", "")
+                    "pid": pid
                 }
+
+                # Only add video streams that have valid resolution (skip streams that haven't decoded yet)
+                if video_info["width"] > 0 and video_info["height"] > 0:
+                    # Add to videos array for ABR support
+                    media_info["videos"].append(video_info)
+
+                    # Also set first video for backwards compatibility
+                    if media_info["video"] is None:
+                        media_info["video"] = video_info
+
             elif stream.get("codec_type") == "audio":
                 media_info["audio"].append({
                     "codec": stream.get("codec_name", "unknown").upper(),

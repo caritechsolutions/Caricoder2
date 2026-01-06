@@ -50,6 +50,41 @@ function getResolution($config) {
     // When scaling is disabled, resolution is preserved from input
     return '';
 }
+
+// Helper function to check if transcoder is ABR mode
+function isAbrMode($config) {
+    return !empty($config['abr']['enabled']) && config_bool($config['abr']['enabled']);
+}
+
+// Helper function to get ABR variants info
+function getAbrVariants($config) {
+    $variants = [];
+    if (!isAbrMode($config)) {
+        return $variants;
+    }
+    $variant_count = intval($config['abr']['variant_count'] ?? 0);
+    for ($i = 0; $i < $variant_count; $i++) {
+        $variants[] = [
+            'width' => $config['abr']["variant_{$i}_width"] ?? 1920,
+            'height' => $config['abr']["variant_{$i}_height"] ?? 1080,
+            'bitrate' => $config['abr']["variant_{$i}_bitrate"] ?? 5000000,
+            'video_pid' => $config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100)
+        ];
+    }
+    return $variants;
+}
+
+// Helper function to get total configured bitrate for ABR
+function getAbrTotalBitrate($config) {
+    $total = 0;
+    $variants = getAbrVariants($config);
+    foreach ($variants as $variant) {
+        $total += $variant['bitrate'];
+    }
+    // Add audio bitrate
+    $total += intval($config['audio']['bitrate'] ?? 128000);
+    return $total;
+}
 ?>
 
 <style>
@@ -114,6 +149,285 @@ function getResolution($config) {
 .badge.avsync-ok { background-color: #16a34a !important; }
 .badge.avsync-warning { background-color: #d97706 !important; }
 .badge.avsync-error { background-color: #dc2626 !important; }
+
+/* HLS Player Stats Panel */
+.player-stats-panel {
+    background: linear-gradient(135deg, #1a1d24 0%, #2d3748 100%);
+    padding: 16px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+.stats-grid-2col {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.stat-card {
+    background: rgba(255,255,255,0.05);
+    border-radius: 12px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(10px);
+    transition: all 0.2s ease;
+}
+
+.stat-card:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+}
+
+.stat-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #9ca3af;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+
+.stat-header i {
+    font-size: 0.85rem;
+    opacity: 0.7;
+}
+
+.stat-value-large {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.1;
+}
+
+.stat-unit {
+    font-size: 0.9rem;
+    font-weight: 400;
+    color: #9ca3af;
+    margin-left: 2px;
+}
+
+.stat-label {
+    font-size: 0.7rem;
+    color: #6b7280;
+    margin-top: 4px;
+}
+
+/* Buffer Gauge */
+.stat-gauge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.gauge-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.gauge-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+    border-radius: 4px;
+    transition: width 0.3s ease, background 0.3s ease;
+}
+
+.gauge-fill.warning {
+    background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%);
+}
+
+.gauge-fill.critical {
+    background: linear-gradient(90deg, #ef4444 0%, #f87171 100%);
+}
+
+.gauge-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+    min-width: 50px;
+    text-align: right;
+}
+
+/* Sparkline */
+.stat-sparkline {
+    margin-top: 8px;
+    height: 24px;
+}
+
+.stat-sparkline canvas {
+    width: 100%;
+}
+
+/* Row Lists */
+.stat-row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.stat-row-label {
+    color: #9ca3af;
+    font-size: 0.8rem;
+}
+
+.stat-row-value {
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Status Dots */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot-ok {
+    background: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.status-dot-warning {
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+
+.status-dot-error {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+/* Quality Levels List */
+.quality-levels-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.quality-level-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+.quality-level-item.active {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.quality-level-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid #4b5563;
+    flex-shrink: 0;
+}
+
+.quality-level-item.active .quality-level-indicator {
+    background: #10b981;
+    border-color: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.quality-level-info {
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.quality-level-resolution {
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.quality-level-bitrate {
+    color: #9ca3af;
+    font-size: 0.8rem;
+}
+
+.quality-level-bar-container {
+    flex: 1;
+    max-width: 120px;
+    height: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.quality-level-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+    border-radius: 2px;
+}
+
+.quality-level-item.active .quality-level-bar {
+    background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+}
+
+/* Stats Toggle Button Active State */
+#statsToggleBtn.active {
+    background-color: #0dcaf0;
+    border-color: #0dcaf0;
+    color: #000;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .stats-grid-2col {
+        grid-template-columns: 1fr;
+    }
+
+    .stat-value-large {
+        font-size: 1.4rem;
+    }
+
+    .quality-level-bar-container {
+        display: none;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .player-stats-panel {
+        padding: 12px;
+    }
+
+    .stat-card {
+        padding: 12px;
+    }
+}
 </style>
 
 <div class="container-fluid py-4">
@@ -189,7 +503,9 @@ function getResolution($config) {
                         $config = $transcoder['config'] ?? [];
                         $videoCodec = $config['video']['codec'] ?? 'h264';
                         $audioCodec = $config['audio']['codec'] ?? 'aac';
-                        $videoBitrate = $config['video']['bitrate'] ?? 0;
+                        $isAbr = isAbrMode($config);
+                        $abrVariants = $isAbr ? getAbrVariants($config) : [];
+                        $videoBitrate = $isAbr ? getAbrTotalBitrate($config) - ($config['audio']['bitrate'] ?? 128000) : ($config['video']['bitrate'] ?? 0);
                         $audioBitrate = $config['audio']['bitrate'] ?? 0;
                         $inputAddr = ($config['input']['address'] ?? '') . ':' . ($config['input']['port'] ?? '');
                         $outputAddr = ($config['output']['address'] ?? '') . ':' . ($config['output']['port'] ?? '');
@@ -209,10 +525,19 @@ function getResolution($config) {
                             <strong><?php echo htmlspecialchars($transcoder['name']); ?></strong>
                         </td>
                         <td>
+                            <?php if ($isAbr): ?>
+                            <span class="badge bg-info codec-badge"><?php echo getCodecDisplay($videoCodec); ?></span>
+                            <span class="badge bg-warning text-dark codec-badge">ABR</span>
+                            <br>
+                            <?php foreach ($abrVariants as $idx => $variant): ?>
+                            <small class="text-muted"><?php echo $variant['width']; ?>x<?php echo $variant['height']; ?> @ <?php echo format_bitrate($variant['bitrate']); ?></small><?php if ($idx < count($abrVariants) - 1): ?><br><?php endif; ?>
+                            <?php endforeach; ?>
+                            <?php else: ?>
                             <span class="badge bg-info codec-badge"><?php echo getCodecDisplay($videoCodec); ?></span>
                             <?php if ($resolution): ?><small class="text-muted ms-1"><?php echo $resolution; ?></small><?php endif; ?>
                             <br>
                             <small class="text-muted"><?php echo format_bitrate($videoBitrate); ?></small>
+                            <?php endif; ?>
                         </td>
                         <td>
                             <span class="badge bg-secondary codec-badge"><?php echo getCodecDisplay($audioCodec); ?></span>
@@ -285,8 +610,20 @@ function getResolution($config) {
                 <div class="card mb-3">
                     <div class="card-header py-2 d-flex justify-content-between align-items-center">
                         <strong><i class="bi bi-play-circle me-1"></i>Output Preview</strong>
-                        <div>
-                            <span id="playerStatus" class="badge bg-secondary me-2">Stopped</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="playerStatus" class="badge bg-secondary">Stopped</span>
+                            <!-- Quality Selector (hidden until multiple levels available) -->
+                            <select id="qualitySelector" class="form-select form-select-sm d-none" style="width: auto; min-width: 90px;" title="Video Quality">
+                                <option value="-1">Auto</option>
+                            </select>
+                            <!-- CC Button (hidden until captions available) -->
+                            <button id="ccBtn" class="btn btn-sm btn-outline-secondary d-none" title="Closed Captions" onclick="toggleClosedCaptions()">
+                                <i class="bi bi-badge-cc"></i>
+                            </button>
+                            <!-- Stats Toggle Button -->
+                            <button id="statsToggleBtn" class="btn btn-sm btn-outline-info d-none" title="Player Statistics" onclick="togglePlayerStats()">
+                                <i class="bi bi-speedometer2"></i>
+                            </button>
                             <button class="btn btn-sm btn-success" id="startPlayerBtn" onclick="startOutputPlayer()">
                                 <i class="bi bi-play-fill me-1"></i>Start
                             </button>
@@ -304,6 +641,129 @@ function getResolution($config) {
                                 </div>
                             </div>
                             <video id="outputVideo" class="w-100 h-100 d-none" controls autoplay muted playsinline></video>
+                        </div>
+
+                        <!-- HLS Player Stats Panel (hidden by default) -->
+                        <div id="playerStatsPanel" class="player-stats-panel d-none">
+                            <div class="stats-grid">
+                                <!-- Buffer Gauge -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-collection"></i>
+                                        <span>Buffer</span>
+                                    </div>
+                                    <div class="stat-gauge">
+                                        <div class="gauge-bar">
+                                            <div id="bufferGaugeFill" class="gauge-fill" style="width: 0%"></div>
+                                        </div>
+                                        <div class="gauge-value"><span id="bufferValue">0.0</span>s</div>
+                                    </div>
+                                    <div class="stat-label" id="bufferStatus">Waiting</div>
+                                </div>
+
+                                <!-- Latency -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-clock-history"></i>
+                                        <span>Latency</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="latencyValue">--</span><span class="stat-unit">s</span>
+                                    </div>
+                                    <div class="stat-label">Behind live</div>
+                                </div>
+
+                                <!-- Bandwidth -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-speedometer"></i>
+                                        <span>Bandwidth</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="bandwidthValue">--</span><span class="stat-unit">Mbps</span>
+                                    </div>
+                                    <div class="stat-sparkline">
+                                        <canvas id="bandwidthSparkline" height="24"></canvas>
+                                    </div>
+                                </div>
+
+                                <!-- Current Quality -->
+                                <div class="stat-card">
+                                    <div class="stat-header">
+                                        <i class="bi bi-badge-hd"></i>
+                                        <span>Quality</span>
+                                    </div>
+                                    <div class="stat-value-large">
+                                        <span id="currentQualityValue">--</span>
+                                    </div>
+                                    <div class="stat-label" id="currentQualityBitrate">--</div>
+                                </div>
+                            </div>
+
+                            <!-- Second Row: Frame Stats & Network -->
+                            <div class="stats-grid stats-grid-2col mt-2">
+                                <!-- Frame Stats -->
+                                <div class="stat-card stat-card-wide">
+                                    <div class="stat-header">
+                                        <i class="bi bi-film"></i>
+                                        <span>Frame Statistics</span>
+                                    </div>
+                                    <div class="stat-row-list">
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Decoded</span>
+                                            <span class="stat-row-value" id="framesDecoded">0</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Dropped</span>
+                                            <span class="stat-row-value">
+                                                <span id="framesDropped">0</span>
+                                                <span id="framesDroppedIndicator" class="status-dot status-dot-ok"></span>
+                                            </span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">FPS</span>
+                                            <span class="stat-row-value" id="currentFps">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Network Stats -->
+                                <div class="stat-card stat-card-wide">
+                                    <div class="stat-header">
+                                        <i class="bi bi-wifi"></i>
+                                        <span>Network</span>
+                                    </div>
+                                    <div class="stat-row-list">
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">TTFB</span>
+                                            <span class="stat-row-value"><span id="ttfbValue">--</span> ms</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Fragments</span>
+                                            <span class="stat-row-value" id="fragmentsLoaded">0</span>
+                                        </div>
+                                        <div class="stat-row">
+                                            <span class="stat-row-label">Stalls</span>
+                                            <span class="stat-row-value">
+                                                <span id="stallCount">0</span>
+                                                <span id="stallIndicator" class="status-dot status-dot-ok"></span>
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Quality Levels Visual -->
+                            <div class="stat-card mt-2">
+                                <div class="stat-header">
+                                    <i class="bi bi-sliders"></i>
+                                    <span>Quality Levels</span>
+                                    <span id="abrModeIndicator" class="badge bg-success ms-auto">Auto ABR</span>
+                                </div>
+                                <div id="qualityLevelsList" class="quality-levels-list">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -343,9 +803,10 @@ function getResolution($config) {
                             <div class="card-header py-2 bg-success bg-opacity-10">
                                 <strong><i class="bi bi-box-arrow-right me-1"></i>Output Format</strong>
                                 <small class="text-muted ms-2" id="outputAddressName"></small>
+                                <span id="outputFormatAbrBadge" class="badge bg-warning text-dark ms-2 d-none">ABR</span>
                             </div>
                             <div class="card-body py-2">
-                                <div class="row small">
+                                <div class="row small" id="outputFormatStandard">
                                     <div class="col-6">
                                         <div class="mb-1"><span class="text-muted">Video:</span> <span id="outputVideoCodec">-</span></div>
                                         <div class="mb-1"><span class="text-muted">Resolution:</span> <span id="outputResolution">-</span></div>
@@ -354,6 +815,11 @@ function getResolution($config) {
                                         <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodec">-</span></div>
                                         <div><span class="text-muted">Channels:</span> <span id="outputAudioChannels">-</span></div>
                                     </div>
+                                </div>
+                                <div id="outputFormatAbr" class="d-none small">
+                                    <div class="mb-1"><span class="text-muted">Audio:</span> <span id="outputAudioCodecAbr">-</span> (<span id="outputAudioChannelsAbr">-</span>)</div>
+                                    <div class="text-muted mb-1">Video Streams:</div>
+                                    <div id="outputVideoStreamsList"></div>
                                 </div>
                             </div>
                         </div>
@@ -383,15 +849,24 @@ function getResolution($config) {
                         <div class="card">
                             <div class="card-header py-2">
                                 <strong><i class="bi bi-box-arrow-right me-1 text-success"></i>Output Bitrate</strong>
+                                <span id="outputAbrBadge" class="badge bg-warning text-dark ms-2 d-none">ABR</span>
                             </div>
                             <div class="card-body py-2">
-                                <div class="d-flex justify-content-between align-items-center mb-1">
-                                    <span class="text-muted small">Video</span>
-                                    <span class="fw-bold text-success" id="monitorOutputVideoBitrate">-</span>
+                                <div id="outputBitrateContainer">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <span class="text-muted small">Video</span>
+                                        <span class="fw-bold text-success" id="monitorOutputVideoBitrate">-</span>
+                                    </div>
                                 </div>
+                                <div id="outputVideoPidsList"></div>
                                 <div class="d-flex justify-content-between align-items-center">
                                     <span class="text-muted small">Audio</span>
                                     <span class="fw-bold text-success" id="monitorOutputAudioBitrate">-</span>
+                                </div>
+                                <hr class="my-1 d-none" id="outputTotalSeparator">
+                                <div class="d-flex justify-content-between align-items-center d-none" id="outputTotalRow">
+                                    <span class="text-muted small fw-bold">Total</span>
+                                    <span class="fw-bold text-success" id="monitorOutputTotalBitrate">-</span>
                                 </div>
                             </div>
                         </div>
@@ -511,10 +986,23 @@ let avsyncChart = null;
 let avsyncUpdateInterval = null;
 let inputVideoHistory = [];
 let inputAudioHistory = [];
-let outputVideoHistory = [];
+let outputVideoHistory = [];  // For non-ABR: single video stream
 let outputAudioHistory = [];
 let bitrateTimestamps = [];
+let outputVideoPidsHistory = {};  // For ABR: per-PID video history {pid: [bitrates]}
+let currentVideoPids = [];  // List of video PIDs for current ABR transcoder
+let currentIsAbr = false;  // Whether current transcoder is ABR mode
 const MAX_HISTORY_POINTS = 60;
+
+// Color palette for ABR video PIDs
+const VIDEO_PID_COLORS = [
+    '#198754',  // Green
+    '#0d6efd',  // Blue
+    '#6f42c1',  // Purple
+    '#d63384',  // Pink
+    '#fd7e14',  // Orange
+    '#20c997',  // Teal
+];
 
 // Filter transcoders
 function filterTranscoders() {
@@ -616,54 +1104,49 @@ function initBitrateChart() {
         bitrateChart.destroy();
     }
 
+    // Base datasets: Input Video, Input Audio, Output Audio
+    // For non-ABR, we add a single Output Video dataset
+    // For ABR, we add per-PID video datasets dynamically
+    const datasets = [
+        {
+            label: 'Input Video',
+            data: [],
+            borderColor: '#0dcaf0',
+            backgroundColor: 'rgba(13, 202, 240, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2
+        },
+        {
+            label: 'Input Audio',
+            data: [],
+            borderColor: '#6edff6',
+            backgroundColor: 'rgba(110, 223, 246, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 1,
+            borderDash: [5, 5]
+        },
+        {
+            label: 'Output Audio',
+            data: [],
+            borderColor: '#75b798',
+            backgroundColor: 'rgba(117, 183, 152, 0.1)',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 1,
+            borderDash: [5, 5]
+        }
+    ];
+
     bitrateChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: [],
-            datasets: [
-                {
-                    label: 'Input Video',
-                    data: [],
-                    borderColor: '#0dcaf0',
-                    backgroundColor: 'rgba(13, 202, 240, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Input Audio',
-                    data: [],
-                    borderColor: '#6edff6',
-                    backgroundColor: 'rgba(110, 223, 246, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1,
-                    borderDash: [5, 5]
-                },
-                {
-                    label: 'Output Video',
-                    data: [],
-                    borderColor: '#198754',
-                    backgroundColor: 'rgba(25, 135, 84, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Output Audio',
-                    data: [],
-                    borderColor: '#75b798',
-                    backgroundColor: 'rgba(117, 183, 152, 0.1)',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1,
-                    borderDash: [5, 5]
-                }
-            ]
+            datasets: datasets
         },
         options: {
             responsive: true,
@@ -673,7 +1156,7 @@ function initBitrateChart() {
                 mode: 'index'
             },
             plugins: {
-                legend: { display: false },
+                legend: { display: true, position: 'bottom', labels: { boxWidth: 12, padding: 10 } },
                 tooltip: {
                     callbacks: {
                         label: function(context) {
@@ -701,6 +1184,57 @@ function initBitrateChart() {
     });
 }
 
+// Add video PID datasets to chart for ABR mode
+function setupAbrChartDatasets(videoPids) {
+    if (!bitrateChart) return;
+
+    // Remove any existing output video datasets (indices 3+)
+    while (bitrateChart.data.datasets.length > 3) {
+        bitrateChart.data.datasets.pop();
+    }
+
+    // Add a dataset for each video PID
+    videoPids.forEach((pid, idx) => {
+        const color = VIDEO_PID_COLORS[idx % VIDEO_PID_COLORS.length];
+        bitrateChart.data.datasets.push({
+            label: `Video PID ${pid}`,
+            data: [],
+            borderColor: color,
+            backgroundColor: color + '1A',  // 10% opacity
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2
+        });
+    });
+
+    bitrateChart.update('none');
+}
+
+// Add single video dataset for non-ABR mode
+function setupStandardChartDatasets() {
+    if (!bitrateChart) return;
+
+    // Remove any existing output video datasets (indices 3+)
+    while (bitrateChart.data.datasets.length > 3) {
+        bitrateChart.data.datasets.pop();
+    }
+
+    // Add single output video dataset
+    bitrateChart.data.datasets.push({
+        label: 'Output Video',
+        data: [],
+        borderColor: '#198754',
+        backgroundColor: 'rgba(25, 135, 84, 0.1)',
+        fill: false,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2
+    });
+
+    bitrateChart.update('none');
+}
+
 // Load historical bitrate data for output
 async function loadBitrateHistory(transcoderId) {
     try {
@@ -708,20 +1242,32 @@ async function loadBitrateHistory(transcoderId) {
         const data = await response.json();
 
         if (data.success && data.pids) {
-            const videoPid = data.video_pid;
             const audioPid = data.audio_pid;
+            const isAbr = data.is_abr && data.video_pids && data.video_pids.length > 1;
 
-            // Build combined timeline from video and audio PIDs
-            // Video and audio samples alternate, so we need to track which has data
+            // Store ABR state
+            currentIsAbr = isAbr;
+            currentVideoPids = isAbr ? data.video_pids : [data.video_pid];
+
+            // Setup chart datasets based on ABR mode
+            if (isAbr) {
+                setupAbrChartDatasets(currentVideoPids);
+            } else {
+                setupStandardChartDatasets();
+            }
+
+            // Build combined timeline from all PIDs
             const timelineMap = new Map();
 
-            // Add video data
-            if (data.pids[videoPid] && data.pids[videoPid].history) {
-                for (const [ts, bitrate] of data.pids[videoPid].history) {
-                    if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: null, audio: null });
+            // Add video data for all video PIDs
+            for (const pid of currentVideoPids) {
+                if (data.pids[pid] && data.pids[pid].history) {
+                    for (const [ts, bitrate] of data.pids[pid].history) {
+                        if (!timelineMap.has(ts)) {
+                            timelineMap.set(ts, { videos: {}, audio: null });
+                        }
+                        timelineMap.get(ts).videos[pid] = bitrate;
                     }
-                    timelineMap.get(ts).video = bitrate;
                 }
             }
 
@@ -729,7 +1275,7 @@ async function loadBitrateHistory(transcoderId) {
             if (data.pids[audioPid] && data.pids[audioPid].history) {
                 for (const [ts, bitrate] of data.pids[audioPid].history) {
                     if (!timelineMap.has(ts)) {
-                        timelineMap.set(ts, { video: null, audio: null });
+                        timelineMap.set(ts, { videos: {}, audio: null });
                     }
                     timelineMap.get(ts).audio = bitrate;
                 }
@@ -742,43 +1288,75 @@ async function loadBitrateHistory(transcoderId) {
             outputVideoHistory = [];
             outputAudioHistory = [];
             bitrateTimestamps = [];
+            outputVideoPidsHistory = {};
+            for (const pid of currentVideoPids) {
+                outputVideoPidsHistory[pid] = [];
+            }
 
             // Carry forward last known values for missing data
-            let lastVideo = 0;
+            let lastVideos = {};
+            for (const pid of currentVideoPids) {
+                lastVideos[pid] = 0;
+            }
             let lastAudio = 0;
 
             for (const ts of sortedTimestamps) {
                 const values = timelineMap.get(ts);
 
-                // Update last known values if we have new data
-                if (values.video !== null) lastVideo = values.video;
+                // Update last known values
+                for (const pid of currentVideoPids) {
+                    if (values.videos[pid] !== undefined) {
+                        lastVideos[pid] = values.videos[pid];
+                    }
+                }
                 if (values.audio !== null) lastAudio = values.audio;
 
-                // Only add entries where we have BOTH values (skip until we have both)
-                if (lastVideo > 0 || lastAudio > 0) {
-                    outputVideoHistory.push(lastVideo);
+                // Check if we have any data
+                const hasAnyVideo = Object.values(lastVideos).some(v => v > 0);
+                if (hasAnyVideo || lastAudio > 0) {
+                    for (const pid of currentVideoPids) {
+                        outputVideoPidsHistory[pid].push(lastVideos[pid]);
+                    }
+                    // For non-ABR compatibility, sum all video bitrates
+                    outputVideoHistory.push(Object.values(lastVideos).reduce((a, b) => a + b, 0));
                     outputAudioHistory.push(lastAudio);
                     bitrateTimestamps.push(ts);
                 }
             }
 
             // Limit to last MAX_HISTORY_POINTS for display
-            if (outputVideoHistory.length > MAX_HISTORY_POINTS) {
-                outputVideoHistory = outputVideoHistory.slice(-MAX_HISTORY_POINTS);
-                outputAudioHistory = outputAudioHistory.slice(-MAX_HISTORY_POINTS);
-                bitrateTimestamps = bitrateTimestamps.slice(-MAX_HISTORY_POINTS);
+            if (bitrateTimestamps.length > MAX_HISTORY_POINTS) {
+                const start = bitrateTimestamps.length - MAX_HISTORY_POINTS;
+                outputVideoHistory = outputVideoHistory.slice(start);
+                outputAudioHistory = outputAudioHistory.slice(start);
+                bitrateTimestamps = bitrateTimestamps.slice(start);
+                for (const pid of currentVideoPids) {
+                    outputVideoPidsHistory[pid] = outputVideoPidsHistory[pid].slice(start);
+                }
             }
 
             // Update chart with loaded history
-            if (bitrateChart && outputVideoHistory.length > 0) {
-                // Generate time labels from timestamps
+            if (bitrateChart && bitrateTimestamps.length > 0) {
                 const labels = bitrateTimestamps.map(ts => {
                     return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
                 });
 
                 bitrateChart.data.labels = labels;
-                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+                // Dataset 2 is Output Audio (indices 0, 1, 2 are Input Video, Input Audio, Output Audio)
+                bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+
+                // Datasets 3+ are video PIDs
+                if (isAbr) {
+                    currentVideoPids.forEach((pid, idx) => {
+                        if (bitrateChart.data.datasets[3 + idx]) {
+                            bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                        }
+                    });
+                } else {
+                    if (bitrateChart.data.datasets[3]) {
+                        bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                    }
+                }
                 bitrateChart.update('none');
             }
         }
@@ -925,8 +1503,22 @@ async function loadInputBitrateHistory(inputId) {
             bitrateChart.data.labels = labels;
             bitrateChart.data.datasets[0].data = [...inputVideoHistory];
             bitrateChart.data.datasets[1].data = [...inputAudioHistory];
-            bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-            bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+            // Dataset 2 is now Output Audio
+            bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+            // Dataset 3+ are output video PIDs
+            if (currentIsAbr) {
+                // For ABR, we need to update per-PID data
+                currentVideoPids.forEach((pid, idx) => {
+                    if (bitrateChart.data.datasets[3 + idx] && outputVideoPidsHistory[pid]) {
+                        bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                    }
+                });
+            } else {
+                // For non-ABR, dataset 3 is the single output video
+                if (bitrateChart.data.datasets[3]) {
+                    bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                }
+            }
             bitrateChart.update('none');
         }
     } catch (e) {
@@ -1204,15 +1796,63 @@ async function loadPreviewMetrics() {
             // Update bitrate displays
             document.getElementById('monitorInputVideoBitrate').textContent = formatBitrate(metrics.input_video_bitrate || 0);
             document.getElementById('monitorInputAudioBitrate').textContent = formatBitrate(metrics.input_audio_bitrate || 0);
-            document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
             document.getElementById('monitorOutputAudioBitrate').textContent = formatBitrate(metrics.output_audio_bitrate || 0);
 
-            // Add to history (4 series: input video, input audio, output video, output audio)
+            // Handle ABR mode with multiple video PIDs
+            const isAbr = metrics.is_abr && metrics.video_bitrates_by_pid && Object.keys(metrics.video_bitrates_by_pid).length > 1;
+            window.currentIsAbr = isAbr;
+
+            if (isAbr) {
+                // Show ABR badge
+                document.getElementById('outputAbrBadge').classList.remove('d-none');
+
+                // Hide single video row, show per-PID rows
+                document.getElementById('outputBitrateContainer').classList.add('d-none');
+
+                // Build per-PID bitrate list
+                const pidsList = document.getElementById('outputVideoPidsList');
+                pidsList.innerHTML = '';
+                let totalVideoBitrate = 0;
+
+                for (const [pid, bitrate] of Object.entries(metrics.video_bitrates_by_pid)) {
+                    totalVideoBitrate += bitrate;
+                    const row = document.createElement('div');
+                    row.className = 'd-flex justify-content-between align-items-center mb-1';
+                    row.innerHTML = `<span class="text-muted small">Video PID ${pid}</span><span class="fw-bold text-success">${formatBitrate(bitrate)}</span>`;
+                    pidsList.appendChild(row);
+                }
+
+                // Show total row
+                document.getElementById('outputTotalSeparator').classList.remove('d-none');
+                document.getElementById('outputTotalRow').classList.remove('d-none');
+                document.getElementById('monitorOutputTotalBitrate').textContent = formatBitrate(metrics.output_total_bitrate || 0);
+            } else {
+                // Standard mode - single video
+                document.getElementById('outputAbrBadge').classList.add('d-none');
+                document.getElementById('outputBitrateContainer').classList.remove('d-none');
+                document.getElementById('outputVideoPidsList').innerHTML = '';
+                document.getElementById('outputTotalSeparator').classList.add('d-none');
+                document.getElementById('outputTotalRow').classList.add('d-none');
+                document.getElementById('monitorOutputVideoBitrate').textContent = formatBitrate(metrics.output_video_bitrate || 0);
+            }
+
+            // Add to history
             inputVideoHistory.push(metrics.input_video_bitrate || 0);
             inputAudioHistory.push(metrics.input_audio_bitrate || 0);
-            outputVideoHistory.push(metrics.output_video_bitrate || 0);
             outputAudioHistory.push(metrics.output_audio_bitrate || 0);
             bitrateTimestamps.push(Math.floor(Date.now() / 1000));
+
+            // For ABR mode, update per-PID video history
+            if (currentIsAbr && metrics.video_bitrates_by_pid) {
+                for (const pid of currentVideoPids) {
+                    if (!outputVideoPidsHistory[pid]) {
+                        outputVideoPidsHistory[pid] = [];
+                    }
+                    outputVideoPidsHistory[pid].push(metrics.video_bitrates_by_pid[pid] || 0);
+                }
+            }
+            // Always update combined video history for compatibility
+            outputVideoHistory.push(metrics.output_video_bitrate || 0);
 
             if (inputVideoHistory.length > MAX_HISTORY_POINTS) {
                 inputVideoHistory.shift();
@@ -1220,6 +1860,13 @@ async function loadPreviewMetrics() {
                 outputVideoHistory.shift();
                 outputAudioHistory.shift();
                 bitrateTimestamps.shift();
+                if (currentIsAbr) {
+                    for (const pid of currentVideoPids) {
+                        if (outputVideoPidsHistory[pid]) {
+                            outputVideoPidsHistory[pid].shift();
+                        }
+                    }
+                }
             }
 
             // Update chart
@@ -1232,8 +1879,20 @@ async function loadPreviewMetrics() {
                 bitrateChart.data.labels = labels;
                 bitrateChart.data.datasets[0].data = [...inputVideoHistory];
                 bitrateChart.data.datasets[1].data = [...inputAudioHistory];
-                bitrateChart.data.datasets[2].data = [...outputVideoHistory];
-                bitrateChart.data.datasets[3].data = [...outputAudioHistory];
+                // Dataset 2 is Output Audio
+                bitrateChart.data.datasets[2].data = [...outputAudioHistory];
+                // Dataset 3+ are output video PIDs
+                if (currentIsAbr) {
+                    currentVideoPids.forEach((pid, idx) => {
+                        if (bitrateChart.data.datasets[3 + idx] && outputVideoPidsHistory[pid]) {
+                            bitrateChart.data.datasets[3 + idx].data = [...outputVideoPidsHistory[pid]];
+                        }
+                    });
+                } else {
+                    if (bitrateChart.data.datasets[3]) {
+                        bitrateChart.data.datasets[3].data = [...outputVideoHistory];
+                    }
+                }
                 bitrateChart.update('none');
             }
 
@@ -1331,21 +1990,59 @@ async function loadOutputMediaInfo(outputAddress) {
             return;
         }
 
-        // Update video info
-        if (data.video) {
-            document.getElementById('outputVideoCodec').textContent =
-                (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
-            document.getElementById('outputResolution').textContent =
-                data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
-        }
+        // Check if we have multiple video streams (ABR mode)
+        const videoStreams = data.videos || (data.video ? [data.video] : []);
+        const isAbr = videoStreams.length > 1;
 
-        // Update audio info (use first track)
-        if (data.audio && data.audio.length > 0) {
-            const track = data.audio[0];
-            document.getElementById('outputAudioCodec').textContent =
-                (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
-            document.getElementById('outputAudioChannels').textContent =
-                track.channels ? `${track.channels} ch` : '-';
+        if (isAbr) {
+            // Show ABR format display
+            document.getElementById('outputFormatAbrBadge').classList.remove('d-none');
+            document.getElementById('outputFormatStandard').classList.add('d-none');
+            document.getElementById('outputFormatAbr').classList.remove('d-none');
+
+            // Update audio info
+            if (data.audio && data.audio.length > 0) {
+                const track = data.audio[0];
+                document.getElementById('outputAudioCodecAbr').textContent =
+                    (track.codec || '-').toUpperCase() + (track.profile ? ` ${track.profile}` : '');
+                document.getElementById('outputAudioChannelsAbr').textContent =
+                    track.channels ? `${track.channels} ch` : '-';
+            }
+
+            // Build video streams list
+            const videosList = document.getElementById('outputVideoStreamsList');
+            videosList.innerHTML = '';
+            for (const video of videoStreams) {
+                const row = document.createElement('div');
+                row.className = 'ms-2 mb-1';
+                const codec = (video.codec || '-').toUpperCase();
+                const resolution = video.width && video.height ? `${video.width}x${video.height}` : '-';
+                const pid = video.pid ? ` (PID ${video.pid})` : '';
+                row.innerHTML = `<small>${codec} ${resolution}${pid}</small>`;
+                videosList.appendChild(row);
+            }
+        } else {
+            // Standard single-video format display
+            document.getElementById('outputFormatAbrBadge').classList.add('d-none');
+            document.getElementById('outputFormatStandard').classList.remove('d-none');
+            document.getElementById('outputFormatAbr').classList.add('d-none');
+
+            // Update video info
+            if (data.video) {
+                document.getElementById('outputVideoCodec').textContent =
+                    (data.video.codec || '-').toUpperCase() + (data.video.profile ? ` (${data.video.profile})` : '');
+                document.getElementById('outputResolution').textContent =
+                    data.video.width && data.video.height ? `${data.video.width}x${data.video.height}` : '-';
+            }
+
+            // Update audio info (use first track)
+            if (data.audio && data.audio.length > 0) {
+                const track = data.audio[0];
+                document.getElementById('outputAudioCodec').textContent =
+                    (track.codec || '-').toUpperCase() + (track.profile ? ` (${track.profile})` : '');
+                document.getElementById('outputAudioChannels').textContent =
+                    track.channels ? `${track.channels} ch` : '-';
+            }
         }
     } catch (e) {
         console.error('Failed to load output media info:', e);
@@ -1363,6 +2060,9 @@ async function showPreview(id, name) {
     window.inputFormatLoaded = false;
     window.outputFormatLoaded = false;
     window.currentOutputAddress = null;
+    window.previewStarted = false;
+    window.variantCount = 1;
+    window.variantBitrates = [];
 
     // Reset player state
     if (outputHlsPlayer) {
@@ -1370,20 +2070,32 @@ async function showPreview(id, name) {
         outputHlsPlayer = null;
     }
     outputPlayerRunning = false;
+    ccEnabled = false;
     document.getElementById('outputVideo').classList.add('d-none');
     document.getElementById('videoLoadingOverlay').classList.remove('d-none');
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');
-    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
-    document.getElementById('playerStatus').textContent = 'Stopped';
-    document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+    document.getElementById('playerStatus').className = 'badge bg-secondary';
+    document.getElementById('playerStatus').textContent = 'Ready';
+    document.getElementById('videoStatusText').textContent = 'Starting preview in background...';
 
-    // Reset history (4 series + timestamps)
+    // Reset quality selector and CC button
+    const qualitySelector = document.getElementById('qualitySelector');
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    document.getElementById('ccBtn').classList.add('d-none');
+    document.getElementById('ccBtn').classList.remove('btn-primary');
+    document.getElementById('ccBtn').classList.add('btn-outline-secondary');
+
+    // Reset history (all series + timestamps)
     inputVideoHistory = [];
     inputAudioHistory = [];
     outputVideoHistory = [];
     outputAudioHistory = [];
     bitrateTimestamps = [];
+    outputVideoPidsHistory = {};
+    currentVideoPids = [];
+    currentIsAbr = false;
 
     // Reset format displays
     document.getElementById('inputSourceName').textContent = '';
@@ -1416,8 +2128,8 @@ async function showPreview(id, name) {
     // Load historical output bitrate data first (await to ensure it's ready before input history)
     await loadBitrateHistory(id);
 
-    // Load initial metrics (this will trigger input history loading after source_service is known)
-    loadPreviewMetrics();
+    // Load initial metrics - wait for it to get output_address and start preview
+    await loadPreviewMetricsAndStartPreview();
 
     // Load A/V sync data and full continuity error count
     loadAVSyncHistory(id);
@@ -1438,6 +2150,113 @@ async function showPreview(id, name) {
     previewModal.show();
 }
 
+// Load metrics and start preview immediately (called once when modal opens)
+async function loadPreviewMetricsAndStartPreview() {
+    const id = document.getElementById('previewId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/transcoders.php?action=all_metrics`);
+        const data = await response.json();
+
+        if (data.success && data.transcoders && data.transcoders[id]) {
+            const metrics = data.transcoders[id];
+
+            // Store output address
+            if (metrics.output_address) {
+                window.currentOutputAddress = metrics.output_address;
+            }
+
+            // Store api_port
+            if (metrics.api_port) {
+                document.getElementById('previewApiPort').value = metrics.api_port;
+            }
+
+            // Store ABR variant info
+            if (metrics.is_abr && metrics.variant_count > 1) {
+                window.variantCount = metrics.variant_count;
+                window.variantBitrates = metrics.variant_bitrates || [];
+            }
+
+            // Start preview in background if we have output address
+            if (window.currentOutputAddress && !window.previewStarted) {
+                await startPreviewInBackground();
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load metrics for preview:', e);
+    }
+}
+
+// Start preview in background (called when modal opens)
+async function startPreviewInBackground() {
+    const id = document.getElementById('previewId').value;
+    const apiPort = document.getElementById('previewApiPort').value;
+    const outputAddress = window.currentOutputAddress;
+
+    if (!outputAddress || !apiPort) {
+        return;
+    }
+
+    const folderName = `transcoder-${id}`;
+    const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
+    const previewPort = parseInt(apiPort) + 100;
+
+    try {
+        // Check if preview is already running
+        try {
+            const statusResponse = await fetch(`http://${window.location.hostname}:${previewPort}/status`);
+            if (statusResponse.ok) {
+                // Preview already running, just set up keepalive
+                window.previewStarted = true;
+                currentPreviewPort = previewPort;
+                document.getElementById('videoStatusText').textContent = 'Preview ready - click Start to play';
+
+                // Start keepalive
+                if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
+                outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
+                return;
+            }
+        } catch (e) {
+            // Preview not running, continue to start it
+        }
+
+        // Build request with variants and bitrates
+        const requestBody = {
+            id: id,
+            input_address: outputAddress,
+            output_dir: outputDir,
+            api_port: previewPort,
+            variants: window.variantCount || 1,
+            bitrates: window.variantBitrates || []
+        };
+
+        const response = await fetch('api/transcoders.php?action=start_preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            window.previewStarted = true;
+            currentPreviewPort = previewPort;
+            document.getElementById('videoStatusText').textContent = 'Buffering in background...';
+
+            // Start keepalive immediately
+            if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
+            outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
+        } else {
+            console.error('Failed to start preview:', result.error);
+            document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+        }
+    } catch (e) {
+        console.error('Failed to start preview in background:', e);
+        document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+    }
+}
+
 // Cleanup on modal close
 document.getElementById('previewModal').addEventListener('hidden.bs.modal', function() {
     if (previewInterval) {
@@ -1450,16 +2269,34 @@ document.getElementById('previewModal').addEventListener('hidden.bs.modal', func
         avsyncUpdateInterval = null;
     }
 
+    // Stop keepalive
+    if (outputKeepaliveInterval) {
+        clearInterval(outputKeepaliveInterval);
+        outputKeepaliveInterval = null;
+    }
+
     // Stop player if running
     if (outputPlayerRunning) {
         stopOutputPlayer();
+    } else if (window.previewStarted && currentPreviewPort) {
+        // Stop background preview even if player wasn't started
+        fetch(`api/transcoders.php?action=stop_preview&api_port=${currentPreviewPort}`, {
+            method: 'POST'
+        }).catch(e => console.error('Failed to stop preview:', e));
     }
+
+    // Reset state
+    window.previewStarted = false;
+    currentPreviewPort = null;
 
     inputVideoHistory = [];
     inputAudioHistory = [];
     outputVideoHistory = [];
     outputAudioHistory = [];
     bitrateTimestamps = [];
+    outputVideoPidsHistory = {};
+    currentVideoPids = [];
+    currentIsAbr = false;
 });
 
 // Fetch all transcoder metrics
@@ -1522,6 +2359,7 @@ let outputHlsPlayer = null;
 let outputPlayerRunning = false;
 let outputKeepaliveInterval = null;
 let currentPreviewPort = null;
+let ccEnabled = false;
 
 // Send keepalive to preview via API
 async function sendOutputKeepalive() {
@@ -1533,7 +2371,43 @@ async function sendOutputKeepalive() {
     }
 }
 
-// Start output player preview
+// Wait for playlist to be ready by polling player_preview status
+async function waitForPlaylistReady(previewPort, playlistUrl, maxAttempts = 30) {
+    const statusText = document.getElementById('videoStatusText');
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (!outputPlayerRunning) {
+            // Player was stopped while waiting
+            return;
+        }
+
+        try {
+            const response = await fetch(`http://${window.location.hostname}:${previewPort}/status`);
+            if (response.ok) {
+                const status = await response.json();
+                statusText.textContent = `Buffering... (${status.segments || 0} segments)`;
+
+                if (status.ready) {
+                    // Playlist is ready, start the player
+                    initOutputHlsPlayer(playlistUrl);
+                    return;
+                }
+            }
+        } catch (e) {
+            // Preview server not responding yet, keep trying
+            statusText.textContent = `Starting preview... (${attempt + 1}s)`;
+        }
+
+        // Wait 1 second before next check
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // Timeout - try to play anyway
+    console.warn('Playlist ready timeout, attempting to play anyway');
+    initOutputHlsPlayer(playlistUrl);
+}
+
+// Start output player preview (connects to already-running preview)
 async function startOutputPlayer() {
     const id = document.getElementById('previewId').value;
     const apiPort = document.getElementById('previewApiPort').value;
@@ -1547,48 +2421,28 @@ async function startOutputPlayer() {
     document.getElementById('startPlayerBtn').classList.add('d-none');
     document.getElementById('stopPlayerBtn').classList.remove('d-none');
     document.getElementById('playerStatus').className = 'badge bg-warning me-2';
-    document.getElementById('playerStatus').textContent = 'Starting...';
-    document.getElementById('videoStatusText').textContent = 'Starting preview...';
+    document.getElementById('playerStatus').textContent = 'Connecting...';
+    document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
 
     try {
-        // Start player_preview for the output stream
-        // Use /preview/ path to match inputs page structure
         const folderName = `transcoder-${id}`;
-        const outputDir = `/var/www/caritrans/public/preview/${folderName}`;
-        const previewPort = parseInt(apiPort) + 100; // Use api_port + 100 for preview
+        const previewPort = parseInt(apiPort) + 100;
 
-        const response = await fetch('api/transcoders.php?action=start_preview', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                id: id,
-                input_address: outputAddress,
-                output_dir: outputDir,
-                api_port: previewPort
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            outputPlayerRunning = true;
-            currentPreviewPort = previewPort;
-            document.getElementById('playerStatus').className = 'badge bg-info me-2';
-            document.getElementById('playerStatus').textContent = 'Loading...';
-            document.getElementById('videoStatusText').textContent = 'Waiting for segments...';
-
-            // Start keepalive (every 30 seconds)
-            if (outputKeepaliveInterval) clearInterval(outputKeepaliveInterval);
-            outputKeepaliveInterval = setInterval(sendOutputKeepalive, 30000);
-
-            // Wait for HLS segments to be generated (5 seconds for keyframe + encoding)
-            setTimeout(() => {
-                const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
-                initOutputHlsPlayer(playlistUrl);
-            }, 5000);
-        } else {
-            throw new Error(data.error || 'Failed to start preview');
+        // If preview wasn't started in background, start it now
+        if (!window.previewStarted) {
+            await startPreviewInBackground();
         }
+
+        // Mark player as running
+        outputPlayerRunning = true;
+
+        // Update status
+        document.getElementById('playerStatus').className = 'badge bg-info';
+        document.getElementById('playerStatus').textContent = 'Loading...';
+
+        // Wait for playlist to be ready and connect
+        const playlistUrl = `/preview/${folderName}/playlist.m3u8`;
+        await waitForPlaylistReady(previewPort, playlistUrl);
     } catch (e) {
         console.error('Failed to start output player:', e);
         document.getElementById('playerStatus').className = 'badge bg-danger me-2';
@@ -1601,6 +2455,9 @@ async function startOutputPlayer() {
 
 // Stop output player preview
 async function stopOutputPlayer() {
+    // Mark player as not running immediately to prevent race conditions
+    outputPlayerRunning = false;
+
     const id = document.getElementById('previewId').value;
     const apiPort = document.getElementById('previewApiPort').value;
     const previewPort = parseInt(apiPort) + 100;
@@ -1619,6 +2476,8 @@ async function stopOutputPlayer() {
     }
 
     const video = document.getElementById('outputVideo');
+    video.pause();
+    video.src = '';
     video.classList.add('d-none');
     document.getElementById('videoLoadingOverlay').classList.remove('d-none');
 
@@ -1630,63 +2489,577 @@ async function stopOutputPlayer() {
         console.error('Failed to stop preview:', e);
     }
 
-    outputPlayerRunning = false;
+    // Reset state
+    window.previewStarted = false;
+    ccEnabled = false;
     document.getElementById('startPlayerBtn').classList.remove('d-none');
     document.getElementById('stopPlayerBtn').classList.add('d-none');
-    document.getElementById('playerStatus').className = 'badge bg-secondary me-2';
+    document.getElementById('playerStatus').className = 'badge bg-secondary';
     document.getElementById('playerStatus').textContent = 'Stopped';
     document.getElementById('videoStatusText').textContent = 'Click Start to preview output';
+
+    // Reset quality selector and CC button
+    const qualitySelector = document.getElementById('qualitySelector');
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    document.getElementById('ccBtn').classList.add('d-none');
+    document.getElementById('ccBtn').classList.remove('btn-primary');
+    document.getElementById('ccBtn').classList.add('btn-outline-secondary');
+
+    // Reset and hide stats panel
+    document.getElementById('statsToggleBtn').classList.add('d-none');
+    document.getElementById('statsToggleBtn').classList.remove('active');
+    document.getElementById('playerStatsPanel').classList.add('d-none');
+    statsVisible = false;
+    stopStatsUpdate();
+    resetPlayerStats();
 }
 
 // Initialize HLS player for output
 function initOutputHlsPlayer(playlistUrl) {
     const video = document.getElementById('outputVideo');
+    const qualitySelector = document.getElementById('qualitySelector');
+    const ccBtn = document.getElementById('ccBtn');
 
     if (outputHlsPlayer) {
         outputHlsPlayer.destroy();
         outputHlsPlayer = null;
     }
 
+    // Reset quality selector
+    qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+    qualitySelector.classList.add('d-none');
+    ccBtn.classList.add('d-none');
+
     if (Hls.isSupported()) {
         outputHlsPlayer = new Hls({
             liveSyncDurationCount: 3,
-            liveMaxLatencyDurationCount: 6
+            liveMaxLatencyDurationCount: 6,
+            liveDurationInfinity: true,      // Live stream has infinite duration
+            liveBackBufferLength: 0,         // Don't keep back buffer for live
+            maxBufferLength: 30,             // Max buffer length
+            maxMaxBufferLength: 60,          // Max buffer when switching quality
+            enableCEA708Captions: true,      // Enable CEA-608/708 caption extraction
+            captionsTextTrack1Label: 'Captions',
+            captionsTextTrack1LanguageCode: 'en'
         });
 
         outputHlsPlayer.loadSource(playlistUrl);
         outputHlsPlayer.attachMedia(video);
 
-        outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+        // Hook stats events
+        hookHlsStatsEvents(outputHlsPlayer);
+
+        // Handle manifest parsed - populate quality levels
+        outputHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
+            // Guard against race condition if stop was clicked
+            if (!outputPlayerRunning) return;
+
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
-            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').className = 'badge bg-success';
             document.getElementById('playerStatus').textContent = 'Playing';
             video.play();
+
+            // Populate quality selector if multiple levels available
+            const levels = outputHlsPlayer.levels;
+            if (levels && levels.length > 1) {
+                qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+                levels.forEach((level, index) => {
+                    const height = level.height || 'Unknown';
+                    const bitrate = level.bitrate ? Math.round(level.bitrate / 1000) + ' kbps' : '';
+                    const label = height + 'p' + (bitrate ? ' (' + bitrate + ')' : '');
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = label;
+                    qualitySelector.appendChild(option);
+                });
+                qualitySelector.classList.remove('d-none');
+                console.log('Quality levels available:', levels.length);
+            }
         });
+
+        // Handle subtitle tracks update
+        outputHlsPlayer.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function(event, data) {
+            if (data.subtitleTracks && data.subtitleTracks.length > 0) {
+                ccBtn.classList.remove('d-none');
+                console.log('Subtitle tracks available:', data.subtitleTracks.length);
+            }
+        });
+
+        // Also check for CEA-608/708 captions via cues
+        outputHlsPlayer.on(Hls.Events.CUES_PARSED, function(event, data) {
+            if (data.type === 'captions' && data.cues && data.cues.length > 0) {
+                ccBtn.classList.remove('d-none');
+                console.log('CEA captions detected');
+            }
+        });
+
+        // Quality selector change handler
+        qualitySelector.onchange = function() {
+            if (outputHlsPlayer) {
+                const level = parseInt(this.value);
+                outputHlsPlayer.currentLevel = level;
+                console.log('Quality changed to level:', level, level === -1 ? '(Auto)' : '');
+            }
+        };
 
         outputHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
             console.error('HLS error:', data);
             if (data.fatal) {
-                document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+                document.getElementById('playerStatus').className = 'badge bg-danger';
                 document.getElementById('playerStatus').textContent = 'Error';
                 document.getElementById('videoStatusText').textContent = 'Playback error';
             }
         });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari native HLS
+        // Safari native HLS - quality selection handled by Safari
         video.src = playlistUrl;
         video.addEventListener('loadedmetadata', function() {
+            // Guard against race condition if stop was clicked
+            if (!outputPlayerRunning) return;
+
             document.getElementById('videoLoadingOverlay').classList.add('d-none');
             video.classList.remove('d-none');
-            document.getElementById('playerStatus').className = 'badge bg-success me-2';
+            document.getElementById('playerStatus').className = 'badge bg-success';
             document.getElementById('playerStatus').textContent = 'Playing';
             video.play();
+
+            // Check for text tracks (captions)
+            if (video.textTracks && video.textTracks.length > 0) {
+                ccBtn.classList.remove('d-none');
+            }
         });
     } else {
         document.getElementById('videoStatusText').textContent = 'HLS not supported in this browser';
-        document.getElementById('playerStatus').className = 'badge bg-danger me-2';
+        document.getElementById('playerStatus').className = 'badge bg-danger';
         document.getElementById('playerStatus').textContent = 'Unsupported';
     }
+}
+
+// Toggle closed captions
+function toggleClosedCaptions() {
+    const video = document.getElementById('outputVideo');
+    const ccBtn = document.getElementById('ccBtn');
+
+    ccEnabled = !ccEnabled;
+
+    if (ccEnabled) {
+        ccBtn.classList.remove('btn-outline-secondary');
+        ccBtn.classList.add('btn-primary');
+
+        // Enable captions
+        if (outputHlsPlayer && outputHlsPlayer.subtitleTracks && outputHlsPlayer.subtitleTracks.length > 0) {
+            outputHlsPlayer.subtitleTrack = 0;  // Enable first subtitle track
+        }
+
+        // Also try native text tracks
+        if (video.textTracks) {
+            for (let i = 0; i < video.textTracks.length; i++) {
+                if (video.textTracks[i].kind === 'captions' || video.textTracks[i].kind === 'subtitles') {
+                    video.textTracks[i].mode = 'showing';
+                    break;
+                }
+            }
+        }
+    } else {
+        ccBtn.classList.remove('btn-primary');
+        ccBtn.classList.add('btn-outline-secondary');
+
+        // Disable captions
+        if (outputHlsPlayer) {
+            outputHlsPlayer.subtitleTrack = -1;  // Disable subtitle track
+        }
+
+        // Also disable native text tracks
+        if (video.textTracks) {
+            for (let i = 0; i < video.textTracks.length; i++) {
+                video.textTracks[i].mode = 'hidden';
+            }
+        }
+    }
+
+    console.log('Closed captions:', ccEnabled ? 'enabled' : 'disabled');
+}
+
+// ============================================
+// HLS Player Statistics
+// ============================================
+
+let statsVisible = false;
+let statsUpdateInterval = null;
+let bandwidthHistory = [];
+let fragmentsLoaded = 0;
+let stallCount = 0;
+let lastDecodedFrames = 0;
+let lastFrameTime = 0;
+let bandwidthSparklineCtx = null;
+
+// Toggle stats panel visibility
+function togglePlayerStats() {
+    const panel = document.getElementById('playerStatsPanel');
+    const btn = document.getElementById('statsToggleBtn');
+
+    statsVisible = !statsVisible;
+
+    if (statsVisible) {
+        panel.classList.remove('d-none');
+        btn.classList.add('active');
+        startStatsUpdate();
+    } else {
+        panel.classList.add('d-none');
+        btn.classList.remove('active');
+        stopStatsUpdate();
+    }
+}
+
+// Start stats update interval
+function startStatsUpdate() {
+    if (statsUpdateInterval) return;
+
+    // Initialize sparkline
+    const canvas = document.getElementById('bandwidthSparkline');
+    if (canvas) {
+        bandwidthSparklineCtx = canvas.getContext('2d');
+    }
+
+    statsUpdateInterval = setInterval(updatePlayerStats, 500);
+    updatePlayerStats(); // Initial update
+}
+
+// Stop stats update interval
+function stopStatsUpdate() {
+    if (statsUpdateInterval) {
+        clearInterval(statsUpdateInterval);
+        statsUpdateInterval = null;
+    }
+}
+
+// Update all player stats
+function updatePlayerStats() {
+    if (!outputHlsPlayer || !outputPlayerRunning) return;
+
+    const video = document.getElementById('outputVideo');
+
+    // Buffer level
+    updateBufferStats(video);
+
+    // Latency
+    updateLatencyStats();
+
+    // Bandwidth
+    updateBandwidthStats();
+
+    // Current quality
+    updateQualityStats();
+
+    // Frame stats
+    updateFrameStats(video);
+
+    // Network stats
+    updateNetworkStats();
+
+    // Quality levels list
+    updateQualityLevelsList();
+}
+
+// Update buffer gauge
+function updateBufferStats(video) {
+    if (!video || video.readyState < 2) return;
+
+    const buffered = video.buffered;
+    const currentTime = video.currentTime;
+    let bufferLength = 0;
+
+    for (let i = 0; i < buffered.length; i++) {
+        if (buffered.start(i) <= currentTime && buffered.end(i) > currentTime) {
+            bufferLength = buffered.end(i) - currentTime;
+            break;
+        }
+    }
+
+    const bufferValue = document.getElementById('bufferValue');
+    const bufferGaugeFill = document.getElementById('bufferGaugeFill');
+    const bufferStatus = document.getElementById('bufferStatus');
+
+    bufferValue.textContent = bufferLength.toFixed(1);
+
+    // Max buffer for gauge: 10 seconds
+    const bufferPercent = Math.min(100, (bufferLength / 10) * 100);
+    bufferGaugeFill.style.width = bufferPercent + '%';
+
+    // Color coding
+    bufferGaugeFill.classList.remove('warning', 'critical');
+    if (bufferLength < 1) {
+        bufferGaugeFill.classList.add('critical');
+        bufferStatus.textContent = 'Critical';
+    } else if (bufferLength < 3) {
+        bufferGaugeFill.classList.add('warning');
+        bufferStatus.textContent = 'Low';
+    } else {
+        bufferStatus.textContent = 'Healthy';
+    }
+}
+
+// Update latency display
+function updateLatencyStats() {
+    const latencyValue = document.getElementById('latencyValue');
+
+    if (outputHlsPlayer && outputHlsPlayer.latency !== undefined) {
+        latencyValue.textContent = outputHlsPlayer.latency.toFixed(1);
+    } else if (outputHlsPlayer && outputHlsPlayer.targetLatency !== undefined) {
+        latencyValue.textContent = outputHlsPlayer.targetLatency.toFixed(1);
+    } else {
+        latencyValue.textContent = '--';
+    }
+}
+
+// Update bandwidth stats and sparkline
+function updateBandwidthStats() {
+    const bandwidthValue = document.getElementById('bandwidthValue');
+
+    if (outputHlsPlayer && outputHlsPlayer.bandwidthEstimate) {
+        const bwMbps = outputHlsPlayer.bandwidthEstimate / 1000000;
+        bandwidthValue.textContent = bwMbps.toFixed(1);
+
+        // Add to history
+        bandwidthHistory.push(bwMbps);
+        if (bandwidthHistory.length > 30) {
+            bandwidthHistory.shift();
+        }
+
+        // Draw sparkline
+        drawBandwidthSparkline();
+    } else {
+        bandwidthValue.textContent = '--';
+    }
+}
+
+// Draw bandwidth sparkline
+function drawBandwidthSparkline() {
+    if (!bandwidthSparklineCtx || bandwidthHistory.length < 2) return;
+
+    const canvas = bandwidthSparklineCtx.canvas;
+    const width = canvas.width = canvas.offsetWidth * 2;
+    const height = canvas.height = 48;
+
+    bandwidthSparklineCtx.clearRect(0, 0, width, height);
+
+    const max = Math.max(...bandwidthHistory) * 1.1 || 1;
+    const min = 0;
+    const range = max - min;
+
+    const stepX = width / (bandwidthHistory.length - 1);
+
+    // Draw line
+    bandwidthSparklineCtx.beginPath();
+    bandwidthSparklineCtx.strokeStyle = '#10b981';
+    bandwidthSparklineCtx.lineWidth = 2;
+
+    bandwidthHistory.forEach((val, i) => {
+        const x = i * stepX;
+        const y = height - ((val - min) / range) * (height - 4) - 2;
+
+        if (i === 0) {
+            bandwidthSparklineCtx.moveTo(x, y);
+        } else {
+            bandwidthSparklineCtx.lineTo(x, y);
+        }
+    });
+
+    bandwidthSparklineCtx.stroke();
+
+    // Draw fill
+    bandwidthSparklineCtx.lineTo(width, height);
+    bandwidthSparklineCtx.lineTo(0, height);
+    bandwidthSparklineCtx.closePath();
+
+    const gradient = bandwidthSparklineCtx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, 'rgba(16, 185, 129, 0.3)');
+    gradient.addColorStop(1, 'rgba(16, 185, 129, 0.05)');
+    bandwidthSparklineCtx.fillStyle = gradient;
+    bandwidthSparklineCtx.fill();
+}
+
+// Update current quality display
+function updateQualityStats() {
+    const qualityValue = document.getElementById('currentQualityValue');
+    const qualityBitrate = document.getElementById('currentQualityBitrate');
+    const abrIndicator = document.getElementById('abrModeIndicator');
+
+    if (outputHlsPlayer && outputHlsPlayer.levels && outputHlsPlayer.currentLevel >= 0) {
+        const level = outputHlsPlayer.levels[outputHlsPlayer.currentLevel];
+        if (level) {
+            qualityValue.textContent = (level.height || 'Auto') + 'p';
+            const bitrateMbps = (level.bitrate / 1000000).toFixed(1);
+            qualityBitrate.textContent = bitrateMbps + ' Mbps';
+        }
+    } else {
+        qualityValue.textContent = 'Auto';
+        qualityBitrate.textContent = '--';
+    }
+
+    // ABR mode indicator
+    if (outputHlsPlayer) {
+        const isAuto = outputHlsPlayer.autoLevelEnabled;
+        abrIndicator.textContent = isAuto ? 'Auto ABR' : 'Manual';
+        abrIndicator.className = isAuto ? 'badge bg-success ms-auto' : 'badge bg-secondary ms-auto';
+    }
+}
+
+// Update frame statistics
+function updateFrameStats(video) {
+    const framesDecoded = document.getElementById('framesDecoded');
+    const framesDropped = document.getElementById('framesDropped');
+    const framesDroppedIndicator = document.getElementById('framesDroppedIndicator');
+    const currentFps = document.getElementById('currentFps');
+
+    if (video.getVideoPlaybackQuality) {
+        const quality = video.getVideoPlaybackQuality();
+
+        framesDecoded.textContent = quality.totalVideoFrames.toLocaleString();
+        framesDropped.textContent = quality.droppedVideoFrames.toLocaleString();
+
+        // Dropped frames indicator
+        const dropRate = quality.totalVideoFrames > 0
+            ? (quality.droppedVideoFrames / quality.totalVideoFrames) * 100
+            : 0;
+
+        framesDroppedIndicator.className = 'status-dot';
+        if (dropRate < 0.1) {
+            framesDroppedIndicator.classList.add('status-dot-ok');
+        } else if (dropRate < 1) {
+            framesDroppedIndicator.classList.add('status-dot-warning');
+        } else {
+            framesDroppedIndicator.classList.add('status-dot-error');
+        }
+
+        // Calculate FPS
+        const now = performance.now();
+        if (lastFrameTime > 0) {
+            const framesDelta = quality.totalVideoFrames - lastDecodedFrames;
+            const timeDelta = (now - lastFrameTime) / 1000;
+            if (timeDelta > 0) {
+                const fps = framesDelta / timeDelta;
+                currentFps.textContent = fps.toFixed(1);
+            }
+        }
+        lastDecodedFrames = quality.totalVideoFrames;
+        lastFrameTime = now;
+    }
+}
+
+// Update network stats
+function updateNetworkStats() {
+    const ttfbValue = document.getElementById('ttfbValue');
+    const fragmentsLoadedEl = document.getElementById('fragmentsLoaded');
+    const stallCountEl = document.getElementById('stallCount');
+    const stallIndicator = document.getElementById('stallIndicator');
+
+    if (outputHlsPlayer && outputHlsPlayer.ttfbEstimate) {
+        ttfbValue.textContent = Math.round(outputHlsPlayer.ttfbEstimate);
+    }
+
+    fragmentsLoadedEl.textContent = fragmentsLoaded.toLocaleString();
+    stallCountEl.textContent = stallCount.toLocaleString();
+
+    // Stall indicator
+    stallIndicator.className = 'status-dot';
+    if (stallCount === 0) {
+        stallIndicator.classList.add('status-dot-ok');
+    } else if (stallCount < 3) {
+        stallIndicator.classList.add('status-dot-warning');
+    } else {
+        stallIndicator.classList.add('status-dot-error');
+    }
+}
+
+// Update quality levels visual list
+function updateQualityLevelsList() {
+    const list = document.getElementById('qualityLevelsList');
+    if (!outputHlsPlayer || !outputHlsPlayer.levels || outputHlsPlayer.levels.length === 0) {
+        list.innerHTML = '<div class="text-muted small">No quality levels available</div>';
+        return;
+    }
+
+    const levels = outputHlsPlayer.levels;
+    const currentLevel = outputHlsPlayer.currentLevel;
+    const maxBitrate = Math.max(...levels.map(l => l.bitrate || 0));
+
+    let html = '';
+    levels.forEach((level, index) => {
+        const isActive = index === currentLevel;
+        const height = level.height || 'Unknown';
+        const bitrateMbps = ((level.bitrate || 0) / 1000000).toFixed(1);
+        const barWidth = maxBitrate > 0 ? ((level.bitrate || 0) / maxBitrate) * 100 : 0;
+
+        html += `
+            <div class="quality-level-item ${isActive ? 'active' : ''}">
+                <div class="quality-level-indicator"></div>
+                <div class="quality-level-info">
+                    <span class="quality-level-resolution">${height}p</span>
+                    <span class="quality-level-bitrate">${bitrateMbps} Mbps</span>
+                </div>
+                <div class="quality-level-bar-container">
+                    <div class="quality-level-bar" style="width: ${barWidth}%"></div>
+                </div>
+            </div>
+        `;
+    });
+
+    list.innerHTML = html;
+}
+
+// Reset player stats
+function resetPlayerStats() {
+    bandwidthHistory = [];
+    fragmentsLoaded = 0;
+    stallCount = 0;
+    lastDecodedFrames = 0;
+    lastFrameTime = 0;
+
+    // Reset UI
+    document.getElementById('bufferValue').textContent = '0.0';
+    document.getElementById('bufferGaugeFill').style.width = '0%';
+    document.getElementById('bufferStatus').textContent = 'Waiting';
+    document.getElementById('latencyValue').textContent = '--';
+    document.getElementById('bandwidthValue').textContent = '--';
+    document.getElementById('currentQualityValue').textContent = '--';
+    document.getElementById('currentQualityBitrate').textContent = '--';
+    document.getElementById('framesDecoded').textContent = '0';
+    document.getElementById('framesDropped').textContent = '0';
+    document.getElementById('currentFps').textContent = '--';
+    document.getElementById('ttfbValue').textContent = '--';
+    document.getElementById('fragmentsLoaded').textContent = '0';
+    document.getElementById('stallCount').textContent = '0';
+    document.getElementById('qualityLevelsList').innerHTML = '';
+}
+
+// Hook HLS events for stats (called from initOutputHlsPlayer)
+function hookHlsStatsEvents(hls) {
+    // Show stats button when player is ready
+    document.getElementById('statsToggleBtn').classList.remove('d-none');
+
+    // Fragment loaded event
+    hls.on(Hls.Events.FRAG_LOADED, function(event, data) {
+        fragmentsLoaded++;
+    });
+
+    // Buffer stalled event
+    hls.on(Hls.Events.ERROR, function(event, data) {
+        if (data.details === 'bufferStalledError') {
+            stallCount++;
+        }
+    });
+
+    // Level switched event
+    hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {
+        console.log('Level switched to:', data.level);
+        if (statsVisible) {
+            updateQualityStats();
+            updateQualityLevelsList();
+        }
+    });
 }
 </script>
 

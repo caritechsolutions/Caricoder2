@@ -30,8 +30,8 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-# Updated: 2024-12-29
-BRANCH="claude/av-sync-monitor-Y57VM"
+# Updated: 2026-01-02
+BRANCH="claude/ABR-transcoder-DH9tM"
 GSTREAMER_VERSION="1.26.1"
 
 # Parse arguments

@@ -429,7 +429,7 @@ static int detect_stream(void) {
         int w, h;
         if (sscanf(line, "%31[^,],%d,%d", codec, &w, &h) >= 1) {
             g_ctx.stream_info.video_detected = 1;
-            strncpy(g_ctx.stream_info.video_codec, codec, sizeof(g_ctx.stream_info.video_codec) - 1);
+            snprintf(g_ctx.stream_info.video_codec, sizeof(g_ctx.stream_info.video_codec), "%s", codec);
             g_ctx.stream_info.width = w;
             g_ctx.stream_info.height = h;
             printf("  Video detected: %s %dx%d\n", codec, w, h);
@@ -450,7 +450,7 @@ static int detect_stream(void) {
         int ch = 2, sr = 48000;
         if (sscanf(line, "%31[^,],%d,%d", codec, &ch, &sr) >= 1) {
             g_ctx.stream_info.audio_detected = 1;
-            strncpy(g_ctx.stream_info.audio_codec, codec, sizeof(g_ctx.stream_info.audio_codec) - 1);
+            snprintf(g_ctx.stream_info.audio_codec, sizeof(g_ctx.stream_info.audio_codec), "%s", codec);
             g_ctx.stream_info.audio_channels = ch;
             g_ctx.stream_info.audio_samplerate = sr;
             printf("  Audio detected: %s %d ch @ %d Hz\n", codec, ch, sr);

@@ -676,6 +676,8 @@ function handle_start_preview() {
     $input_address = $input['input_address'] ?? '';
     $output_dir = $input['output_dir'] ?? '';
     $api_port = intval($input['api_port'] ?? 0);
+    $variants = intval($input['variants'] ?? 1);
+    $bitrates = $input['bitrates'] ?? [];
 
     if (empty($input_address) || empty($output_dir) || $api_port === 0) {
         echo json_encode(['success' => false, 'error' => 'Missing required parameters']);
@@ -686,7 +688,9 @@ function handle_start_preview() {
         'input_address' => $input_address,
         'output_dir' => $output_dir,
         'api_port' => $api_port,
-        'folder' => 'transcoder-' . $id
+        'folder' => 'transcoder-' . $id,
+        'variants' => $variants,
+        'bitrates' => $bitrates
     ];
 
     $result = call_cari_api('/preview/start', 'POST', $api_data);
@@ -896,20 +900,46 @@ function get_transcoder_metrics($id) {
         'input_format' => null,
         'output_format' => null,
         'video_pid' => 256,
+        'video_pids' => [],
         'audio_pid' => 257,
+        'is_abr' => false,
+        'video_bitrates_by_pid' => [],
         'continuity_errors' => 0,
         'continuity_errors_by_pid' => []
     ];
 
     $input_api_port = null;
     $input_address = null;
+    $video_pids = [];
 
     // Try to get input source from transcoder config file first
     if (file_exists($config_file)) {
         $config = parse_config($config_file);
 
+        // Check for ABR mode with multiple video PIDs
+        $is_abr = !empty($config['abr']['enabled']) && config_bool($config['abr']['enabled']);
+        $metrics['is_abr'] = $is_abr;
+
+        if ($is_abr && isset($config['abr']['variant_count'])) {
+            $variant_count = intval($config['abr']['variant_count']);
+            $variant_bitrates = [];
+            for ($i = 0; $i < $variant_count; $i++) {
+                $pid = intval($config['abr']["variant_{$i}_video_pid"] ?? (100 + $i * 100));
+                $video_pids[] = $pid;
+                $variant_bitrates[] = intval($config['abr']["variant_{$i}_bitrate"] ?? 5000000);
+            }
+            $metrics['video_pids'] = $video_pids;
+            $metrics['variant_count'] = $variant_count;
+            $metrics['variant_bitrates'] = $variant_bitrates;
+        }
+
+        // Fall back to single video PID if not ABR or no variants
+        if (empty($video_pids)) {
+            $video_pids[] = intval($config['output']['video_pid'] ?? 256);
+        }
+
         // Get configured PIDs and api_port for output stream
-        $metrics['video_pid'] = intval($config['output']['video_pid'] ?? 256);
+        $metrics['video_pid'] = $video_pids[0];  // First video PID for backwards compatibility
         $metrics['audio_pid'] = intval($config['output']['audio_pid'] ?? 257);
         $metrics['api_port'] = intval($config['output']['api_port'] ?? 9200);
 
@@ -963,9 +993,15 @@ function get_transcoder_metrics($id) {
             }
         }
 
-        // Parse output address: --udp-host HOST --udp-port PORT (new format)
-        // or -O ip ADDRESS:PORT (legacy format)
+        // Parse output address from various formats:
+        // 1. --udp-host HOST --udp-port PORT (cari-transcoder new format)
+        // 2. --output ADDRESS:PORT (cari-transcoder-abr format)
+        // 3. -O ip ADDRESS:PORT (legacy format)
         if (preg_match('/--udp-host\s+(\d+\.\d+\.\d+\.\d+)\s+--udp-port\s+(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
+        } elseif (preg_match('/--output\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
+            $metrics['output_address'] = $matches[1] . ':' . $matches[2];
+        } elseif (preg_match('/-o\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
             $metrics['output_address'] = $matches[1] . ':' . $matches[2];
         } elseif (preg_match('/-O\s+ip\s+(\d+\.\d+\.\d+\.\d+):(\d+)/', $service_content, $matches)) {
             $metrics['output_address'] = $matches[1] . ':' . $matches[2];
@@ -1038,8 +1074,13 @@ function get_transcoder_metrics($id) {
         // Format with --pid: * bitrate_monitor: YYYY/MM/DD HH:MM:SS, PID 0x0100 (256) bitrate: 5,384,620 bits/s
         // Note: Numbers may contain commas as thousand separators
 
-        $video_pid = $metrics['video_pid'];
         $audio_pid = $metrics['audio_pid'];
+
+        // For ABR mode, we need to track each video PID's bitrate
+        $video_bitrates = [];
+        foreach ($video_pids as $pid) {
+            $video_bitrates[$pid] = 0;
+        }
 
         foreach (array_reverse($lines) as $line) {
             if (strpos($line, 'bitrate_monitor') !== false) {
@@ -1048,8 +1089,9 @@ function get_transcoder_metrics($id) {
                     $pid = intval($matches[1]);
                     $bitrate = intval(str_replace(',', '', $matches[2]));
 
-                    if ($pid === $video_pid && $metrics['output_video_bitrate'] === 0) {
-                        $metrics['output_video_bitrate'] = $bitrate;
+                    // Check if this is one of our video PIDs
+                    if (in_array($pid, $video_pids) && $video_bitrates[$pid] === 0) {
+                        $video_bitrates[$pid] = $bitrate;
                     } elseif ($pid === $audio_pid && $metrics['output_audio_bitrate'] === 0) {
                         $metrics['output_audio_bitrate'] = $bitrate;
                     }
@@ -1064,9 +1106,14 @@ function get_transcoder_metrics($id) {
             }
         }
 
+        // Store per-PID bitrates and calculate total video bitrate
+        $metrics['video_bitrates_by_pid'] = $video_bitrates;
+        $total_video_bitrate = array_sum($video_bitrates);
+        $metrics['output_video_bitrate'] = $total_video_bitrate;
+
         // Calculate total from video + audio if we have per-PID values
-        if ($metrics['output_video_bitrate'] > 0 || $metrics['output_audio_bitrate'] > 0) {
-            $metrics['output_total_bitrate'] = $metrics['output_video_bitrate'] + $metrics['output_audio_bitrate'];
+        if ($total_video_bitrate > 0 || $metrics['output_audio_bitrate'] > 0) {
+            $metrics['output_total_bitrate'] = $total_video_bitrate + $metrics['output_audio_bitrate'];
         }
 
         // Parse CONTINUITY errors from log

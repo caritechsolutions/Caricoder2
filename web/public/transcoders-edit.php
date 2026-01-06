@@ -200,9 +200,9 @@ include __DIR__ . '/../templates/header.php';
                     </div>
                 </div>
                 <div class="row">
-                    <div class="col-md-3 mb-3">
+                    <div class="col-md-3 mb-3 abr-hide-field">
                         <label class="form-label">Video PID</label>
-                        <input type="number" class="form-control" name="video_pid"
+                        <input type="number" class="form-control" name="video_pid" id="videoPid"
                                value="<?php echo htmlspecialchars($config['output']['video_pid'] ?? '256'); ?>"
                                min="32" max="8190">
                         <div class="form-text">Default: 256 (0x100)</div>
@@ -257,9 +257,9 @@ include __DIR__ . '/../templates/header.php';
                             <option value="mpeg2" <?php echo ($config['video']['codec'] ?? '') === 'mpeg2' ? 'selected' : ''; ?>>MPEG-2</option>
                         </select>
                     </div>
-                    <div class="col-md-3 mb-3 video-transcode-option">
+                    <div class="col-md-3 mb-3 video-transcode-option abr-hide-field">
                         <label class="form-label">Bitrate (bps)</label>
-                        <input type="number" class="form-control" name="video_bitrate"
+                        <input type="number" class="form-control" name="video_bitrate" id="videoBitrate"
                                value="<?php echo htmlspecialchars($config['video']['bitrate'] ?? '5000000'); ?>"
                                min="100000" max="50000000" step="100000">
                         <div class="form-text">e.g., 5000000 = 5 Mbps</div>
@@ -709,6 +709,13 @@ function toggleAbrMode() {
     if (scalingCard) {
         scalingCard.style.display = enabled ? 'none' : '';
     }
+
+    // When ABR is enabled, hide main video bitrate and video PID fields
+    // (these are set per-variant in ABR mode)
+    const abrHideFields = document.querySelectorAll('.abr-hide-field');
+    abrHideFields.forEach(el => {
+        el.style.display = enabled ? 'none' : '';
+    });
 
     // Update video card to show it's for all variants
     if (videoCard) {
