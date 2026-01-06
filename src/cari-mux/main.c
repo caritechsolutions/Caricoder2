@@ -225,11 +225,9 @@ static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
     argv[argc++] = "-b";
     argv[argc++] = bitrate_str;
 
-    /* Input: null packet generator (sets overall bitrate, provides stuffing) */
+    /* Input: null packet generator (provides stuffing packets) */
     argv[argc++] = "-I";
     argv[argc++] = "null";
-    argv[argc++] = "--bitrate";
-    argv[argc++] = bitrate_str;
 
     /* Add merge plugin for each service (each runs a subprocess) */
     for (int i = 0; i < state->service_count && argc < max_args - 30; i++) {
