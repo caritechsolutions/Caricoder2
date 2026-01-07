@@ -40,7 +40,7 @@ transcoder: common
 	@echo "Building cari-transcoder..."
 	$(MAKE) -C src/cari-transcoder
 
-mux: common
+mux:
 	@echo "Building cari-mux..."
 	$(MAKE) -C src/cari-mux
 

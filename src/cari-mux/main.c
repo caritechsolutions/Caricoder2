@@ -1,597 +1,902 @@
 /*
- * CariTranscoder - TSDuck Mux Application
- * Copyright (c) 2024 CariTech Solutions
+ * CariMux - GStreamer-based MPTS Multiplexer
  *
- * Reads muxer configuration and executes TSDuck tsp command
- * to multiplex multiple SPTS into MPTS with PSI/SI generation.
+ * Multiplexes multiple SPTS UDP inputs into a single MPTS output.
+ * Uses tsdemux -> parse -> mpegtsmux pipeline.
+ * Output can be piped to tsp for SDT/NIT injection.
+ *
+ * Copyright (c) 2024 CariTech Solutions
  */
 
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <signal.h>
 #include <getopt.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+#include <pthread.h>
 #include <errno.h>
+#include <gst/gst.h>
 
-#include "config.h"
-#include "logging.h"
-
-#define VERSION "2.0.0"
+#define VERSION "3.0.0"
 #define MAX_SERVICES 16
-#define MAX_CMD_LEN 8192
-#define MAX_ARGS 256
 
-/* Service definition */
+/* Stream types detected via ffprobe */
+typedef enum {
+    STREAM_TYPE_UNKNOWN = 0,
+    STREAM_TYPE_H264,
+    STREAM_TYPE_H265,
+    STREAM_TYPE_MPEG2,
+    STREAM_TYPE_AAC,
+    STREAM_TYPE_AC3,
+    STREAM_TYPE_EAC3,
+    STREAM_TYPE_MP2
+} StreamType;
+
+/* Service/input definition */
 typedef struct {
     int enabled;
-    char source_type[32];
-    char source_id[64];
-    char source_address[64];
-    int source_port;
-    int program_number;
-    char service_name[128];
-    char service_provider[128];
-    int service_type;
-    int pmt_pid;
-    int is_pcr_reference;
-    /* PIDs for the output MPTS (after remapping) */
-    int video_pid;
-    int audio_pid;
-    /* Original PIDs from source SPTS (for remapping) */
-    int source_video_pid;
-    int source_audio_pid;
-} mux_service_t;
+    char address[64];
+    int port;
+    int program_number;         /* Service ID in MPTS */
+    int video_pid;              /* Output video PID */
+    int audio_pid;              /* Output audio PID */
+    StreamType video_type;      /* Detected video codec */
+    StreamType audio_type;      /* Detected audio codec */
+    gboolean video_linked;      /* Video pad connected */
+    gboolean audio_linked;      /* Audio pad connected */
+    GstElement *demux;          /* tsdemux element for this input */
+} ServiceInput;
 
-/* Mux state */
+/* Application context */
 typedef struct {
-    config_t config;
-    char config_file[256];
-    char id[64];
-    char name[128];
+    /* Services */
+    ServiceInput services[MAX_SERVICES];
+    int service_count;
 
     /* Output settings */
-    int output_bitrate;
-    char output_address[64];
-    int output_port;
-
-    /* Network settings */
-    int network_id;
-    char network_name[64];
-    int ts_id;
-    int original_network_id;
-
-    /* PSI intervals */
-    int pat_interval;
-    int pmt_interval;
-    int sdt_interval;
-    int nit_interval;
-
-    /* Services */
-    mux_service_t services[MAX_SERVICES];
-    int service_count;
-    int pcr_reference_service;
+    gboolean use_stdout;
+    char udp_host[256];
+    int udp_port;
 
     /* Runtime */
     volatile int running;
-    pid_t tsp_pid;
-} mux_state_t;
+    GstElement *pipeline;
+    GstElement *mux;
+    GMainLoop *main_loop;
 
-static mux_state_t g_state = {0};
+    /* Options */
+    gboolean debug;
+    gboolean detect_only;
+} AppContext;
 
+static AppContext g_ctx = {0};
+
+/*
+ * Signal handler
+ */
 static void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        CARI_LOG_INFO("Received signal %d, shutting down...", signum);
-        g_state.running = 0;
-
-        /* Forward signal to tsp child process */
-        if (g_state.tsp_pid > 0) {
-            kill(g_state.tsp_pid, SIGTERM);
+        fprintf(stderr, "\nReceived signal %d, shutting down...\n", signum);
+        g_ctx.running = 0;
+        if (g_ctx.main_loop) {
+            g_main_loop_quit(g_ctx.main_loop);
         }
     }
-}
-
-static int load_config(mux_state_t *state) {
-    if (config_load(&state->config, state->config_file) != 0) {
-        return -1;
-    }
-
-    /* Muxer identification */
-    strncpy(state->id,
-            config_get_string(&state->config, "muxer", "id", "mux-1"),
-            sizeof(state->id) - 1);
-
-    strncpy(state->name,
-            config_get_string(&state->config, "muxer", "name", state->id),
-            sizeof(state->name) - 1);
-
-    /* Output settings */
-    state->output_bitrate = config_get_int(&state->config, "output", "output_bitrate", 20000000);
-    strncpy(state->output_address,
-            config_get_string(&state->config, "output", "address", "239.1.1.1"),
-            sizeof(state->output_address) - 1);
-    state->output_port = config_get_int(&state->config, "output", "port", 5000);
-
-    /* Network settings */
-    state->network_id = config_get_int(&state->config, "network", "network_id", 1);
-    strncpy(state->network_name,
-            config_get_string(&state->config, "network", "network_name", "CariTrans"),
-            sizeof(state->network_name) - 1);
-    state->ts_id = config_get_int(&state->config, "network", "ts_id", 1);
-    state->original_network_id = config_get_int(&state->config, "network", "original_network_id", 1);
-
-    /* PSI intervals */
-    state->pat_interval = config_get_int(&state->config, "tsduck", "pat_interval", 100);
-    state->pmt_interval = config_get_int(&state->config, "tsduck", "pmt_interval", 100);
-    state->sdt_interval = config_get_int(&state->config, "tsduck", "sdt_interval", 500);
-    state->nit_interval = config_get_int(&state->config, "tsduck", "nit_interval", 10000);
-
-    /* Parse services */
-    state->service_count = 0;
-    state->pcr_reference_service = 0;
-
-    for (int i = 1; i <= MAX_SERVICES; i++) {
-        char key[128];
-
-        snprintf(key, sizeof(key), "service.%d.enabled", i);
-        if (!config_get_bool(&state->config, "services", key, false)) {
-            continue;
-        }
-
-        mux_service_t *svc = &state->services[state->service_count];
-        svc->enabled = 1;
-
-        snprintf(key, sizeof(key), "service.%d.source_type", i);
-        strncpy(svc->source_type,
-                config_get_string(&state->config, "services", key, "input"),
-                sizeof(svc->source_type) - 1);
-
-        snprintf(key, sizeof(key), "service.%d.source_id", i);
-        strncpy(svc->source_id,
-                config_get_string(&state->config, "services", key, ""),
-                sizeof(svc->source_id) - 1);
-
-        snprintf(key, sizeof(key), "service.%d.source_address", i);
-        strncpy(svc->source_address,
-                config_get_string(&state->config, "services", key, ""),
-                sizeof(svc->source_address) - 1);
-
-        snprintf(key, sizeof(key), "service.%d.source_port", i);
-        svc->source_port = config_get_int(&state->config, "services", key, 0);
-
-        snprintf(key, sizeof(key), "service.%d.program_number", i);
-        svc->program_number = config_get_int(&state->config, "services", key, 1000 + i);
-
-        snprintf(key, sizeof(key), "service.%d.service_name", i);
-        strncpy(svc->service_name,
-                config_get_string(&state->config, "services", key, ""),
-                sizeof(svc->service_name) - 1);
-
-        snprintf(key, sizeof(key), "service.%d.service_provider", i);
-        strncpy(svc->service_provider,
-                config_get_string(&state->config, "services", key, "CariTrans"),
-                sizeof(svc->service_provider) - 1);
-
-        snprintf(key, sizeof(key), "service.%d.service_type", i);
-        svc->service_type = config_get_int(&state->config, "services", key, 0x01);
-
-        snprintf(key, sizeof(key), "service.%d.pmt_pid", i);
-        svc->pmt_pid = config_get_int(&state->config, "services", key, 256 + state->service_count * 256);
-
-        snprintf(key, sizeof(key), "service.%d.is_pcr_reference", i);
-        svc->is_pcr_reference = config_get_bool(&state->config, "services", key, false);
-
-        /* Source PIDs (from input SPTS - typically all same due to encoder output) */
-        snprintf(key, sizeof(key), "service.%d.source_video_pid", i);
-        svc->source_video_pid = config_get_int(&state->config, "services", key, 211);
-
-        snprintf(key, sizeof(key), "service.%d.source_audio_pid", i);
-        svc->source_audio_pid = config_get_int(&state->config, "services", key, 221);
-
-        /* Output PIDs (unique per service in MPTS) */
-        snprintf(key, sizeof(key), "service.%d.video_pid", i);
-        svc->video_pid = config_get_int(&state->config, "services", key,
-                                        100 + state->service_count * 100);
-
-        snprintf(key, sizeof(key), "service.%d.audio_pid", i);
-        svc->audio_pid = config_get_int(&state->config, "services", key,
-                                        101 + state->service_count * 100);
-
-        if (svc->is_pcr_reference && state->pcr_reference_service == 0) {
-            state->pcr_reference_service = svc->program_number;
-        }
-
-        if (svc->source_address[0] && svc->source_port > 0) {
-            state->service_count++;
-            CARI_LOG_INFO("Service %d: %s (%s:%d) -> Program %d (V:%d A:%d PMT:%d)",
-                     state->service_count, svc->service_name,
-                     svc->source_address, svc->source_port, svc->program_number,
-                     svc->video_pid, svc->audio_pid, svc->pmt_pid);
-        }
-    }
-
-    /* Default PCR reference to first service if not set */
-    if (state->pcr_reference_service == 0 && state->service_count > 0) {
-        state->pcr_reference_service = state->services[0].program_number;
-    }
-
-    CARI_LOG_INFO("Configured: %s (%s) - %d services, %d bps output",
-             state->name, state->id, state->service_count, state->output_bitrate);
-
-    return 0;
 }
 
 /*
- * Build TSDuck tsp command arguments
- *
- * Strategy for MPTS creation:
- * 1. Use null input as stuffing source (provides CBR padding)
- * 2. Merge each SPTS with --no-psi-merge (we inject our own tables)
- *    - Inside subprocess: filter out PSI (PIDs 0-20), remap content PIDs
- * 3. Inject our own PAT, SDT, and PMT tables with correct structure
- * 4. Regulate output for CBR
- *
- * Result: Clean MPTS with each SPTS as separate program/service
+ * Get parser element name for stream type
  */
-static int build_tsp_args(mux_state_t *state, char **argv, int max_args) {
-    int argc = 0;
-
-    /* Static buffers for string arguments (must persist after function returns) */
-    static char bitrate_str[32];
-    static char merge_cmds[MAX_SERVICES][1024];
-    static char pat_xml[4096];
-    static char sdt_xml[8192];
-    static char pmt_xml[MAX_SERVICES][2048];
-    static char pat_bitrate[32];
-    static char sdt_bitrate[32];
-    static char pmt_bitrate[MAX_SERVICES][32];
-    static char pmt_pid_str[MAX_SERVICES][32];
-    static char output_addr[128];
-
-    /* Command */
-    argv[argc++] = "tsp";
-    argv[argc++] = "-v";  /* Verbose for debugging */
-
-    /* Global bitrate */
-    snprintf(bitrate_str, sizeof(bitrate_str), "%d", state->output_bitrate);
-    argv[argc++] = "-b";
-    argv[argc++] = bitrate_str;
-
-    /* Input: null packet generator (provides stuffing packets) */
-    argv[argc++] = "-I";
-    argv[argc++] = "null";
-
-    /*
-     * Add merge plugin for each service
-     * Each merge runs a subprocess that:
-     * - Reads from UDP source
-     * - Filters out PSI tables (PIDs 0-20) since we inject our own
-     * - Remaps video/audio PIDs to unique values
-     */
-    for (int i = 0; i < state->service_count && argc < max_args - 50; i++) {
-        mux_service_t *svc = &state->services[i];
-
-        /* Build subprocess command:
-         * tsp -I ip addr:port -P filter -n -p 0-20 -s -P remap SRC=DST ...
-         */
-        snprintf(merge_cmds[i], sizeof(merge_cmds[i]),
-                 "tsp -I ip %s:%d "
-                 "-P filter -n -p 0-20 -s "
-                 "-P remap %d=%d %d=%d",
-                 svc->source_address, svc->source_port,
-                 svc->source_video_pid, svc->video_pid,
-                 svc->source_audio_pid, svc->audio_pid);
-
-        argv[argc++] = "-P";
-        argv[argc++] = "merge";
-        argv[argc++] = "--no-psi-merge";
-        argv[argc++] = merge_cmds[i];
+static const char *get_parser_for_type(StreamType type) {
+    switch (type) {
+        case STREAM_TYPE_H264:  return "h264parse";
+        case STREAM_TYPE_H265:  return "h265parse";
+        case STREAM_TYPE_MPEG2: return "mpegvideoparse";
+        case STREAM_TYPE_AAC:   return "aacparse";
+        case STREAM_TYPE_AC3:   return "ac3parse";
+        case STREAM_TYPE_EAC3:  return "ac3parse";
+        case STREAM_TYPE_MP2:   return "mpegaudioparse";
+        default:                return NULL;
     }
-
-    /*
-     * Build and inject PAT (Program Association Table)
-     * Maps service_id -> PMT PID for each program
-     */
-    {
-        int pos = snprintf(pat_xml, sizeof(pat_xml),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<tsduck>"
-            "<PAT version=\"0\" transport_stream_id=\"%d\">",
-            state->ts_id);
-
-        for (int i = 0; i < state->service_count; i++) {
-            pos += snprintf(pat_xml + pos, sizeof(pat_xml) - pos,
-                "<service service_id=\"%d\" program_map_PID=\"%d\"/>",
-                state->services[i].program_number,
-                state->services[i].pmt_pid);
-        }
-        snprintf(pat_xml + pos, sizeof(pat_xml) - pos, "</PAT></tsduck>");
-
-        snprintf(pat_bitrate, sizeof(pat_bitrate), "%d",
-                 state->pat_interval > 0 ? 15000 / state->pat_interval * 1000 : 15000);
-
-        argv[argc++] = "-P";
-        argv[argc++] = "inject";
-        argv[argc++] = pat_xml;
-        argv[argc++] = "--pid";
-        argv[argc++] = "0";
-        argv[argc++] = "--bitrate";
-        argv[argc++] = pat_bitrate;
-        argv[argc++] = "--stuffing";
-    }
-
-    /*
-     * Build and inject SDT (Service Description Table)
-     * Contains service name, provider, type for each program
-     */
-    {
-        int pos = snprintf(sdt_xml, sizeof(sdt_xml),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<tsduck>"
-            "<SDT version=\"0\" transport_stream_id=\"%d\" "
-            "original_network_id=\"%d\" actual=\"true\">",
-            state->ts_id, state->original_network_id);
-
-        for (int i = 0; i < state->service_count; i++) {
-            mux_service_t *svc = &state->services[i];
-            pos += snprintf(sdt_xml + pos, sizeof(sdt_xml) - pos,
-                "<service service_id=\"%d\" running_status=\"running\" "
-                "EIT_schedule=\"false\" EIT_present_following=\"false\">"
-                "<service_descriptor service_type=\"0x%02X\" "
-                "service_provider_name=\"%s\" service_name=\"%s\"/>"
-                "</service>",
-                svc->program_number,
-                svc->service_type,
-                svc->service_provider,
-                svc->service_name);
-        }
-        snprintf(sdt_xml + pos, sizeof(sdt_xml) - pos, "</SDT></tsduck>");
-
-        snprintf(sdt_bitrate, sizeof(sdt_bitrate), "%d",
-                 state->sdt_interval > 0 ? 15000 / state->sdt_interval * 1000 : 3000);
-
-        argv[argc++] = "-P";
-        argv[argc++] = "inject";
-        argv[argc++] = sdt_xml;
-        argv[argc++] = "--pid";
-        argv[argc++] = "17";
-        argv[argc++] = "--bitrate";
-        argv[argc++] = sdt_bitrate;
-        argv[argc++] = "--stuffing";
-    }
-
-    /*
-     * Build and inject PMT (Program Map Table) for each service
-     * Each PMT lists video/audio PIDs for its program
-     */
-    for (int i = 0; i < state->service_count && argc < max_args - 20; i++) {
-        mux_service_t *svc = &state->services[i];
-
-        /* PMT with video (H.264=0x1B) and audio (AAC=0x0F) components
-         * PCR_PID is typically the video PID */
-        snprintf(pmt_xml[i], sizeof(pmt_xml[i]),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<tsduck>"
-            "<PMT version=\"0\" service_id=\"%d\" PCR_PID=\"%d\">"
-            "<component elementary_PID=\"%d\" stream_type=\"0x1B\"/>"
-            "<component elementary_PID=\"%d\" stream_type=\"0x0F\"/>"
-            "</PMT>"
-            "</tsduck>",
-            svc->program_number,
-            svc->video_pid,
-            svc->video_pid,
-            svc->audio_pid);
-
-        snprintf(pmt_bitrate[i], sizeof(pmt_bitrate[i]), "%d",
-                 state->pmt_interval > 0 ? 15000 / state->pmt_interval * 1000 : 15000);
-
-        snprintf(pmt_pid_str[i], sizeof(pmt_pid_str[i]), "%d", svc->pmt_pid);
-
-        argv[argc++] = "-P";
-        argv[argc++] = "inject";
-        argv[argc++] = pmt_xml[i];
-        argv[argc++] = "--pid";
-        argv[argc++] = pmt_pid_str[i];
-        argv[argc++] = "--bitrate";
-        argv[argc++] = pmt_bitrate[i];
-        argv[argc++] = "--stuffing";
-    }
-
-    /* Regulate for CBR output */
-    argv[argc++] = "-P";
-    argv[argc++] = "regulate";
-
-    /* Output to UDP multicast */
-    snprintf(output_addr, sizeof(output_addr), "%s:%d",
-             state->output_address, state->output_port);
-    argv[argc++] = "-O";
-    argv[argc++] = "ip";
-    argv[argc++] = output_addr;
-
-    /* Null terminate */
-    argv[argc] = NULL;
-
-    return argc;
 }
 
 /*
- * Print the command that will be executed
+ * Get stream type from codec name (ffprobe output)
  */
-static void print_command(char **argv) {
-    fprintf(stderr, "Executing: ");
-    for (int i = 0; argv[i] != NULL; i++) {
-        /* Quote arguments with spaces */
-        if (strchr(argv[i], ' ')) {
-            fprintf(stderr, "\"%s\" ", argv[i]);
-        } else {
-            fprintf(stderr, "%s ", argv[i]);
-        }
-    }
-    fprintf(stderr, "\n");
+static StreamType get_stream_type(const char *codec_name) {
+    if (!codec_name) return STREAM_TYPE_UNKNOWN;
+
+    if (strcmp(codec_name, "h264") == 0) return STREAM_TYPE_H264;
+    if (strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "h265") == 0) return STREAM_TYPE_H265;
+    if (strcmp(codec_name, "mpeg2video") == 0) return STREAM_TYPE_MPEG2;
+    if (strcmp(codec_name, "aac") == 0) return STREAM_TYPE_AAC;
+    if (strcmp(codec_name, "ac3") == 0) return STREAM_TYPE_AC3;
+    if (strcmp(codec_name, "eac3") == 0) return STREAM_TYPE_EAC3;
+    if (strcmp(codec_name, "mp2") == 0 || strcmp(codec_name, "mp3") == 0) return STREAM_TYPE_MP2;
+
+    return STREAM_TYPE_UNKNOWN;
 }
 
 /*
- * Execute TSDuck tsp command
+ * Simple JSON string extractor
  */
-static int run_tsp(mux_state_t *state) {
-    char *argv[MAX_ARGS];
+static char *json_get_string(const char *json, const char *key) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
 
-    int argc = build_tsp_args(state, argv, MAX_ARGS);
-    if (argc <= 0) {
-        CARI_LOG_ERROR("Failed to build tsp arguments");
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t') pos++;
+
+    if (*pos != '"') return NULL;
+    pos++;
+
+    const char *end = strchr(pos, '"');
+    if (!end) return NULL;
+
+    size_t len = end - pos;
+    char *result = malloc(len + 1);
+    if (result) {
+        memcpy(result, pos, len);
+        result[len] = '\0';
+    }
+    return result;
+}
+
+/*
+ * Detect streams using ffprobe
+ */
+static int detect_stream(ServiceInput *svc) {
+    char cmd[512];
+    char url[256];
+    FILE *fp;
+    char *output = NULL;
+    size_t output_size = 0;
+    size_t output_capacity = 32768;
+
+    snprintf(url, sizeof(url), "udp://@%s:%d", svc->address, svc->port);
+
+    snprintf(cmd, sizeof(cmd),
+             "ffprobe -v quiet -print_format json -show_streams "
+             "-analyzeduration 3000000 -probesize 3000000 -i \"%s\" 2>/dev/null",
+             url);
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Probing: %s\n", url);
+    }
+
+    fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "Error: Failed to run ffprobe for %s:%d\n", svc->address, svc->port);
         return -1;
     }
 
-    print_command(argv);
-
-    /* Fork and exec */
-    pid_t pid = fork();
-    if (pid < 0) {
-        CARI_LOG_ERROR("Fork failed: %s", strerror(errno));
+    output = malloc(output_capacity);
+    if (!output) {
+        pclose(fp);
         return -1;
     }
 
-    if (pid == 0) {
-        /* Child process - execute tsp */
-        execvp("tsp", argv);
-
-        /* If exec fails */
-        fprintf(stderr, "Failed to execute tsp: %s\n", strerror(errno));
-        _exit(127);
-    }
-
-    /* Parent process */
-    state->tsp_pid = pid;
-    CARI_LOG_INFO("Started tsp process with PID %d", pid);
-
-    /* Wait for child to exit */
-    int status;
-    while (state->running) {
-        pid_t result = waitpid(pid, &status, WNOHANG);
-        if (result == pid) {
-            /* Child exited */
-            if (WIFEXITED(status)) {
-                int exit_code = WEXITSTATUS(status);
-                CARI_LOG_INFO("tsp exited with code %d", exit_code);
-                return exit_code;
-            } else if (WIFSIGNALED(status)) {
-                CARI_LOG_INFO("tsp killed by signal %d", WTERMSIG(status));
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        size_t len = strlen(buffer);
+        if (output_size + len >= output_capacity) {
+            output_capacity *= 2;
+            char *new_output = realloc(output, output_capacity);
+            if (!new_output) {
+                free(output);
+                pclose(fp);
                 return -1;
             }
-            break;
-        } else if (result < 0 && errno != EINTR) {
-            CARI_LOG_ERROR("waitpid error: %s", strerror(errno));
+            output = new_output;
+        }
+        memcpy(output + output_size, buffer, len);
+        output_size += len;
+    }
+    output[output_size] = '\0';
+
+    int status = pclose(fp);
+    if (status != 0) {
+        fprintf(stderr, "Warning: ffprobe returned status %d for %s:%d\n",
+                status, svc->address, svc->port);
+        free(output);
+        return -1;
+    }
+
+    /* Parse streams */
+    const char *stream_pos = output;
+    while ((stream_pos = strstr(stream_pos, "\"codec_type\"")) != NULL) {
+        /* Find the enclosing object */
+        const char *obj_start = stream_pos;
+        int brace_count = 0;
+        while (obj_start > output) {
+            obj_start--;
+            if (*obj_start == '{') {
+                brace_count++;
+                if (brace_count == 1) break;
+            } else if (*obj_start == '}') {
+                brace_count--;
+            }
+        }
+
+        const char *obj_end = stream_pos;
+        brace_count = 0;
+        while (*obj_end) {
+            if (*obj_end == '{') brace_count++;
+            else if (*obj_end == '}') {
+                brace_count--;
+                if (brace_count < 0) break;
+            }
+            obj_end++;
+        }
+
+        size_t obj_len = obj_end - obj_start + 1;
+        char *stream_json = malloc(obj_len + 1);
+        if (!stream_json) break;
+        memcpy(stream_json, obj_start, obj_len);
+        stream_json[obj_len] = '\0';
+
+        char *codec_type = json_get_string(stream_json, "codec_type");
+        char *codec_name = json_get_string(stream_json, "codec_name");
+
+        if (codec_type && codec_name) {
+            if (strcmp(codec_type, "video") == 0 && svc->video_type == STREAM_TYPE_UNKNOWN) {
+                svc->video_type = get_stream_type(codec_name);
+                if (g_ctx.debug) {
+                    fprintf(stderr, "  Video: %s\n", codec_name);
+                }
+            } else if (strcmp(codec_type, "audio") == 0 && svc->audio_type == STREAM_TYPE_UNKNOWN) {
+                svc->audio_type = get_stream_type(codec_name);
+                if (g_ctx.debug) {
+                    fprintf(stderr, "  Audio: %s\n", codec_name);
+                }
+            }
+        }
+
+        free(codec_type);
+        free(codec_name);
+        free(stream_json);
+        stream_pos++;
+    }
+
+    free(output);
+
+    return (svc->video_type != STREAM_TYPE_UNKNOWN ||
+            svc->audio_type != STREAM_TYPE_UNKNOWN) ? 0 : -1;
+}
+
+/*
+ * Find service by demux element
+ */
+static ServiceInput *find_service_by_demux(GstElement *demux) {
+    for (int i = 0; i < g_ctx.service_count; i++) {
+        if (g_ctx.services[i].demux == demux) {
+            return &g_ctx.services[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Callback when tsdemux discovers a new pad
+ */
+static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_data) {
+    (void)user_data;
+
+    ServiceInput *svc = find_service_by_demux(demux);
+    if (!svc) {
+        fprintf(stderr, "Warning: pad-added from unknown demux\n");
+        return;
+    }
+
+    const gchar *pad_name = GST_PAD_NAME(pad);
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        caps = gst_pad_query_caps(pad, NULL);
+    }
+
+    if (!caps) {
+        fprintf(stderr, "Warning: No caps on pad %s\n", pad_name);
+        return;
+    }
+
+    const gchar *media_type = gst_structure_get_name(gst_caps_get_structure(caps, 0));
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Service %d: pad-added '%s' type=%s\n",
+                svc->program_number, pad_name, media_type);
+    }
+
+    gboolean is_video = g_str_has_prefix(media_type, "video/");
+    gboolean is_audio = g_str_has_prefix(media_type, "audio/");
+
+    if (is_video && !svc->video_linked) {
+        const char *parser_name = get_parser_for_type(svc->video_type);
+        if (!parser_name) {
+            fprintf(stderr, "Warning: No parser for video type %d\n", svc->video_type);
+            gst_caps_unref(caps);
+            return;
+        }
+
+        /* Create queue -> parser chain */
+        GstElement *queue = gst_element_factory_make("queue", NULL);
+        GstElement *parser = gst_element_factory_make(parser_name, NULL);
+
+        if (!queue || !parser) {
+            fprintf(stderr, "Error: Failed to create video elements\n");
+            gst_caps_unref(caps);
+            return;
+        }
+
+        gst_bin_add_many(GST_BIN(g_ctx.pipeline), queue, parser, NULL);
+        gst_element_sync_state_with_parent(queue);
+        gst_element_sync_state_with_parent(parser);
+
+        /* Link: demux pad -> queue -> parser */
+        GstPad *queue_sink = gst_element_get_static_pad(queue, "sink");
+        if (gst_pad_link(pad, queue_sink) != GST_PAD_LINK_OK) {
+            fprintf(stderr, "Error: Failed to link demux to video queue\n");
+        }
+        gst_object_unref(queue_sink);
+
+        gst_element_link(queue, parser);
+
+        /* Link parser to mux with specific sink pad name for PID assignment */
+        char sink_pad_name[32];
+        snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", svc->video_pid);
+
+        GstPad *mux_sink = gst_element_request_pad_simple(g_ctx.mux, sink_pad_name);
+        if (!mux_sink) {
+            /* Fallback to generic request */
+            mux_sink = gst_element_request_pad_simple(g_ctx.mux, "sink_%d");
+        }
+
+        if (mux_sink) {
+            GstPad *parser_src = gst_element_get_static_pad(parser, "src");
+            if (gst_pad_link(parser_src, mux_sink) != GST_PAD_LINK_OK) {
+                fprintf(stderr, "Error: Failed to link video parser to mux\n");
+            }
+            gst_object_unref(parser_src);
+            gst_object_unref(mux_sink);
+        }
+
+        svc->video_linked = TRUE;
+        fprintf(stderr, "Service %d: Video linked (PID %d)\n", svc->program_number, svc->video_pid);
+
+    } else if (is_audio && !svc->audio_linked) {
+        const char *parser_name = get_parser_for_type(svc->audio_type);
+        if (!parser_name) {
+            fprintf(stderr, "Warning: No parser for audio type %d\n", svc->audio_type);
+            gst_caps_unref(caps);
+            return;
+        }
+
+        /* Create queue -> parser chain */
+        GstElement *queue = gst_element_factory_make("queue", NULL);
+        GstElement *parser = gst_element_factory_make(parser_name, NULL);
+
+        if (!queue || !parser) {
+            fprintf(stderr, "Error: Failed to create audio elements\n");
+            gst_caps_unref(caps);
+            return;
+        }
+
+        gst_bin_add_many(GST_BIN(g_ctx.pipeline), queue, parser, NULL);
+        gst_element_sync_state_with_parent(queue);
+        gst_element_sync_state_with_parent(parser);
+
+        /* Link: demux pad -> queue -> parser */
+        GstPad *queue_sink = gst_element_get_static_pad(queue, "sink");
+        if (gst_pad_link(pad, queue_sink) != GST_PAD_LINK_OK) {
+            fprintf(stderr, "Error: Failed to link demux to audio queue\n");
+        }
+        gst_object_unref(queue_sink);
+
+        gst_element_link(queue, parser);
+
+        /* Link parser to mux with specific sink pad name for PID assignment */
+        char sink_pad_name[32];
+        snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", svc->audio_pid);
+
+        GstPad *mux_sink = gst_element_request_pad_simple(g_ctx.mux, sink_pad_name);
+        if (!mux_sink) {
+            mux_sink = gst_element_request_pad_simple(g_ctx.mux, "sink_%d");
+        }
+
+        if (mux_sink) {
+            GstPad *parser_src = gst_element_get_static_pad(parser, "src");
+            if (gst_pad_link(parser_src, mux_sink) != GST_PAD_LINK_OK) {
+                fprintf(stderr, "Error: Failed to link audio parser to mux\n");
+            }
+            gst_object_unref(parser_src);
+            gst_object_unref(mux_sink);
+        }
+
+        svc->audio_linked = TRUE;
+        fprintf(stderr, "Service %d: Audio linked (PID %d)\n", svc->program_number, svc->audio_pid);
+    }
+
+    gst_caps_unref(caps);
+}
+
+/*
+ * Build program-map string for mpegtsmux
+ * Format: "program1:pid1,pid2,program2:pid3,pid4"
+ * The lowest PID in each program becomes the PCR PID
+ */
+static char *build_prog_map(void) {
+    static char prog_map[2048];
+    char *p = prog_map;
+    int remaining = sizeof(prog_map);
+    int n;
+
+    for (int i = 0; i < g_ctx.service_count; i++) {
+        ServiceInput *svc = &g_ctx.services[i];
+
+        if (i > 0) {
+            n = snprintf(p, remaining, ",");
+            p += n; remaining -= n;
+        }
+
+        /* Format: programN:video_pid,audio_pid
+         * Lowest PID will be PCR */
+        int pid1 = (svc->video_pid < svc->audio_pid) ? svc->video_pid : svc->audio_pid;
+        int pid2 = (svc->video_pid < svc->audio_pid) ? svc->audio_pid : svc->video_pid;
+
+        n = snprintf(p, remaining, "program%d:%d,%d",
+                     svc->program_number, pid1, pid2);
+        p += n; remaining -= n;
+    }
+
+    return prog_map;
+}
+
+/*
+ * GStreamer bus message handler
+ */
+static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
+    (void)bus;
+    (void)data;
+
+    switch (GST_MESSAGE_TYPE(msg)) {
+        case GST_MESSAGE_ERROR: {
+            GError *err = NULL;
+            gchar *debug = NULL;
+            gst_message_parse_error(msg, &err, &debug);
+            fprintf(stderr, "Error from %s: %s\n",
+                    GST_OBJECT_NAME(msg->src), err->message);
+            if (debug && g_ctx.debug) {
+                fprintf(stderr, "Debug: %s\n", debug);
+            }
+            g_error_free(err);
+            g_free(debug);
+            g_ctx.running = 0;
+            if (g_ctx.main_loop) {
+                g_main_loop_quit(g_ctx.main_loop);
+            }
             break;
         }
 
-        /* Sleep briefly to avoid busy waiting */
-        usleep(100000);  /* 100ms */
+        case GST_MESSAGE_WARNING: {
+            GError *err = NULL;
+            gchar *debug = NULL;
+            gst_message_parse_warning(msg, &err, &debug);
+            fprintf(stderr, "Warning from %s: %s\n",
+                    GST_OBJECT_NAME(msg->src), err->message);
+            g_error_free(err);
+            g_free(debug);
+            break;
+        }
+
+        case GST_MESSAGE_EOS:
+            fprintf(stderr, "End of stream\n");
+            g_ctx.running = 0;
+            if (g_ctx.main_loop) {
+                g_main_loop_quit(g_ctx.main_loop);
+            }
+            break;
+
+        case GST_MESSAGE_STATE_CHANGED:
+            if (GST_MESSAGE_SRC(msg) == GST_OBJECT(g_ctx.pipeline) && g_ctx.debug) {
+                GstState old_state, new_state, pending_state;
+                gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
+                fprintf(stderr, "Pipeline state: %s -> %s\n",
+                        gst_element_state_get_name(old_state),
+                        gst_element_state_get_name(new_state));
+            }
+            break;
+
+        default:
+            break;
     }
 
-    /* If we're stopping, ensure child is terminated */
-    if (!state->running && state->tsp_pid > 0) {
-        kill(state->tsp_pid, SIGTERM);
-        waitpid(state->tsp_pid, &status, 0);
+    return TRUE;
+}
+
+/*
+ * Create the pipeline
+ */
+static int create_pipeline(void) {
+    g_ctx.pipeline = gst_pipeline_new("mux-pipeline");
+    if (!g_ctx.pipeline) {
+        fprintf(stderr, "Error: Failed to create pipeline\n");
+        return -1;
     }
 
-    state->tsp_pid = 0;
+    /* Create mpegtsmux */
+    g_ctx.mux = gst_element_factory_make("mpegtsmux", "mux");
+    if (!g_ctx.mux) {
+        fprintf(stderr, "Error: Failed to create mpegtsmux (is gst-plugins-bad installed?)\n");
+        return -1;
+    }
+
+    /* Set program map for multi-program output */
+    char *prog_map = build_prog_map();
+    fprintf(stderr, "Program map: %s\n", prog_map);
+    g_object_set(g_ctx.mux, "prog-map", prog_map, NULL);
+
+    gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
+
+    /* Create output sink */
+    GstElement *sink;
+    if (g_ctx.use_stdout) {
+        sink = gst_element_factory_make("fdsink", "sink");
+        g_object_set(sink, "fd", 1, NULL);  /* stdout */
+        g_object_set(sink, "sync", FALSE, NULL);
+    } else {
+        sink = gst_element_factory_make("udpsink", "sink");
+        g_object_set(sink,
+                     "host", g_ctx.udp_host,
+                     "port", g_ctx.udp_port,
+                     "sync", FALSE,
+                     "async", FALSE,
+                     "auto-multicast", TRUE,
+                     NULL);
+    }
+
+    if (!sink) {
+        fprintf(stderr, "Error: Failed to create output sink\n");
+        return -1;
+    }
+
+    gst_bin_add(GST_BIN(g_ctx.pipeline), sink);
+    gst_element_link(g_ctx.mux, sink);
+
+    /* Create input chain for each service */
+    for (int i = 0; i < g_ctx.service_count; i++) {
+        ServiceInput *svc = &g_ctx.services[i];
+        char elem_name[64];
+
+        /* udpsrc */
+        snprintf(elem_name, sizeof(elem_name), "udpsrc_%d", i);
+        GstElement *udpsrc = gst_element_factory_make("udpsrc", elem_name);
+        if (!udpsrc) {
+            fprintf(stderr, "Error: Failed to create udpsrc for service %d\n", i);
+            return -1;
+        }
+
+        char uri[256];
+        snprintf(uri, sizeof(uri), "udp://%s:%d", svc->address, svc->port);
+        g_object_set(udpsrc,
+                     "uri", uri,
+                     "buffer-size", 2097152,
+                     NULL);
+
+        /* queue for input buffering */
+        snprintf(elem_name, sizeof(elem_name), "queue_in_%d", i);
+        GstElement *queue = gst_element_factory_make("queue", elem_name);
+
+        /* tsparse for clean TS handling */
+        snprintf(elem_name, sizeof(elem_name), "tsparse_%d", i);
+        GstElement *tsparse = gst_element_factory_make("tsparse", elem_name);
+
+        /* tsdemux */
+        snprintf(elem_name, sizeof(elem_name), "tsdemux_%d", i);
+        GstElement *tsdemux = gst_element_factory_make("tsdemux", elem_name);
+        if (!tsdemux) {
+            fprintf(stderr, "Error: Failed to create tsdemux for service %d\n", i);
+            return -1;
+        }
+
+        svc->demux = tsdemux;
+
+        /* Connect pad-added signal for dynamic linking */
+        g_signal_connect(tsdemux, "pad-added", G_CALLBACK(on_demux_pad_added), NULL);
+
+        /* Add elements to pipeline */
+        gst_bin_add_many(GST_BIN(g_ctx.pipeline), udpsrc, queue, tsparse, tsdemux, NULL);
+
+        /* Link static elements */
+        if (!gst_element_link_many(udpsrc, queue, tsparse, tsdemux, NULL)) {
+            fprintf(stderr, "Error: Failed to link input chain for service %d\n", i);
+            return -1;
+        }
+
+        fprintf(stderr, "Service %d: %s:%d -> Program %d (V:%d A:%d)\n",
+                i + 1, svc->address, svc->port, svc->program_number,
+                svc->video_pid, svc->audio_pid);
+    }
+
+    /* Set up bus watch */
+    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(g_ctx.pipeline));
+    gst_bus_add_watch(bus, on_bus_message, NULL);
+    gst_object_unref(bus);
+
     return 0;
 }
 
-static void print_usage(const char *prog) {
-    printf("CariTranscoder Mux (TSDuck) - v%s\n", VERSION);
-    printf("Multiplexes SPTS streams into MPTS using TSDuck\n\n");
-    printf("Usage: %s -c <config_file> [options]\n\n", prog);
+/*
+ * Print help
+ */
+static void print_help(const char *prog) {
+    printf("CariMux v%s - GStreamer MPTS Multiplexer\n\n", VERSION);
+    printf("Usage: %s [options] -i ADDR:PORT[:PROG:VPID:APID] ...\n\n", prog);
     printf("Options:\n");
-    printf("  -c, --config FILE    Configuration file (required)\n");
-    printf("  -d, --debug          Enable debug logging\n");
-    printf("  -t, --test           Test mode - print command without executing\n");
-    printf("  -h, --help           Show this help\n");
+    printf("  -i, --input ADDR:PORT[:PROG:VPID:APID]\n");
+    printf("                         Add input service (can specify multiple)\n");
+    printf("                         PROG = program number (default: auto)\n");
+    printf("                         VPID = video PID (default: auto)\n");
+    printf("                         APID = audio PID (default: auto)\n");
+    printf("  -o, --output HOST:PORT UDP output address\n");
+    printf("  --stdout               Output to stdout (for piping to tsp)\n");
+    printf("  --detect-only          Detect streams and exit\n");
+    printf("  -d, --debug            Enable debug output\n");
+    printf("  -h, --help             Show this help\n");
     printf("\n");
-    printf("The configuration file should contain:\n");
-    printf("  [muxer]     - id, name\n");
-    printf("  [output]    - output_bitrate, address, port\n");
-    printf("  [network]   - network_id, network_name, ts_id\n");
-    printf("  [tsduck]    - pat_interval, pmt_interval, sdt_interval\n");
-    printf("  [services]  - service.N.enabled, source_address, program_number, etc.\n");
+    printf("Examples:\n");
+    printf("  Single input to UDP:\n");
+    printf("    %s -i 239.100.0.1:10000 -o 239.1.1.100:5500\n\n", prog);
+    printf("  Multiple inputs with custom PIDs:\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
+    printf("       -i 239.100.0.2:10000:2:200:201 \\\n");
+    printf("       -i 239.100.0.3:10000:3:300:301 \\\n");
+    printf("       -o 239.1.1.100:5500\n\n");
+    printf("  Output to tsp for SDT injection:\n");
+    printf("    %s -i 239.100.0.1:10000 --stdout | \\\n", prog);
+    printf("       tsp -I file - -P inject sdt.xml --pid 17 -O ip 239.1.1.100:5500\n");
 }
 
-int main(int argc, char *argv[]) {
-    int opt, debug = 0, test_mode = 0;
-    const char *config_file = NULL;
+/*
+ * Parse input argument: ADDR:PORT[:PROG:VPID:APID]
+ */
+static int parse_input(const char *arg, ServiceInput *svc, int index) {
+    char buf[256];
+    strncpy(buf, arg, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
 
+    /* Default values */
+    svc->program_number = index + 1;
+    svc->video_pid = 100 + index * 100;
+    svc->audio_pid = 101 + index * 100;
+    svc->video_type = STREAM_TYPE_UNKNOWN;
+    svc->audio_type = STREAM_TYPE_UNKNOWN;
+    svc->enabled = 1;
+
+    /* Parse ADDR:PORT */
+    char *colon1 = strchr(buf, ':');
+    if (!colon1) {
+        fprintf(stderr, "Error: Input must be ADDR:PORT format\n");
+        return -1;
+    }
+    *colon1 = '\0';
+    strncpy(svc->address, buf, sizeof(svc->address) - 1);
+
+    char *rest = colon1 + 1;
+    char *colon2 = strchr(rest, ':');
+
+    if (colon2) {
+        *colon2 = '\0';
+        svc->port = atoi(rest);
+
+        /* Parse optional PROG:VPID:APID */
+        char *parts[3] = {NULL, NULL, NULL};
+        parts[0] = colon2 + 1;
+
+        char *c = strchr(parts[0], ':');
+        if (c) {
+            *c = '\0';
+            parts[1] = c + 1;
+            c = strchr(parts[1], ':');
+            if (c) {
+                *c = '\0';
+                parts[2] = c + 1;
+            }
+        }
+
+        if (parts[0] && strlen(parts[0]) > 0) svc->program_number = atoi(parts[0]);
+        if (parts[1] && strlen(parts[1]) > 0) svc->video_pid = atoi(parts[1]);
+        if (parts[2] && strlen(parts[2]) > 0) svc->audio_pid = atoi(parts[2]);
+    } else {
+        svc->port = atoi(rest);
+    }
+
+    if (svc->port <= 0) {
+        fprintf(stderr, "Error: Invalid port in input\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Parse arguments
+ */
+static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
-        {"config", required_argument, 0, 'c'},
-        {"debug", no_argument, 0, 'd'},
-        {"test", no_argument, 0, 't'},
-        {"help", no_argument, 0, 'h'},
+        {"input",       required_argument, 0, 'i'},
+        {"output",      required_argument, 0, 'o'},
+        {"stdout",      no_argument,       0, 'S'},
+        {"detect-only", no_argument,       0, 'D'},
+        {"debug",       no_argument,       0, 'd'},
+        {"help",        no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "c:dth", long_options, NULL)) != -1) {
+    int opt;
+    while ((opt = getopt_long(argc, argv, "i:o:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'c': config_file = optarg; break;
-            case 'd': debug = 1; break;
-            case 't': test_mode = 1; break;
-            case 'h': print_usage(argv[0]); return 0;
-            default: return 1;
+            case 'i':
+                if (g_ctx.service_count >= MAX_SERVICES) {
+                    fprintf(stderr, "Error: Maximum %d services supported\n", MAX_SERVICES);
+                    return -1;
+                }
+                if (parse_input(optarg, &g_ctx.services[g_ctx.service_count],
+                               g_ctx.service_count) != 0) {
+                    return -1;
+                }
+                g_ctx.service_count++;
+                break;
+
+            case 'o': {
+                char *colon = strchr(optarg, ':');
+                if (!colon) {
+                    fprintf(stderr, "Error: Output must be HOST:PORT format\n");
+                    return -1;
+                }
+                *colon = '\0';
+                strncpy(g_ctx.udp_host, optarg, sizeof(g_ctx.udp_host) - 1);
+                g_ctx.udp_port = atoi(colon + 1);
+                break;
+            }
+
+            case 'S':
+                g_ctx.use_stdout = TRUE;
+                break;
+
+            case 'D':
+                g_ctx.detect_only = TRUE;
+                break;
+
+            case 'd':
+                g_ctx.debug = TRUE;
+                break;
+
+            case 'h':
+                print_help(argv[0]);
+                exit(0);
+
+            default:
+                return -1;
         }
     }
 
-    if (!config_file) {
-        fprintf(stderr, "Configuration file required (-c)\n");
-        print_usage(argv[0]);
-        return 1;
+    if (g_ctx.service_count == 0) {
+        fprintf(stderr, "Error: At least one input (-i) is required\n");
+        return -1;
     }
 
-    /* Initialize logging */
-    log_config_t log_cfg = LOG_CONFIG_DEFAULT;
-    strncpy(log_cfg.ident, "cari-mux", sizeof(log_cfg.ident));
-    if (debug) log_cfg.min_level = LOG_LEVEL_DEBUG;
-    log_init(&log_cfg);
-
-    CARI_LOG_INFO("CariTranscoder Mux (TSDuck) v%s starting...", VERSION);
-
-    /* Load configuration */
-    strncpy(g_state.config_file, config_file, sizeof(g_state.config_file) - 1);
-    if (load_config(&g_state) != 0) {
-        CARI_LOG_ERROR("Failed to load configuration");
-        return 1;
+    if (!g_ctx.use_stdout && g_ctx.udp_host[0] == '\0') {
+        fprintf(stderr, "Error: Either --output or --stdout is required\n");
+        return -1;
     }
 
-    if (g_state.service_count == 0) {
-        CARI_LOG_ERROR("No services configured");
-        return 1;
+    return 0;
+}
+
+/*
+ * Cleanup
+ */
+static void cleanup(void) {
+    if (g_ctx.pipeline) {
+        gst_element_set_state(g_ctx.pipeline, GST_STATE_NULL);
+        gst_object_unref(g_ctx.pipeline);
+        g_ctx.pipeline = NULL;
     }
 
-    /* Test mode - just print command and exit */
-    if (test_mode) {
-        char *argv_tsp[MAX_ARGS];
-        build_tsp_args(&g_state, argv_tsp, MAX_ARGS);
-        print_command(argv_tsp);
-        config_free(&g_state.config);
-        log_shutdown();
-        return 0;
+    if (g_ctx.main_loop) {
+        g_main_loop_unref(g_ctx.main_loop);
+        g_ctx.main_loop = NULL;
+    }
+}
+
+/*
+ * Main
+ */
+int main(int argc, char *argv[]) {
+    int ret = 0;
+
+    /* Parse arguments first (before gst_init modifies argc/argv) */
+    if (parse_args(argc, argv) != 0) {
+        print_help(argv[0]);
+        return 1;
     }
 
     /* Set up signal handlers */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGCHLD, SIG_DFL);
 
-    g_state.running = 1;
+    g_ctx.running = 1;
 
-    /* Run tsp */
-    int ret = run_tsp(&g_state);
+    /* Detect streams for all inputs */
+    fprintf(stderr, "Detecting streams...\n");
+    for (int i = 0; i < g_ctx.service_count; i++) {
+        ServiceInput *svc = &g_ctx.services[i];
+        fprintf(stderr, "Input %d: %s:%d\n", i + 1, svc->address, svc->port);
+
+        if (detect_stream(svc) != 0) {
+            fprintf(stderr, "Warning: Could not detect streams for %s:%d\n",
+                    svc->address, svc->port);
+            /* Default to H.264 + AAC */
+            svc->video_type = STREAM_TYPE_H264;
+            svc->audio_type = STREAM_TYPE_AAC;
+        }
+    }
+
+    if (g_ctx.detect_only) {
+        printf("{\n  \"services\": [\n");
+        for (int i = 0; i < g_ctx.service_count; i++) {
+            ServiceInput *svc = &g_ctx.services[i];
+            printf("    {\"address\": \"%s\", \"port\": %d, \"program\": %d, "
+                   "\"video_pid\": %d, \"audio_pid\": %d, "
+                   "\"video_type\": %d, \"audio_type\": %d}%s\n",
+                   svc->address, svc->port, svc->program_number,
+                   svc->video_pid, svc->audio_pid,
+                   svc->video_type, svc->audio_type,
+                   (i < g_ctx.service_count - 1) ? "," : "");
+        }
+        printf("  ]\n}\n");
+        return 0;
+    }
+
+    /* Initialize GStreamer */
+    gst_init(&argc, &argv);
+
+    /* Create main loop */
+    g_ctx.main_loop = g_main_loop_new(NULL, FALSE);
+
+    /* Create pipeline */
+    if (create_pipeline() != 0) {
+        cleanup();
+        return 1;
+    }
+
+    /* Start pipeline */
+    fprintf(stderr, "Starting muxer...\n");
+    GstStateChangeReturn state_ret = gst_element_set_state(g_ctx.pipeline, GST_STATE_PLAYING);
+    if (state_ret == GST_STATE_CHANGE_FAILURE) {
+        fprintf(stderr, "Error: Failed to start pipeline\n");
+        cleanup();
+        return 1;
+    }
+
+    if (g_ctx.use_stdout) {
+        fprintf(stderr, "Muxing to stdout. Press Ctrl+C to stop.\n");
+    } else {
+        fprintf(stderr, "Muxing to %s:%d. Press Ctrl+C to stop.\n",
+                g_ctx.udp_host, g_ctx.udp_port);
+    }
+
+    /* Run main loop */
+    g_main_loop_run(g_ctx.main_loop);
 
     /* Cleanup */
-    CARI_LOG_INFO("Mux %s shutting down", g_state.id);
-    config_free(&g_state.config);
-    log_shutdown();
+    cleanup();
 
     return ret;
 }
