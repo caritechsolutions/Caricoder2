@@ -43,11 +43,21 @@ typedef struct {
     int program_number;         /* Service ID in MPTS */
     int video_pid;              /* Output video PID */
     int audio_pid;              /* Output audio PID */
+    int pcr_pid;                /* Which PID carries PCR (video_pid or audio_pid) */
     StreamType video_type;      /* Detected video codec */
     StreamType audio_type;      /* Detected audio codec */
     gboolean video_linked;      /* Video pad connected */
     gboolean audio_linked;      /* Audio pad connected */
+    gboolean pcr_linked;        /* PCR stream has been linked */
     GstElement *demux;          /* tsdemux element for this input */
+
+    /* Pending pads for delayed linking (link PCR first) */
+    GstPad *pending_video_pad;
+    GstElement *pending_video_queue;
+    GstElement *pending_video_parser;
+    GstPad *pending_audio_pad;
+    GstElement *pending_audio_queue;
+    GstElement *pending_audio_parser;
 } ServiceInput;
 
 /* Application context */
@@ -283,7 +293,68 @@ static ServiceInput *find_service_by_demux(GstElement *demux) {
 }
 
 /*
+ * Link a parser to the mux on a specific PID
+ */
+static gboolean link_parser_to_mux(GstElement *parser, int pid, const char *stream_type) {
+    char sink_pad_name[32];
+    snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", pid);
+
+    GstPad *mux_sink = gst_element_request_pad_simple(g_ctx.mux, sink_pad_name);
+    if (!mux_sink) {
+        /* Fallback to generic request */
+        mux_sink = gst_element_request_pad_simple(g_ctx.mux, "sink_%d");
+    }
+
+    if (mux_sink) {
+        GstPad *parser_src = gst_element_get_static_pad(parser, "src");
+        GstPadLinkReturn ret = gst_pad_link(parser_src, mux_sink);
+        gst_object_unref(parser_src);
+        gst_object_unref(mux_sink);
+
+        if (ret != GST_PAD_LINK_OK) {
+            fprintf(stderr, "Error: Failed to link %s parser to mux (PID %d)\n", stream_type, pid);
+            return FALSE;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Link any pending (non-PCR) streams after PCR is linked
+ */
+static void link_pending_streams(ServiceInput *svc) {
+    if (svc->pending_video_parser && !svc->video_linked) {
+        if (link_parser_to_mux(svc->pending_video_parser, svc->video_pid, "video")) {
+            svc->video_linked = TRUE;
+            fprintf(stderr, "Service %d: Video linked (PID %d) [deferred]\n",
+                    svc->program_number, svc->video_pid);
+        }
+        svc->pending_video_pad = NULL;
+        svc->pending_video_queue = NULL;
+        svc->pending_video_parser = NULL;
+    }
+
+    if (svc->pending_audio_parser && !svc->audio_linked) {
+        if (link_parser_to_mux(svc->pending_audio_parser, svc->audio_pid, "audio")) {
+            svc->audio_linked = TRUE;
+            fprintf(stderr, "Service %d: Audio linked (PID %d) [deferred]\n",
+                    svc->program_number, svc->audio_pid);
+        }
+        svc->pending_audio_pad = NULL;
+        svc->pending_audio_queue = NULL;
+        svc->pending_audio_parser = NULL;
+    }
+}
+
+/*
  * Callback when tsdemux discovers a new pad
+ *
+ * PCR Control via Delayed Linking:
+ * - The first stream linked to mpegtsmux for a program becomes the PCR carrier
+ * - We want pcr_pid to be PCR, so we link it first
+ * - If a non-PCR stream arrives before PCR stream, we queue it
+ * - Once PCR stream is linked, we link any pending streams
  */
 static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_data) {
     (void)user_data;
@@ -308,117 +379,107 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
     const gchar *media_type = gst_structure_get_name(gst_caps_get_structure(caps, 0));
 
     if (g_ctx.debug) {
-        fprintf(stderr, "Service %d: pad-added '%s' type=%s\n",
-                svc->program_number, pad_name, media_type);
+        fprintf(stderr, "Service %d: pad-added '%s' type=%s (pcr_pid=%d, pcr_linked=%d)\n",
+                svc->program_number, pad_name, media_type, svc->pcr_pid, svc->pcr_linked);
     }
 
     gboolean is_video = g_str_has_prefix(media_type, "video/");
     gboolean is_audio = g_str_has_prefix(media_type, "audio/");
 
+    /* Determine which PID this stream will use and if it's the PCR stream */
+    int this_pid = 0;
+    StreamType stream_type = STREAM_TYPE_UNKNOWN;
+    gboolean *linked_flag = NULL;
+    GstPad **pending_pad = NULL;
+    GstElement **pending_queue = NULL;
+    GstElement **pending_parser = NULL;
+    const char *stream_name = NULL;
+
     if (is_video && !svc->video_linked) {
-        const char *parser_name = get_parser_for_type(svc->video_type);
-        if (!parser_name) {
-            fprintf(stderr, "Warning: No parser for video type %d\n", svc->video_type);
-            gst_caps_unref(caps);
-            return;
-        }
-
-        /* Create queue -> parser chain */
-        GstElement *queue = gst_element_factory_make("queue", NULL);
-        GstElement *parser = gst_element_factory_make(parser_name, NULL);
-
-        if (!queue || !parser) {
-            fprintf(stderr, "Error: Failed to create video elements\n");
-            gst_caps_unref(caps);
-            return;
-        }
-
-        gst_bin_add_many(GST_BIN(g_ctx.pipeline), queue, parser, NULL);
-        gst_element_sync_state_with_parent(queue);
-        gst_element_sync_state_with_parent(parser);
-
-        /* Link: demux pad -> queue -> parser */
-        GstPad *queue_sink = gst_element_get_static_pad(queue, "sink");
-        if (gst_pad_link(pad, queue_sink) != GST_PAD_LINK_OK) {
-            fprintf(stderr, "Error: Failed to link demux to video queue\n");
-        }
-        gst_object_unref(queue_sink);
-
-        gst_element_link(queue, parser);
-
-        /* Link parser to mux with specific sink pad name for PID assignment */
-        char sink_pad_name[32];
-        snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", svc->video_pid);
-
-        GstPad *mux_sink = gst_element_request_pad_simple(g_ctx.mux, sink_pad_name);
-        if (!mux_sink) {
-            /* Fallback to generic request */
-            mux_sink = gst_element_request_pad_simple(g_ctx.mux, "sink_%d");
-        }
-
-        if (mux_sink) {
-            GstPad *parser_src = gst_element_get_static_pad(parser, "src");
-            if (gst_pad_link(parser_src, mux_sink) != GST_PAD_LINK_OK) {
-                fprintf(stderr, "Error: Failed to link video parser to mux\n");
-            }
-            gst_object_unref(parser_src);
-            gst_object_unref(mux_sink);
-        }
-
-        svc->video_linked = TRUE;
-        fprintf(stderr, "Service %d: Video linked (PID %d)\n", svc->program_number, svc->video_pid);
-
+        this_pid = svc->video_pid;
+        stream_type = svc->video_type;
+        linked_flag = &svc->video_linked;
+        pending_pad = &svc->pending_video_pad;
+        pending_queue = &svc->pending_video_queue;
+        pending_parser = &svc->pending_video_parser;
+        stream_name = "Video";
     } else if (is_audio && !svc->audio_linked) {
-        const char *parser_name = get_parser_for_type(svc->audio_type);
-        if (!parser_name) {
-            fprintf(stderr, "Warning: No parser for audio type %d\n", svc->audio_type);
-            gst_caps_unref(caps);
-            return;
+        this_pid = svc->audio_pid;
+        stream_type = svc->audio_type;
+        linked_flag = &svc->audio_linked;
+        pending_pad = &svc->pending_audio_pad;
+        pending_queue = &svc->pending_audio_queue;
+        pending_parser = &svc->pending_audio_parser;
+        stream_name = "Audio";
+    } else {
+        /* Already linked or unknown type */
+        gst_caps_unref(caps);
+        return;
+    }
+
+    gboolean is_pcr_stream = (this_pid == svc->pcr_pid);
+
+    const char *parser_name = get_parser_for_type(stream_type);
+    if (!parser_name) {
+        fprintf(stderr, "Warning: No parser for %s type %d\n", stream_name, stream_type);
+        gst_caps_unref(caps);
+        return;
+    }
+
+    /* Create queue -> parser chain */
+    GstElement *queue = gst_element_factory_make("queue", NULL);
+    GstElement *parser = gst_element_factory_make(parser_name, NULL);
+
+    if (!queue || !parser) {
+        fprintf(stderr, "Error: Failed to create %s elements\n", stream_name);
+        gst_caps_unref(caps);
+        return;
+    }
+
+    gst_bin_add_many(GST_BIN(g_ctx.pipeline), queue, parser, NULL);
+    gst_element_sync_state_with_parent(queue);
+    gst_element_sync_state_with_parent(parser);
+
+    /* Link: demux pad -> queue -> parser */
+    GstPad *queue_sink = gst_element_get_static_pad(queue, "sink");
+    if (gst_pad_link(pad, queue_sink) != GST_PAD_LINK_OK) {
+        fprintf(stderr, "Error: Failed to link demux to %s queue\n", stream_name);
+    }
+    gst_object_unref(queue_sink);
+
+    gst_element_link(queue, parser);
+
+    /*
+     * Delayed linking logic for PCR control:
+     * - If this is the PCR stream: link immediately, then link any pending
+     * - If PCR already linked: link immediately
+     * - Otherwise: queue for later (wait for PCR stream)
+     */
+    if (is_pcr_stream) {
+        /* This is the PCR stream - link it first */
+        if (link_parser_to_mux(parser, this_pid, stream_name)) {
+            *linked_flag = TRUE;
+            svc->pcr_linked = TRUE;
+            fprintf(stderr, "Service %d: %s linked (PID %d) [PCR]\n",
+                    svc->program_number, stream_name, this_pid);
+
+            /* Now link any pending non-PCR streams */
+            link_pending_streams(svc);
         }
-
-        /* Create queue -> parser chain */
-        GstElement *queue = gst_element_factory_make("queue", NULL);
-        GstElement *parser = gst_element_factory_make(parser_name, NULL);
-
-        if (!queue || !parser) {
-            fprintf(stderr, "Error: Failed to create audio elements\n");
-            gst_caps_unref(caps);
-            return;
+    } else if (svc->pcr_linked) {
+        /* PCR already linked, we can link this stream now */
+        if (link_parser_to_mux(parser, this_pid, stream_name)) {
+            *linked_flag = TRUE;
+            fprintf(stderr, "Service %d: %s linked (PID %d)\n",
+                    svc->program_number, stream_name, this_pid);
         }
-
-        gst_bin_add_many(GST_BIN(g_ctx.pipeline), queue, parser, NULL);
-        gst_element_sync_state_with_parent(queue);
-        gst_element_sync_state_with_parent(parser);
-
-        /* Link: demux pad -> queue -> parser */
-        GstPad *queue_sink = gst_element_get_static_pad(queue, "sink");
-        if (gst_pad_link(pad, queue_sink) != GST_PAD_LINK_OK) {
-            fprintf(stderr, "Error: Failed to link demux to audio queue\n");
-        }
-        gst_object_unref(queue_sink);
-
-        gst_element_link(queue, parser);
-
-        /* Link parser to mux with specific sink pad name for PID assignment */
-        char sink_pad_name[32];
-        snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", svc->audio_pid);
-
-        GstPad *mux_sink = gst_element_request_pad_simple(g_ctx.mux, sink_pad_name);
-        if (!mux_sink) {
-            mux_sink = gst_element_request_pad_simple(g_ctx.mux, "sink_%d");
-        }
-
-        if (mux_sink) {
-            GstPad *parser_src = gst_element_get_static_pad(parser, "src");
-            if (gst_pad_link(parser_src, mux_sink) != GST_PAD_LINK_OK) {
-                fprintf(stderr, "Error: Failed to link audio parser to mux\n");
-            }
-            gst_object_unref(parser_src);
-            gst_object_unref(mux_sink);
-        }
-
-        svc->audio_linked = TRUE;
-        fprintf(stderr, "Service %d: Audio linked (PID %d)\n", svc->program_number, svc->audio_pid);
+    } else {
+        /* PCR not linked yet - queue this stream for later */
+        *pending_pad = pad;
+        *pending_queue = queue;
+        *pending_parser = parser;
+        fprintf(stderr, "Service %d: %s queued (PID %d) - waiting for PCR (PID %d)\n",
+                svc->program_number, stream_name, this_pid, svc->pcr_pid);
     }
 
     gst_caps_unref(caps);
@@ -426,8 +487,8 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
 
 /*
  * Build program-map string for mpegtsmux
- * Format: "program1:pid1,pid2,program2:pid3,pid4"
- * The lowest PID in each program becomes the PCR PID
+ * Format: "program_map,sink_PID=program_number,sink_PID=program_number,..."
+ * This tells the mux which program each PID belongs to
  */
 static char *build_prog_map(void) {
     static char prog_map[2048];
@@ -435,21 +496,21 @@ static char *build_prog_map(void) {
     int remaining = sizeof(prog_map);
     int n;
 
+    /* Start with the GstStructure name */
+    n = snprintf(p, remaining, "program_map");
+    p += n; remaining -= n;
+
     for (int i = 0; i < g_ctx.service_count; i++) {
         ServiceInput *svc = &g_ctx.services[i];
 
-        if (i > 0) {
-            n = snprintf(p, remaining, ",");
-            p += n; remaining -= n;
-        }
+        /* Add video PID mapping */
+        n = snprintf(p, remaining, ",sink_%d=%d",
+                     svc->video_pid, svc->program_number);
+        p += n; remaining -= n;
 
-        /* Format: programN:video_pid,audio_pid
-         * Lowest PID will be PCR */
-        int pid1 = (svc->video_pid < svc->audio_pid) ? svc->video_pid : svc->audio_pid;
-        int pid2 = (svc->video_pid < svc->audio_pid) ? svc->audio_pid : svc->video_pid;
-
-        n = snprintf(p, remaining, "program%d:%d,%d",
-                     svc->program_number, pid1, pid2);
+        /* Add audio PID mapping */
+        n = snprintf(p, remaining, ",sink_%d=%d",
+                     svc->audio_pid, svc->program_number);
         p += n; remaining -= n;
     }
 
@@ -538,7 +599,15 @@ static int create_pipeline(void) {
     /* Set program map for multi-program output */
     char *prog_map = build_prog_map();
     fprintf(stderr, "Program map: %s\n", prog_map);
-    g_object_set(g_ctx.mux, "prog-map", prog_map, NULL);
+
+    /* Configure mux settings:
+     * - prog-map: program membership for each PID
+     * - alignment: 7 for proper UDP packet alignment (7 * 188 = 1316 bytes)
+     */
+    g_object_set(g_ctx.mux,
+                 "prog-map", prog_map,
+                 "alignment", 7,
+                 NULL);
 
     gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
 
@@ -617,9 +686,9 @@ static int create_pipeline(void) {
             return -1;
         }
 
-        fprintf(stderr, "Service %d: %s:%d -> Program %d (V:%d A:%d)\n",
+        fprintf(stderr, "Service %d: %s:%d -> Program %d (V:%d A:%d PCR:%d)\n",
                 i + 1, svc->address, svc->port, svc->program_number,
-                svc->video_pid, svc->audio_pid);
+                svc->video_pid, svc->audio_pid, svc->pcr_pid);
     }
 
     /* Set up bus watch */
@@ -635,34 +704,44 @@ static int create_pipeline(void) {
  */
 static void print_help(const char *prog) {
     printf("CariMux v%s - GStreamer MPTS Multiplexer\n\n", VERSION);
-    printf("Usage: %s [options] -i ADDR:PORT[:PROG:VPID:APID] ...\n\n", prog);
+    printf("Usage: %s [options] -i ADDR:PORT[:PROG:VPID:APID:PCRPID] ...\n\n", prog);
     printf("Options:\n");
-    printf("  -i, --input ADDR:PORT[:PROG:VPID:APID]\n");
+    printf("  -i, --input ADDR:PORT[:PROG:VPID:APID:PCRPID]\n");
     printf("                         Add input service (can specify multiple)\n");
-    printf("                         PROG = program number (default: auto)\n");
-    printf("                         VPID = video PID (default: auto)\n");
-    printf("                         APID = audio PID (default: auto)\n");
+    printf("                         PROG   = program number (default: auto 1,2,3...)\n");
+    printf("                         VPID   = video PID (default: 100,200,300...)\n");
+    printf("                         APID   = audio PID (default: 101,201,301...)\n");
+    printf("                         PCRPID = which PID carries PCR (default: VPID)\n");
     printf("  -o, --output HOST:PORT UDP output address\n");
     printf("  --stdout               Output to stdout (for piping to tsp)\n");
     printf("  --detect-only          Detect streams and exit\n");
     printf("  -d, --debug            Enable debug output\n");
     printf("  -h, --help             Show this help\n");
     printf("\n");
+    printf("PCR Control:\n");
+    printf("  The PCRPID parameter controls which PID carries the Program Clock Reference.\n");
+    printf("  By default, the video PID carries PCR. Set PCRPID to the audio PID to have\n");
+    printf("  audio carry PCR instead.\n");
+    printf("\n");
     printf("Examples:\n");
     printf("  Single input to UDP:\n");
     printf("    %s -i 239.100.0.1:10000 -o 239.1.1.100:5500\n\n", prog);
-    printf("  Multiple inputs with custom PIDs:\n");
-    printf("    %s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
-    printf("       -i 239.100.0.2:10000:2:200:201 \\\n");
-    printf("       -i 239.100.0.3:10000:3:300:301 \\\n");
+    printf("  Multiple inputs with custom PIDs (video carries PCR):\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101:100 \\\n", prog);
+    printf("       -i 239.100.0.2:10000:2:200:201:200 \\\n");
     printf("       -o 239.1.1.100:5500\n\n");
-    printf("  Output to tsp for SDT injection:\n");
-    printf("    %s -i 239.100.0.1:10000 --stdout | \\\n", prog);
-    printf("       tsp -I file - -P inject sdt.xml --pid 17 -O ip 239.1.1.100:5500\n");
+    printf("  Audio carrying PCR:\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101:101 -o 239.1.1.100:5500\n\n", prog);
+    printf("  Output to tsp for SDT injection and CBR:\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101 --stdout | \\\n", prog);
+    printf("       tsp -I file - \\\n");
+    printf("           -P inject sdt.xml --pid 17 --replace --stuffing \\\n");
+    printf("           -P regulate \\\n");
+    printf("           -O ip 239.1.1.100:5500\n");
 }
 
 /*
- * Parse input argument: ADDR:PORT[:PROG:VPID:APID]
+ * Parse input argument: ADDR:PORT[:PROG:VPID:APID:PCRPID]
  */
 static int parse_input(const char *arg, ServiceInput *svc, int index) {
     char buf[256];
@@ -673,9 +752,13 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
     svc->program_number = index + 1;
     svc->video_pid = 100 + index * 100;
     svc->audio_pid = 101 + index * 100;
+    svc->pcr_pid = 0;  /* Will default to video_pid if not set */
     svc->video_type = STREAM_TYPE_UNKNOWN;
     svc->audio_type = STREAM_TYPE_UNKNOWN;
     svc->enabled = 1;
+    svc->pcr_linked = FALSE;
+    svc->pending_video_pad = NULL;
+    svc->pending_audio_pad = NULL;
 
     /* Parse ADDR:PORT */
     char *colon1 = strchr(buf, ':');
@@ -693,8 +776,8 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
         *colon2 = '\0';
         svc->port = atoi(rest);
 
-        /* Parse optional PROG:VPID:APID */
-        char *parts[3] = {NULL, NULL, NULL};
+        /* Parse optional PROG:VPID:APID:PCRPID */
+        char *parts[4] = {NULL, NULL, NULL, NULL};
         parts[0] = colon2 + 1;
 
         char *c = strchr(parts[0], ':');
@@ -705,14 +788,32 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
             if (c) {
                 *c = '\0';
                 parts[2] = c + 1;
+                c = strchr(parts[2], ':');
+                if (c) {
+                    *c = '\0';
+                    parts[3] = c + 1;
+                }
             }
         }
 
         if (parts[0] && strlen(parts[0]) > 0) svc->program_number = atoi(parts[0]);
         if (parts[1] && strlen(parts[1]) > 0) svc->video_pid = atoi(parts[1]);
         if (parts[2] && strlen(parts[2]) > 0) svc->audio_pid = atoi(parts[2]);
+        if (parts[3] && strlen(parts[3]) > 0) svc->pcr_pid = atoi(parts[3]);
     } else {
         svc->port = atoi(rest);
+    }
+
+    /* Default PCR to video PID if not specified */
+    if (svc->pcr_pid == 0) {
+        svc->pcr_pid = svc->video_pid;
+    }
+
+    /* Validate PCR PID is either video or audio */
+    if (svc->pcr_pid != svc->video_pid && svc->pcr_pid != svc->audio_pid) {
+        fprintf(stderr, "Warning: PCRPID %d is not video (%d) or audio (%d), using video\n",
+                svc->pcr_pid, svc->video_pid, svc->audio_pid);
+        svc->pcr_pid = svc->video_pid;
     }
 
     if (svc->port <= 0) {
@@ -853,10 +954,10 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < g_ctx.service_count; i++) {
             ServiceInput *svc = &g_ctx.services[i];
             printf("    {\"address\": \"%s\", \"port\": %d, \"program\": %d, "
-                   "\"video_pid\": %d, \"audio_pid\": %d, "
+                   "\"video_pid\": %d, \"audio_pid\": %d, \"pcr_pid\": %d, "
                    "\"video_type\": %d, \"audio_type\": %d}%s\n",
                    svc->address, svc->port, svc->program_number,
-                   svc->video_pid, svc->audio_pid,
+                   svc->video_pid, svc->audio_pid, svc->pcr_pid,
                    svc->video_type, svc->audio_type,
                    (i < g_ctx.service_count - 1) ? "," : "");
         }
