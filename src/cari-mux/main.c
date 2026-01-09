@@ -65,7 +65,6 @@ typedef struct {
     gboolean use_stdout;
     char udp_host[256];
     int udp_port;
-    guint64 bitrate;            /* Target bitrate in bps (0 = VBR) */
 
     /* TS identification */
     int ts_id;                  /* Transport Stream ID */
@@ -629,15 +628,6 @@ static int create_pipeline(void) {
                  "alignment", 7,
                  NULL);
 
-    /* Set bitrate for CBR if specified */
-    if (g_ctx.bitrate > 0) {
-        g_object_set(g_ctx.mux, "bitrate", g_ctx.bitrate, NULL);
-        fprintf(stderr, "CBR mode: %lu bps (%.2f Mbps)\n",
-                (unsigned long)g_ctx.bitrate, g_ctx.bitrate / 1000000.0);
-    } else {
-        fprintf(stderr, "VBR mode (no bitrate limit)\n");
-    }
-
     gst_structure_free(prog_map);
 
     gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
@@ -737,7 +727,7 @@ static int create_pipeline(void) {
  * Print help
  */
 static void print_help(const char *prog) {
-    printf("CariMux v%s - GStreamer MPTS Multiplexer with CBR and SDT\n\n", VERSION);
+    printf("CariMux v%s - GStreamer MPTS Multiplexer with SDT\n\n", VERSION);
     printf("Usage: %s [options] -i ADDR:PORT[:PROG:VPID:APID:PCRPID:PMTPID] ...\n\n", prog);
     printf("Input Options:\n");
     printf("  -i, --input ADDR:PORT[:PROG:VPID:APID:PCRPID:PMTPID]\n");
@@ -750,12 +740,10 @@ static void print_help(const char *prog) {
     printf("  -m, --name NAME        Service name for SDT (applies to previous -i)\n");
     printf("\n");
     printf("Output Options:\n");
-    printf("  -o, --output HOST:PORT UDP output address\n");
-    printf("  --stdout               Output to stdout\n");
-    printf("  -b, --bitrate RATE     Target bitrate for CBR (e.g., 10M, 5000K, 8000000)\n");
-    printf("                         If not specified, output is VBR\n");
+    printf("  -o, --output HOST:PORT UDP output address (VBR)\n");
+    printf("  --stdout               Output to stdout (for piping to tsp)\n");
     printf("\n");
-    printf("SDT/NIT Options:\n");
+    printf("SDT Options:\n");
     printf("  -t, --ts-id ID         Transport Stream ID (default: 1)\n");
     printf("  -n, --network-id ID    Original Network ID (default: 1)\n");
     printf("  -N, --network NAME     Network/provider name (default: CariCoder)\n");
@@ -766,16 +754,17 @@ static void print_help(const char *prog) {
     printf("  -h, --help             Show this help\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  Simple CBR mux at 10 Mbps:\n");
-    printf("    %s -i 239.100.0.1:10000 -b 10M -o 239.1.1.100:5500\n\n", prog);
-    printf("  Multiple services with names and custom bitrate:\n");
+    printf("  Simple VBR mux to UDP:\n");
+    printf("    %s -i 239.100.0.1:10000 -o 239.1.1.100:5500\n\n", prog);
+    printf("  Multiple services with names:\n");
     printf("    %s -i 239.100.0.1:10000:1:100:101 --name \"Channel 1\" \\\n", prog);
     printf("       -i 239.100.0.2:10000:2:200:201 --name \"Channel 2\" \\\n");
-    printf("       -b 15M --ts-id 100 --network \"MyNetwork\" \\\n");
-    printf("       -o 239.1.1.100:5500\n\n");
-    printf("  Full control with custom PIDs:\n");
-    printf("    %s -i 239.100.0.1:10000:1:100:101:100:256 --name \"HD Channel\" \\\n", prog);
-    printf("       -b 8M -t 1 -n 1 -N \"CariCoder\" -o 239.1.1.100:5500\n");
+    printf("       --ts-id 100 --network \"MyNetwork\" -o 239.1.1.100:5500\n\n");
+    printf("  CBR output via tsp merge (10 Mbps):\n");
+    printf("    tsp -I null -b 10000000 \\\n");
+    printf("        -P merge \"%s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
+    printf("           --name 'HD Channel' --stdout\" \\\n");
+    printf("        -O ip 239.1.1.100:5500\n");
 }
 
 /*
@@ -878,7 +867,6 @@ static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"input",       required_argument, 0, 'i'},
         {"output",      required_argument, 0, 'o'},
-        {"bitrate",     required_argument, 0, 'b'},
         {"ts-id",       required_argument, 0, 't'},
         {"network-id",  required_argument, 0, 'n'},
         {"network",     required_argument, 0, 'N'},
@@ -896,7 +884,7 @@ static int parse_args(int argc, char *argv[]) {
     strncpy(g_ctx.network_name, "CariCoder", sizeof(g_ctx.network_name) - 1);
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:Ddh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:t:n:N:m:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 if (g_ctx.service_count >= MAX_SERVICES) {
@@ -919,20 +907,6 @@ static int parse_args(int argc, char *argv[]) {
                 *colon = '\0';
                 strncpy(g_ctx.udp_host, optarg, sizeof(g_ctx.udp_host) - 1);
                 g_ctx.udp_port = atoi(colon + 1);
-                break;
-            }
-
-            case 'b': {
-                /* Parse bitrate - support M/K suffix */
-                char *end;
-                double val = strtod(optarg, &end);
-                if (*end == 'M' || *end == 'm') {
-                    g_ctx.bitrate = (guint64)(val * 1000000);
-                } else if (*end == 'K' || *end == 'k') {
-                    g_ctx.bitrate = (guint64)(val * 1000);
-                } else {
-                    g_ctx.bitrate = (guint64)val;
-                }
                 break;
             }
 
