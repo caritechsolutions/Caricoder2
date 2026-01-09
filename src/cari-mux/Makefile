@@ -18,7 +18,7 @@ SRCS = main.c
 OBJS = $(SRCS:.c=.o)
 BIN = cari-mux
 
-.PHONY: all clean
+.PHONY: all clean install
 
 all: $(BIN)
 
@@ -27,6 +27,9 @@ $(BIN): $(OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+install: $(BIN)
+	install -m 755 $(BIN) /usr/local/bin/
 
 clean:
 	rm -f $(OBJS) $(BIN)
