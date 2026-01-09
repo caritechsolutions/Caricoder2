@@ -548,17 +548,26 @@ static int create_pipeline(void) {
     }
 
     /* Set program map for multi-program output */
-    char *prog_map = build_prog_map();
-    fprintf(stderr, "Program map: %s\n", prog_map);
+    char *prog_map_str = build_prog_map();
+    fprintf(stderr, "Program map: %s\n", prog_map_str);
+
+    /* Parse the string into a GstStructure for the prog-map property */
+    GstStructure *prog_map = gst_structure_from_string(prog_map_str, NULL);
+    if (!prog_map) {
+        fprintf(stderr, "Error: Failed to parse program map structure\n");
+        return -1;
+    }
 
     /* Configure mux settings:
-     * - prog-map: program membership for each PID
+     * - prog-map: program membership for each PID (GstStructure)
      * - alignment: 7 for proper UDP packet alignment (7 * 188 = 1316 bytes)
      */
     g_object_set(g_ctx.mux,
                  "prog-map", prog_map,
                  "alignment", 7,
                  NULL);
+
+    gst_structure_free(prog_map);
 
     gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
 
