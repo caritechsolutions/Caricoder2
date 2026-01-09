@@ -3,7 +3,7 @@
  *
  * Multiplexes multiple SPTS UDP inputs into a single MPTS output.
  * Uses tsdemux -> parse -> mpegtsmux pipeline.
- * Output can be piped to tsp for SDT/NIT injection.
+ * Supports CBR output, custom PIDs, PCR control, and SDT generation.
  *
  * Copyright (c) 2024 CariTech Solutions
  */
@@ -19,8 +19,9 @@
 #include <pthread.h>
 #include <errno.h>
 #include <gst/gst.h>
+#include <gst/mpegts/mpegts.h>
 
-#define VERSION "3.0.0"
+#define VERSION "3.1.0"
 #define MAX_SERVICES 16
 
 /* Stream types detected via ffprobe */
@@ -45,6 +46,8 @@ typedef struct {
     int video_pid;              /* Output video PID */
     int audio_pid;              /* Output audio PID */
     int pcr_pid;                /* Which PID carries PCR (video_pid or audio_pid) */
+    char service_name[64];      /* Service name for SDT */
+    char provider_name[64];     /* Provider name for SDT */
     StreamType video_type;      /* Detected video codec */
     StreamType audio_type;      /* Detected audio codec */
     gboolean video_linked;      /* Video pad connected */
@@ -62,6 +65,12 @@ typedef struct {
     gboolean use_stdout;
     char udp_host[256];
     int udp_port;
+    guint64 bitrate;            /* Target bitrate in bps (0 = VBR) */
+
+    /* TS identification */
+    int ts_id;                  /* Transport Stream ID */
+    int original_network_id;    /* Original Network ID */
+    char network_name[64];      /* Network name for NIT */
 
     /* Runtime */
     volatile int running;
@@ -531,6 +540,58 @@ static gboolean on_bus_message(GstBus *bus, GstMessage *msg, gpointer data) {
 }
 
 /*
+ * Create and send SDT (Service Description Table) to mpegtsmux
+ */
+static void send_sdt(void) {
+    GstMpegtsSDT *sdt;
+    GstMpegtsSection *section;
+
+    sdt = gst_mpegts_sdt_new();
+    sdt->actual_ts = TRUE;
+    sdt->transport_stream_id = g_ctx.ts_id;
+    sdt->original_network_id = g_ctx.original_network_id;
+
+    for (int i = 0; i < g_ctx.service_count; i++) {
+        ServiceInput *svc = &g_ctx.services[i];
+        GstMpegtsSDTService *service;
+        GstMpegtsDescriptor *desc;
+
+        service = gst_mpegts_sdt_service_new();
+        service->service_id = svc->program_number;
+        service->EIT_schedule_flag = FALSE;
+        service->EIT_present_following_flag = FALSE;
+        service->running_status = 4;  /* Running */
+        service->free_CA_mode = FALSE;
+
+        /* Create service descriptor with name and provider */
+        desc = gst_mpegts_descriptor_from_dvb_service(
+            GST_DVB_SERVICE_DIGITAL_TELEVISION,
+            svc->service_name[0] ? svc->service_name : "Service",
+            svc->provider_name[0] ? svc->provider_name : g_ctx.network_name);
+        g_ptr_array_add(service->descriptors, desc);
+
+        g_ptr_array_add(sdt->services, service);
+
+        if (g_ctx.debug) {
+            fprintf(stderr, "SDT: Program %d = \"%s\" (provider: \"%s\")\n",
+                    svc->program_number,
+                    svc->service_name[0] ? svc->service_name : "Service",
+                    svc->provider_name[0] ? svc->provider_name : g_ctx.network_name);
+        }
+    }
+
+    section = gst_mpegts_section_from_sdt(sdt);
+    if (section) {
+        gst_mpegts_section_send_event(section, g_ctx.mux);
+        gst_mpegts_section_unref(section);
+        fprintf(stderr, "SDT sent to mux (TS ID: %d, ONID: %d)\n",
+                g_ctx.ts_id, g_ctx.original_network_id);
+    } else {
+        fprintf(stderr, "Warning: Failed to create SDT section\n");
+    }
+}
+
+/*
  * Create the pipeline
  */
 static int create_pipeline(void) {
@@ -561,15 +622,28 @@ static int create_pipeline(void) {
     /* Configure mux settings:
      * - prog-map: program membership for each PID (GstStructure)
      * - alignment: 7 for proper UDP packet alignment (7 * 188 = 1316 bytes)
+     * - bitrate: target bitrate for CBR output (0 = VBR)
      */
     g_object_set(g_ctx.mux,
                  "prog-map", prog_map,
                  "alignment", 7,
                  NULL);
 
+    /* Set bitrate for CBR if specified */
+    if (g_ctx.bitrate > 0) {
+        g_object_set(g_ctx.mux, "bitrate", g_ctx.bitrate, NULL);
+        fprintf(stderr, "CBR mode: %lu bps (%.2f Mbps)\n",
+                (unsigned long)g_ctx.bitrate, g_ctx.bitrate / 1000000.0);
+    } else {
+        fprintf(stderr, "VBR mode (no bitrate limit)\n");
+    }
+
     gst_structure_free(prog_map);
 
     gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
+
+    /* Send SDT (Service Description Table) */
+    send_sdt();
 
     /* Create output sink */
     GstElement *sink;
@@ -663,9 +737,9 @@ static int create_pipeline(void) {
  * Print help
  */
 static void print_help(const char *prog) {
-    printf("CariMux v%s - GStreamer MPTS Multiplexer\n\n", VERSION);
+    printf("CariMux v%s - GStreamer MPTS Multiplexer with CBR and SDT\n\n", VERSION);
     printf("Usage: %s [options] -i ADDR:PORT[:PROG:VPID:APID:PCRPID:PMTPID] ...\n\n", prog);
-    printf("Options:\n");
+    printf("Input Options:\n");
     printf("  -i, --input ADDR:PORT[:PROG:VPID:APID:PCRPID:PMTPID]\n");
     printf("                         Add input service (can specify multiple)\n");
     printf("                         PROG   = program number (default: 1,2,3...)\n");
@@ -673,35 +747,35 @@ static void print_help(const char *prog) {
     printf("                         APID   = audio PID (default: 101,201,301...)\n");
     printf("                         PCRPID = which PID carries PCR (default: VPID)\n");
     printf("                         PMTPID = PMT PID for program (default: 256,257,258...)\n");
+    printf("  -m, --name NAME        Service name for SDT (applies to previous -i)\n");
+    printf("\n");
+    printf("Output Options:\n");
     printf("  -o, --output HOST:PORT UDP output address\n");
-    printf("  --stdout               Output to stdout (for piping to tsp)\n");
+    printf("  --stdout               Output to stdout\n");
+    printf("  -b, --bitrate RATE     Target bitrate for CBR (e.g., 10M, 5000K, 8000000)\n");
+    printf("                         If not specified, output is VBR\n");
+    printf("\n");
+    printf("SDT/NIT Options:\n");
+    printf("  -t, --ts-id ID         Transport Stream ID (default: 1)\n");
+    printf("  -n, --network-id ID    Original Network ID (default: 1)\n");
+    printf("  -N, --network NAME     Network/provider name (default: CariCoder)\n");
+    printf("\n");
+    printf("General Options:\n");
     printf("  --detect-only          Detect streams and exit\n");
     printf("  -d, --debug            Enable debug output\n");
     printf("  -h, --help             Show this help\n");
     printf("\n");
-    printf("PID Configuration:\n");
-    printf("  PCRPID  - Controls which PID carries the Program Clock Reference.\n");
-    printf("            Set to VPID (default) for video PCR, or APID for audio PCR.\n");
-    printf("  PMTPID  - Sets the PID for the Program Map Table for this program.\n");
-    printf("\n");
-    printf("Stream Ordering:\n");
-    printf("  Video is always first in PMT, audio is second (PMT_ORDER property).\n");
-    printf("\n");
     printf("Examples:\n");
-    printf("  Single input to UDP:\n");
-    printf("    %s -i 239.100.0.1:10000 -o 239.1.1.100:5500\n\n", prog);
-    printf("  Multiple inputs with custom PIDs:\n");
-    printf("    %s -i 239.100.0.1:10000:1:100:101:100:256 \\\n", prog);
-    printf("       -i 239.100.0.2:10000:2:200:201:200:257 \\\n");
+    printf("  Simple CBR mux at 10 Mbps:\n");
+    printf("    %s -i 239.100.0.1:10000 -b 10M -o 239.1.1.100:5500\n\n", prog);
+    printf("  Multiple services with names and custom bitrate:\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101 --name \"Channel 1\" \\\n", prog);
+    printf("       -i 239.100.0.2:10000:2:200:201 --name \"Channel 2\" \\\n");
+    printf("       -b 15M --ts-id 100 --network \"MyNetwork\" \\\n");
     printf("       -o 239.1.1.100:5500\n\n");
-    printf("  Audio carrying PCR:\n");
-    printf("    %s -i 239.100.0.1:10000:1:100:101:101 -o 239.1.1.100:5500\n\n", prog);
-    printf("  Output to tsp for SDT injection and CBR:\n");
-    printf("    %s -i 239.100.0.1:10000:1:100:101 --stdout | \\\n", prog);
-    printf("       tsp -I file - \\\n");
-    printf("           -P inject sdt.xml --pid 17 --replace --stuffing \\\n");
-    printf("           -P regulate \\\n");
-    printf("           -O ip 239.1.1.100:5500\n");
+    printf("  Full control with custom PIDs:\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101:100:256 --name \"HD Channel\" \\\n", prog);
+    printf("       -b 8M -t 1 -n 1 -N \"CariCoder\" -o 239.1.1.100:5500\n");
 }
 
 /*
@@ -724,6 +798,8 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
     svc->audio_linked = FALSE;
     svc->enabled = 1;
     svc->demux = NULL;
+    svc->service_name[0] = '\0';         /* Will use default if not set */
+    svc->provider_name[0] = '\0';        /* Will use network_name if not set */
 
     /* Parse ADDR:PORT */
     char *colon1 = strchr(buf, ':');
@@ -802,6 +878,11 @@ static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"input",       required_argument, 0, 'i'},
         {"output",      required_argument, 0, 'o'},
+        {"bitrate",     required_argument, 0, 'b'},
+        {"ts-id",       required_argument, 0, 't'},
+        {"network-id",  required_argument, 0, 'n'},
+        {"network",     required_argument, 0, 'N'},
+        {"name",        required_argument, 0, 'm'},
         {"stdout",      no_argument,       0, 'S'},
         {"detect-only", no_argument,       0, 'D'},
         {"debug",       no_argument,       0, 'd'},
@@ -809,8 +890,13 @@ static int parse_args(int argc, char *argv[]) {
         {0, 0, 0, 0}
     };
 
+    /* Defaults */
+    g_ctx.ts_id = 1;
+    g_ctx.original_network_id = 1;
+    strncpy(g_ctx.network_name, "CariCoder", sizeof(g_ctx.network_name) - 1);
+
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:Ddh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 if (g_ctx.service_count >= MAX_SERVICES) {
@@ -835,6 +921,40 @@ static int parse_args(int argc, char *argv[]) {
                 g_ctx.udp_port = atoi(colon + 1);
                 break;
             }
+
+            case 'b': {
+                /* Parse bitrate - support M/K suffix */
+                char *end;
+                double val = strtod(optarg, &end);
+                if (*end == 'M' || *end == 'm') {
+                    g_ctx.bitrate = (guint64)(val * 1000000);
+                } else if (*end == 'K' || *end == 'k') {
+                    g_ctx.bitrate = (guint64)(val * 1000);
+                } else {
+                    g_ctx.bitrate = (guint64)val;
+                }
+                break;
+            }
+
+            case 't':
+                g_ctx.ts_id = atoi(optarg);
+                break;
+
+            case 'n':
+                g_ctx.original_network_id = atoi(optarg);
+                break;
+
+            case 'N':
+                strncpy(g_ctx.network_name, optarg, sizeof(g_ctx.network_name) - 1);
+                break;
+
+            case 'm':
+                /* Set service name for most recently added service */
+                if (g_ctx.service_count > 0) {
+                    strncpy(g_ctx.services[g_ctx.service_count - 1].service_name,
+                            optarg, sizeof(g_ctx.services[0].service_name) - 1);
+                }
+                break;
 
             case 'S':
                 g_ctx.use_stdout = TRUE;
