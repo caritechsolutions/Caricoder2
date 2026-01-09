@@ -761,9 +761,9 @@ static void print_help(const char *prog) {
     printf("       -i 239.100.0.2:10000:2:200:201 --name \"Channel 2\" \\\n");
     printf("       --ts-id 100 --network \"MyNetwork\" -o 239.1.1.100:5500\n\n");
     printf("  CBR output via tsp merge (10 Mbps):\n");
-    printf("    tsp -I null -b 10000000 \\\n");
-    printf("        -P merge \"%s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
-    printf("           --name 'HD Channel' --stdout\" \\\n");
+    printf("    tsp -v -b 10000000 -I null \\\n");
+    printf("        -P merge \"tsp -I fork '%s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
+    printf("           --name HD_Channel --ts-id 100 --stdout'\" \\\n");
     printf("        -O ip 239.1.1.100:5500\n");
 }
 
