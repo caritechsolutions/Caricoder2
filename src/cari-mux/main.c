@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <gst/gst.h>
+#define GST_USE_UNSTABLE_API
 #include <gst/mpegts/mpegts.h>
 
 #define VERSION "3.2.0"
@@ -805,7 +806,7 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
         return -1;
     }
     *colon1 = '\0';
-    strncpy(svc->address, buf, sizeof(svc->address) - 1);
+    snprintf(svc->address, sizeof(svc->address), "%s", buf);
 
     char *rest = colon1 + 1;
     char *colon2 = strchr(rest, ':');
