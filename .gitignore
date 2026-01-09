@@ -8,3 +8,11 @@ tools/*/cari-avsync
 # Transcoder binaries
 src/cari-transcoder/cari-transcoder
 src/cari-transcoder/*.o
+
+# Mux binaries
+src/cari-mux/cari-mux
+src/cari-mux/*.o
+
+# Common library
+src/common/*.o
+src/common/*.a
