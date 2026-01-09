@@ -806,7 +806,11 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
         return -1;
     }
     *colon1 = '\0';
-    snprintf(svc->address, sizeof(svc->address), "%s", buf);
+    if (strlen(buf) >= sizeof(svc->address)) {
+        fprintf(stderr, "Error: Address too long (max %zu chars)\n", sizeof(svc->address) - 1);
+        return -1;
+    }
+    strcpy(svc->address, buf);
 
     char *rest = colon1 + 1;
     char *colon2 = strchr(rest, ':');
