@@ -21,7 +21,7 @@
 #include <gst/gst.h>
 #include <gst/mpegts/mpegts.h>
 
-#define VERSION "3.1.0"
+#define VERSION "3.2.0"
 #define MAX_SERVICES 16
 
 /* Stream types detected via ffprobe */
@@ -65,6 +65,7 @@ typedef struct {
     gboolean use_stdout;
     char udp_host[256];
     int udp_port;
+    guint64 bitrate;            /* Target bitrate in bps (0 = VBR) */
 
     /* TS identification */
     int ts_id;                  /* Transport Stream ID */
@@ -630,6 +631,13 @@ static int create_pipeline(void) {
 
     gst_structure_free(prog_map);
 
+    /* Set bitrate for CBR output if specified */
+    if (g_ctx.bitrate > 0) {
+        g_object_set(g_ctx.mux, "bitrate", g_ctx.bitrate, NULL);
+        fprintf(stderr, "CBR mode: %lu bps (use tsp -P regulate for smooth output)\n",
+                (unsigned long)g_ctx.bitrate);
+    }
+
     gst_bin_add(GST_BIN(g_ctx.pipeline), g_ctx.mux);
 
     /* Send SDT (Service Description Table) */
@@ -740,7 +748,8 @@ static void print_help(const char *prog) {
     printf("  -m, --name NAME        Service name for SDT (applies to previous -i)\n");
     printf("\n");
     printf("Output Options:\n");
-    printf("  -o, --output HOST:PORT UDP output address (VBR)\n");
+    printf("  -o, --output HOST:PORT UDP output address\n");
+    printf("  -b, --bitrate RATE     Target bitrate for CBR (e.g., 10M, 5000000)\n");
     printf("  --stdout               Output to stdout (for piping to tsp)\n");
     printf("\n");
     printf("SDT Options:\n");
@@ -760,11 +769,10 @@ static void print_help(const char *prog) {
     printf("    %s -i 239.100.0.1:10000:1:100:101 --name \"Channel 1\" \\\n", prog);
     printf("       -i 239.100.0.2:10000:2:200:201 --name \"Channel 2\" \\\n");
     printf("       --ts-id 100 --network \"MyNetwork\" -o 239.1.1.100:5500\n\n");
-    printf("  CBR output via tsp merge (10 Mbps):\n");
-    printf("    tsp -v -b 10000000 -I null \\\n");
-    printf("        -P merge \"tsp -I fork '%s -i 239.100.0.1:10000:1:100:101 \\\n", prog);
-    printf("           --name HD_Channel --ts-id 100 --stdout'\" \\\n");
-    printf("        -O ip 239.1.1.100:5500\n");
+    printf("  CBR output with smooth pacing via tsp regulate (10 Mbps):\n");
+    printf("    %s -i 239.100.0.1:10000:1:100:101 --name HD_Channel \\\n", prog);
+    printf("       --ts-id 100 -b 10M --stdout | \\\n");
+    printf("       tsp -P regulate -O ip 239.1.1.100:5500\n");
 }
 
 /*
@@ -867,6 +875,7 @@ static int parse_args(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"input",       required_argument, 0, 'i'},
         {"output",      required_argument, 0, 'o'},
+        {"bitrate",     required_argument, 0, 'b'},
         {"ts-id",       required_argument, 0, 't'},
         {"network-id",  required_argument, 0, 'n'},
         {"network",     required_argument, 0, 'N'},
@@ -884,7 +893,7 @@ static int parse_args(int argc, char *argv[]) {
     strncpy(g_ctx.network_name, "CariCoder", sizeof(g_ctx.network_name) - 1);
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:t:n:N:m:Ddh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 if (g_ctx.service_count >= MAX_SERVICES) {
@@ -907,6 +916,23 @@ static int parse_args(int argc, char *argv[]) {
                 *colon = '\0';
                 strncpy(g_ctx.udp_host, optarg, sizeof(g_ctx.udp_host) - 1);
                 g_ctx.udp_port = atoi(colon + 1);
+                break;
+            }
+
+            case 'b': {
+                /* Parse bitrate with optional K/M suffix */
+                char *end;
+                double val = strtod(optarg, &end);
+                if (end == optarg) {
+                    fprintf(stderr, "Error: Invalid bitrate value\n");
+                    return -1;
+                }
+                if (*end == 'k' || *end == 'K') {
+                    val *= 1000;
+                } else if (*end == 'm' || *end == 'M') {
+                    val *= 1000000;
+                }
+                g_ctx.bitrate = (guint64)val;
                 break;
             }
 
