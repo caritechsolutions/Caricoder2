@@ -257,7 +257,7 @@ function handle_list() {
  * Get muxer status (running/stopped) via systemd
  */
 function get_mux_status($id) {
-    $service_name = "cari-mux@{$id}.service";
+    $service_name = "cari-mux-{$id}.service";
     exec("systemctl is-active " . escapeshellarg($service_name) . " 2>/dev/null", $output, $ret);
 
     if ($ret === 0 && !empty($output) && trim($output[0]) === 'active') {
@@ -294,6 +294,8 @@ function handle_get($id) {
             $video_pid = intval($config['services']["{$prefix}.video_pid"] ?? (100 + ($i - 1) * 100));
             $audio_pid = intval($config['services']["{$prefix}.audio_pid"] ?? (101 + ($i - 1) * 100));
             $pcr_pid_val = intval($config['services']["{$prefix}.pcr_pid"] ?? $video_pid);
+            $stream_order_str = $config['services']["{$prefix}.stream_order"] ?? 'video,audio';
+            $stream_order = array_map('trim', explode(',', $stream_order_str));
 
             $services[] = [
                 'enabled' => $config['services']["{$prefix}.enabled"] === 'true',
@@ -309,6 +311,7 @@ function handle_get($id) {
                 'video_pid' => $video_pid,
                 'audio_pid' => $audio_pid,
                 'pcr_pid' => ($pcr_pid_val === $audio_pid) ? 'audio' : 'video',
+                'stream_order' => $stream_order,
                 'is_pcr_reference' => ($config['services']["{$prefix}.is_pcr_reference"] ?? 'false') === 'true'
             ];
         }
@@ -390,6 +393,13 @@ function handle_create() {
         return;
     }
 
+    // Generate systemd service file
+    if (!generate_systemd_service($id, $config)) {
+        // Non-fatal - config is saved, just warn
+        echo json_encode(['success' => true, 'id' => $id, 'message' => 'Muxer created (systemd service generation failed - may need manual setup)']);
+        return;
+    }
+
     echo json_encode(['success' => true, 'id' => $id, 'message' => 'Muxer created successfully']);
 }
 
@@ -446,12 +456,156 @@ function build_mux_config($id, $input) {
         $config['services']["{$prefix}.video_pid"] = intval($service['video_pid'] ?? (100 + ($i - 1) * 100));
         $config['services']["{$prefix}.audio_pid"] = intval($service['audio_pid'] ?? (101 + ($i - 1) * 100));
         $config['services']["{$prefix}.pcr_pid"] = intval($service['pcr_pid'] ?? $config['services']["{$prefix}.video_pid"]);
+        $stream_order = $service['stream_order'] ?? ['video', 'audio'];
+        $config['services']["{$prefix}.stream_order"] = implode(',', $stream_order);
         $config['services']["{$prefix}.is_pcr_reference"] = ($service['is_pcr_reference'] ?? false) ? 'true' : 'false';
 
         $i++;
     }
 
     return $config;
+}
+
+/**
+ * Generate cari-mux command from config
+ */
+function build_carimux_command($id, $config) {
+    $cmd_parts = ['/usr/local/bin/cari-mux'];
+
+    // Output settings
+    $output_address = $config['output']['address'] ?? '';
+    $output_port = $config['output']['port'] ?? '';
+    $output_bitrate = $config['output']['output_bitrate'] ?? 0;
+
+    if (empty($output_address) || empty($output_port)) {
+        return null;
+    }
+
+    // Network settings
+    $ts_id = $config['network']['ts_id'] ?? 1;
+    $network_id = $config['network']['network_id'] ?? 1;
+    $network_name = $config['network']['network_name'] ?? 'CariTrans';
+
+    // Process services
+    for ($i = 1; $i <= 20; $i++) {
+        $prefix = "service.{$i}";
+        if (!isset($config['services']["{$prefix}.enabled"]) ||
+            $config['services']["{$prefix}.enabled"] !== 'true') {
+            continue;
+        }
+
+        $source_address = $config['services']["{$prefix}.source_address"] ?? '';
+        $source_port = $config['services']["{$prefix}.source_port"] ?? '';
+        if (empty($source_address) || empty($source_port)) {
+            continue;
+        }
+
+        $program_number = $config['services']["{$prefix}.program_number"] ?? $i;
+        $video_pid = $config['services']["{$prefix}.video_pid"] ?? (100 + ($i - 1) * 100);
+        $audio_pid = $config['services']["{$prefix}.audio_pid"] ?? (101 + ($i - 1) * 100);
+        $pcr_pid = $config['services']["{$prefix}.pcr_pid"] ?? $video_pid;
+        $pmt_pid = $config['services']["{$prefix}.pmt_pid"] ?? (256 + ($i - 1));
+        $service_name = $config['services']["{$prefix}.service_name"] ?? "Service {$i}";
+
+        // Build input argument: ADDR:PORT:PROG:VPID:APID:PCRPID:PMTPID
+        $input_arg = "{$source_address}:{$source_port}:{$program_number}:{$video_pid}:{$audio_pid}:{$pcr_pid}:{$pmt_pid}";
+        $cmd_parts[] = '-i';
+        $cmd_parts[] = escapeshellarg($input_arg);
+
+        // Service name
+        $cmd_parts[] = '--name';
+        $cmd_parts[] = escapeshellarg($service_name);
+    }
+
+    // Add network/SDT settings
+    $cmd_parts[] = '--ts-id';
+    $cmd_parts[] = $ts_id;
+    $cmd_parts[] = '--network-id';
+    $cmd_parts[] = $network_id;
+    $cmd_parts[] = '--network';
+    $cmd_parts[] = escapeshellarg($network_name);
+
+    // Add bitrate if set (for CBR)
+    if ($output_bitrate > 0) {
+        $cmd_parts[] = '-b';
+        $cmd_parts[] = $output_bitrate;
+    }
+
+    // Output
+    $cmd_parts[] = '-o';
+    $cmd_parts[] = "{$output_address}:{$output_port}";
+
+    return implode(' ', $cmd_parts);
+}
+
+/**
+ * Generate systemd service file for muxer
+ */
+function generate_systemd_service($id, $config) {
+    $cmd = build_carimux_command($id, $config);
+    if (!$cmd) {
+        return false;
+    }
+
+    $service_name = "cari-mux-{$id}";
+    $muxer_name = $config['muxer']['name'] ?? $id;
+
+    $service_content = <<<EOF
+[Unit]
+Description=CariTranscoder Mux - {$muxer_name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Environment
+Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0:/usr/local/lib/gstreamer-1.0"
+Environment="PATH=/usr/bin:/usr/local/bin"
+
+# Main process
+ExecStart={$cmd}
+
+# Restart behavior
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOF;
+
+    $service_file = "/etc/systemd/system/{$service_name}.service";
+
+    // Call cari-api to write service file (needs root)
+    $result = call_cari_api('/service/write_file', 'POST', [
+        'path' => $service_file,
+        'content' => $service_content
+    ]);
+
+    if ($result && isset($result['success']) && $result['success']) {
+        // Reload systemd daemon
+        call_cari_api('/service/control', 'POST', [
+            'action' => 'daemon-reload',
+            'service_name' => ''
+        ]);
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -512,6 +666,9 @@ function handle_update() {
         return;
     }
 
+    // Regenerate systemd service file
+    generate_systemd_service($id, $config);
+
     echo json_encode(['success' => true, 'message' => 'Muxer updated successfully']);
 }
 
@@ -570,7 +727,7 @@ function handle_start($id) {
     // Start via cari-api (Python FastAPI running as root)
     $result = call_cari_api('/service/control', 'POST', [
         'action' => 'start',
-        'service_name' => "cari-mux@$id"
+        'service_name' => "cari-mux-$id"
     ]);
 
     if ($result && isset($result['success']) && $result['success']) {
@@ -726,7 +883,7 @@ function handle_stop($id) {
 function stop_mux($id) {
     $result = call_cari_api('/service/control', 'POST', [
         'action' => 'stop',
-        'service_name' => "cari-mux@$id"
+        'service_name' => "cari-mux-$id"
     ]);
 
     return $result && isset($result['success']) && $result['success'];

@@ -575,6 +575,16 @@ function addService(data = null) {
     const videoPid = data?.video_pid || (100 + (index - 1) * 100);
     const audioPid = data?.audio_pid || (101 + (index - 1) * 100);
     const pcrPid = data?.pcr_pid || 'video';  // 'video' or 'audio'
+    const streamOrder = data?.stream_order || ['video', 'audio'];  // Default: video first
+
+    // Build stream order list HTML
+    const streamOrderHtml = streamOrder.map(type => `
+        <div class="stream-order-item" data-type="${type}">
+            <i class="bi bi-grip-vertical me-2 stream-drag-handle"></i>
+            <i class="bi bi-${type === 'video' ? 'camera-video' : 'volume-up'} me-2"></i>
+            ${type === 'video' ? 'Video' : 'Audio'}
+        </div>
+    `).join('');
 
     const html = `
     <div class="service-card" id="service-${index}" data-index="${index}">
@@ -624,26 +634,35 @@ function addService(data = null) {
                     </select>
                 </div>
                 <div class="col-md-3 mb-3">
+                    <label class="form-label">PMT Order</label>
+                    <div class="stream-order-list" id="streamOrder${index}">
+                        ${streamOrderHtml}
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-4 mb-3">
+                    <label class="form-label">Service Name</label>
+                    <input type="text" class="form-control" id="serviceName${index}" value="${data?.service_name || ''}" placeholder="HD Channel 1" required>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <label class="form-label">Service Provider</label>
+                    <input type="text" class="form-control" id="serviceProvider${index}" value="${data?.service_provider || 'CariTrans'}" placeholder="CariTrans">
+                </div>
+                <div class="col-md-4 mb-3">
                     <label class="form-label">Service Type</label>
                     <select class="form-select" id="serviceType${index}">
                         ${typeOptions}
                     </select>
                 </div>
             </div>
-            <div class="row">
-                <div class="col-md-6 mb-3">
-                    <label class="form-label">Service Name</label>
-                    <input type="text" class="form-control" id="serviceName${index}" value="${data?.service_name || ''}" placeholder="HD Channel 1" required>
-                </div>
-                <div class="col-md-6 mb-3">
-                    <label class="form-label">Service Provider</label>
-                    <input type="text" class="form-control" id="serviceProvider${index}" value="${data?.service_provider || 'CariTrans'}" placeholder="CariTrans">
-                </div>
-            </div>
         </div>
     </div>`;
 
     document.getElementById('servicesContainer').insertAdjacentHTML('beforeend', html);
+
+    // Initialize stream order sortable for this service
+    initStreamOrderSortable(index);
 
     // Trigger source change if data provided
     if (data && data.source_id) {
@@ -709,6 +728,13 @@ async function handleFormSubmit(e) {
             const audioPid = parseInt(document.getElementById(`audioPid${index}`).value);
             const pcrOn = document.getElementById(`pcrPid${index}`).value;
 
+            // Get stream order from sortable list
+            const streamOrderList = document.getElementById(`streamOrder${index}`);
+            const streamOrder = [];
+            streamOrderList.querySelectorAll('.stream-order-item').forEach(item => {
+                streamOrder.push(item.dataset.type);
+            });
+
             formData.services.push({
                 source_type: document.getElementById(`sourceType${index}`).value,
                 source_id: sourceSelect.value,
@@ -719,10 +745,11 @@ async function handleFormSubmit(e) {
                 video_pid: videoPid,
                 audio_pid: audioPid,
                 pcr_pid: pcrOn === 'video' ? videoPid : audioPid,
+                stream_order: streamOrder,  // Order of streams in PMT
                 service_name: document.getElementById(`serviceName${index}`).value,
                 service_provider: document.getElementById(`serviceProvider${index}`).value,
                 service_type: parseInt(document.getElementById(`serviceType${index}`).value),
-                order: orderIndex  // Track service order for PMT ordering
+                order: orderIndex  // Track service order
             });
         }
     });
@@ -989,9 +1016,32 @@ function updateServiceNumbers() {
     });
 }
 
+// Initialize stream order sortable for a specific service
+function initStreamOrderSortable(index) {
+    const container = document.getElementById(`streamOrder${index}`);
+    if (container && typeof Sortable !== 'undefined') {
+        new Sortable(container, {
+            animation: 150,
+            handle: '.stream-drag-handle',
+            ghostClass: 'stream-sortable-ghost'
+        });
+    }
+}
+
+// Re-init all stream order sortables
+function initAllStreamOrderSortables() {
+    document.querySelectorAll('.stream-order-list').forEach(list => {
+        const index = list.id.replace('streamOrder', '');
+        initStreamOrderSortable(index);
+    });
+}
+
 // Re-init sortable when modal shown
 document.getElementById('muxerModal')?.addEventListener('shown.bs.modal', function() {
-    setTimeout(initServicesSortable, 100);
+    setTimeout(() => {
+        initServicesSortable();
+        initAllStreamOrderSortables();
+    }, 100);
 });
 </script>
 
@@ -1005,6 +1055,34 @@ document.getElementById('muxerModal')?.addEventListener('shown.bs.modal', functi
 }
 .drag-handle:hover {
     color: #0d6efd;
+}
+.stream-order-list {
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 4px;
+    background: #f8f9fa;
+}
+.stream-order-item {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    margin: 2px 0;
+    background: white;
+    border: 1px solid #dee2e6;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    cursor: default;
+}
+.stream-drag-handle {
+    cursor: grab;
+    color: #6c757d;
+}
+.stream-drag-handle:hover {
+    color: #0d6efd;
+}
+.stream-sortable-ghost {
+    opacity: 0.4;
+    background: #cfe2ff;
 }
 </style>
 
