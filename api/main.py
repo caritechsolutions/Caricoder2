@@ -258,6 +258,12 @@ class ConfigFile(BaseModel):
     content: str
 
 
+class WriteFileRequest(BaseModel):
+    """Model for writing arbitrary files (with security restrictions)"""
+    path: str
+    content: str
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -1453,6 +1459,46 @@ async def create_service_file(service: ServiceFile):
         }
     except Exception as e:
         logger.error(f"Failed to create service file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/service/write_file")
+async def write_service_file(request: WriteFileRequest):
+    """Write a file to allowed locations (systemd, config dirs)"""
+
+    # Security: only allow writing to specific directories
+    allowed_prefixes = [
+        SYSTEMD_DIR,       # /etc/systemd/system
+        CONFIG_DIR,        # /etc/caritrans
+        LOG_DIR,           # /var/log/caritrans
+        RUN_DIR            # /run/caritrans
+    ]
+
+    is_allowed = any(request.path.startswith(prefix) for prefix in allowed_prefixes)
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail=f"Can only write to: {allowed_prefixes}")
+
+    try:
+        # Create parent directory if needed
+        from pathlib import Path
+        parent = Path(request.path).parent
+        parent.mkdir(parents=True, exist_ok=True)
+
+        with open(request.path, 'w') as f:
+            f.write(request.content)
+
+        logger.info(f"Wrote file: {request.path}")
+
+        # If it's a systemd service file, reload daemon
+        if request.path.startswith(SYSTEMD_DIR):
+            daemon_reload()
+
+        return {
+            "success": True,
+            "path": request.path
+        }
+    except Exception as e:
+        logger.error(f"Failed to write file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
