@@ -571,21 +571,21 @@ function addService(data = null) {
 
     const isPcrRef = data && data.is_pcr_reference ? 'checked' : (index === 1 ? 'checked' : '');
     const programNumber = data?.program_number || (index * 1000 + 1);
-    const pmtPid = data?.pmt_pid || (256 + (index - 1) * 256);
+    const pmtPid = data?.pmt_pid || (256 + (index - 1));
+    const videoPid = data?.video_pid || (100 + (index - 1) * 100);
+    const audioPid = data?.audio_pid || (101 + (index - 1) * 100);
+    const pcrPid = data?.pcr_pid || 'video';  // 'video' or 'audio'
 
     const html = `
-    <div class="service-card" id="service-${index}">
+    <div class="service-card" id="service-${index}" data-index="${index}">
         <div class="service-header">
-            <span><i class="bi bi-broadcast me-2"></i>Service ${index}</span>
-            <div>
-                <div class="form-check form-check-inline mb-0">
-                    <input type="radio" class="form-check-input" name="pcr_reference" id="pcrRef${index}" value="${index}" ${isPcrRef}>
-                    <label class="form-check-label small" for="pcrRef${index}">PCR Reference</label>
-                </div>
-                <button type="button" class="btn btn-sm btn-outline-danger ms-2" onclick="removeService(${index})">
-                    <i class="bi bi-trash"></i>
-                </button>
+            <div class="d-flex align-items-center">
+                <i class="bi bi-grip-vertical me-2 drag-handle" style="cursor: grab;"></i>
+                <span><i class="bi bi-broadcast me-2"></i>Service ${index}</span>
             </div>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeService(${index})">
+                <i class="bi bi-trash"></i>
+            </button>
         </div>
         <div class="service-body">
             <div class="row">
@@ -605,23 +605,39 @@ function addService(data = null) {
                 <div class="col-md-3 mb-3">
                     <label class="form-label">PMT PID</label>
                     <input type="number" class="form-control" id="pmtPid${index}" value="${pmtPid}" min="32" max="8190">
-                    <small class="text-muted">0 = auto</small>
                 </div>
             </div>
             <div class="row">
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Service Name</label>
-                    <input type="text" class="form-control" id="serviceName${index}" value="${data?.service_name || ''}" placeholder="HD Channel 1" required>
+                <div class="col-md-3 mb-3">
+                    <label class="form-label">Video PID</label>
+                    <input type="number" class="form-control" id="videoPid${index}" value="${videoPid}" min="32" max="8190" required>
                 </div>
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Service Provider</label>
-                    <input type="text" class="form-control" id="serviceProvider${index}" value="${data?.service_provider || 'CariTrans'}" placeholder="CariTrans">
+                <div class="col-md-3 mb-3">
+                    <label class="form-label">Audio PID</label>
+                    <input type="number" class="form-control" id="audioPid${index}" value="${audioPid}" min="32" max="8190" required>
                 </div>
-                <div class="col-md-4 mb-3">
+                <div class="col-md-3 mb-3">
+                    <label class="form-label">PCR on</label>
+                    <select class="form-select" id="pcrPid${index}">
+                        <option value="video" ${pcrPid === 'video' ? 'selected' : ''}>Video PID</option>
+                        <option value="audio" ${pcrPid === 'audio' ? 'selected' : ''}>Audio PID</option>
+                    </select>
+                </div>
+                <div class="col-md-3 mb-3">
                     <label class="form-label">Service Type</label>
                     <select class="form-select" id="serviceType${index}">
                         ${typeOptions}
                     </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label class="form-label">Service Name</label>
+                    <input type="text" class="form-control" id="serviceName${index}" value="${data?.service_name || ''}" placeholder="HD Channel 1" required>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label class="form-label">Service Provider</label>
+                    <input type="text" class="form-control" id="serviceProvider${index}" value="${data?.service_provider || 'CariTrans'}" placeholder="CariTrans">
                 </div>
             </div>
         </div>
@@ -683,14 +699,16 @@ async function handleFormSubmit(e) {
         services: []
     };
 
-    // Collect services
-    const pcrRefValue = document.querySelector('input[name="pcr_reference"]:checked')?.value;
-
-    document.querySelectorAll('.service-card').forEach((card, idx) => {
+    // Collect services (in DOM order - respects drag-drop reordering)
+    document.querySelectorAll('.service-card').forEach((card, orderIndex) => {
         const index = card.id.replace('service-', '');
         const sourceSelect = document.getElementById(`source${index}`);
 
         if (sourceSelect && sourceSelect.value) {
+            const videoPid = parseInt(document.getElementById(`videoPid${index}`).value);
+            const audioPid = parseInt(document.getElementById(`audioPid${index}`).value);
+            const pcrOn = document.getElementById(`pcrPid${index}`).value;
+
             formData.services.push({
                 source_type: document.getElementById(`sourceType${index}`).value,
                 source_id: sourceSelect.value,
@@ -698,10 +716,13 @@ async function handleFormSubmit(e) {
                 source_port: document.getElementById(`sourcePort${index}`).value,
                 program_number: parseInt(document.getElementById(`programNumber${index}`).value),
                 pmt_pid: parseInt(document.getElementById(`pmtPid${index}`).value) || 0,
+                video_pid: videoPid,
+                audio_pid: audioPid,
+                pcr_pid: pcrOn === 'video' ? videoPid : audioPid,
                 service_name: document.getElementById(`serviceName${index}`).value,
                 service_provider: document.getElementById(`serviceProvider${index}`).value,
                 service_type: parseInt(document.getElementById(`serviceType${index}`).value),
-                is_pcr_reference: pcrRefValue === index
+                order: orderIndex  // Track service order for PMT ordering
             });
         }
     });
@@ -937,6 +958,54 @@ function startAutoRefresh() {
         }
     });
 }
+
+// Initialize SortableJS when modal opens
+let servicesSortable = null;
+
+function initServicesSortable() {
+    const container = document.getElementById('servicesContainer');
+    if (container && typeof Sortable !== 'undefined') {
+        if (servicesSortable) {
+            servicesSortable.destroy();
+        }
+        servicesSortable = new Sortable(container, {
+            animation: 150,
+            handle: '.drag-handle',
+            ghostClass: 'sortable-ghost',
+            onEnd: function() {
+                // Update service numbers after reorder
+                updateServiceNumbers();
+            }
+        });
+    }
+}
+
+function updateServiceNumbers() {
+    document.querySelectorAll('.service-card').forEach((card, idx) => {
+        const header = card.querySelector('.service-header span:last-child');
+        if (header) {
+            header.innerHTML = `<i class="bi bi-broadcast me-2"></i>Service ${idx + 1}`;
+        }
+    });
+}
+
+// Re-init sortable when modal shown
+document.getElementById('muxerModal')?.addEventListener('shown.bs.modal', function() {
+    setTimeout(initServicesSortable, 100);
+});
 </script>
+
+<!-- SortableJS for drag-drop service ordering -->
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+
+<style>
+.sortable-ghost {
+    opacity: 0.4;
+    background: #e9ecef;
+}
+.drag-handle:hover {
+    color: #0d6efd;
+}
+</style>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>

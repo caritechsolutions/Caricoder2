@@ -291,6 +291,10 @@ function handle_get($id) {
     for ($i = 1; $i <= 20; $i++) {
         $prefix = "service.{$i}";
         if (isset($config['services']["{$prefix}.enabled"])) {
+            $video_pid = intval($config['services']["{$prefix}.video_pid"] ?? (100 + ($i - 1) * 100));
+            $audio_pid = intval($config['services']["{$prefix}.audio_pid"] ?? (101 + ($i - 1) * 100));
+            $pcr_pid_val = intval($config['services']["{$prefix}.pcr_pid"] ?? $video_pid);
+
             $services[] = [
                 'enabled' => $config['services']["{$prefix}.enabled"] === 'true',
                 'source_type' => $config['services']["{$prefix}.source_type"] ?? 'input',
@@ -301,7 +305,10 @@ function handle_get($id) {
                 'service_name' => $config['services']["{$prefix}.service_name"] ?? '',
                 'service_provider' => $config['services']["{$prefix}.service_provider"] ?? '',
                 'service_type' => intval($config['services']["{$prefix}.service_type"] ?? 0x01),
-                'pmt_pid' => intval($config['services']["{$prefix}.pmt_pid"] ?? 0),
+                'pmt_pid' => intval($config['services']["{$prefix}.pmt_pid"] ?? (256 + ($i - 1))),
+                'video_pid' => $video_pid,
+                'audio_pid' => $audio_pid,
+                'pcr_pid' => ($pcr_pid_val === $audio_pid) ? 'audio' : 'video',
                 'is_pcr_reference' => ($config['services']["{$prefix}.is_pcr_reference"] ?? 'false') === 'true'
             ];
         }
@@ -417,7 +424,7 @@ function build_mux_config($id, $input) {
         'services' => []
     ];
 
-    // Process services
+    // Process services (order in array determines PMT order via drag-drop)
     $services = $input['services'] ?? [];
     $i = 1;
     foreach ($services as $service) {
@@ -435,7 +442,10 @@ function build_mux_config($id, $input) {
         $config['services']["{$prefix}.service_name"] = $service['service_name'] ?? '';
         $config['services']["{$prefix}.service_provider"] = $service['service_provider'] ?? '';
         $config['services']["{$prefix}.service_type"] = intval($service['service_type'] ?? 0x01);
-        $config['services']["{$prefix}.pmt_pid"] = intval($service['pmt_pid'] ?? (256 + ($i - 1) * 256));
+        $config['services']["{$prefix}.pmt_pid"] = intval($service['pmt_pid'] ?? (256 + ($i - 1)));
+        $config['services']["{$prefix}.video_pid"] = intval($service['video_pid'] ?? (100 + ($i - 1) * 100));
+        $config['services']["{$prefix}.audio_pid"] = intval($service['audio_pid'] ?? (101 + ($i - 1) * 100));
+        $config['services']["{$prefix}.pcr_pid"] = intval($service['pcr_pid'] ?? $config['services']["{$prefix}.video_pid"]);
         $config['services']["{$prefix}.is_pcr_reference"] = ($service['is_pcr_reference'] ?? false) ? 'true' : 'false';
 
         $i++;
