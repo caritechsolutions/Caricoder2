@@ -47,6 +47,7 @@ typedef struct {
     int video_pid;              /* Output video PID */
     int audio_pid;              /* Output audio PID */
     int pcr_pid;                /* Which PID carries PCR (video_pid or audio_pid) */
+    gboolean audio_first;       /* PMT order: 0=video first, 1=audio first */
     char service_name[64];      /* Service name for SDT */
     char provider_name[64];     /* Provider name for SDT */
     StreamType video_type;      /* Detected video codec */
@@ -465,14 +466,20 @@ static char *build_prog_map(void) {
                      svc->program_number, svc->pcr_pid);
         p += n; remaining -= n;
 
-        /* Set stream ordering in PMT: video first (0), audio second (1) */
-        n = snprintf(p, remaining, ",PMT_ORDER_%d=0",
-                     svc->video_pid);
-        p += n; remaining -= n;
-
-        n = snprintf(p, remaining, ",PMT_ORDER_%d=1",
-                     svc->audio_pid);
-        p += n; remaining -= n;
+        /* Set stream ordering in PMT based on audio_first flag */
+        if (svc->audio_first) {
+            /* Audio first (0), video second (1) */
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=0", svc->audio_pid);
+            p += n; remaining -= n;
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=1", svc->video_pid);
+            p += n; remaining -= n;
+        } else {
+            /* Video first (0), audio second (1) - default */
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=0", svc->video_pid);
+            p += n; remaining -= n;
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=1", svc->audio_pid);
+            p += n; remaining -= n;
+        }
     }
 
     return prog_map;
@@ -747,6 +754,7 @@ static void print_help(const char *prog) {
     printf("                         PCRPID = which PID carries PCR (default: VPID)\n");
     printf("                         PMTPID = PMT PID for program (default: 256,257,258...)\n");
     printf("  -m, --name NAME        Service name for SDT (applies to previous -i)\n");
+    printf("  -P, --pmt-order ORDER  Stream order in PMT: video,audio (default) or audio,video\n");
     printf("\n");
     printf("Output Options:\n");
     printf("  -o, --output HOST:PORT UDP output address\n");
@@ -885,6 +893,7 @@ static int parse_args(int argc, char *argv[]) {
         {"network-id",  required_argument, 0, 'n'},
         {"network",     required_argument, 0, 'N'},
         {"name",        required_argument, 0, 'm'},
+        {"pmt-order",   required_argument, 0, 'P'},
         {"stdout",      no_argument,       0, 'S'},
         {"detect-only", no_argument,       0, 'D'},
         {"debug",       no_argument,       0, 'd'},
@@ -898,7 +907,7 @@ static int parse_args(int argc, char *argv[]) {
     strncpy(g_ctx.network_name, "CariCoder", sizeof(g_ctx.network_name) - 1);
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:Ddh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:P:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 if (g_ctx.service_count >= MAX_SERVICES) {
@@ -958,6 +967,17 @@ static int parse_args(int argc, char *argv[]) {
                 if (g_ctx.service_count > 0) {
                     strncpy(g_ctx.services[g_ctx.service_count - 1].service_name,
                             optarg, sizeof(g_ctx.services[0].service_name) - 1);
+                }
+                break;
+
+            case 'P':
+                /* Set PMT stream order for most recently added service */
+                if (g_ctx.service_count > 0) {
+                    if (strcmp(optarg, "audio,video") == 0 || strcmp(optarg, "av") == 0) {
+                        g_ctx.services[g_ctx.service_count - 1].audio_first = TRUE;
+                    } else {
+                        g_ctx.services[g_ctx.service_count - 1].audio_first = FALSE;
+                    }
                 }
                 break;
 
