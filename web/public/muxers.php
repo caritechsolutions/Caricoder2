@@ -790,34 +790,86 @@ async function handleFormSubmit(e) {
 
 // Start muxer
 async function startMuxer(id) {
+    const row = document.querySelector(`tr[data-id="${id}"]`);
+    const btn = row?.querySelector('.btn-outline-success');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    }
+
     try {
         const response = await fetch(`api/muxers.php?action=start&id=${id}`, { method: 'POST' });
         const result = await response.json();
         if (result.success) {
+            // Wait for systemd to actually start the service before reloading
+            await waitForStatus(id, 'running', 5000);
             location.reload();
         } else {
             alert('Failed to start: ' + result.error);
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-play-fill"></i>';
+            }
         }
     } catch (e) {
         console.error('Start failed:', e);
         alert('Failed to start muxer');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-fill"></i>';
+        }
     }
 }
 
 // Stop muxer
 async function stopMuxer(id) {
+    const row = document.querySelector(`tr[data-id="${id}"]`);
+    const btn = row?.querySelector('.btn-outline-warning');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    }
+
     try {
         const response = await fetch(`api/muxers.php?action=stop&id=${id}`, { method: 'POST' });
         const result = await response.json();
         if (result.success) {
+            // Wait for systemd to actually stop the service before reloading
+            await waitForStatus(id, 'stopped', 5000);
             location.reload();
         } else {
             alert('Failed to stop: ' + result.error);
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-stop-fill"></i>';
+            }
         }
     } catch (e) {
         console.error('Stop failed:', e);
         alert('Failed to stop muxer');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-stop-fill"></i>';
+        }
     }
+}
+
+// Wait for service to reach expected status
+async function waitForStatus(id, expectedStatus, timeout = 5000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+        try {
+            const response = await fetch(`api/muxers.php?action=status&id=${id}`);
+            const data = await response.json();
+            if (data.success && data.status === expectedStatus) {
+                return true;
+            }
+        } catch (e) {
+            console.error('Status check failed:', e);
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return false;  // Timeout - reload anyway
 }
 
 // Delete muxer

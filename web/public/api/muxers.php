@@ -550,6 +550,14 @@ function generate_systemd_service($id, $config) {
     $service_name = "cari-mux-{$id}";
     $muxer_name = $config['muxer']['name'] ?? $id;
 
+    // If command contains a pipe, wrap in bash -c
+    if (strpos($cmd, '|') !== false) {
+        $escaped_cmd = str_replace("'", "'\\''", $cmd);
+        $exec_start = "/bin/bash -c '{$escaped_cmd}'";
+    } else {
+        $exec_start = $cmd;
+    }
+
     $service_content = <<<EOF
 [Unit]
 Description=CariTranscoder Mux - {$muxer_name}
@@ -564,10 +572,10 @@ Group=root
 
 # Environment
 Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0:/usr/local/lib/gstreamer-1.0"
-Environment="PATH=/usr/bin:/usr/local/bin"
+Environment="PATH=/usr/bin:/usr/local/bin:/opt/tsduck/bin"
 
 # Main process
-ExecStart={$cmd}
+ExecStart={$exec_start}
 
 # Restart behavior
 Restart=on-failure
