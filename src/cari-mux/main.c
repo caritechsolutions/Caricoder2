@@ -55,6 +55,8 @@ typedef struct {
     gboolean video_linked;      /* Video pad connected */
     gboolean audio_linked;      /* Audio pad connected */
     GstElement *demux;          /* tsdemux element for this input */
+    GstElement *pending_video_parser;  /* Video parser waiting to be linked */
+    GstElement *pending_audio_parser;  /* Audio parser waiting to be linked */
 } ServiceInput;
 
 /* Application context */
@@ -324,10 +326,54 @@ static gboolean link_parser_to_mux(GstElement *parser, int pid, const char *stre
 }
 
 /*
+ * Link pending parsers to mux in the correct order for PMT stream ordering.
+ * Called when both video and audio parsers are ready.
+ */
+static void link_pending_parsers(ServiceInput *svc) {
+    if (!svc->pending_video_parser || !svc->pending_audio_parser) {
+        return;  /* Not both ready yet */
+    }
+
+    if (svc->audio_first) {
+        /* Link audio first, then video */
+        if (link_parser_to_mux(svc->pending_audio_parser, svc->audio_pid, "Audio")) {
+            svc->audio_linked = TRUE;
+            fprintf(stderr, "Service %d: Audio linked (PID %d)%s\n",
+                    svc->program_number, svc->audio_pid,
+                    (svc->audio_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+        if (link_parser_to_mux(svc->pending_video_parser, svc->video_pid, "Video")) {
+            svc->video_linked = TRUE;
+            fprintf(stderr, "Service %d: Video linked (PID %d)%s\n",
+                    svc->program_number, svc->video_pid,
+                    (svc->video_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+    } else {
+        /* Link video first, then audio (default) */
+        if (link_parser_to_mux(svc->pending_video_parser, svc->video_pid, "Video")) {
+            svc->video_linked = TRUE;
+            fprintf(stderr, "Service %d: Video linked (PID %d)%s\n",
+                    svc->program_number, svc->video_pid,
+                    (svc->video_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+        if (link_parser_to_mux(svc->pending_audio_parser, svc->audio_pid, "Audio")) {
+            svc->audio_linked = TRUE;
+            fprintf(stderr, "Service %d: Audio linked (PID %d)%s\n",
+                    svc->program_number, svc->audio_pid,
+                    (svc->audio_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+    }
+
+    /* Clear pending pointers */
+    svc->pending_video_parser = NULL;
+    svc->pending_audio_parser = NULL;
+}
+
+/*
  * Callback when tsdemux discovers a new pad
  *
- * PCR is controlled via prog-map PCR_X property, so we link streams immediately.
- * Stream ordering in PMT is controlled via PMT_ORDER_X property.
+ * PCR is controlled via prog-map PCR_X property.
+ * Stream ordering in PMT is controlled by the order we link to mux.
  */
 static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_data) {
     (void)user_data;
@@ -362,21 +408,21 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
     /* Determine which PID and stream type */
     int this_pid = 0;
     StreamType stream_type = STREAM_TYPE_UNKNOWN;
-    gboolean *linked_flag = NULL;
+    GstElement **pending_parser = NULL;
     const char *stream_name = NULL;
 
-    if (is_video && !svc->video_linked) {
+    if (is_video && !svc->pending_video_parser && !svc->video_linked) {
         this_pid = svc->video_pid;
         stream_type = svc->video_type;
-        linked_flag = &svc->video_linked;
+        pending_parser = &svc->pending_video_parser;
         stream_name = "Video";
-    } else if (is_audio && !svc->audio_linked) {
+    } else if (is_audio && !svc->pending_audio_parser && !svc->audio_linked) {
         this_pid = svc->audio_pid;
         stream_type = svc->audio_type;
-        linked_flag = &svc->audio_linked;
+        pending_parser = &svc->pending_audio_parser;
         stream_name = "Audio";
     } else {
-        /* Already linked or unknown type */
+        /* Already linked/pending or unknown type */
         gst_caps_unref(caps);
         return;
     }
@@ -411,13 +457,16 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
 
     gst_element_link(queue, parser);
 
-    /* Link parser to mux - PCR is set via prog-map PCR_X property */
-    if (link_parser_to_mux(parser, this_pid, stream_name)) {
-        *linked_flag = TRUE;
-        fprintf(stderr, "Service %d: %s linked (PID %d)%s\n",
-                svc->program_number, stream_name, this_pid,
-                (this_pid == svc->pcr_pid) ? " [PCR]" : "");
+    /* Store parser as pending */
+    *pending_parser = parser;
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Service %d: %s parser ready (PID %d)\n",
+                svc->program_number, stream_name, this_pid);
     }
+
+    /* Check if both parsers are ready, then link in correct order */
+    link_pending_parsers(svc);
 
     gst_caps_unref(caps);
 }
@@ -802,6 +851,8 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
     svc->audio_type = STREAM_TYPE_UNKNOWN;
     svc->video_linked = FALSE;
     svc->audio_linked = FALSE;
+    svc->pending_video_parser = NULL;
+    svc->pending_audio_parser = NULL;
     svc->enabled = 1;
     svc->demux = NULL;
     svc->service_name[0] = '\0';         /* Will use default if not set */
