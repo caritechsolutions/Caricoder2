@@ -475,15 +475,16 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
  * Build program-map string for mpegtsmux
  *
  * mpegtsmux prog-map supports these properties:
- *   sink_X=program   - Map sink pad with PID X to program number
- *   PMT_X=pid        - Set PMT PID for program X
- *   PCR_X=pid        - Set which PID carries PCR for program X
- *   PMT_ORDER_X=idx  - Set stream ordering in PMT (X=stream PID, idx=position)
+ *   sink_X=program     - Map sink pad with PID X to program number
+ *   PMT_X=pid          - Set PMT PID for program X (X=program number)
+ *   PCR_X=pid          - Set which PID carries PCR for program X
+ *   PMT_X=idx          - Set stream ordering in PMT (X=stream PID, idx=position)
  *
- * IMPORTANT: Values must have explicit (int) type annotations for
- * gst_structure_get_int() to work correctly when parsing the string.
+ * Note: PMT_X serves dual purpose - when X is a program number (1,2,3...)
+ * it sets the PMT PID. When X is a stream PID (100,101,200...) it sets
+ * the stream's position in the PMT. These don't conflict in practice.
  *
- * Format: "program_map,sink_100=(int)1,PMT_1=(int)256,PCR_1=(int)100,PMT_ORDER_100=(int)0,..."
+ * Format: "program_map,sink_100=1,sink_101=1,PMT_1=256,PCR_1=100,PMT_100=0,PMT_101=1"
  */
 static char *build_prog_map(void) {
     static char prog_map[4096];
@@ -498,45 +499,43 @@ static char *build_prog_map(void) {
     for (int i = 0; i < g_ctx.service_count; i++) {
         ServiceInput *svc = &g_ctx.services[i];
 
-        /* Map video PID to program - use (int) type annotation */
-        n = snprintf(p, remaining, ",sink_%d=(int)%d",
+        /* Map video PID to program */
+        n = snprintf(p, remaining, ",sink_%d=%d",
                      svc->video_pid, svc->program_number);
         p += n; remaining -= n;
 
         /* Map audio PID to program */
-        n = snprintf(p, remaining, ",sink_%d=(int)%d",
+        n = snprintf(p, remaining, ",sink_%d=%d",
                      svc->audio_pid, svc->program_number);
         p += n; remaining -= n;
 
         /* Set PMT PID for this program */
-        n = snprintf(p, remaining, ",PMT_%d=(int)%d",
+        n = snprintf(p, remaining, ",PMT_%d=%d",
                      svc->program_number, svc->pmt_pid);
         p += n; remaining -= n;
 
         /* Set PCR PID for this program */
-        n = snprintf(p, remaining, ",PCR_%d=(int)%d",
+        n = snprintf(p, remaining, ",PCR_%d=%d",
                      svc->program_number, svc->pcr_pid);
         p += n; remaining -= n;
 
         /* Set stream ordering in PMT based on audio_first flag.
-         * GStreamer 1.20+ uses PMT_ORDER_%d, older versions use PMT_%d
-         * We include both for compatibility. Note: PMT_%d for stream ordering
-         * uses stream PID (e.g., 100), while PMT_%d for PMT PID uses program
-         * number (e.g., 1), so they don't conflict in practice.
+         * GStreamer 1.26.x uses PMT_%d where %d is the stream PID.
+         * The value is the position index (0=first, 1=second, etc.)
+         * Note: This doesn't conflict with PMT_%d for PMT PID because
+         * program numbers (1,2,3...) differ from stream PIDs (100,101,200...)
          */
         if (svc->audio_first) {
             /* Audio first (0), video second (1) */
-            /* New format for GStreamer 1.20+ */
-            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)0", svc->audio_pid);
+            n = snprintf(p, remaining, ",PMT_%d=0", svc->audio_pid);
             p += n; remaining -= n;
-            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)1", svc->video_pid);
+            n = snprintf(p, remaining, ",PMT_%d=1", svc->video_pid);
             p += n; remaining -= n;
         } else {
             /* Video first (0), audio second (1) - default */
-            /* New format for GStreamer 1.20+ */
-            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)0", svc->video_pid);
+            n = snprintf(p, remaining, ",PMT_%d=0", svc->video_pid);
             p += n; remaining -= n;
-            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)1", svc->audio_pid);
+            n = snprintf(p, remaining, ",PMT_%d=1", svc->audio_pid);
             p += n; remaining -= n;
         }
     }
