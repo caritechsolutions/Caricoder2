@@ -506,6 +506,7 @@ function build_carimux_command($id, $config) {
         $pcr_pid = $config['services']["{$prefix}.pcr_pid"] ?? $video_pid;
         $pmt_pid = $config['services']["{$prefix}.pmt_pid"] ?? (256 + ($i - 1));
         $service_name = $config['services']["{$prefix}.service_name"] ?? "Service {$i}";
+        $stream_order = $config['services']["{$prefix}.stream_order"] ?? 'video,audio';
 
         // Build input argument: ADDR:PORT:PROG:VPID:APID:PCRPID:PMTPID
         $input_arg = "{$source_address}:{$source_port}:{$program_number}:{$video_pid}:{$audio_pid}:{$pcr_pid}:{$pmt_pid}";
@@ -515,6 +516,10 @@ function build_carimux_command($id, $config) {
         // Service name
         $cmd_parts[] = '--name';
         $cmd_parts[] = escapeshellarg($service_name);
+
+        // PMT stream order (video,audio or audio,video)
+        $cmd_parts[] = '--pmt-order';
+        $cmd_parts[] = escapeshellarg($stream_order);
     }
 
     // Add network/SDT settings
