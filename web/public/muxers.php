@@ -14,6 +14,16 @@ auth_require_login();
 
 $muxers = get_service_list('muxers');
 
+// Helper function to get muxer status
+function get_mux_status_local($id) {
+    $service_name = "cari-mux-{$id}.service";
+    exec("systemctl is-active " . escapeshellarg($service_name) . " 2>/dev/null", $output, $ret);
+    if ($ret === 0 && !empty($output) && trim($output[0]) === 'active') {
+        return 'running';
+    }
+    return 'stopped';
+}
+
 // Enhance muxer data
 foreach ($muxers as &$mux) {
     $config_file = CONFIG_PATH . '/muxers/' . $mux['id'] . '.conf';
@@ -33,6 +43,9 @@ foreach ($muxers as &$mux) {
         }
         $mux['service_count'] = $service_count;
     }
+
+    // Get running status
+    $mux['status'] = get_mux_status_local($mux['id']);
 }
 
 $page_title = 'Muxers';

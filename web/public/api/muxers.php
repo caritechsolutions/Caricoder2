@@ -525,13 +525,18 @@ function build_carimux_command($id, $config) {
     $cmd_parts[] = '--network';
     $cmd_parts[] = escapeshellarg($network_name);
 
-    // Add bitrate if set (for CBR)
+    // CBR mode: use --stdout and pipe through tsp regulate for smooth output
     if ($output_bitrate > 0) {
         $cmd_parts[] = '-b';
         $cmd_parts[] = $output_bitrate;
+        $cmd_parts[] = '--stdout';
+
+        $mux_cmd = implode(' ', $cmd_parts);
+        // Pipe through tsp regulate for smooth CBR pacing
+        return "{$mux_cmd} | tsp -P regulate -O ip {$output_address}:{$output_port}";
     }
 
-    // Output
+    // VBR mode: direct UDP output
     $cmd_parts[] = '-o';
     $cmd_parts[] = "{$output_address}:{$output_port}";
 
