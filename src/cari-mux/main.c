@@ -47,6 +47,7 @@ typedef struct {
     int video_pid;              /* Output video PID */
     int audio_pid;              /* Output audio PID */
     int pcr_pid;                /* Which PID carries PCR (video_pid or audio_pid) */
+    gboolean audio_first;       /* PMT order: 0=video first, 1=audio first */
     char service_name[64];      /* Service name for SDT */
     char provider_name[64];     /* Provider name for SDT */
     StreamType video_type;      /* Detected video codec */
@@ -54,6 +55,8 @@ typedef struct {
     gboolean video_linked;      /* Video pad connected */
     gboolean audio_linked;      /* Audio pad connected */
     GstElement *demux;          /* tsdemux element for this input */
+    GstElement *pending_video_parser;  /* Video parser waiting to be linked */
+    GstElement *pending_audio_parser;  /* Audio parser waiting to be linked */
 } ServiceInput;
 
 /* Application context */
@@ -323,10 +326,54 @@ static gboolean link_parser_to_mux(GstElement *parser, int pid, const char *stre
 }
 
 /*
+ * Link pending parsers to mux in the correct order for PMT stream ordering.
+ * Called when both video and audio parsers are ready.
+ */
+static void link_pending_parsers(ServiceInput *svc) {
+    if (!svc->pending_video_parser || !svc->pending_audio_parser) {
+        return;  /* Not both ready yet */
+    }
+
+    if (svc->audio_first) {
+        /* Link audio first, then video */
+        if (link_parser_to_mux(svc->pending_audio_parser, svc->audio_pid, "Audio")) {
+            svc->audio_linked = TRUE;
+            fprintf(stderr, "Service %d: Audio linked (PID %d)%s\n",
+                    svc->program_number, svc->audio_pid,
+                    (svc->audio_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+        if (link_parser_to_mux(svc->pending_video_parser, svc->video_pid, "Video")) {
+            svc->video_linked = TRUE;
+            fprintf(stderr, "Service %d: Video linked (PID %d)%s\n",
+                    svc->program_number, svc->video_pid,
+                    (svc->video_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+    } else {
+        /* Link video first, then audio (default) */
+        if (link_parser_to_mux(svc->pending_video_parser, svc->video_pid, "Video")) {
+            svc->video_linked = TRUE;
+            fprintf(stderr, "Service %d: Video linked (PID %d)%s\n",
+                    svc->program_number, svc->video_pid,
+                    (svc->video_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+        if (link_parser_to_mux(svc->pending_audio_parser, svc->audio_pid, "Audio")) {
+            svc->audio_linked = TRUE;
+            fprintf(stderr, "Service %d: Audio linked (PID %d)%s\n",
+                    svc->program_number, svc->audio_pid,
+                    (svc->audio_pid == svc->pcr_pid) ? " [PCR]" : "");
+        }
+    }
+
+    /* Clear pending pointers */
+    svc->pending_video_parser = NULL;
+    svc->pending_audio_parser = NULL;
+}
+
+/*
  * Callback when tsdemux discovers a new pad
  *
- * PCR is controlled via prog-map PCR_X property, so we link streams immediately.
- * Stream ordering in PMT is controlled via PMT_ORDER_X property.
+ * PCR is controlled via prog-map PCR_X property.
+ * Stream ordering in PMT is controlled by the order we link to mux.
  */
 static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_data) {
     (void)user_data;
@@ -361,21 +408,21 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
     /* Determine which PID and stream type */
     int this_pid = 0;
     StreamType stream_type = STREAM_TYPE_UNKNOWN;
-    gboolean *linked_flag = NULL;
+    GstElement **pending_parser = NULL;
     const char *stream_name = NULL;
 
-    if (is_video && !svc->video_linked) {
+    if (is_video && !svc->pending_video_parser && !svc->video_linked) {
         this_pid = svc->video_pid;
         stream_type = svc->video_type;
-        linked_flag = &svc->video_linked;
+        pending_parser = &svc->pending_video_parser;
         stream_name = "Video";
-    } else if (is_audio && !svc->audio_linked) {
+    } else if (is_audio && !svc->pending_audio_parser && !svc->audio_linked) {
         this_pid = svc->audio_pid;
         stream_type = svc->audio_type;
-        linked_flag = &svc->audio_linked;
+        pending_parser = &svc->pending_audio_parser;
         stream_name = "Audio";
     } else {
-        /* Already linked or unknown type */
+        /* Already linked/pending or unknown type */
         gst_caps_unref(caps);
         return;
     }
@@ -410,13 +457,16 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
 
     gst_element_link(queue, parser);
 
-    /* Link parser to mux - PCR is set via prog-map PCR_X property */
-    if (link_parser_to_mux(parser, this_pid, stream_name)) {
-        *linked_flag = TRUE;
-        fprintf(stderr, "Service %d: %s linked (PID %d)%s\n",
-                svc->program_number, stream_name, this_pid,
-                (this_pid == svc->pcr_pid) ? " [PCR]" : "");
+    /* Store parser as pending */
+    *pending_parser = parser;
+
+    if (g_ctx.debug) {
+        fprintf(stderr, "Service %d: %s parser ready (PID %d)\n",
+                svc->program_number, stream_name, this_pid);
     }
+
+    /* Check if both parsers are ready, then link in correct order */
+    link_pending_parsers(svc);
 
     gst_caps_unref(caps);
 }
@@ -430,7 +480,10 @@ static void on_demux_pad_added(GstElement *demux, GstPad *pad, gpointer user_dat
  *   PCR_X=pid        - Set which PID carries PCR for program X
  *   PMT_ORDER_X=idx  - Set stream ordering in PMT (X=stream PID, idx=position)
  *
- * Format: "program_map,sink_100=1,PMT_1=256,PCR_1=100,PMT_ORDER_100=0,..."
+ * IMPORTANT: Values must have explicit (int) type annotations for
+ * gst_structure_get_int() to work correctly when parsing the string.
+ *
+ * Format: "program_map,sink_100=(int)1,PMT_1=(int)256,PCR_1=(int)100,PMT_ORDER_100=(int)0,..."
  */
 static char *build_prog_map(void) {
     static char prog_map[4096];
@@ -445,34 +498,47 @@ static char *build_prog_map(void) {
     for (int i = 0; i < g_ctx.service_count; i++) {
         ServiceInput *svc = &g_ctx.services[i];
 
-        /* Map video PID to program */
-        n = snprintf(p, remaining, ",sink_%d=%d",
+        /* Map video PID to program - use (int) type annotation */
+        n = snprintf(p, remaining, ",sink_%d=(int)%d",
                      svc->video_pid, svc->program_number);
         p += n; remaining -= n;
 
         /* Map audio PID to program */
-        n = snprintf(p, remaining, ",sink_%d=%d",
+        n = snprintf(p, remaining, ",sink_%d=(int)%d",
                      svc->audio_pid, svc->program_number);
         p += n; remaining -= n;
 
         /* Set PMT PID for this program */
-        n = snprintf(p, remaining, ",PMT_%d=%d",
+        n = snprintf(p, remaining, ",PMT_%d=(int)%d",
                      svc->program_number, svc->pmt_pid);
         p += n; remaining -= n;
 
         /* Set PCR PID for this program */
-        n = snprintf(p, remaining, ",PCR_%d=%d",
+        n = snprintf(p, remaining, ",PCR_%d=(int)%d",
                      svc->program_number, svc->pcr_pid);
         p += n; remaining -= n;
 
-        /* Set stream ordering in PMT: video first (0), audio second (1) */
-        n = snprintf(p, remaining, ",PMT_ORDER_%d=0",
-                     svc->video_pid);
-        p += n; remaining -= n;
-
-        n = snprintf(p, remaining, ",PMT_ORDER_%d=1",
-                     svc->audio_pid);
-        p += n; remaining -= n;
+        /* Set stream ordering in PMT based on audio_first flag.
+         * GStreamer 1.20+ uses PMT_ORDER_%d, older versions use PMT_%d
+         * We include both for compatibility. Note: PMT_%d for stream ordering
+         * uses stream PID (e.g., 100), while PMT_%d for PMT PID uses program
+         * number (e.g., 1), so they don't conflict in practice.
+         */
+        if (svc->audio_first) {
+            /* Audio first (0), video second (1) */
+            /* New format for GStreamer 1.20+ */
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)0", svc->audio_pid);
+            p += n; remaining -= n;
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)1", svc->video_pid);
+            p += n; remaining -= n;
+        } else {
+            /* Video first (0), audio second (1) - default */
+            /* New format for GStreamer 1.20+ */
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)0", svc->video_pid);
+            p += n; remaining -= n;
+            n = snprintf(p, remaining, ",PMT_ORDER_%d=(int)1", svc->audio_pid);
+            p += n; remaining -= n;
+        }
     }
 
     return prog_map;
@@ -747,6 +813,7 @@ static void print_help(const char *prog) {
     printf("                         PCRPID = which PID carries PCR (default: VPID)\n");
     printf("                         PMTPID = PMT PID for program (default: 256,257,258...)\n");
     printf("  -m, --name NAME        Service name for SDT (applies to previous -i)\n");
+    printf("  -P, --pmt-order ORDER  Stream order in PMT: video,audio (default) or audio,video\n");
     printf("\n");
     printf("Output Options:\n");
     printf("  -o, --output HOST:PORT UDP output address\n");
@@ -794,6 +861,8 @@ static int parse_input(const char *arg, ServiceInput *svc, int index) {
     svc->audio_type = STREAM_TYPE_UNKNOWN;
     svc->video_linked = FALSE;
     svc->audio_linked = FALSE;
+    svc->pending_video_parser = NULL;
+    svc->pending_audio_parser = NULL;
     svc->enabled = 1;
     svc->demux = NULL;
     svc->service_name[0] = '\0';         /* Will use default if not set */
@@ -885,6 +954,7 @@ static int parse_args(int argc, char *argv[]) {
         {"network-id",  required_argument, 0, 'n'},
         {"network",     required_argument, 0, 'N'},
         {"name",        required_argument, 0, 'm'},
+        {"pmt-order",   required_argument, 0, 'P'},
         {"stdout",      no_argument,       0, 'S'},
         {"detect-only", no_argument,       0, 'D'},
         {"debug",       no_argument,       0, 'd'},
@@ -898,7 +968,7 @@ static int parse_args(int argc, char *argv[]) {
     strncpy(g_ctx.network_name, "CariCoder", sizeof(g_ctx.network_name) - 1);
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:Ddh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:o:b:t:n:N:m:P:Ddh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 if (g_ctx.service_count >= MAX_SERVICES) {
@@ -958,6 +1028,17 @@ static int parse_args(int argc, char *argv[]) {
                 if (g_ctx.service_count > 0) {
                     strncpy(g_ctx.services[g_ctx.service_count - 1].service_name,
                             optarg, sizeof(g_ctx.services[0].service_name) - 1);
+                }
+                break;
+
+            case 'P':
+                /* Set PMT stream order for most recently added service */
+                if (g_ctx.service_count > 0) {
+                    if (strcmp(optarg, "audio,video") == 0 || strcmp(optarg, "av") == 0) {
+                        g_ctx.services[g_ctx.service_count - 1].audio_first = TRUE;
+                    } else {
+                        g_ctx.services[g_ctx.service_count - 1].audio_first = FALSE;
+                    }
                 }
                 break;
 
