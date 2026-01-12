@@ -264,6 +264,11 @@ class WriteFileRequest(BaseModel):
     content: str
 
 
+class DeleteFileRequest(BaseModel):
+    """Model for deleting files (with security restrictions)"""
+    path: str
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================

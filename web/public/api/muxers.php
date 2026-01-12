@@ -670,9 +670,9 @@ function handle_update() {
         return;
     }
 
-    // Stop if running
-    $status = get_mux_status($id);
-    if ($status === 'running') {
+    // Check if running before update
+    $was_running = (get_mux_status($id) === 'running');
+    if ($was_running) {
         stop_mux($id);
     }
 
@@ -686,6 +686,14 @@ function handle_update() {
 
     // Regenerate systemd service file
     generate_systemd_service($id, $config);
+
+    // Restart if it was running before
+    if ($was_running) {
+        call_cari_api('/service/control', 'POST', [
+            'action' => 'start',
+            'service_name' => "cari-mux-$id"
+        ]);
+    }
 
     echo json_encode(['success' => true, 'message' => 'Muxer updated successfully']);
 }
@@ -707,8 +715,9 @@ function handle_delete($id) {
         return;
     }
 
-    // Stop if running
-    stop_mux($id);
+    // Delete systemd service file (this also stops, disables, and reloads daemon)
+    $service_name = "cari-mux-{$id}";
+    call_cari_api("/service/file/{$service_name}", 'DELETE');
 
     // Delete config file
     if (!unlink($config_file)) {
