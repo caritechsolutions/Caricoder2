@@ -1009,7 +1009,8 @@ function handle_pid_stats($id) {
 
     if ($analysis && isset($analysis['pids'])) {
         foreach ($analysis['pids'] as $pid_info) {
-            $pid = $pid_info['pid'] ?? 0;
+            // Try 'id' first (TSDuck format), fallback to 'pid'
+            $pid = $pid_info['id'] ?? ($pid_info['pid'] ?? 0);
             $bitrate = $pid_info['bitrate'] ?? 0;
             $total_bitrate += $bitrate;
 
@@ -1045,6 +1046,7 @@ function handle_pid_stats($id) {
 
 /**
  * Determine PID type for visualization
+ * TSDuck JSON provides boolean flags: video, audio, pmt, ecm, emm, etc.
  */
 function get_pid_type($pid, $info = []) {
     // Well-known PIDs
@@ -1057,18 +1059,26 @@ function get_pid_type($pid, $info = []) {
     if ($pid === 0x0014) return 'tdt';
     if ($pid === 0x1FFF) return 'null';
 
-    // Check description from analysis
+    // Check TSDuck boolean flags first
+    if (!empty($info['video'])) return 'video';
+    if (!empty($info['audio'])) return 'audio';
+    if (!empty($info['pmt'])) return 'pmt';
+    if (!empty($info['ecm']) || !empty($info['emm'])) return 'ca';
+    if (!empty($info['pcr-pid'])) return 'pcr';
+
+    // Check description from analysis as fallback
     $desc = strtolower($info['description'] ?? '');
     if (strpos($desc, 'video') !== false || strpos($desc, 'avc') !== false ||
-        strpos($desc, 'hevc') !== false || strpos($desc, 'mpeg2') !== false) {
+        strpos($desc, 'hevc') !== false || strpos($desc, 'mpeg2 video') !== false) {
         return 'video';
     }
     if (strpos($desc, 'audio') !== false || strpos($desc, 'aac') !== false ||
-        strpos($desc, 'ac3') !== false || strpos($desc, 'mp2') !== false) {
+        strpos($desc, 'ac3') !== false || strpos($desc, 'mp2') !== false ||
+        strpos($desc, 'mpeg audio') !== false) {
         return 'audio';
     }
     if (strpos($desc, 'pmt') !== false) return 'pmt';
-    if (strpos($desc, 'pcr') !== false) return 'pcr';
+    if (strpos($desc, 'stuffing') !== false) return 'null';
     if (strpos($desc, 'subtitle') !== false || strpos($desc, 'dvb_sub') !== false) {
         return 'subtitle';
     }
