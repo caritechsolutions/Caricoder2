@@ -579,10 +579,17 @@ int main(int argc, char *argv[]) {
     /* Initialize SRT library */
     srt_startup();
 
-    /* Open input buffer */
-    g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, NULL, false);
+    /* Open input buffer (must already exist - created by input/transcoder/muxer) */
+    ring_buffer_options_t rb_opts = {
+        .capacity = 0,  /* Not used when opening existing */
+        .overflow_policy = RING_BUFFER_OVERFLOW_DROP_OLDEST,
+        .create = false,  /* Don't create - must exist */
+        .exclusive = false,
+        .mode = 0660
+    };
+    g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, &rb_opts, false);
     if (!g_state.input_buffer) {
-        CARI_LOG_ERROR("Failed to open input buffer: %s", g_state.input_buffer_name);
+        CARI_LOG_ERROR("Failed to open input buffer: %s (is the input/transcoder/muxer running?)", g_state.input_buffer_name);
         return 1;
     }
     CARI_LOG_INFO("Connected to input buffer: %s", g_state.input_buffer_name);
