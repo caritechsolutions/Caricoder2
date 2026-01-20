@@ -484,3 +484,14 @@ function validate_required($data, $fields) {
     }
     return $missing;
 }
+
+/**
+ * Sanitize a name to create a valid ID
+ * Converts to lowercase, replaces non-alphanumeric chars with hyphens
+ */
+function sanitize_name_to_id($name, $prefix = 'item') {
+    $id = strtolower(trim($name));
+    $id = preg_replace('/[^a-z0-9]+/', '-', $id);
+    $id = trim($id, '-');
+    return $id ?: $prefix . '-' . time();
+}

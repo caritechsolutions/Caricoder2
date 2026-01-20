@@ -13,6 +13,10 @@ src/cari-transcoder/*.o
 src/cari-mux/cari-mux
 src/cari-mux/*.o
 
+# Output binaries
+src/cari-output/cari-output
+src/cari-output/*.o
+
 # Common library
 src/common/*.o
 src/common/*.a

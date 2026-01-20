@@ -22,6 +22,7 @@ set_error_handler(function($errno, $errstr, $errfile, $errline) {
 });
 
 define('CARITRANS', true);
+define('CARI_API_URL', 'http://127.0.0.1:8081');
 require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
@@ -55,8 +56,16 @@ switch ($action) {
         }
         break;
 
+    case 'available_sources':
+    case 'available_buffers':  // Legacy alias
+        // Get all available sources (inputs, transcoders, muxers) with their UDP output info
+        $sources = get_available_sources();
+        json_response(['sources' => $sources]);
+        break;
+
     case 'check_name':
         $name = $_GET['name'] ?? '';
+        $type = $_GET['type'] ?? 'srt';
         $exclude_id = $_GET['exclude'] ?? '';
 
         if (empty($name)) {
@@ -64,11 +73,22 @@ switch ($action) {
         }
 
         $id = sanitize_name_to_id($name);
-        $exists = output_exists($id, $exclude_id);
+        $service_name = $id . '-output-' . $type;
+
+        // Check if output config exists
+        $config_exists = output_exists($id, $exclude_id);
+
+        // Check if service file exists
+        $service_exists = file_exists('/etc/systemd/system/' . $service_name . '.service');
+
+        $available = !$config_exists && !$service_exists;
 
         json_response([
-            'available' => !$exists,
-            'suggested_id' => $id
+            'available' => $available,
+            'suggested_id' => $id,
+            'service_name' => $service_name,
+            'config_exists' => $config_exists,
+            'service_exists' => $service_exists
         ]);
         break;
 
@@ -151,8 +171,127 @@ switch ($action) {
         json_response($metrics);
         break;
 
+    case 'clients':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $clients = get_output_clients($id);
+        json_response($clients);
+        break;
+
+    case 'client_info':
+        $id = $_GET['id'] ?? '';
+        $slot = $_GET['slot'] ?? '';
+        if (empty($id) || $slot === '') {
+            json_response(['error' => 'Output ID and slot required'], 400);
+        }
+
+        $client = get_output_client_info($id, intval($slot));
+        json_response($client);
+        break;
+
+    case 'kick_client':
+        $id = $_GET['id'] ?? $_POST['id'] ?? '';
+        $slot = $_GET['slot'] ?? $_POST['slot'] ?? '';
+        if (empty($id) || $slot === '') {
+            json_response(['error' => 'Output ID and slot required'], 400);
+        }
+
+        $result = kick_output_client($id, intval($slot));
+        json_response($result);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
+}
+
+/**
+ * Get all available sources (inputs, transcoders, muxers) with their UDP output info
+ */
+function get_available_sources() {
+    $sources = [];
+
+    // Get sources from inputs
+    $inputs = get_service_list('inputs');
+    foreach ($inputs as $input) {
+        $id = $input['id'] ?? '';
+        $name = $input['name'] ?? $id;
+        if ($id) {
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
+                'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'input',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
+                'status' => $input['status'] ?? 'unknown'
+            ];
+        }
+    }
+
+    // Get sources from transcoders
+    $transcoders = get_service_list('transcoders');
+    foreach ($transcoders as $transcoder) {
+        $id = $transcoder['id'] ?? '';
+        $name = $transcoder['name'] ?? $id;
+        if ($id) {
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
+                'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'transcoder',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
+                'status' => $transcoder['status'] ?? 'unknown'
+            ];
+        }
+    }
+
+    // Get sources from muxers
+    $muxers = get_service_list('muxers');
+    foreach ($muxers as $muxer) {
+        $id = $muxer['id'] ?? '';
+        $name = $muxer['name'] ?? $id;
+        if ($id) {
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/muxers/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
+                'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'muxer',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
+                'status' => $muxer['status'] ?? 'unknown'
+            ];
+        }
+    }
+
+    return $sources;
 }
 
 /**
@@ -185,12 +324,91 @@ function get_output_config($id) {
 }
 
 /**
+ * Generate systemd service file for output via backend API
+ */
+function generate_output_service_file($id, $type, $name) {
+    $service_name = $id . '-output-' . $type;
+    $config_path = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    $service_content = <<<EOT
+[Unit]
+Description=CariTranscoder Output - {$name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/cari-output --config {$config_path}
+ExecReload=/bin/kill -HUP \$MAINPID
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOT;
+
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
+
+    // Log error but still return service name
+    error_log("Failed to create service file: " . json_encode($result));
+    return $service_name;
+}
+
+/**
+ * Delete systemd service file for output via backend API
+ */
+function delete_output_service_file($id, $type) {
+    $service_name = $id . '-output-' . $type;
+
+    // Use backend API to delete service file
+    $result = call_cari_api('/service/file/delete', 'POST', [
+        'service_name' => $service_name,
+        'content' => ''  // Not needed for delete but required by model
+    ]);
+
+    return isset($result['success']) && $result['success'];
+}
+
+/**
+ * Get service name for output
+ */
+function get_output_service_name($id) {
+    $config = get_output_config($id);
+    if (!$config) {
+        return null;
+    }
+    $type = $config['output']['type'] ?? 'udp';
+    return $id . '-output-' . $type;
+}
+
+/**
  * Create new output
  */
 function create_output($data) {
     $name = trim($data['name'] ?? '');
     $id = !empty($data['id']) ? sanitize_name_to_id($data['id']) : sanitize_name_to_id($name);
-    $type = $data['type'] ?? 'udp';
 
     if (empty($name)) {
         return ['success' => false, 'error' => 'Output name required'];
@@ -200,51 +418,41 @@ function create_output($data) {
         return ['success' => false, 'error' => 'Output with this ID already exists'];
     }
 
+    // Check for service file conflict (SRT output only)
+    $service_name = $id . '-output-srt';
+    if (file_exists('/etc/systemd/system/' . $service_name . '.service')) {
+        return ['success' => false, 'error' => 'Service file already exists: ' . $service_name];
+    }
+
+    // Auto-assign API port (SRT port + 1000)
+    $srt_port = intval($data['srt_port'] ?? 4900);
+    $api_port = $srt_port + 1000;
+
     // Build configuration
     $config = [
         'output' => [
             'id' => $id,
             'name' => $name,
-            'type' => $type,
-            'enabled' => 'true'
+            'type' => 'srt',
+            'enabled' => 'true',
+            'service_name' => $service_name,
+            'api_port' => strval($api_port)
         ],
         'input' => [
-            'buffer_name' => $data['input_buffer'] ?? ''
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_srt' => [
+            'listen_address' => $data['srt_listen_address'] ?? '0.0.0.0',
+            'listen_port' => $data['srt_port'] ?? '4900',
+            'latency' => $data['srt_latency'] ?? '120',
+            'passphrase' => $data['srt_passphrase'] ?? '',
+            'pbkeylen' => $data['srt_pbkeylen'] ?? '0',
+            'streamid' => $data['srt_streamid'] ?? '',
+            'max_clients' => $data['srt_max_clients'] ?? '10'
         ]
     ];
-
-    // Type-specific configuration
-    switch ($type) {
-        case 'udp':
-            $config['destination'] = [
-                'address' => $data['udp_address'] ?? '239.1.1.1',
-                'port' => $data['udp_port'] ?? '5000',
-                'ttl' => $data['udp_ttl'] ?? '64',
-                'buffer_size' => $data['udp_buffer_size'] ?? '2097152'
-            ];
-            break;
-
-        case 'srt':
-            $config['destination_srt'] = [
-                'mode' => $data['srt_mode'] ?? 'listener',
-                'listen_address' => $data['srt_listen_address'] ?? '0.0.0.0',
-                'listen_port' => $data['srt_port'] ?? '4900',
-                'latency' => $data['srt_latency'] ?? '120',
-                'passphrase' => $data['srt_passphrase'] ?? '',
-                'pbkeylen' => $data['srt_pbkeylen'] ?? '0',
-                'streamid' => $data['srt_streamid'] ?? '',
-                'max_clients' => $data['srt_max_clients'] ?? '10'
-            ];
-            break;
-
-        case 'hls':
-            $config['destination_hls'] = [
-                'output_dir' => $data['hls_path'] ?? '/var/www/hls',
-                'segment_duration' => $data['hls_segment'] ?? '4',
-                'playlist_length' => $data['hls_playlist'] ?? '5'
-            ];
-            break;
-    }
 
     // Save configuration
     $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
@@ -252,7 +460,10 @@ function create_output($data) {
         return ['success' => false, 'error' => 'Failed to save configuration'];
     }
 
-    return ['success' => true, 'id' => $id, 'message' => 'Output created successfully'];
+    // Generate systemd service file
+    generate_output_service_file($id, 'srt', $name);
+
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'message' => 'Output created successfully'];
 }
 
 /**
@@ -266,56 +477,44 @@ function update_output($id, $data) {
         return ['success' => false, 'error' => 'Output not found'];
     }
 
+    // Load existing config
+    $config = parse_config($config_file);
+
     // Stop service if running
     stop_output_service($id);
-
-    // Load existing config and merge
-    $config = parse_config($config_file);
-    $type = $data['type'] ?? $config['output']['type'] ?? 'udp';
 
     // Update basic fields
     if (!empty($data['name'])) {
         $config['output']['name'] = $data['name'];
     }
-    if (!empty($data['type'])) {
-        $config['output']['type'] = $data['type'];
-    }
-    if (!empty($data['input_buffer'])) {
-        $config['input']['buffer_name'] = $data['input_buffer'];
-    }
+    $config['output']['type'] = 'srt';
 
-    // Update type-specific fields
-    switch ($type) {
-        case 'udp':
-            if (!isset($config['destination'])) $config['destination'] = [];
-            if (!empty($data['udp_address'])) $config['destination']['address'] = $data['udp_address'];
-            if (!empty($data['udp_port'])) $config['destination']['port'] = $data['udp_port'];
-            if (!empty($data['udp_ttl'])) $config['destination']['ttl'] = $data['udp_ttl'];
-            break;
+    // Update UDP input fields
+    if (!isset($config['input'])) $config['input'] = [];
+    if (isset($data['input_address'])) $config['input']['address'] = $data['input_address'];
+    if (!empty($data['input_port'])) $config['input']['port'] = $data['input_port'];
+    if (isset($data['input_interface'])) $config['input']['interface'] = $data['input_interface'];
 
-        case 'srt':
-            if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
-            if (!empty($data['srt_mode'])) $config['destination_srt']['mode'] = $data['srt_mode'];
-            if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
-            if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
-            if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
-            if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
-            if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
-            if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
-            if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
-            break;
+    // Update service name
+    $config['output']['service_name'] = $id . '-output-srt';
 
-        case 'hls':
-            if (!isset($config['destination_hls'])) $config['destination_hls'] = [];
-            if (!empty($data['hls_path'])) $config['destination_hls']['output_dir'] = $data['hls_path'];
-            if (!empty($data['hls_segment'])) $config['destination_hls']['segment_duration'] = $data['hls_segment'];
-            if (!empty($data['hls_playlist'])) $config['destination_hls']['playlist_length'] = $data['hls_playlist'];
-            break;
-    }
+    // Update SRT output fields
+    if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
+    if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
+    if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
+    if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
+    if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
+    if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
+    if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
+    if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
 
     if (!save_config($config_file, $config)) {
         return ['success' => false, 'error' => 'Failed to save configuration'];
     }
+
+    // Generate/update systemd service file
+    $name = $config['output']['name'] ?? $id;
+    generate_output_service_file($id, 'srt', $name);
 
     return ['success' => true, 'message' => 'Output updated successfully'];
 }
@@ -331,8 +530,15 @@ function delete_output($id) {
         return ['success' => false, 'error' => 'Output not found'];
     }
 
+    // Get type for service file deletion
+    $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'udp';
+
     // Stop service first
     stop_output_service($id);
+
+    // Delete service file
+    delete_output_service_file($id, $type);
 
     // Delete config file
     if (!unlink($config_file)) {
@@ -343,7 +549,36 @@ function delete_output($id) {
 }
 
 /**
- * Start output service
+ * Call the CariTranscoder backend API
+ */
+function call_cari_api($endpoint, $method = 'GET', $data = null) {
+    $url = CARI_API_URL . $endpoint;
+
+    $options = [
+        'http' => [
+            'method' => $method,
+            'timeout' => 10,
+            'ignore_errors' => true,
+            'header' => "Content-Type: application/json\r\n"
+        ]
+    ];
+
+    if ($data !== null && in_array($method, ['POST', 'PUT', 'PATCH'])) {
+        $options['http']['content'] = json_encode($data);
+    }
+
+    $context = stream_context_create($options);
+    $response = @file_get_contents($url, false, $context);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Failed to connect to CariTranscoder API'];
+    }
+
+    return json_decode($response, true) ?: ['success' => false, 'error' => 'Invalid API response'];
+}
+
+/**
+ * Start output service via backend API
  */
 function start_output_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -353,45 +588,53 @@ function start_output_service($id) {
         return ['success' => false, 'error' => 'Output not found'];
     }
 
-    $service = "cari-output@{$id}";
-    $cmd = "sudo /bin/systemctl start " . escapeshellarg($service) . " 2>&1";
-    $output = shell_exec($cmd);
+    $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
+    $service_name = $id . '-output-' . $type;
 
-    // Check if started
-    usleep(500000);
-    $status_cmd = "systemctl is-active " . escapeshellarg($service) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Use same endpoint as muxers
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'start',
+        'service_name' => $service_name
+    ]);
 
-    if ($status === 'active') {
+    if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output started'];
-    } else {
-        return ['success' => false, 'error' => 'Failed to start output: ' . ($output ?: 'Unknown error')];
     }
+
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start output'];
 }
 
 /**
- * Stop output service
+ * Stop output service via backend API
  */
 function stop_output_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
-    $service = "cari-output@{$id}";
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
 
-    $cmd = "sudo /bin/systemctl stop " . escapeshellarg($service) . " 2>&1";
-    shell_exec($cmd);
-
-    usleep(500000);
-    $status_cmd = "systemctl is-active " . escapeshellarg($service) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
-
-    if ($status !== 'active') {
-        return ['success' => true, 'message' => 'Output stopped'];
-    } else {
-        return ['success' => false, 'error' => 'Failed to stop output'];
+    if (!file_exists($config_file)) {
+        return ['success' => true, 'message' => 'No service to stop'];
     }
+
+    $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
+    $service_name = $id . '-output-' . $type;
+
+    // Use same endpoint as muxers
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'stop',
+        'service_name' => $service_name
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return ['success' => true, 'message' => 'Output stopped'];
+    }
+
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop output'];
 }
 
 /**
- * Get output status
+ * Get output status via backend API
  */
 function get_output_status($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -402,17 +645,21 @@ function get_output_status($id) {
     }
 
     $config = parse_config($config_file);
-    $service = "cari-output@{$id}";
+    $type = $config['output']['type'] ?? 'srt';
+    $service_name = get_output_service_name($id);
 
-    $status_cmd = "systemctl is-active " . escapeshellarg($service) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Call backend API to get status
+    $result = call_cari_api("/output/{$id}/status?output_type={$type}", 'GET');
+
+    $is_active = isset($result['active']) && $result['active'];
 
     return [
         'success' => true,
         'id' => $id,
         'name' => $config['output']['name'] ?? $id,
-        'type' => $config['output']['type'] ?? 'udp',
-        'status' => $status === 'active' ? 'running' : 'stopped'
+        'type' => $type,
+        'service_name' => $service_name,
+        'status' => $is_active ? 'running' : 'stopped'
     ];
 }
 
@@ -429,18 +676,123 @@ function get_output_metrics($id) {
 
     $config = parse_config($config_file);
     $type = $config['output']['type'] ?? 'udp';
+    $service_name = get_output_service_name($id);
 
-    // For SRT outputs, we could query connected clients count, etc.
-    // For now, return basic status
-    $service = "cari-output@{$id}";
-    $status_cmd = "systemctl is-active " . escapeshellarg($service) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Get status via backend API
+    $result = call_cari_api("/output/{$id}/status?output_type={$type}", 'GET');
+    $is_active = isset($result['active']) && $result['active'];
 
     return [
         'success' => true,
         'id' => $id,
         'name' => $config['output']['name'] ?? $id,
         'type' => $type,
-        'status' => $status === 'active' ? 'running' : 'stopped'
+        'service_name' => $service_name,
+        'status' => $is_active ? 'running' : 'stopped'
     ];
+}
+
+/**
+ * Get API port for output from config
+ */
+function get_output_api_port($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return null;
+    }
+
+    $config = parse_config($config_file);
+    return $config['output']['api_port'] ?? null;
+}
+
+/**
+ * Call output's HTTP API
+ */
+function call_output_api($id, $endpoint, $method = 'GET') {
+    $api_port = get_output_api_port($id);
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured for this output'];
+    }
+
+    $url = "http://127.0.0.1:{$api_port}{$endpoint}";
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => $method,
+            'timeout' => 5,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to output API', 'status' => 'offline'];
+    }
+
+    return json_decode($response, true) ?: ['success' => false, 'error' => 'Invalid API response'];
+}
+
+/**
+ * Get connected clients for an output
+ */
+function get_output_clients($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+    $api_port = $config['output']['api_port'] ?? null;
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured - add api_port to output config'];
+    }
+
+    $result = call_output_api($id, '/clients');
+
+    if (isset($result['success']) && $result['success']) {
+        return [
+            'success' => true,
+            'id' => $id,
+            'name' => $config['output']['name'] ?? $id,
+            'client_count' => $result['client_count'] ?? 0,
+            'max_clients' => $result['max_clients'] ?? 10,
+            'clients' => $result['clients'] ?? []
+        ];
+    }
+
+    return $result;
+}
+
+/**
+ * Get info for a specific client
+ */
+function get_output_client_info($id, $slot) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    return call_output_api($id, "/client/{$slot}");
+}
+
+/**
+ * Kick a client from an output
+ */
+function kick_output_client($id, $slot) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    return call_output_api($id, "/client/{$slot}/kick", 'POST');
 }

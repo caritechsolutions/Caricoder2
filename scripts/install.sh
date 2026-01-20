@@ -724,6 +724,18 @@ build_apps() {
 build_tools() {
     log_step "Building CariTranscoder tools..."
 
+    # Build common library first (required by src/* applications)
+    if [[ -d "$INSTALL_DIR/src/common" ]]; then
+        cd "$INSTALL_DIR/src/common"
+        log_info "Building common library..."
+        make clean 2>/dev/null || true
+        if make; then
+            log_info "Common library built successfully"
+        else
+            log_warn "Failed to build common library"
+        fi
+    fi
+
     # Build udp_input
     if [[ -d "$INSTALL_DIR/tools/udp_input" ]]; then
         cd "$INSTALL_DIR/tools/udp_input"
@@ -863,7 +875,7 @@ build_tools() {
             make install
             log_info "cari-output installed to /usr/local/bin/"
         else
-            log_warn "Failed to build cari-output (SRT/GStreamer dev packages may be missing)"
+            log_warn "Failed to build cari-output (SRT dev packages may be missing)"
         fi
     fi
 
