@@ -369,7 +369,6 @@ function get_output_service_name($id) {
 function create_output($data) {
     $name = trim($data['name'] ?? '');
     $id = !empty($data['id']) ? sanitize_name_to_id($data['id']) : sanitize_name_to_id($name);
-    $type = $data['type'] ?? 'srt';
 
     if (empty($name)) {
         return ['success' => false, 'error' => 'Output name required'];
@@ -379,8 +378,8 @@ function create_output($data) {
         return ['success' => false, 'error' => 'Output with this ID already exists'];
     }
 
-    // Check for service file conflict
-    $service_name = $id . '-output-' . $type;
+    // Check for service file conflict (SRT output only)
+    $service_name = $id . '-output-srt';
     if (file_exists('/etc/systemd/system/' . $service_name . '.service')) {
         return ['success' => false, 'error' => 'Service file already exists: ' . $service_name];
     }
@@ -390,47 +389,25 @@ function create_output($data) {
         'output' => [
             'id' => $id,
             'name' => $name,
-            'type' => $type,
+            'type' => 'srt',
             'enabled' => 'true',
             'service_name' => $service_name
         ],
         'input' => [
-            'buffer_name' => $data['input_buffer'] ?? ''
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_srt' => [
+            'listen_address' => $data['srt_listen_address'] ?? '0.0.0.0',
+            'listen_port' => $data['srt_port'] ?? '4900',
+            'latency' => $data['srt_latency'] ?? '120',
+            'passphrase' => $data['srt_passphrase'] ?? '',
+            'pbkeylen' => $data['srt_pbkeylen'] ?? '0',
+            'streamid' => $data['srt_streamid'] ?? '',
+            'max_clients' => $data['srt_max_clients'] ?? '10'
         ]
     ];
-
-    // Type-specific configuration
-    switch ($type) {
-        case 'udp':
-            $config['destination'] = [
-                'address' => $data['udp_address'] ?? '239.1.1.1',
-                'port' => $data['udp_port'] ?? '5000',
-                'ttl' => $data['udp_ttl'] ?? '64',
-                'buffer_size' => $data['udp_buffer_size'] ?? '2097152'
-            ];
-            break;
-
-        case 'srt':
-            $config['destination_srt'] = [
-                'mode' => $data['srt_mode'] ?? 'listener',
-                'listen_address' => $data['srt_listen_address'] ?? '0.0.0.0',
-                'listen_port' => $data['srt_port'] ?? '4900',
-                'latency' => $data['srt_latency'] ?? '120',
-                'passphrase' => $data['srt_passphrase'] ?? '',
-                'pbkeylen' => $data['srt_pbkeylen'] ?? '0',
-                'streamid' => $data['srt_streamid'] ?? '',
-                'max_clients' => $data['srt_max_clients'] ?? '10'
-            ];
-            break;
-
-        case 'hls':
-            $config['destination_hls'] = [
-                'output_dir' => $data['hls_path'] ?? '/var/www/hls',
-                'segment_duration' => $data['hls_segment'] ?? '4',
-                'playlist_length' => $data['hls_playlist'] ?? '5'
-            ];
-            break;
-    }
 
     // Save configuration
     $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
@@ -439,7 +416,7 @@ function create_output($data) {
     }
 
     // Generate systemd service file
-    generate_output_service_file($id, $type, $name);
+    generate_output_service_file($id, 'srt', $name);
 
     return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'message' => 'Output created successfully'];
 }
@@ -457,59 +434,34 @@ function update_output($id, $data) {
 
     // Load existing config
     $config = parse_config($config_file);
-    $old_type = $config['output']['type'] ?? 'udp';
-    $new_type = $data['type'] ?? $old_type;
 
     // Stop service if running
     stop_output_service($id);
-
-    // If type changed, delete old service file and create new one
-    if ($old_type !== $new_type) {
-        delete_output_service_file($id, $old_type);
-    }
 
     // Update basic fields
     if (!empty($data['name'])) {
         $config['output']['name'] = $data['name'];
     }
-    if (!empty($data['type'])) {
-        $config['output']['type'] = $data['type'];
-    }
-    if (!empty($data['input_buffer'])) {
-        $config['input']['buffer_name'] = $data['input_buffer'];
-    }
+    $config['output']['type'] = 'srt';
+
+    // Update UDP input fields
+    if (!isset($config['input'])) $config['input'] = [];
+    if (isset($data['input_address'])) $config['input']['address'] = $data['input_address'];
+    if (!empty($data['input_port'])) $config['input']['port'] = $data['input_port'];
+    if (isset($data['input_interface'])) $config['input']['interface'] = $data['input_interface'];
 
     // Update service name
-    $config['output']['service_name'] = $id . '-output-' . $new_type;
+    $config['output']['service_name'] = $id . '-output-srt';
 
-    // Update type-specific fields
-    switch ($new_type) {
-        case 'udp':
-            if (!isset($config['destination'])) $config['destination'] = [];
-            if (!empty($data['udp_address'])) $config['destination']['address'] = $data['udp_address'];
-            if (!empty($data['udp_port'])) $config['destination']['port'] = $data['udp_port'];
-            if (!empty($data['udp_ttl'])) $config['destination']['ttl'] = $data['udp_ttl'];
-            break;
-
-        case 'srt':
-            if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
-            if (!empty($data['srt_mode'])) $config['destination_srt']['mode'] = $data['srt_mode'];
-            if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
-            if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
-            if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
-            if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
-            if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
-            if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
-            if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
-            break;
-
-        case 'hls':
-            if (!isset($config['destination_hls'])) $config['destination_hls'] = [];
-            if (!empty($data['hls_path'])) $config['destination_hls']['output_dir'] = $data['hls_path'];
-            if (!empty($data['hls_segment'])) $config['destination_hls']['segment_duration'] = $data['hls_segment'];
-            if (!empty($data['hls_playlist'])) $config['destination_hls']['playlist_length'] = $data['hls_playlist'];
-            break;
-    }
+    // Update SRT output fields
+    if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
+    if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
+    if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
+    if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
+    if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
+    if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
+    if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
+    if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
 
     if (!save_config($config_file, $config)) {
         return ['success' => false, 'error' => 'Failed to save configuration'];
@@ -517,7 +469,7 @@ function update_output($id, $data) {
 
     // Generate/update systemd service file
     $name = $config['output']['name'] ?? $id;
-    generate_output_service_file($id, $new_type, $name);
+    generate_output_service_file($id, 'srt', $name);
 
     return ['success' => true, 'message' => 'Output updated successfully'];
 }
