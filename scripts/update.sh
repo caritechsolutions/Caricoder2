@@ -30,8 +30,8 @@ WEB_DIR="/var/www/caritrans"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-# Updated: 2026-01-02
-BRANCH="claude/ABR-transcoder-DH9tM"
+# Updated: 2026-01-20
+BRANCH="claude/implement-transcoder-output-8LaWa"
 GSTREAMER_VERSION="1.26.1"
 
 # Parse arguments
@@ -578,6 +578,32 @@ build_tools() {
             log_info "cari-transcoder-abr installed to /usr/local/bin/"
         else
             log_warn "Failed to build cari-transcoder-abr (GStreamer dev packages may be missing)"
+        fi
+    fi
+
+    # Build cari-mux (MPEG-TS multiplexer)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-mux" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-mux"
+        log_info "Building cari-mux..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-mux installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-mux (GStreamer dev packages may be missing)"
+        fi
+    fi
+
+    # Build cari-output (Output with SRT one-to-many support)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/cari-output" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/cari-output"
+        log_info "Building cari-output..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-output installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-output (SRT/GStreamer dev packages may be missing)"
         fi
     fi
 

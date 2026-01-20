@@ -25,7 +25,7 @@ LOG_DIR="/var/log/caritrans"
 RUN_DIR="/run/caritrans"
 DATA_DIR="/var/lib/caritrans"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
-BRANCH="claude/av-sync-monitor-Y57VM"
+BRANCH="claude/implement-transcoder-output-8LaWa"
 SERVICE_USER="caritrans"
 WEB_USER="www-data"
 
@@ -838,6 +838,32 @@ build_tools() {
             log_info "cari-transcoder-abr installed to /usr/local/bin/"
         else
             log_warn "Failed to build cari-transcoder-abr (GStreamer dev packages may be missing)"
+        fi
+    fi
+
+    # Build cari-mux (MPEG-TS multiplexer)
+    if [[ -d "$INSTALL_DIR/src/cari-mux" ]]; then
+        cd "$INSTALL_DIR/src/cari-mux"
+        log_info "Building cari-mux..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-mux installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-mux (GStreamer dev packages may be missing)"
+        fi
+    fi
+
+    # Build cari-output (Output with SRT one-to-many support)
+    if [[ -d "$INSTALL_DIR/src/cari-output" ]]; then
+        cd "$INSTALL_DIR/src/cari-output"
+        log_info "Building cari-output..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "cari-output installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build cari-output (SRT/GStreamer dev packages may be missing)"
         fi
     fi
 
