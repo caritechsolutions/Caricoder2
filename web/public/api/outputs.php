@@ -171,6 +171,38 @@ switch ($action) {
         json_response($metrics);
         break;
 
+    case 'clients':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $clients = get_output_clients($id);
+        json_response($clients);
+        break;
+
+    case 'client_info':
+        $id = $_GET['id'] ?? '';
+        $slot = $_GET['slot'] ?? '';
+        if (empty($id) || $slot === '') {
+            json_response(['error' => 'Output ID and slot required'], 400);
+        }
+
+        $client = get_output_client_info($id, intval($slot));
+        json_response($client);
+        break;
+
+    case 'kick_client':
+        $id = $_GET['id'] ?? $_POST['id'] ?? '';
+        $slot = $_GET['slot'] ?? $_POST['slot'] ?? '';
+        if (empty($id) || $slot === '') {
+            json_response(['error' => 'Output ID and slot required'], 400);
+        }
+
+        $result = kick_output_client($id, intval($slot));
+        json_response($result);
+        break;
+
     default:
         json_response(['error' => 'Invalid action'], 400);
 }
@@ -413,6 +445,10 @@ function create_output($data) {
         return ['success' => false, 'error' => 'Service file already exists: ' . $service_name];
     }
 
+    // Auto-assign API port (SRT port + 1000)
+    $srt_port = intval($data['srt_port'] ?? 4900);
+    $api_port = $srt_port + 1000;
+
     // Build configuration
     $config = [
         'output' => [
@@ -420,7 +456,8 @@ function create_output($data) {
             'name' => $name,
             'type' => 'srt',
             'enabled' => 'true',
-            'service_name' => $service_name
+            'service_name' => $service_name,
+            'api_port' => strval($api_port)
         ],
         'input' => [
             'address' => $data['input_address'] ?? '',
@@ -666,4 +703,109 @@ function get_output_metrics($id) {
         'service_name' => $service_name,
         'status' => $is_active ? 'running' : 'stopped'
     ];
+}
+
+/**
+ * Get API port for output from config
+ */
+function get_output_api_port($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return null;
+    }
+
+    $config = parse_config($config_file);
+    return $config['output']['api_port'] ?? null;
+}
+
+/**
+ * Call output's HTTP API
+ */
+function call_output_api($id, $endpoint, $method = 'GET') {
+    $api_port = get_output_api_port($id);
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured for this output'];
+    }
+
+    $url = "http://127.0.0.1:{$api_port}{$endpoint}";
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => $method,
+            'timeout' => 5,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to output API', 'status' => 'offline'];
+    }
+
+    return json_decode($response, true) ?: ['success' => false, 'error' => 'Invalid API response'];
+}
+
+/**
+ * Get connected clients for an output
+ */
+function get_output_clients($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+    $api_port = $config['output']['api_port'] ?? null;
+
+    if (!$api_port) {
+        return ['success' => false, 'error' => 'No API port configured - add api_port to output config'];
+    }
+
+    $result = call_output_api($id, '/clients');
+
+    if (isset($result['success']) && $result['success']) {
+        return [
+            'success' => true,
+            'id' => $id,
+            'name' => $config['output']['name'] ?? $id,
+            'client_count' => $result['client_count'] ?? 0,
+            'max_clients' => $result['max_clients'] ?? 10,
+            'clients' => $result['clients'] ?? []
+        ];
+    }
+
+    return $result;
+}
+
+/**
+ * Get info for a specific client
+ */
+function get_output_client_info($id, $slot) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    return call_output_api($id, "/client/{$slot}");
+}
+
+/**
+ * Kick a client from an output
+ */
+function kick_output_client($id, $slot) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    return call_output_api($id, "/client/{$slot}/kick", 'POST');
 }

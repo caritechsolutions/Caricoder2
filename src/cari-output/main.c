@@ -32,6 +32,7 @@
 #define TS_PACKET_BATCH 7           /* 7 TS packets = 1316 bytes per SRT/UDP send */
 #define SRT_PAYLOAD_SIZE (TS_PACKET_BATCH * TS_PACKET_SIZE)
 #define UDP_BUFFER_SIZE 2097152     /* 2MB UDP receive buffer */
+#define API_BUFFER_SIZE 8192        /* HTTP API buffer size */
 
 /* SRT Client state */
 typedef struct {
@@ -90,6 +91,12 @@ typedef struct {
     /* SRT accept thread */
     pthread_t srt_accept_thread;
     volatile int srt_accept_running;
+
+    /* HTTP API server */
+    int api_port;
+    int api_socket;
+    pthread_t api_thread;
+    volatile int api_running;
 
     /* Statistics */
     uint64_t packets_received;
@@ -160,8 +167,14 @@ static int load_config(output_state_t *state) {
             config_get_string(&state->config, "destination_srt", "streamid", ""),
             sizeof(state->srt_streamid) - 1);
 
+    /* API configuration */
+    state->api_port = config_get_int(&state->config, "output", "api_port", 0);
+
     CARI_LOG_INFO("Configured: %s (%s) - Type: %s", state->name, state->id, state->output_type);
     CARI_LOG_INFO("UDP Input: %s:%d", state->udp_input_address, state->udp_input_port);
+    if (state->api_port > 0) {
+        CARI_LOG_INFO("API Port: %d", state->api_port);
+    }
 
     return 0;
 }
@@ -628,6 +641,370 @@ static void cleanup_srt_output(output_state_t *state) {
     pthread_mutex_destroy(&state->srt_clients_lock);
 }
 
+/* ============================================================================
+ * HTTP API Server for stats and client management
+ * ============================================================================ */
+
+/* Send HTTP response */
+static void api_send_response(int client_fd, int status_code, const char *status_text,
+                              const char *content_type, const char *body) {
+    char header[512];
+    int body_len = body ? strlen(body) : 0;
+
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 %d %s\r\n"
+             "Content-Type: %s\r\n"
+             "Content-Length: %d\r\n"
+             "Access-Control-Allow-Origin: *\r\n"
+             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+             "Connection: close\r\n"
+             "\r\n",
+             status_code, status_text, content_type, body_len);
+
+    send(client_fd, header, strlen(header), 0);
+    if (body && body_len > 0) {
+        send(client_fd, body, body_len, 0);
+    }
+}
+
+/* Build JSON for a single client's stats */
+static int build_client_json(output_state_t *state, int slot, char *buf, int buf_size) {
+    srt_client_t *client = &state->srt_clients[slot];
+    if (!client->active) return 0;
+
+    /* Get fresh SRT stats */
+    SRT_TRACEBSTATS stats;
+    memset(&stats, 0, sizeof(stats));
+    srt_bstats(client->socket, &stats, 0);
+
+    time_t duration = time(NULL) - client->connected_at;
+
+    return snprintf(buf, buf_size,
+        "{"
+        "\"slot\":%d,"
+        "\"address\":\"%s\","
+        "\"connected_at\":%ld,"
+        "\"duration\":%ld,"
+        "\"bytes_sent\":%lu,"
+        "\"packets_sent\":%lu,"
+        "\"send_errors\":%lu,"
+        "\"rtt_ms\":%.2f,"
+        "\"bandwidth_mbps\":%.2f,"
+        "\"send_rate_mbps\":%.2f,"
+        "\"negotiated_latency_ms\":%d,"
+        "\"packets_lost\":%ld,"
+        "\"packets_retrans\":%ld,"
+        "\"packets_dropped\":%ld,"
+        "\"flight_size\":%d,"
+        "\"send_buffer_ms\":%d,"
+        "\"congestion_window\":%d"
+        "}",
+        slot,
+        client->addr_str,
+        (long)client->connected_at,
+        (long)duration,
+        client->bytes_sent,
+        client->packets_sent,
+        client->send_errors,
+        stats.msRTT,
+        stats.mbpsBandwidth,
+        stats.mbpsSendRate,
+        stats.msSndTsbPdDelay,
+        (long)stats.pktSndLossTotal,
+        (long)stats.pktRetransTotal,
+        (long)stats.pktSndDropTotal,
+        stats.pktFlightSize,
+        stats.msSndBuf,
+        stats.pktCongestionWindow
+    );
+}
+
+/* Handle /metrics endpoint - overall output stats */
+static void api_handle_metrics(output_state_t *state, int client_fd) {
+    char json[2048];
+
+    snprintf(json, sizeof(json),
+        "{"
+        "\"success\":true,"
+        "\"id\":\"%s\","
+        "\"name\":\"%s\","
+        "\"type\":\"%s\","
+        "\"udp_input\":{\"address\":\"%s\",\"port\":%d},"
+        "\"srt_output\":{\"address\":\"%s\",\"port\":%d,\"latency\":%d,\"max_clients\":%d},"
+        "\"stats\":{"
+        "\"packets_received\":%lu,"
+        "\"packets_sent\":%lu,"
+        "\"bytes_received\":%lu,"
+        "\"bytes_sent\":%lu,"
+        "\"client_count\":%d"
+        "}"
+        "}",
+        state->id,
+        state->name,
+        state->output_type,
+        state->udp_input_address[0] ? state->udp_input_address : "*",
+        state->udp_input_port,
+        state->srt_listen_address,
+        state->srt_port,
+        state->srt_latency,
+        state->srt_max_clients,
+        state->packets_received,
+        state->packets_sent,
+        state->bytes_received,
+        state->bytes_sent,
+        state->srt_client_count
+    );
+
+    api_send_response(client_fd, 200, "OK", "application/json", json);
+}
+
+/* Handle /clients endpoint - list all connected clients */
+static void api_handle_clients(output_state_t *state, int client_fd) {
+    char *json = malloc(API_BUFFER_SIZE * 4);  /* Allow for many clients */
+    if (!json) {
+        api_send_response(client_fd, 500, "Internal Server Error",
+                         "application/json", "{\"success\":false,\"error\":\"Memory allocation failed\"}");
+        return;
+    }
+
+    pthread_mutex_lock(&state->srt_clients_lock);
+
+    int offset = snprintf(json, API_BUFFER_SIZE * 4,
+        "{\"success\":true,\"client_count\":%d,\"max_clients\":%d,\"clients\":[",
+        state->srt_client_count, state->srt_max_clients);
+
+    int first = 1;
+    for (int i = 0; i < MAX_SRT_CLIENTS && offset < API_BUFFER_SIZE * 4 - 1024; i++) {
+        if (!state->srt_clients[i].active) continue;
+
+        if (!first) {
+            json[offset++] = ',';
+        }
+        first = 0;
+
+        offset += build_client_json(state, i, json + offset, API_BUFFER_SIZE * 4 - offset - 10);
+    }
+
+    pthread_mutex_unlock(&state->srt_clients_lock);
+
+    snprintf(json + offset, API_BUFFER_SIZE * 4 - offset, "]}");
+
+    api_send_response(client_fd, 200, "OK", "application/json", json);
+    free(json);
+}
+
+/* Handle /client/{slot} endpoint - get single client stats */
+static void api_handle_client_info(output_state_t *state, int client_fd, int slot) {
+    if (slot < 0 || slot >= MAX_SRT_CLIENTS) {
+        api_send_response(client_fd, 400, "Bad Request",
+                         "application/json", "{\"success\":false,\"error\":\"Invalid slot\"}");
+        return;
+    }
+
+    pthread_mutex_lock(&state->srt_clients_lock);
+
+    if (!state->srt_clients[slot].active) {
+        pthread_mutex_unlock(&state->srt_clients_lock);
+        api_send_response(client_fd, 404, "Not Found",
+                         "application/json", "{\"success\":false,\"error\":\"Client not found\"}");
+        return;
+    }
+
+    char json[1024];
+    int len = snprintf(json, sizeof(json), "{\"success\":true,\"client\":");
+    len += build_client_json(state, slot, json + len, sizeof(json) - len - 2);
+    snprintf(json + len, sizeof(json) - len, "}");
+
+    pthread_mutex_unlock(&state->srt_clients_lock);
+
+    api_send_response(client_fd, 200, "OK", "application/json", json);
+}
+
+/* Handle /client/{slot}/kick endpoint - disconnect a client */
+static void api_handle_client_kick(output_state_t *state, int client_fd, int slot) {
+    if (slot < 0 || slot >= MAX_SRT_CLIENTS) {
+        api_send_response(client_fd, 400, "Bad Request",
+                         "application/json", "{\"success\":false,\"error\":\"Invalid slot\"}");
+        return;
+    }
+
+    pthread_mutex_lock(&state->srt_clients_lock);
+
+    if (!state->srt_clients[slot].active) {
+        pthread_mutex_unlock(&state->srt_clients_lock);
+        api_send_response(client_fd, 404, "Not Found",
+                         "application/json", "{\"success\":false,\"error\":\"Client not found\"}");
+        return;
+    }
+
+    char addr_str[64];
+    strncpy(addr_str, state->srt_clients[slot].addr_str, sizeof(addr_str) - 1);
+    addr_str[sizeof(addr_str) - 1] = '\0';
+
+    pthread_mutex_unlock(&state->srt_clients_lock);
+
+    /* Remove client (this logs the disconnection) */
+    CARI_LOG_INFO("Kicking client in slot %d: %s", slot, addr_str);
+    remove_srt_client(state, slot);
+
+    char json[256];
+    snprintf(json, sizeof(json),
+             "{\"success\":true,\"message\":\"Client kicked\",\"slot\":%d,\"address\":\"%s\"}",
+             slot, addr_str);
+
+    api_send_response(client_fd, 200, "OK", "application/json", json);
+}
+
+/* Parse HTTP request and route to handler */
+static void api_handle_request(output_state_t *state, int client_fd) {
+    char buffer[API_BUFFER_SIZE];
+    ssize_t len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+    if (len <= 0) return;
+    buffer[len] = '\0';
+
+    /* Parse request line */
+    char method[16], path[256];
+    if (sscanf(buffer, "%15s %255s", method, path) != 2) {
+        api_send_response(client_fd, 400, "Bad Request",
+                         "application/json", "{\"success\":false,\"error\":\"Bad request\"}");
+        return;
+    }
+
+    /* Handle OPTIONS for CORS preflight */
+    if (strcmp(method, "OPTIONS") == 0) {
+        api_send_response(client_fd, 200, "OK", "text/plain", "");
+        return;
+    }
+
+    /* Route requests */
+    if (strcmp(path, "/metrics") == 0) {
+        api_handle_metrics(state, client_fd);
+    } else if (strcmp(path, "/clients") == 0) {
+        api_handle_clients(state, client_fd);
+    } else if (strncmp(path, "/client/", 8) == 0) {
+        /* Parse slot number */
+        int slot = -1;
+        char *slash = strchr(path + 8, '/');
+
+        if (slash && strcmp(slash, "/kick") == 0) {
+            /* /client/{slot}/kick */
+            *slash = '\0';
+            slot = atoi(path + 8);
+            if (strcmp(method, "POST") == 0) {
+                api_handle_client_kick(state, client_fd, slot);
+            } else {
+                api_send_response(client_fd, 405, "Method Not Allowed",
+                                 "application/json", "{\"success\":false,\"error\":\"Use POST\"}");
+            }
+        } else {
+            /* /client/{slot} */
+            slot = atoi(path + 8);
+            api_handle_client_info(state, client_fd, slot);
+        }
+    } else {
+        api_send_response(client_fd, 404, "Not Found",
+                         "application/json", "{\"success\":false,\"error\":\"Unknown endpoint\"}");
+    }
+}
+
+/* API server thread */
+static void *api_server_thread(void *arg) {
+    output_state_t *state = (output_state_t *)arg;
+
+    CARI_LOG_DEBUG("API server thread started on port %d", state->api_port);
+
+    while (state->api_running) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+
+        /* Accept with timeout using select */
+        fd_set readfds;
+        struct timeval tv = {1, 0};  /* 1 second timeout */
+
+        FD_ZERO(&readfds);
+        FD_SET(state->api_socket, &readfds);
+
+        int ret = select(state->api_socket + 1, &readfds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        int client_fd = accept(state->api_socket, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            if (errno != EINTR && errno != EAGAIN) {
+                CARI_LOG_WARNING("API accept failed: %s", strerror(errno));
+            }
+            continue;
+        }
+
+        /* Set socket timeout */
+        struct timeval client_tv = {5, 0};
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &client_tv, sizeof(client_tv));
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &client_tv, sizeof(client_tv));
+
+        api_handle_request(state, client_fd);
+        close(client_fd);
+    }
+
+    CARI_LOG_DEBUG("API server thread stopped");
+    return NULL;
+}
+
+/* Initialize API server */
+static int init_api_server(output_state_t *state) {
+    if (state->api_port <= 0) {
+        return 0;  /* API disabled */
+    }
+
+    state->api_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (state->api_socket < 0) {
+        CARI_LOG_ERROR("Failed to create API socket: %s", strerror(errno));
+        return -1;
+    }
+
+    int reuse = 1;
+    setsockopt(state->api_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");  /* Localhost only for security */
+    addr.sin_port = htons(state->api_port);
+
+    if (bind(state->api_socket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        CARI_LOG_ERROR("Failed to bind API socket to port %d: %s", state->api_port, strerror(errno));
+        close(state->api_socket);
+        return -1;
+    }
+
+    if (listen(state->api_socket, 5) < 0) {
+        CARI_LOG_ERROR("Failed to listen on API socket: %s", strerror(errno));
+        close(state->api_socket);
+        return -1;
+    }
+
+    state->api_running = 1;
+    if (pthread_create(&state->api_thread, NULL, api_server_thread, state) != 0) {
+        CARI_LOG_ERROR("Failed to create API thread: %s", strerror(errno));
+        close(state->api_socket);
+        return -1;
+    }
+
+    CARI_LOG_INFO("API server started on port %d", state->api_port);
+    return 0;
+}
+
+/* Cleanup API server */
+static void cleanup_api_server(output_state_t *state) {
+    if (state->api_port <= 0) return;
+
+    state->api_running = 0;
+    pthread_join(state->api_thread, NULL);
+
+    if (state->api_socket >= 0) {
+        close(state->api_socket);
+    }
+}
+
 static void print_usage(const char *prog) {
     printf("CariTranscoder Output v2.0.0\n");
     printf("Copyright (c) 2024 CariTech Solutions\n\n");
@@ -711,6 +1088,11 @@ int main(int argc, char *argv[]) {
     g_state.srt_accept_running = 1;
     pthread_create(&g_state.srt_accept_thread, NULL, srt_accept_thread_func, &g_state);
 
+    /* Start API server if configured */
+    if (init_api_server(&g_state) != 0) {
+        CARI_LOG_WARNING("API server disabled or failed to start");
+    }
+
     g_state.running = 1;
     g_state.stats_last_report = time(NULL);
 
@@ -790,6 +1172,9 @@ int main(int argc, char *argv[]) {
 
     /* Shutdown */
     CARI_LOG_INFO("Shutting down...");
+
+    /* Stop API server first */
+    cleanup_api_server(&g_state);
 
     g_state.srt_accept_running = 0;
     pthread_join(g_state.srt_accept_thread, NULL);

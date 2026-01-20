@@ -18,118 +18,253 @@ include __DIR__ . '/../templates/header.php';
 
 <div class="container-fluid py-4">
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2><i class="bi bi-upload me-2"></i>Output Destinations</h2>
+        <h2><i class="bi bi-upload me-2"></i>Outputs</h2>
         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addOutputModal">
             <i class="bi bi-plus-lg me-1"></i>Add Output
         </button>
     </div>
 
-    <div class="row" id="outputs-grid">
-        <?php if (empty($outputs)): ?>
-        <div class="col-12">
-            <div class="card">
-                <div class="card-body text-center py-5">
-                    <i class="bi bi-upload text-muted" style="font-size: 3rem;"></i>
-                    <h5 class="mt-3">No Output Destinations</h5>
-                    <p class="text-muted">Create an output to send your streams via SRT.</p>
-                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addOutputModal">
-                        <i class="bi bi-plus-lg me-1"></i>Add Output
-                    </button>
-                </div>
-            </div>
-        </div>
-        <?php else: ?>
-        <?php foreach ($outputs as $output): ?>
-        <div class="col-xl-4 col-md-6 mb-4">
-            <div class="card service-card h-100">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0"><?php echo htmlspecialchars($output['name']); ?></h6>
-                    <span class="badge bg-<?php echo $output['status'] === 'running' ? 'success' : 'secondary'; ?>">
-                        <?php echo ucfirst($output['status']); ?>
-                    </span>
-                </div>
-                <div class="card-body">
-                    <div class="mb-3">
-                        <small class="text-muted">Type</small>
-                        <div>
-                            <span class="badge bg-primary">
-                                <i class="bi bi-shield-lock me-1"></i>SRT
-                            </span>
-                            <span class="badge bg-success ms-1" title="Multiple clients can connect">
-                                <i class="bi bi-people-fill"></i> 1:N
-                            </span>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <small class="text-muted">UDP Input</small>
-                        <div class="text-truncate font-monospace small">
-                            <?php
-                            $input_addr = $output['input']['address'] ?? '';
-                            $input_port = $output['input']['port'] ?? '';
-                            if ($input_addr && $input_port) {
-                                echo htmlspecialchars("udp://{$input_addr}:{$input_port}");
-                            } elseif ($input_port) {
-                                echo htmlspecialchars("udp://*:{$input_port}");
-                            } else {
-                                echo 'Not configured';
-                            }
-                            ?>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <small class="text-muted">SRT Output</small>
-                        <div class="text-truncate font-monospace small">
-                            <?php
-                            $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
-                            $srt_port = $output['destination_srt']['listen_port'] ?? '';
-                            if ($srt_port) {
-                                echo htmlspecialchars("srt://{$srt_addr}:{$srt_port}");
-                            } else {
-                                echo 'Not configured';
-                            }
-                            ?>
-                        </div>
-                    </div>
-                    <div class="mb-2">
-                        <small class="text-muted">Service</small>
-                        <div class="text-truncate font-monospace small"><?php echo htmlspecialchars($output['output']['service_name'] ?? $output['id'] . '-output-srt'); ?></div>
-                    </div>
-                    <?php if ($output['status'] === 'running'): ?>
-                    <div class="row">
-                        <div class="col-6">
-                            <small class="text-muted">Max Clients</small>
-                            <div class="fw-bold"><?php echo htmlspecialchars($output['destination_srt']['max_clients'] ?? '10'); ?></div>
-                        </div>
-                        <div class="col-6">
-                            <small class="text-muted">Latency</small>
-                            <div class="fw-bold"><?php echo htmlspecialchars($output['destination_srt']['latency'] ?? '120'); ?> ms</div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-                </div>
-                <div class="card-footer bg-transparent">
-                    <div class="btn-group w-100">
-                        <?php if ($output['status'] === 'running'): ?>
-                        <button class="btn btn-outline-warning btn-sm" onclick="stopService('outputs', '<?php echo $output['id']; ?>')">
-                            <i class="bi bi-stop-fill"></i> Stop
-                        </button>
+    <!-- Outputs Table -->
+    <div class="card">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0" id="outputs-table">
+                    <thead class="table-dark">
+                        <tr>
+                            <th style="width: 40px;"></th>
+                            <th>Name</th>
+                            <th>UDP Input</th>
+                            <th>SRT Output</th>
+                            <th>Max Clients</th>
+                            <th>Status</th>
+                            <th style="width: 220px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($outputs)): ?>
+                        <tr>
+                            <td colspan="7" class="text-center py-5">
+                                <i class="bi bi-upload text-muted" style="font-size: 3rem;"></i>
+                                <h5 class="mt-3">No Outputs</h5>
+                                <p class="text-muted">Create an output to send your streams via SRT.</p>
+                                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addOutputModal">
+                                    <i class="bi bi-plus-lg me-1"></i>Add Output
+                                </button>
+                            </td>
+                        </tr>
                         <?php else: ?>
-                        <button class="btn btn-outline-success btn-sm" onclick="startService('outputs', '<?php echo $output['id']; ?>')">
-                            <i class="bi bi-play-fill"></i> Start
-                        </button>
+                        <?php foreach ($outputs as $output): ?>
+                        <?php
+                        $input_addr = $output['input']['address'] ?? '';
+                        $input_port = $output['input']['port'] ?? '';
+                        $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
+                        $srt_port = $output['destination_srt']['listen_port'] ?? '';
+                        $max_clients = $output['destination_srt']['max_clients'] ?? '10';
+                        ?>
+                        <tr data-id="<?php echo htmlspecialchars($output['id']); ?>">
+                            <td>
+                                <span class="status-dot status-<?php echo $output['status'] ?? 'stopped'; ?>"></span>
+                            </td>
+                            <td>
+                                <strong><?php echo htmlspecialchars($output['name']); ?></strong>
+                                <br><small class="text-muted"><?php echo htmlspecialchars($output['id']); ?></small>
+                            </td>
+                            <td>
+                                <code><?php
+                                if ($input_addr && $input_port) {
+                                    echo htmlspecialchars("{$input_addr}:{$input_port}");
+                                } elseif ($input_port) {
+                                    echo htmlspecialchars("*:{$input_port}");
+                                } else {
+                                    echo '<span class="text-muted">Not set</span>';
+                                }
+                                ?></code>
+                            </td>
+                            <td>
+                                <code><?php echo htmlspecialchars("{$srt_addr}:{$srt_port}"); ?></code>
+                            </td>
+                            <td>
+                                <span class="badge bg-info"><?php echo htmlspecialchars($max_clients); ?></span>
+                            </td>
+                            <td>
+                                <span class="badge bg-<?php echo ($output['status'] ?? 'stopped') === 'running' ? 'success' : 'secondary'; ?>">
+                                    <?php echo ucfirst($output['status'] ?? 'stopped'); ?>
+                                </span>
+                            </td>
+                            <td>
+                                <div class="btn-group btn-group-sm">
+                                    <?php if (($output['status'] ?? 'stopped') === 'running'): ?>
+                                    <button class="btn btn-outline-warning" onclick="stopOutput('<?php echo $output['id']; ?>')" title="Stop">
+                                        <i class="bi bi-stop-fill"></i>
+                                    </button>
+                                    <?php else: ?>
+                                    <button class="btn btn-outline-success" onclick="startOutput('<?php echo $output['id']; ?>')" title="Start">
+                                        <i class="bi bi-play-fill"></i>
+                                    </button>
+                                    <?php endif; ?>
+                                    <button class="btn btn-outline-info" onclick="showClientsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
+                                        <i class="bi bi-people"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" onclick="editOutput('<?php echo $output['id']; ?>')" title="Edit">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                    <button class="btn btn-outline-danger" onclick="deleteOutput('<?php echo $output['id']; ?>')" title="Delete">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
                         <?php endif; ?>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="editService('outputs', '<?php echo $output['id']; ?>')">
-                            <i class="bi bi-gear"></i> Edit
-                        </button>
-                        <button class="btn btn-outline-danger btn-sm" onclick="deleteService('outputs', '<?php echo $output['id']; ?>')">
-                            <i class="bi bi-trash"></i>
-                        </button>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Clients Modal -->
+<div class="modal fade" id="clientsModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-people me-2"></i>SRT Clients: <span id="clientsOutputName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="clientsOutputId">
+
+                <!-- Summary -->
+                <div class="row mb-4">
+                    <div class="col-md-4">
+                        <div class="card bg-light">
+                            <div class="card-body text-center">
+                                <h3 class="mb-0"><span id="clientCount">0</span> / <span id="maxClients">10</span></h3>
+                                <small class="text-muted">Connected Clients</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-8">
+                        <div class="d-flex justify-content-end align-items-center h-100">
+                            <button class="btn btn-outline-secondary" onclick="refreshClients()">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Clients List -->
+                <div class="card">
+                    <div class="card-header">
+                        <h6 class="mb-0">Connected Clients</h6>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="clients-list" style="max-height: 400px; overflow-y: auto;">
+                            <table class="table table-hover mb-0" id="clientsTable">
+                                <thead class="table-light sticky-top">
+                                    <tr>
+                                        <th>Slot</th>
+                                        <th>Address</th>
+                                        <th>Duration</th>
+                                        <th>RTT</th>
+                                        <th>Bandwidth</th>
+                                        <th>Lost/Retrans</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="clientsTableBody">
+                                    <tr>
+                                        <td colspan="7" class="text-center py-4 text-muted">
+                                            <div class="spinner-border spinner-border-sm me-2"></div>
+                                            Loading clients...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Client Details (shown when a client is selected) -->
+                <div id="clientDetails" class="mt-4 d-none">
+                    <div class="card border-primary">
+                        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                            <h6 class="mb-0"><i class="bi bi-person-badge me-2"></i>Client Details: <span id="detailClientAddr"></span></h6>
+                            <button type="button" class="btn-close btn-close-white" onclick="hideClientDetails()"></button>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Slot</small>
+                                    <div class="fw-bold" id="detailSlot">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Connected Duration</small>
+                                    <div class="fw-bold" id="detailDuration">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">RTT</small>
+                                    <div class="fw-bold" id="detailRtt">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Negotiated Latency</small>
+                                    <div class="fw-bold" id="detailLatency">-</div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Send Rate</small>
+                                    <div class="fw-bold" id="detailSendRate">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Est. Bandwidth</small>
+                                    <div class="fw-bold" id="detailBandwidth">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Packets Sent</small>
+                                    <div class="fw-bold" id="detailPacketsSent">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Send Errors</small>
+                                    <div class="fw-bold" id="detailSendErrors">-</div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Packets Lost</small>
+                                    <div class="fw-bold text-danger" id="detailLost">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Retransmitted</small>
+                                    <div class="fw-bold text-warning" id="detailRetrans">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Dropped</small>
+                                    <div class="fw-bold" id="detailDropped">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">In Flight</small>
+                                    <div class="fw-bold" id="detailFlight">-</div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Send Buffer</small>
+                                    <div class="fw-bold" id="detailBuffer">-</div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <small class="text-muted">Congestion Window</small>
+                                    <div class="fw-bold" id="detailCongestion">-</div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
         </div>
-        <?php endforeach; ?>
-        <?php endif; ?>
     </div>
 </div>
 
@@ -192,11 +327,6 @@ include __DIR__ . '/../templates/header.php';
                     <!-- SRT Output Section -->
                     <hr>
                     <h6><i class="bi bi-shield-lock me-2"></i>SRT Output (One-to-Many)</h6>
-                    <div class="alert alert-info small mb-3">
-                        <i class="bi bi-info-circle me-1"></i>
-                        <strong>One-to-Many Mode:</strong> Multiple clients can connect to the same port
-                        and receive the stream simultaneously. Perfect for distribution to multiple destinations.
-                    </div>
                     <div class="row">
                         <div class="col-md-4 mb-3">
                             <label class="form-label">Listen Address</label>
@@ -220,7 +350,6 @@ include __DIR__ . '/../templates/header.php';
                             <label class="form-label">Latency (ms)</label>
                             <input type="number" class="form-control" name="srt_latency"
                                    value="120" min="20" max="8000">
-                            <small class="text-muted">Higher = more reliable</small>
                         </div>
                         <div class="col-md-4 mb-3">
                             <label class="form-label">Stream ID (optional)</label>
@@ -264,20 +393,232 @@ include __DIR__ . '/../templates/header.php';
 <script>
 let nameValid = false;
 let availableSources = [];
+let clientsRefreshInterval = null;
+let currentOutputId = null;
 
+// Format duration from seconds to HH:MM:SS
+function formatDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+// Show clients modal
+function showClientsModal(id, name) {
+    currentOutputId = id;
+    document.getElementById('clientsOutputId').value = id;
+    document.getElementById('clientsOutputName').textContent = name;
+    hideClientDetails();
+
+    new bootstrap.Modal(document.getElementById('clientsModal')).show();
+    refreshClients();
+    startClientsAutoRefresh();
+}
+
+// Refresh clients list
+async function refreshClients() {
+    const id = document.getElementById('clientsOutputId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=clients&id=${id}`);
+        const data = await response.json();
+
+        if (data.success) {
+            document.getElementById('clientCount').textContent = data.client_count;
+            document.getElementById('maxClients').textContent = data.max_clients;
+            renderClientsTable(data.clients || []);
+        } else {
+            document.getElementById('clientsTableBody').innerHTML = `
+                <tr><td colspan="7" class="text-center py-4 text-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i>${data.error}
+                </td></tr>`;
+        }
+    } catch (e) {
+        console.error('Failed to get clients:', e);
+        document.getElementById('clientsTableBody').innerHTML = `
+            <tr><td colspan="7" class="text-center py-4 text-danger">
+                <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
+            </td></tr>`;
+    }
+}
+
+// Render clients table
+function renderClientsTable(clients) {
+    const tbody = document.getElementById('clientsTableBody');
+
+    if (clients.length === 0) {
+        tbody.innerHTML = `
+            <tr><td colspan="7" class="text-center py-4 text-muted">
+                <i class="bi bi-people me-2"></i>No clients connected
+            </td></tr>`;
+        return;
+    }
+
+    let html = '';
+    clients.forEach(client => {
+        const duration = formatDuration(client.duration || 0);
+        const rtt = (client.rtt_ms || 0).toFixed(1);
+        const bw = (client.send_rate_mbps || 0).toFixed(2);
+        const lost = client.packets_lost || 0;
+        const retrans = client.packets_retrans || 0;
+
+        html += `
+            <tr class="client-row" onclick="showClientDetails(${client.slot})" style="cursor: pointer;">
+                <td><span class="badge bg-secondary">${client.slot}</span></td>
+                <td><code>${client.address}</code></td>
+                <td>${duration}</td>
+                <td>${rtt} ms</td>
+                <td>${bw} Mbps</td>
+                <td>
+                    <span class="text-danger">${lost}</span> /
+                    <span class="text-warning">${retrans}</span>
+                </td>
+                <td>
+                    <button class="btn btn-outline-danger btn-sm" onclick="event.stopPropagation(); kickClient(${client.slot}, '${client.address}')" title="Kick Client">
+                        <i class="bi bi-x-circle"></i>
+                    </button>
+                </td>
+            </tr>`;
+    });
+
+    tbody.innerHTML = html;
+}
+
+// Show client details
+async function showClientDetails(slot) {
+    const id = document.getElementById('clientsOutputId').value;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=client_info&id=${id}&slot=${slot}`);
+        const data = await response.json();
+
+        if (data.success && data.client) {
+            const c = data.client;
+            document.getElementById('detailClientAddr').textContent = c.address;
+            document.getElementById('detailSlot').textContent = c.slot;
+            document.getElementById('detailDuration').textContent = formatDuration(c.duration || 0);
+            document.getElementById('detailRtt').textContent = (c.rtt_ms || 0).toFixed(1) + ' ms';
+            document.getElementById('detailLatency').textContent = (c.negotiated_latency_ms || 0) + ' ms';
+            document.getElementById('detailSendRate').textContent = (c.send_rate_mbps || 0).toFixed(2) + ' Mbps';
+            document.getElementById('detailBandwidth').textContent = (c.bandwidth_mbps || 0).toFixed(2) + ' Mbps';
+            document.getElementById('detailPacketsSent').textContent = (c.packets_sent || 0).toLocaleString();
+            document.getElementById('detailSendErrors').textContent = c.send_errors || 0;
+            document.getElementById('detailLost').textContent = c.packets_lost || 0;
+            document.getElementById('detailRetrans').textContent = c.packets_retrans || 0;
+            document.getElementById('detailDropped').textContent = c.packets_dropped || 0;
+            document.getElementById('detailFlight').textContent = c.flight_size || 0;
+            document.getElementById('detailBuffer').textContent = (c.send_buffer_ms || 0) + ' ms';
+            document.getElementById('detailCongestion').textContent = c.congestion_window || 0;
+
+            document.getElementById('clientDetails').classList.remove('d-none');
+        }
+    } catch (e) {
+        console.error('Failed to get client details:', e);
+    }
+}
+
+// Hide client details
+function hideClientDetails() {
+    document.getElementById('clientDetails').classList.add('d-none');
+}
+
+// Kick client
+async function kickClient(slot, address) {
+    if (!confirm(`Are you sure you want to kick client ${address}?`)) {
+        return;
+    }
+
+    const id = document.getElementById('clientsOutputId').value;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=kick_client&id=${id}&slot=${slot}`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            hideClientDetails();
+            refreshClients();
+        } else {
+            alert(data.error || 'Failed to kick client');
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// Auto-refresh clients
+function startClientsAutoRefresh() {
+    stopClientsAutoRefresh();
+    clientsRefreshInterval = setInterval(refreshClients, 5000);
+}
+
+function stopClientsAutoRefresh() {
+    if (clientsRefreshInterval) {
+        clearInterval(clientsRefreshInterval);
+        clientsRefreshInterval = null;
+    }
+}
+
+// Stop auto-refresh when modal closes
+document.getElementById('clientsModal').addEventListener('hidden.bs.modal', function() {
+    stopClientsAutoRefresh();
+    currentOutputId = null;
+});
+
+// Output actions
+function startOutput(id) {
+    fetch(`api/outputs.php?action=start&id=${id}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert(data.error || 'Failed to start output');
+            }
+        });
+}
+
+function stopOutput(id) {
+    fetch(`api/outputs.php?action=stop&id=${id}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert(data.error || 'Failed to stop output');
+            }
+        });
+}
+
+function deleteOutput(id) {
+    if (confirm('Are you sure you want to delete this output? This action cannot be undone.')) {
+        fetch(`api/outputs.php?action=delete&id=${id}`, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert(data.error || 'Failed to delete output');
+                }
+            });
+    }
+}
+
+function editOutput(id) {
+    window.location.href = `outputs-edit.php?id=${id}`;
+}
+
+// Add Output Modal functions
 function updateServiceNamePreview() {
     const name = document.getElementById('outputName').value;
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const preview = document.getElementById('serviceNamePreview');
-
-    if (id) {
-        preview.textContent = id + '-output-srt';
-    } else {
-        preview.textContent = '-';
-    }
+    preview.textContent = id ? id + '-output-srt' : '-';
 }
 
-// Load available sources (inputs, transcoders, muxers)
 function loadSources() {
     fetch('api/outputs.php?action=available_sources')
         .then(r => r.json())
@@ -285,100 +626,54 @@ function loadSources() {
             availableSources = data.sources || [];
             populateSourceDropdown();
         })
-        .catch(err => {
-            console.error('Failed to load sources:', err);
-        });
+        .catch(err => console.error('Failed to load sources:', err));
 }
 
-// Populate source dropdown
 function populateSourceDropdown() {
     const select = document.getElementById('sourceSelect');
     select.innerHTML = '<option value="">-- Manual Configuration --</option>';
 
-    // Group sources by type
-    const inputs = availableSources.filter(s => s.source_type === 'input');
-    const transcoders = availableSources.filter(s => s.source_type === 'transcoder');
-    const muxers = availableSources.filter(s => s.source_type === 'muxer');
+    const groups = {
+        input: { label: 'Inputs', items: [] },
+        transcoder: { label: 'Transcoders', items: [] },
+        muxer: { label: 'Muxers', items: [] }
+    };
 
-    if (inputs.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = 'Inputs';
-        inputs.forEach(source => {
-            const opt = document.createElement('option');
-            opt.value = JSON.stringify(source);
-            let label = source.display_name;
-            if (source.output_port) {
-                const addr = source.output_address || '*';
-                label += ` (udp://${addr}:${source.output_port})`;
-            }
-            if (source.status === 'running') {
-                label += ' [Running]';
-            }
-            opt.textContent = label;
-            group.appendChild(opt);
-        });
-        select.appendChild(group);
-    }
+    availableSources.forEach(s => {
+        if (groups[s.source_type]) {
+            groups[s.source_type].items.push(s);
+        }
+    });
 
-    if (transcoders.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = 'Transcoders';
-        transcoders.forEach(source => {
-            const opt = document.createElement('option');
-            opt.value = JSON.stringify(source);
-            let label = source.display_name;
-            if (source.output_port) {
-                const addr = source.output_address || '*';
-                label += ` (udp://${addr}:${source.output_port})`;
-            }
-            if (source.status === 'running') {
-                label += ' [Running]';
-            }
-            opt.textContent = label;
-            group.appendChild(opt);
-        });
-        select.appendChild(group);
-    }
-
-    if (muxers.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = 'Muxers';
-        muxers.forEach(source => {
-            const opt = document.createElement('option');
-            opt.value = JSON.stringify(source);
-            let label = source.display_name;
-            if (source.output_port) {
-                const addr = source.output_address || '*';
-                label += ` (udp://${addr}:${source.output_port})`;
-            }
-            if (source.status === 'running') {
-                label += ' [Running]';
-            }
-            opt.textContent = label;
-            group.appendChild(opt);
-        });
-        select.appendChild(group);
-    }
+    Object.values(groups).forEach(group => {
+        if (group.items.length > 0) {
+            const optgroup = document.createElement('optgroup');
+            optgroup.label = group.label;
+            group.items.forEach(source => {
+                const opt = document.createElement('option');
+                opt.value = JSON.stringify(source);
+                let label = source.display_name;
+                if (source.output_port) {
+                    label += ` (${source.output_address || '*'}:${source.output_port})`;
+                }
+                if (source.status === 'running') label += ' [Running]';
+                opt.textContent = label;
+                optgroup.appendChild(opt);
+            });
+            select.appendChild(optgroup);
+        }
+    });
 }
 
-// Handle source selection - auto-fill UDP settings
 document.getElementById('sourceSelect').addEventListener('change', function() {
-    const value = this.value;
-    if (!value) {
-        // Manual configuration - clear fields or leave as is
-        return;
-    }
-
+    if (!this.value) return;
     try {
-        const source = JSON.parse(value);
+        const source = JSON.parse(this.value);
         document.getElementById('inputAddress').value = source.output_address || '';
         document.getElementById('inputPort').value = source.output_port || '5000';
-    } catch (e) {
-        console.error('Failed to parse source:', e);
-    }
+    } catch (e) {}
 });
 
-// Validate name uniqueness
 let validateTimeout = null;
 function validateName() {
     const nameInput = document.getElementById('outputName');
@@ -394,7 +689,6 @@ function validateName() {
         return;
     }
 
-    // Debounce
     clearTimeout(validateTimeout);
     validateTimeout = setTimeout(() => {
         fetch(`api/outputs.php?action=check_name&name=${encodeURIComponent(name)}&type=srt`)
@@ -408,10 +702,7 @@ function validateName() {
                     nameValid = true;
                     createBtn.disabled = false;
                 } else {
-                    let msg = 'Name already in use';
-                    if (data.config_exists) msg = 'Output with this name already exists';
-                    if (data.service_exists) msg = 'Service file already exists: ' + data.service_name;
-                    validation.textContent = msg;
+                    validation.textContent = data.config_exists ? 'Output already exists' : 'Service file exists';
                     validation.className = 'form-text text-danger';
                     nameInput.classList.remove('is-valid');
                     nameInput.classList.add('is-invalid');
@@ -420,19 +711,15 @@ function validateName() {
                 }
                 updateServiceNamePreview();
             })
-            .catch(err => {
+            .catch(() => {
                 validation.textContent = 'Error checking name';
                 validation.className = 'form-text text-warning';
             });
     }, 300);
 }
 
-// Name input handler
-document.getElementById('outputName').addEventListener('input', function() {
-    validateName();
-});
+document.getElementById('outputName').addEventListener('input', validateName);
 
-// Form submission
 document.getElementById('addOutputForm').addEventListener('submit', function(e) {
     e.preventDefault();
 
@@ -444,68 +731,19 @@ document.getElementById('addOutputForm').addEventListener('submit', function(e) 
     const formData = new FormData(this);
     formData.append('action', 'create');
 
-    fetch('api/outputs.php', {
-        method: 'POST',
-        body: formData
-    })
-    .then(r => r.json())
-    .then(data => {
-        if (data.success) {
-            location.reload();
-        } else {
-            alert(data.error || 'Failed to create output');
-        }
-    })
-    .catch(err => {
-        alert('Error: ' + err.message);
-    });
+    fetch('api/outputs.php', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert(data.error || 'Failed to create output');
+            }
+        })
+        .catch(err => alert('Error: ' + err.message));
 });
 
-function startService(type, id) {
-    fetch(`api/${type}.php?action=start&id=${id}`, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to start service');
-            }
-        });
-}
-
-function stopService(type, id) {
-    fetch(`api/${type}.php?action=stop&id=${id}`, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to stop service');
-            }
-        });
-}
-
-function deleteService(type, id) {
-    if (confirm('Are you sure you want to delete this output? This action cannot be undone.')) {
-        fetch(`api/${type}.php?action=delete&id=${id}`, { method: 'POST' })
-            .then(r => r.json())
-            .then(data => {
-                if (data.success) {
-                    location.reload();
-                } else {
-                    alert(data.error || 'Failed to delete output');
-                }
-            });
-    }
-}
-
-function editService(type, id) {
-    window.location.href = `${type}-edit.php?id=${id}`;
-}
-
-// Load sources when modal opens
 document.getElementById('addOutputModal').addEventListener('show.bs.modal', function() {
-    // Reset form
     document.getElementById('addOutputForm').reset();
     document.getElementById('nameValidation').textContent = '';
     document.getElementById('outputName').classList.remove('is-valid', 'is-invalid');
@@ -513,8 +751,6 @@ document.getElementById('addOutputModal').addEventListener('show.bs.modal', func
     document.getElementById('sourceSelect').value = '';
     nameValid = false;
     updateServiceNamePreview();
-
-    // Load available sources
     loadSources();
 });
 </script>
