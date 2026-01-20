@@ -41,6 +41,7 @@ foreach ($outputs as &$output) {
     // Get running status
     $output['status'] = get_output_status_local($output['id'], $type);
 }
+unset($output); // IMPORTANT: Break the reference to avoid PHP reference bug
 
 $page_title = 'Outputs';
 include __DIR__ . '/../templates/header.php';
