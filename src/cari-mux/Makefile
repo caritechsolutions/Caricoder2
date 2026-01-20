@@ -17,7 +17,6 @@ LDFLAGS = $(GST_LIBS) -lpthread
 SRCS = main.c
 OBJS = $(SRCS:.c=.o)
 BIN = cari-mux
-INSTALL_DIR = /usr/local/bin
 
 .PHONY: all clean install
 
@@ -30,9 +29,7 @@ $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 install: $(BIN)
-	@echo "Installing $(BIN) to $(INSTALL_DIR)/"
-	install -d $(INSTALL_DIR)
-	install -m 755 $(BIN) $(INSTALL_DIR)/
+	install -m 755 $(BIN) /usr/local/bin/
 
 clean:
 	rm -f $(OBJS) $(BIN)
