@@ -486,6 +486,9 @@ function create_output($data) {
  * Create RIST output
  */
 function create_rist_output($data, $id, $name, $service_name) {
+    // Log for debugging
+    error_log("create_rist_output called: id={$id}, name={$name}");
+
     // Assign metrics port (use provided or default to 9100 + offset based on RIST port)
     $rist_port = intval($data['rist_port'] ?? 5001);
     $metrics_port = intval($data['metrics_port'] ?? (9100 + ($rist_port % 1000)));
@@ -523,22 +526,34 @@ function create_rist_output($data, $id, $name, $service_name) {
 
     // Ensure outputs directory exists
     $output_dir = CONFIG_PATH . '/outputs';
+    error_log("Output dir: {$output_dir}");
+
     if (!is_dir($output_dir)) {
+        error_log("Creating output dir: {$output_dir}");
         if (!mkdir($output_dir, 0755, true)) {
+            error_log("Failed to create output dir");
             return ['success' => false, 'error' => 'Failed to create outputs directory'];
         }
     }
 
     // Save configuration
     $config_file = $output_dir . '/' . $id . '.conf';
-    if (!save_config($config_file, $config)) {
+    error_log("Saving config to: {$config_file}");
+
+    $save_result = save_config($config_file, $config);
+    error_log("Save result: " . ($save_result ? 'true' : 'false'));
+
+    if (!$save_result) {
         return ['success' => false, 'error' => 'Failed to save configuration to: ' . $config_file];
     }
 
     // Verify config was saved
     if (!file_exists($config_file)) {
+        error_log("Config file not found after save: {$config_file}");
         return ['success' => false, 'error' => 'Config file not created: ' . $config_file];
     }
+
+    error_log("Config file verified: {$config_file}");
 
     // Generate systemd service file for ristsender
     generate_rist_service_file($id, $name, $config);
