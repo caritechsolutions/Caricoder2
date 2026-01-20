@@ -92,6 +92,16 @@ switch ($action) {
         ]);
         break;
 
+    case 'rist_metrics':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $metrics = get_rist_metrics($id);
+        json_response($metrics);
+        break;
+
     case 'create':
         $data = $_POST;
         if (empty($data) || empty($data['name'])) {
@@ -409,6 +419,7 @@ function get_output_service_name($id) {
 function create_output($data) {
     $name = trim($data['name'] ?? '');
     $id = !empty($data['id']) ? sanitize_name_to_id($data['id']) : sanitize_name_to_id($name);
+    $type = $data['type'] ?? 'srt';
 
     if (empty($name)) {
         return ['success' => false, 'error' => 'Output name required'];
@@ -418,12 +429,17 @@ function create_output($data) {
         return ['success' => false, 'error' => 'Output with this ID already exists'];
     }
 
-    // Check for service file conflict (SRT output only)
-    $service_name = $id . '-output-srt';
+    // Check for service file conflict
+    $service_name = $id . '-output-' . $type;
     if (file_exists('/etc/systemd/system/' . $service_name . '.service')) {
         return ['success' => false, 'error' => 'Service file already exists: ' . $service_name];
     }
 
+    if ($type === 'rist') {
+        return create_rist_output($data, $id, $name, $service_name);
+    }
+
+    // SRT output (default)
     // Auto-assign API port (SRT port + 1000)
     $srt_port = intval($data['srt_port'] ?? 4900);
     $api_port = $srt_port + 1000;
@@ -467,6 +483,195 @@ function create_output($data) {
 }
 
 /**
+ * Create RIST output
+ */
+function create_rist_output($data, $id, $name, $service_name) {
+    // Assign metrics port (use provided or default to 9100 + offset based on RIST port)
+    $rist_port = intval($data['rist_port'] ?? 5001);
+    $metrics_port = intval($data['metrics_port'] ?? (9100 + ($rist_port % 1000)));
+
+    // Build configuration
+    $config = [
+        'output' => [
+            'id' => $id,
+            'name' => $name,
+            'type' => 'rist',
+            'enabled' => 'true',
+            'service_name' => $service_name,
+            'metrics_port' => strval($metrics_port)
+        ],
+        'input' => [
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_rist' => [
+            'mode' => $data['rist_mode'] ?? 'caller',
+            'address' => $data['rist_address'] ?? '',
+            'port' => $data['rist_port'] ?? '5001',
+            'profile' => $data['rist_profile'] ?? '1',
+            'buffer' => $data['rist_buffer'] ?? '250',
+            'encryption' => $data['rist_encryption'] ?? '0',
+            'secret' => $data['rist_secret'] ?? '',
+            'cname' => $data['rist_cname'] ?? '',
+            'npd' => ($data['rist_npd'] ?? '0') === '1' ? 'true' : 'false',
+            'bandwidth' => $data['rist_bandwidth'] ?? '0',
+            'congestion_control' => $data['rist_congestion'] ?? '1',
+            'log_level' => $data['rist_log_level'] ?? '6'
+        ]
+    ];
+
+    // Save configuration
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+    if (!save_config($config_file, $config)) {
+        return ['success' => false, 'error' => 'Failed to save configuration'];
+    }
+
+    // Generate systemd service file for ristsender
+    generate_rist_service_file($id, $name, $config);
+
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'message' => 'RIST output created successfully'];
+}
+
+/**
+ * Generate systemd service file for RIST output (ristsender)
+ */
+function generate_rist_service_file($id, $name, $config) {
+    $service_name = $id . '-output-rist';
+
+    // Build ristsender command
+    $input = $config['input'] ?? [];
+    $dest = $config['destination_rist'] ?? [];
+    $output_cfg = $config['output'] ?? [];
+
+    // Input URL
+    $input_addr = $input['address'] ?? '';
+    $input_port = $input['port'] ?? '5000';
+    $input_iface = $input['interface'] ?? '';
+
+    if (!empty($input_addr)) {
+        // Multicast
+        $input_url = "udp://{$input_addr}:{$input_port}";
+        if (!empty($input_iface)) {
+            $input_url .= "?miface={$input_iface}";
+        }
+    } else {
+        // Unicast - listen on all interfaces
+        $input_url = "udp://0.0.0.0:{$input_port}";
+    }
+
+    // Output URL
+    $mode = $dest['mode'] ?? 'caller';
+    $rist_addr = $dest['address'] ?? '';
+    $rist_port = $dest['port'] ?? '5001';
+    $profile = $dest['profile'] ?? '1';
+    $buffer = $dest['buffer'] ?? '250';
+    $encryption = $dest['encryption'] ?? '0';
+    $secret = $dest['secret'] ?? '';
+    $cname = $dest['cname'] ?? $name;
+    $npd = ($dest['npd'] ?? 'false') === 'true';
+    $bandwidth = $dest['bandwidth'] ?? '0';
+    $congestion = $dest['congestion_control'] ?? '1';
+    $log_level = $dest['log_level'] ?? '6';
+    $metrics_port = $output_cfg['metrics_port'] ?? '9100';
+
+    // Build RIST URL based on mode
+    if ($mode === 'listener') {
+        // Listener mode - use @ prefix
+        $output_url = "rist://@{$rist_addr}:{$rist_port}";
+    } else {
+        // Caller mode - standard URL
+        $output_url = "rist://{$rist_addr}:{$rist_port}";
+    }
+
+    // Add URL parameters
+    $params = [];
+    if (intval($buffer) > 0) {
+        $params[] = "buffer={$buffer}";
+    }
+    if (!empty($cname)) {
+        $params[] = "cname=" . urlencode($cname);
+    }
+    if (intval($encryption) > 0 && !empty($secret)) {
+        $params[] = "aes-type={$encryption}";
+        $params[] = "secret=" . urlencode($secret);
+    }
+    if (intval($bandwidth) > 0) {
+        $params[] = "bandwidth={$bandwidth}";
+    }
+    if (intval($congestion) >= 0) {
+        $params[] = "congestion-control={$congestion}";
+    }
+
+    if (!empty($params)) {
+        $output_url .= '?' . implode('&', $params);
+    }
+
+    // Build command arguments
+    $cmd_args = [];
+    $cmd_args[] = "--inputurl \"{$input_url}\"";
+    $cmd_args[] = "--outputurl \"{$output_url}\"";
+    $cmd_args[] = "--profile {$profile}";
+    $cmd_args[] = "--verbose-level {$log_level}";
+    $cmd_args[] = "--statsinterval 1000";
+
+    if ($npd) {
+        $cmd_args[] = "--null-packet-deletion";
+    }
+
+    // Enable metrics HTTP server
+    $cmd_args[] = "--metrics-http";
+    $cmd_args[] = "--metrics-port {$metrics_port}";
+    $cmd_args[] = "--metrics-ip 127.0.0.1";
+
+    $cmd_line = implode(" \\\n    ", $cmd_args);
+
+    $service_content = <<<EOT
+[Unit]
+Description=CariTranscoder RIST Output - {$name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/bin/ristsender \\
+    {$cmd_line}
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOT;
+
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
+
+    error_log("Failed to create RIST service file: " . json_encode($result));
+    return $service_name;
+}
+
+/**
  * Update existing output
  */
 function update_output($id, $data) {
@@ -479,6 +684,7 @@ function update_output($id, $data) {
 
     // Load existing config
     $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
 
     // Stop service if running
     stop_output_service($id);
@@ -487,7 +693,6 @@ function update_output($id, $data) {
     if (!empty($data['name'])) {
         $config['output']['name'] = $data['name'];
     }
-    $config['output']['type'] = 'srt';
 
     // Update UDP input fields
     if (!isset($config['input'])) $config['input'] = [];
@@ -495,26 +700,54 @@ function update_output($id, $data) {
     if (!empty($data['input_port'])) $config['input']['port'] = $data['input_port'];
     if (isset($data['input_interface'])) $config['input']['interface'] = $data['input_interface'];
 
-    // Update service name
-    $config['output']['service_name'] = $id . '-output-srt';
+    if ($type === 'rist') {
+        // Update RIST output fields
+        $config['output']['service_name'] = $id . '-output-rist';
 
-    // Update SRT output fields
-    if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
-    if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
-    if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
-    if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
-    if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
-    if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
-    if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
-    if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
+        if (!isset($config['destination_rist'])) $config['destination_rist'] = [];
+        if (isset($data['rist_mode'])) $config['destination_rist']['mode'] = $data['rist_mode'];
+        if (isset($data['rist_address'])) $config['destination_rist']['address'] = $data['rist_address'];
+        if (!empty($data['rist_port'])) $config['destination_rist']['port'] = $data['rist_port'];
+        if (isset($data['rist_profile'])) $config['destination_rist']['profile'] = $data['rist_profile'];
+        if (isset($data['rist_buffer'])) $config['destination_rist']['buffer'] = $data['rist_buffer'];
+        if (isset($data['rist_encryption'])) $config['destination_rist']['encryption'] = $data['rist_encryption'];
+        if (isset($data['rist_secret'])) $config['destination_rist']['secret'] = $data['rist_secret'];
+        if (isset($data['rist_cname'])) $config['destination_rist']['cname'] = $data['rist_cname'];
+        if (isset($data['rist_npd'])) $config['destination_rist']['npd'] = $data['rist_npd'] === '1' ? 'true' : 'false';
+        if (isset($data['rist_bandwidth'])) $config['destination_rist']['bandwidth'] = $data['rist_bandwidth'];
+        if (isset($data['rist_congestion'])) $config['destination_rist']['congestion_control'] = $data['rist_congestion'];
+        if (isset($data['rist_log_level'])) $config['destination_rist']['log_level'] = $data['rist_log_level'];
 
-    if (!save_config($config_file, $config)) {
-        return ['success' => false, 'error' => 'Failed to save configuration'];
+        if (!save_config($config_file, $config)) {
+            return ['success' => false, 'error' => 'Failed to save configuration'];
+        }
+
+        // Regenerate service file
+        $name = $config['output']['name'] ?? $id;
+        generate_rist_service_file($id, $name, $config);
+    } else {
+        // SRT output
+        $config['output']['type'] = 'srt';
+        $config['output']['service_name'] = $id . '-output-srt';
+
+        // Update SRT output fields
+        if (!isset($config['destination_srt'])) $config['destination_srt'] = [];
+        if (!empty($data['srt_listen_address'])) $config['destination_srt']['listen_address'] = $data['srt_listen_address'];
+        if (!empty($data['srt_port'])) $config['destination_srt']['listen_port'] = $data['srt_port'];
+        if (!empty($data['srt_latency'])) $config['destination_srt']['latency'] = $data['srt_latency'];
+        if (isset($data['srt_passphrase'])) $config['destination_srt']['passphrase'] = $data['srt_passphrase'];
+        if (isset($data['srt_pbkeylen'])) $config['destination_srt']['pbkeylen'] = $data['srt_pbkeylen'];
+        if (isset($data['srt_streamid'])) $config['destination_srt']['streamid'] = $data['srt_streamid'];
+        if (!empty($data['srt_max_clients'])) $config['destination_srt']['max_clients'] = $data['srt_max_clients'];
+
+        if (!save_config($config_file, $config)) {
+            return ['success' => false, 'error' => 'Failed to save configuration'];
+        }
+
+        // Generate/update systemd service file
+        $name = $config['output']['name'] ?? $id;
+        generate_output_service_file($id, 'srt', $name);
     }
-
-    // Generate/update systemd service file
-    $name = $config['output']['name'] ?? $id;
-    generate_output_service_file($id, 'srt', $name);
 
     return ['success' => true, 'message' => 'Output updated successfully'];
 }
@@ -795,4 +1028,123 @@ function kick_output_client($id, $slot) {
     }
 
     return call_output_api($id, "/client/{$slot}/kick", 'POST');
+}
+
+/**
+ * Get RIST metrics from ristsender's Prometheus endpoint
+ */
+function get_rist_metrics($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+
+    if (($config['output']['type'] ?? '') !== 'rist') {
+        return ['success' => false, 'error' => 'Not a RIST output'];
+    }
+
+    $metrics_port = $config['output']['metrics_port'] ?? '9100';
+    $url = "http://127.0.0.1:{$metrics_port}/metrics";
+
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => 5,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to RIST metrics server', 'status' => 'offline'];
+    }
+
+    // Parse Prometheus-format metrics
+    $metrics = parse_prometheus_metrics($response);
+
+    return [
+        'success' => true,
+        'id' => $id,
+        'name' => $config['output']['name'] ?? $id,
+        'type' => 'rist',
+        'raw' => $response,
+        'metrics' => $metrics
+    ];
+}
+
+/**
+ * Parse Prometheus-format metrics into structured data
+ */
+function parse_prometheus_metrics($text) {
+    $metrics = [];
+    $lines = explode("\n", $text);
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+
+        // Skip empty lines and comments
+        if (empty($line) || $line[0] === '#') {
+            continue;
+        }
+
+        // Parse metric line: metric_name{labels} value
+        if (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\{([^}]*)\}\s+(.+)$/', $line, $matches)) {
+            $name = $matches[1];
+            $labels_str = $matches[2];
+            $value = $matches[3];
+
+            // Parse labels
+            $labels = [];
+            if (!empty($labels_str)) {
+                preg_match_all('/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/', $labels_str, $label_matches, PREG_SET_ORDER);
+                foreach ($label_matches as $lm) {
+                    $labels[$lm[1]] = $lm[2];
+                }
+            }
+
+            $metrics[] = [
+                'name' => $name,
+                'labels' => $labels,
+                'value' => is_numeric($value) ? floatval($value) : $value
+            ];
+        } elseif (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\s+(.+)$/', $line, $matches)) {
+            // Metric without labels
+            $metrics[] = [
+                'name' => $matches[1],
+                'labels' => [],
+                'value' => is_numeric($matches[2]) ? floatval($matches[2]) : $matches[2]
+            ];
+        }
+    }
+
+    // Group metrics by type for easier consumption
+    $grouped = [
+        'sender' => [],
+        'receiver' => [],
+        'peer' => [],
+        'flow' => [],
+        'other' => []
+    ];
+
+    foreach ($metrics as $m) {
+        $name = $m['name'];
+        if (strpos($name, 'rist_sender_') === 0) {
+            $grouped['sender'][] = $m;
+        } elseif (strpos($name, 'rist_receiver_') === 0) {
+            $grouped['receiver'][] = $m;
+        } elseif (strpos($name, 'rist_peer_') === 0) {
+            $grouped['peer'][] = $m;
+        } elseif (strpos($name, 'rist_flow_') === 0) {
+            $grouped['flow'][] = $m;
+        } else {
+            $grouped['other'][] = $m;
+        }
+    }
+
+    return $grouped;
 }

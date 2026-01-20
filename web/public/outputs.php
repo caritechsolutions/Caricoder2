@@ -30,6 +30,7 @@ foreach ($outputs as &$output) {
         $config = parse_config($config_file);
         $output['input'] = $config['input'] ?? [];
         $output['destination_srt'] = $config['destination_srt'] ?? [];
+        $output['destination_rist'] = $config['destination_rist'] ?? [];
         $output['output'] = $config['output'] ?? [];
     }
 
@@ -59,9 +60,9 @@ include __DIR__ . '/../templates/header.php';
                         <tr>
                             <th style="width: 40px;"></th>
                             <th>Name</th>
+                            <th>Type</th>
                             <th>UDP Input</th>
-                            <th>SRT Output</th>
-                            <th>Max Clients</th>
+                            <th>Destination</th>
                             <th>Status</th>
                             <th style="width: 220px;">Actions</th>
                         </tr>
@@ -72,7 +73,7 @@ include __DIR__ . '/../templates/header.php';
                             <td colspan="7" class="text-center py-5">
                                 <i class="bi bi-upload text-muted" style="font-size: 3rem;"></i>
                                 <h5 class="mt-3">No Outputs</h5>
-                                <p class="text-muted">Create an output to send your streams via SRT.</p>
+                                <p class="text-muted">Create an output to send your streams via SRT or RIST.</p>
                                 <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addOutputModal">
                                     <i class="bi bi-plus-lg me-1"></i>Add Output
                                 </button>
@@ -81,19 +82,38 @@ include __DIR__ . '/../templates/header.php';
                         <?php else: ?>
                         <?php foreach ($outputs as $output): ?>
                         <?php
+                        $type = $output['output']['type'] ?? 'srt';
                         $input_addr = $output['input']['address'] ?? '';
                         $input_port = $output['input']['port'] ?? '';
-                        $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
-                        $srt_port = $output['destination_srt']['listen_port'] ?? '';
-                        $max_clients = $output['destination_srt']['max_clients'] ?? '10';
+
+                        // Get destination info based on type
+                        if ($type === 'rist') {
+                            $rist_mode = $output['destination_rist']['mode'] ?? 'caller';
+                            $rist_addr = $output['destination_rist']['address'] ?? '';
+                            $rist_port = $output['destination_rist']['port'] ?? '';
+                            $dest_display = ($rist_mode === 'listener' ? '@' : '') . "{$rist_addr}:{$rist_port}";
+                            $type_badge = 'bg-warning text-dark';
+                            $type_icon = 'bi-arrow-repeat';
+                        } else {
+                            $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
+                            $srt_port = $output['destination_srt']['listen_port'] ?? '';
+                            $dest_display = "{$srt_addr}:{$srt_port}";
+                            $type_badge = 'bg-primary';
+                            $type_icon = 'bi-shield-lock';
+                        }
                         ?>
-                        <tr data-id="<?php echo htmlspecialchars($output['id']); ?>">
+                        <tr data-id="<?php echo htmlspecialchars($output['id']); ?>" data-type="<?php echo $type; ?>">
                             <td>
                                 <span class="status-dot status-<?php echo $output['status'] ?? 'stopped'; ?>"></span>
                             </td>
                             <td>
                                 <strong><?php echo htmlspecialchars($output['name']); ?></strong>
                                 <br><small class="text-muted"><?php echo htmlspecialchars($output['id']); ?></small>
+                            </td>
+                            <td>
+                                <span class="badge <?php echo $type_badge; ?>">
+                                    <i class="bi <?php echo $type_icon; ?> me-1"></i><?php echo strtoupper($type); ?>
+                                </span>
                             </td>
                             <td>
                                 <code><?php
@@ -107,10 +127,10 @@ include __DIR__ . '/../templates/header.php';
                                 ?></code>
                             </td>
                             <td>
-                                <code><?php echo htmlspecialchars("{$srt_addr}:{$srt_port}"); ?></code>
-                            </td>
-                            <td>
-                                <span class="badge bg-info"><?php echo htmlspecialchars($max_clients); ?></span>
+                                <code><?php echo htmlspecialchars($dest_display); ?></code>
+                                <?php if ($type === 'rist'): ?>
+                                <br><small class="text-muted"><?php echo ucfirst($rist_mode); ?> mode</small>
+                                <?php endif; ?>
                             </td>
                             <td>
                                 <span class="badge bg-<?php echo ($output['status'] ?? 'stopped') === 'running' ? 'success' : 'secondary'; ?>">
@@ -128,9 +148,15 @@ include __DIR__ . '/../templates/header.php';
                                         <i class="bi bi-play-fill"></i>
                                     </button>
                                     <?php endif; ?>
+                                    <?php if ($type === 'srt'): ?>
                                     <button class="btn btn-outline-info" onclick="showClientsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
                                         <i class="bi bi-people"></i>
                                     </button>
+                                    <?php else: ?>
+                                    <button class="btn btn-outline-info" onclick="showRistStatsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Stats">
+                                        <i class="bi bi-graph-up"></i>
+                                    </button>
+                                    <?php endif; ?>
                                     <button class="btn btn-outline-secondary" onclick="editOutput('<?php echo $output['id']; ?>')" title="Edit">
                                         <i class="bi bi-pencil"></i>
                                     </button>
@@ -294,6 +320,122 @@ include __DIR__ . '/../templates/header.php';
     </div>
 </div>
 
+<!-- RIST Stats Modal -->
+<div class="modal fade" id="ristStatsModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-graph-up me-2"></i>RIST Stats: <span id="ristStatsOutputName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="ristStatsOutputId">
+
+                <!-- Summary Stats -->
+                <div class="row mb-4">
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center">
+                                <h4 class="mb-0" id="ristBitrate">-</h4>
+                                <small class="text-muted">Bitrate</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center">
+                                <h4 class="mb-0" id="ristRtt">-</h4>
+                                <small class="text-muted">RTT</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center">
+                                <h4 class="mb-0 text-danger" id="ristLost">-</h4>
+                                <small class="text-muted">Packets Lost</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center">
+                                <h4 class="mb-0 text-warning" id="ristRetrans">-</h4>
+                                <small class="text-muted">Retransmitted</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Peer Info -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h6 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Peer Statistics</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0" id="ristPeersTable">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Peer</th>
+                                        <th>State</th>
+                                        <th>RTT</th>
+                                        <th>Sent</th>
+                                        <th>Received</th>
+                                        <th>Retransmit</th>
+                                        <th>Quality</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ristPeersTableBody">
+                                    <tr>
+                                        <td colspan="7" class="text-center py-3 text-muted">
+                                            <div class="spinner-border spinner-border-sm me-2"></div>
+                                            Loading...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Flow Info -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0"><i class="bi bi-activity me-2"></i>Flow Statistics</h6>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="refreshRistStats()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3 mb-2">
+                                <small class="text-muted">Packets Sent</small>
+                                <div class="fw-bold" id="ristFlowSent">-</div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <small class="text-muted">Bytes Sent</small>
+                                <div class="fw-bold" id="ristFlowBytes">-</div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <small class="text-muted">Recovered</small>
+                                <div class="fw-bold text-success" id="ristFlowRecovered">-</div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <small class="text-muted">Not Recovered</small>
+                                <div class="fw-bold text-danger" id="ristFlowNotRecovered">-</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Add Output Modal -->
 <div class="modal fade" id="addOutputModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -303,14 +445,21 @@ include __DIR__ . '/../templates/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form id="addOutputForm">
-                <input type="hidden" name="type" value="srt">
+                <input type="hidden" name="type" id="outputType" value="srt">
                 <div class="modal-body">
                     <div class="row">
-                        <div class="col-md-12 mb-3">
+                        <div class="col-md-8 mb-3">
                             <label class="form-label">Output Name <span class="text-danger">*</span></label>
                             <input type="text" class="form-control" name="name" id="outputName" required
-                                   placeholder="e.g., Main SRT Output">
+                                   placeholder="e.g., Main Output">
                             <div id="nameValidation" class="form-text"></div>
+                        </div>
+                        <div class="col-md-4 mb-3">
+                            <label class="form-label">Output Type <span class="text-danger">*</span></label>
+                            <select class="form-select" id="outputTypeSelect" onchange="toggleOutputType()">
+                                <option value="srt">SRT (One-to-Many)</option>
+                                <option value="rist">RIST</option>
+                            </select>
                         </div>
                     </div>
 
@@ -351,51 +500,140 @@ include __DIR__ . '/../templates/header.php';
                     </div>
 
                     <!-- SRT Output Section -->
-                    <hr>
-                    <h6><i class="bi bi-shield-lock me-2"></i>SRT Output (One-to-Many)</h6>
-                    <div class="row">
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">Listen Address</label>
-                            <input type="text" class="form-control" name="srt_listen_address"
-                                   value="0.0.0.0" placeholder="0.0.0.0">
-                            <small class="text-muted">0.0.0.0 = all interfaces</small>
+                    <div id="srtSection">
+                        <hr>
+                        <h6><i class="bi bi-shield-lock me-2"></i>SRT Output (One-to-Many)</h6>
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Listen Address</label>
+                                <input type="text" class="form-control" name="srt_listen_address"
+                                       value="0.0.0.0" placeholder="0.0.0.0">
+                                <small class="text-muted">0.0.0.0 = all interfaces</small>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">SRT Port <span class="text-danger">*</span></label>
+                                <input type="number" class="form-control" name="srt_port" id="srtPort"
+                                       value="4900" min="1024" max="65535">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Max Clients</label>
+                                <input type="number" class="form-control" name="srt_max_clients"
+                                       value="10" min="1" max="100">
+                            </div>
                         </div>
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">SRT Port <span class="text-danger">*</span></label>
-                            <input type="number" class="form-control" name="srt_port"
-                                   value="4900" min="1024" max="65535" required>
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Latency (ms)</label>
+                                <input type="number" class="form-control" name="srt_latency"
+                                       value="120" min="20" max="8000">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Stream ID (optional)</label>
+                                <input type="text" class="form-control" name="srt_streamid" placeholder="">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Key Length</label>
+                                <select class="form-select" name="srt_pbkeylen">
+                                    <option value="0">No Encryption</option>
+                                    <option value="16">AES-128</option>
+                                    <option value="24">AES-192</option>
+                                    <option value="32">AES-256</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">Max Clients</label>
-                            <input type="number" class="form-control" name="srt_max_clients"
-                                   value="10" min="1" max="100">
+                        <div class="row">
+                            <div class="col-md-12 mb-3">
+                                <label class="form-label">Encryption Passphrase (optional)</label>
+                                <input type="password" class="form-control" name="srt_passphrase"
+                                       placeholder="Leave empty for no encryption">
+                            </div>
                         </div>
                     </div>
-                    <div class="row">
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">Latency (ms)</label>
-                            <input type="number" class="form-control" name="srt_latency"
-                                   value="120" min="20" max="8000">
+
+                    <!-- RIST Output Section -->
+                    <div id="ristSection" style="display: none;">
+                        <hr>
+                        <h6><i class="bi bi-arrow-repeat me-2"></i>RIST Output</h6>
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Mode</label>
+                                <select class="form-select" name="rist_mode" id="ristMode">
+                                    <option value="caller">Caller (push to receiver)</option>
+                                    <option value="listener">Listener (receiver connects)</option>
+                                </select>
+                                <small class="text-muted">Caller pushes, Listener waits</small>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Destination Address <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" name="rist_address" id="ristAddress"
+                                       placeholder="192.168.1.100">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">RIST Port <span class="text-danger">*</span></label>
+                                <input type="number" class="form-control" name="rist_port" id="ristPort"
+                                       value="5001" min="1024" max="65535">
+                            </div>
                         </div>
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">Stream ID (optional)</label>
-                            <input type="text" class="form-control" name="srt_streamid" placeholder="">
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Profile</label>
+                                <select class="form-select" name="rist_profile">
+                                    <option value="0">Simple</option>
+                                    <option value="1" selected>Main</option>
+                                    <option value="2">Advanced</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Buffer (ms)</label>
+                                <input type="number" class="form-control" name="rist_buffer"
+                                       value="250" min="0" max="10000">
+                                <small class="text-muted">Retransmission buffer</small>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Encryption</label>
+                                <select class="form-select" name="rist_encryption" id="ristEncryption" onchange="toggleRistSecret()">
+                                    <option value="0">None</option>
+                                    <option value="128">AES-128</option>
+                                    <option value="256">AES-256</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Congestion Ctrl</label>
+                                <select class="form-select" name="rist_congestion">
+                                    <option value="0">Disabled</option>
+                                    <option value="1" selected>Normal</option>
+                                    <option value="2">Aggressive</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="col-md-4 mb-3">
-                            <label class="form-label">Key Length</label>
-                            <select class="form-select" name="srt_pbkeylen">
-                                <option value="0">No Encryption</option>
-                                <option value="16">AES-128</option>
-                                <option value="24">AES-192</option>
-                                <option value="32">AES-256</option>
-                            </select>
+                        <div class="row" id="ristSecretRow" style="display: none;">
+                            <div class="col-md-12 mb-3">
+                                <label class="form-label">Encryption Secret</label>
+                                <input type="password" class="form-control" name="rist_secret"
+                                       placeholder="Encryption passphrase">
+                            </div>
                         </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-12 mb-3">
-                            <label class="form-label">Encryption Passphrase (optional)</label>
-                            <input type="password" class="form-control" name="srt_passphrase"
-                                   placeholder="Leave empty for no encryption">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Stream Name (cname)</label>
+                                <input type="text" class="form-control" name="rist_cname"
+                                       placeholder="Optional stream identifier">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Bandwidth Limit (Kbps)</label>
+                                <input type="number" class="form-control" name="rist_bandwidth"
+                                       value="0" min="0">
+                                <small class="text-muted">0 = unlimited</small>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Options</label>
+                                <div class="form-check mt-2">
+                                    <input class="form-check-input" type="checkbox" name="rist_npd" value="1" id="ristNpd">
+                                    <label class="form-check-label" for="ristNpd">
+                                        Null Packet Deletion
+                                    </label>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -637,12 +875,190 @@ function editOutput(id) {
     window.location.href = `outputs-edit.php?id=${id}`;
 }
 
+// RIST Stats Modal
+let ristStatsRefreshInterval = null;
+
+function showRistStatsModal(id, name) {
+    currentOutputId = id;
+    document.getElementById('ristStatsOutputId').value = id;
+    document.getElementById('ristStatsOutputName').textContent = name;
+
+    new bootstrap.Modal(document.getElementById('ristStatsModal')).show();
+    refreshRistStats();
+    startRistStatsAutoRefresh();
+}
+
+async function refreshRistStats() {
+    const id = document.getElementById('ristStatsOutputId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=rist_metrics&id=${id}`);
+        const data = await response.json();
+
+        if (data.success) {
+            renderRistStats(data.metrics || {});
+        } else {
+            document.getElementById('ristPeersTableBody').innerHTML = `
+                <tr><td colspan="7" class="text-center py-3 text-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i>${data.error}
+                </td></tr>`;
+        }
+    } catch (e) {
+        console.error('Failed to get RIST stats:', e);
+        document.getElementById('ristPeersTableBody').innerHTML = `
+            <tr><td colspan="7" class="text-center py-3 text-danger">
+                <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
+            </td></tr>`;
+    }
+}
+
+function renderRistStats(metrics) {
+    // Extract key metrics from the grouped data
+    let bitrate = '-';
+    let rtt = '-';
+    let lost = 0;
+    let retrans = 0;
+    let sent = 0;
+    let bytes = 0;
+    let recovered = 0;
+    let notRecovered = 0;
+
+    // Parse sender metrics
+    (metrics.sender || []).forEach(m => {
+        if (m.name === 'rist_sender_bandwidth') bitrate = (m.value / 1000000).toFixed(2) + ' Mbps';
+    });
+
+    // Parse peer metrics
+    const peers = [];
+    const peerMetrics = {};
+    (metrics.peer || []).forEach(m => {
+        const peer = m.labels.peer || 'unknown';
+        if (!peerMetrics[peer]) peerMetrics[peer] = {};
+        peerMetrics[peer][m.name] = m.value;
+    });
+
+    Object.entries(peerMetrics).forEach(([peer, pm]) => {
+        const peerRtt = pm.rist_peer_rtt || 0;
+        const peerSent = pm.rist_peer_sent || 0;
+        const peerRecv = pm.rist_peer_received || 0;
+        const peerRetx = pm.rist_peer_retransmitted || 0;
+        const peerQuality = pm.rist_peer_quality || 100;
+        const peerState = pm.rist_peer_state || 0;
+
+        rtt = peerRtt.toFixed(1) + ' ms';
+        retrans += peerRetx;
+
+        peers.push({
+            name: peer,
+            state: peerState === 1 ? 'Connected' : 'Disconnected',
+            rtt: peerRtt.toFixed(1),
+            sent: peerSent,
+            received: peerRecv,
+            retransmit: peerRetx,
+            quality: peerQuality.toFixed(1)
+        });
+    });
+
+    // Parse flow metrics
+    (metrics.flow || []).forEach(m => {
+        if (m.name === 'rist_flow_sent') sent = m.value;
+        if (m.name === 'rist_flow_sent_bytes') bytes = m.value;
+        if (m.name === 'rist_flow_recovered') recovered = m.value;
+        if (m.name === 'rist_flow_not_recovered') { notRecovered = m.value; lost = m.value; }
+    });
+
+    // Update summary cards
+    document.getElementById('ristBitrate').textContent = bitrate;
+    document.getElementById('ristRtt').textContent = rtt;
+    document.getElementById('ristLost').textContent = lost.toLocaleString();
+    document.getElementById('ristRetrans').textContent = retrans.toLocaleString();
+
+    // Update flow stats
+    document.getElementById('ristFlowSent').textContent = sent.toLocaleString();
+    document.getElementById('ristFlowBytes').textContent = formatBytes(bytes);
+    document.getElementById('ristFlowRecovered').textContent = recovered.toLocaleString();
+    document.getElementById('ristFlowNotRecovered').textContent = notRecovered.toLocaleString();
+
+    // Render peers table
+    const tbody = document.getElementById('ristPeersTableBody');
+    if (peers.length === 0) {
+        tbody.innerHTML = `
+            <tr><td colspan="7" class="text-center py-3 text-muted">
+                <i class="bi bi-diagram-3 me-2"></i>No peer connections
+            </td></tr>`;
+    } else {
+        let html = '';
+        peers.forEach(p => {
+            const stateClass = p.state === 'Connected' ? 'text-success' : 'text-danger';
+            html += `
+                <tr>
+                    <td><code>${p.name}</code></td>
+                    <td><span class="${stateClass}">${p.state}</span></td>
+                    <td>${p.rtt} ms</td>
+                    <td>${p.sent.toLocaleString()}</td>
+                    <td>${p.received.toLocaleString()}</td>
+                    <td>${p.retransmit.toLocaleString()}</td>
+                    <td>${p.quality}%</td>
+                </tr>`;
+        });
+        tbody.innerHTML = html;
+    }
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function startRistStatsAutoRefresh() {
+    stopRistStatsAutoRefresh();
+    ristStatsRefreshInterval = setInterval(refreshRistStats, 5000);
+}
+
+function stopRistStatsAutoRefresh() {
+    if (ristStatsRefreshInterval) {
+        clearInterval(ristStatsRefreshInterval);
+        ristStatsRefreshInterval = null;
+    }
+}
+
+document.getElementById('ristStatsModal').addEventListener('hidden.bs.modal', function() {
+    stopRistStatsAutoRefresh();
+});
+
+// Output Type Toggle
+function toggleOutputType() {
+    const type = document.getElementById('outputTypeSelect').value;
+    document.getElementById('outputType').value = type;
+
+    if (type === 'rist') {
+        document.getElementById('srtSection').style.display = 'none';
+        document.getElementById('ristSection').style.display = 'block';
+    } else {
+        document.getElementById('srtSection').style.display = 'block';
+        document.getElementById('ristSection').style.display = 'none';
+    }
+
+    updateServiceNamePreview();
+    validateName();
+}
+
+function toggleRistSecret() {
+    const encryption = document.getElementById('ristEncryption').value;
+    document.getElementById('ristSecretRow').style.display = encryption !== '0' ? 'block' : 'none';
+}
+
 // Add Output Modal functions
 function updateServiceNamePreview() {
     const name = document.getElementById('outputName').value;
+    const type = document.getElementById('outputTypeSelect').value;
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const preview = document.getElementById('serviceNamePreview');
-    preview.textContent = id ? id + '-output-srt' : '-';
+    preview.textContent = id ? id + '-output-' + type : '-';
 }
 
 function loadSources() {
@@ -706,6 +1122,7 @@ function validateName() {
     const name = nameInput.value.trim();
     const validation = document.getElementById('nameValidation');
     const createBtn = document.getElementById('createBtn');
+    const type = document.getElementById('outputTypeSelect').value;
 
     if (!name) {
         validation.textContent = '';
@@ -717,7 +1134,7 @@ function validateName() {
 
     clearTimeout(validateTimeout);
     validateTimeout = setTimeout(() => {
-        fetch(`api/outputs.php?action=check_name&name=${encodeURIComponent(name)}&type=srt`)
+        fetch(`api/outputs.php?action=check_name&name=${encodeURIComponent(name)}&type=${type}`)
             .then(r => r.json())
             .then(data => {
                 if (data.available) {
@@ -775,6 +1192,11 @@ document.getElementById('addOutputModal').addEventListener('show.bs.modal', func
     document.getElementById('outputName').classList.remove('is-valid', 'is-invalid');
     document.getElementById('createBtn').disabled = false;
     document.getElementById('sourceSelect').value = '';
+    document.getElementById('outputTypeSelect').value = 'srt';
+    document.getElementById('outputType').value = 'srt';
+    document.getElementById('srtSection').style.display = 'block';
+    document.getElementById('ristSection').style.display = 'none';
+    document.getElementById('ristSecretRow').style.display = 'none';
     nameValid = false;
     updateServiceNamePreview();
     loadSources();
