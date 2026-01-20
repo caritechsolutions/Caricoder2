@@ -31,7 +31,7 @@ SERVICE_USER="caritrans"
 WEB_USER="www-data"
 REPO_URL="https://github.com/caritechsolutions/Caricoder2"
 # Updated: 2026-01-20
-BRANCH="claude/ABR-transcoder-DH9tM"
+BRANCH="claude/implement-transcoder-output-8LaWa"
 GSTREAMER_VERSION="1.26.1"
 
 # Parse arguments
