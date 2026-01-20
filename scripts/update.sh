@@ -464,6 +464,18 @@ rebuild_apps() {
 build_tools() {
     log_step "Building tools..."
 
+    # Build common library first (required by src/* applications)
+    if [[ -d "$TEMP_DIR/caritrans_latest/src/common" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/src/common"
+        log_info "Building common library..."
+        make clean 2>/dev/null || true
+        if make; then
+            log_info "Common library built successfully"
+        else
+            log_warn "Failed to build common library"
+        fi
+    fi
+
     # Build udp_input
     if [[ -d "$TEMP_DIR/caritrans_latest/tools/udp_input" ]]; then
         cd "$TEMP_DIR/caritrans_latest/tools/udp_input"
