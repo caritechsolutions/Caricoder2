@@ -22,6 +22,7 @@ set_error_handler(function($errno, $errstr, $errfile, $errline) {
 });
 
 define('CARITRANS', true);
+define('CARI_API_URL', 'http://127.0.0.1:8081');
 require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/functions.php';
@@ -262,11 +263,10 @@ function get_output_config($id) {
 }
 
 /**
- * Generate systemd service file for output
+ * Generate systemd service file for output via backend API
  */
 function generate_output_service_file($id, $type, $name) {
     $service_name = $id . '-output-' . $type;
-    $service_path = '/etc/systemd/system/' . $service_name . '.service';
 
     $service_content = <<<EOT
 [Unit]
@@ -284,10 +284,9 @@ Group=caritrans
 Environment="CONFIG_DIR=/etc/caritrans"
 Environment="RUN_DIR=/run/caritrans"
 Environment="LOG_DIR=/var/log/caritrans"
-Environment="GST_PLUGIN_PATH=/usr/lib/gstreamer-1.0"
 
 # Main process
-ExecStart=/usr/local/bin/cari-output --config \${CONFIG_DIR}/outputs/{$id}.conf
+ExecStart=/usr/local/bin/cari-output --config /etc/caritrans/outputs/{$id}.conf
 ExecReload=/bin/kill -HUP \$MAINPID
 
 # Restart behavior
@@ -322,36 +321,34 @@ SyslogIdentifier={$service_name}
 WantedBy=multi-user.target
 EOT;
 
-    // Write service file
-    $cmd = "echo " . escapeshellarg($service_content) . " | sudo tee " . escapeshellarg($service_path) . " > /dev/null 2>&1";
-    shell_exec($cmd);
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
 
-    // Reload systemd
-    shell_exec("sudo /bin/systemctl daemon-reload 2>&1");
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
 
+    // Log error but still return service name
+    error_log("Failed to create service file: " . json_encode($result));
     return $service_name;
 }
 
 /**
- * Delete systemd service file for output
+ * Delete systemd service file for output via backend API
  */
 function delete_output_service_file($id, $type) {
     $service_name = $id . '-output-' . $type;
-    $service_path = '/etc/systemd/system/' . $service_name . '.service';
 
-    if (file_exists($service_path)) {
-        // Stop and disable service first
-        shell_exec("sudo /bin/systemctl stop " . escapeshellarg($service_name) . " 2>&1");
-        shell_exec("sudo /bin/systemctl disable " . escapeshellarg($service_name) . " 2>&1");
+    // Use backend API to delete service file
+    $result = call_cari_api('/service/file/delete', 'POST', [
+        'service_name' => $service_name,
+        'content' => ''  // Not needed for delete but required by model
+    ]);
 
-        // Remove service file
-        shell_exec("sudo rm -f " . escapeshellarg($service_path) . " 2>&1");
-
-        // Reload systemd
-        shell_exec("sudo /bin/systemctl daemon-reload 2>&1");
-    }
-
-    return true;
+    return isset($result['success']) && $result['success'];
 }
 
 /**
@@ -555,7 +552,36 @@ function delete_output($id) {
 }
 
 /**
- * Start output service
+ * Call the CariTranscoder backend API
+ */
+function call_cari_api($endpoint, $method = 'GET', $data = null) {
+    $url = CARI_API_URL . $endpoint;
+
+    $options = [
+        'http' => [
+            'method' => $method,
+            'timeout' => 10,
+            'ignore_errors' => true,
+            'header' => "Content-Type: application/json\r\n"
+        ]
+    ];
+
+    if ($data !== null && in_array($method, ['POST', 'PUT', 'PATCH'])) {
+        $options['http']['content'] = json_encode($data);
+    }
+
+    $context = stream_context_create($options);
+    $response = @file_get_contents($url, false, $context);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Failed to connect to CariTranscoder API'];
+    }
+
+    return json_decode($response, true) ?: ['success' => false, 'error' => 'Invalid API response'];
+}
+
+/**
+ * Start output service via backend API
  */
 function start_output_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -565,53 +591,45 @@ function start_output_service($id) {
         return ['success' => false, 'error' => 'Output not found'];
     }
 
-    $service_name = get_output_service_name($id);
-    if (!$service_name) {
-        return ['success' => false, 'error' => 'Cannot determine service name'];
-    }
+    $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
 
-    $cmd = "sudo /bin/systemctl start " . escapeshellarg($service_name) . " 2>&1";
-    $output = shell_exec($cmd);
+    // Call backend API to start service
+    $result = call_cari_api("/output/{$id}/start?output_type={$type}", 'POST');
 
-    // Check if started
-    usleep(500000);
-    $status_cmd = "systemctl is-active " . escapeshellarg($service_name) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
-
-    if ($status === 'active') {
+    if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output started'];
-    } else {
-        return ['success' => false, 'error' => 'Failed to start output: ' . ($output ?: 'Unknown error')];
     }
+
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to start output'];
 }
 
 /**
- * Stop output service
+ * Stop output service via backend API
  */
 function stop_output_service($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
 
-    $service_name = get_output_service_name($id);
-    if (!$service_name) {
+    if (!file_exists($config_file)) {
         return ['success' => true, 'message' => 'No service to stop'];
     }
 
-    $cmd = "sudo /bin/systemctl stop " . escapeshellarg($service_name) . " 2>&1";
-    shell_exec($cmd);
+    $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
 
-    usleep(500000);
-    $status_cmd = "systemctl is-active " . escapeshellarg($service_name) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Call backend API to stop service
+    $result = call_cari_api("/output/{$id}/stop?output_type={$type}", 'POST');
 
-    if ($status !== 'active') {
+    if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output stopped'];
-    } else {
-        return ['success' => false, 'error' => 'Failed to stop output'];
     }
+
+    return ['success' => false, 'error' => $result['error'] ?? $result['stderr'] ?? 'Failed to stop output'];
 }
 
 /**
- * Get output status
+ * Get output status via backend API
  */
 function get_output_status($id) {
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -622,18 +640,21 @@ function get_output_status($id) {
     }
 
     $config = parse_config($config_file);
+    $type = $config['output']['type'] ?? 'srt';
     $service_name = get_output_service_name($id);
 
-    $status_cmd = "systemctl is-active " . escapeshellarg($service_name) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Call backend API to get status
+    $result = call_cari_api("/output/{$id}/status?output_type={$type}", 'GET');
+
+    $is_active = isset($result['active']) && $result['active'];
 
     return [
         'success' => true,
         'id' => $id,
         'name' => $config['output']['name'] ?? $id,
-        'type' => $config['output']['type'] ?? 'udp',
+        'type' => $type,
         'service_name' => $service_name,
-        'status' => $status === 'active' ? 'running' : 'stopped'
+        'status' => $is_active ? 'running' : 'stopped'
     ];
 }
 
@@ -652,8 +673,9 @@ function get_output_metrics($id) {
     $type = $config['output']['type'] ?? 'udp';
     $service_name = get_output_service_name($id);
 
-    $status_cmd = "systemctl is-active " . escapeshellarg($service_name) . " 2>&1";
-    $status = trim(shell_exec($status_cmd));
+    // Get status via backend API
+    $result = call_cari_api("/output/{$id}/status?output_type={$type}", 'GET');
+    $is_active = isset($result['active']) && $result['active'];
 
     return [
         'success' => true,
@@ -661,6 +683,6 @@ function get_output_metrics($id) {
         'name' => $config['output']['name'] ?? $id,
         'type' => $type,
         'service_name' => $service_name,
-        'status' => $status === 'active' ? 'running' : 'stopped'
+        'status' => $is_active ? 'running' : 'stopped'
     ];
 }

@@ -1445,9 +1445,11 @@ async def rist_input_status(input_id: str):
 async def create_service_file(service: ServiceFile):
     """Create a generic systemd service file"""
 
-    # Security: only allow cari-* services
-    if not service.service_name.startswith("cari-"):
-        raise HTTPException(status_code=403, detail="Can only create cari-* services")
+    # Security: only allow cari-* services and output services (*-output-*)
+    is_cari_service = service.service_name.startswith("cari-")
+    is_output_service = "-output-" in service.service_name
+    if not (is_cari_service or is_output_service):
+        raise HTTPException(status_code=403, detail="Can only create cari-* or *-output-* services")
 
     service_file = f"{SYSTEMD_DIR}/{service.service_name}.service"
 
@@ -1464,6 +1466,40 @@ async def create_service_file(service: ServiceFile):
         }
     except Exception as e:
         logger.error(f"Failed to create service file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/service/file/delete")
+async def delete_service_file(service: ServiceFile):
+    """Delete a systemd service file"""
+
+    # Security: only allow cari-* services and output services (*-output-*)
+    is_cari_service = service.service_name.startswith("cari-")
+    is_output_service = "-output-" in service.service_name
+    if not (is_cari_service or is_output_service):
+        raise HTTPException(status_code=403, detail="Can only delete cari-* or *-output-* services")
+
+    service_file = f"{SYSTEMD_DIR}/{service.service_name}.service"
+
+    try:
+        if os.path.exists(service_file):
+            # Stop and disable service first
+            run_systemctl("stop", f"{service.service_name}.service")
+            run_systemctl("disable", f"{service.service_name}.service")
+
+            # Remove service file
+            os.remove(service_file)
+            logger.info(f"Deleted service file: {service_file}")
+
+            # Reload systemd
+            daemon_reload()
+
+        return {
+            "success": True,
+            "service_file": service_file
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete service file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2427,6 +2463,70 @@ async def transcoder_status(transcoder_id: str):
     """Get transcoder service status"""
     service_name = f"cari-transcoder@{transcoder_id}.service"
     return get_service_status(service_name)
+
+
+# ----------------------------------------------------------------------------
+# Output Operations
+# ----------------------------------------------------------------------------
+
+@app.post("/output/{output_id}/start")
+async def start_output(output_id: str, output_type: str = "srt"):
+    """Start an output service"""
+    # Service name format: {id}-output-{type}
+    service_name = f"{output_id}-output-{output_type}.service"
+
+    service_file = f"{SYSTEMD_DIR}/{service_name}"
+    if not os.path.exists(service_file):
+        return {
+            "success": False,
+            "service": service_name,
+            "error": f"Service file not found: {service_file}"
+        }
+
+    result = run_systemctl("start", service_name)
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.post("/output/{output_id}/stop")
+async def stop_output(output_id: str, output_type: str = "srt"):
+    """Stop an output service"""
+    service_name = f"{output_id}-output-{output_type}.service"
+    result = run_systemctl("stop", service_name)
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.post("/output/{output_id}/restart")
+async def restart_output(output_id: str, output_type: str = "srt"):
+    """Restart an output service"""
+    service_name = f"{output_id}-output-{output_type}.service"
+    result = run_systemctl("restart", service_name)
+    return {
+        "success": result.get("success", False),
+        "service": service_name,
+        **result
+    }
+
+
+@app.get("/output/{output_id}/status")
+async def get_output_status(output_id: str, output_type: str = "srt"):
+    """Get status of an output service"""
+    service_name = f"{output_id}-output-{output_type}.service"
+    result = run_systemctl("is-active", service_name)
+    is_active = result.get("stdout", "").strip() == "active"
+    return {
+        "service": service_name,
+        "active": is_active,
+        "status": result.get("stdout", "").strip(),
+        **result
+    }
 
 
 # ----------------------------------------------------------------------------
