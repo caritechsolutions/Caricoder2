@@ -715,6 +715,17 @@ async def health():
 # Service Management
 # ----------------------------------------------------------------------------
 
+def is_allowed_service(service_name: str) -> bool:
+    """Check if service name is allowed to be controlled"""
+    # Allow cari-* services (muxers, transcoders, inputs)
+    if service_name.startswith("cari-"):
+        return True
+    # Allow *-output-* services (SRT outputs)
+    if "-output-" in service_name:
+        return True
+    return False
+
+
 @app.post("/service/control")
 async def control_service(action: ServiceAction):
     """Control a systemd service (start, stop, restart, status)"""
@@ -723,9 +734,9 @@ async def control_service(action: ServiceAction):
     if action.action not in valid_actions:
         raise HTTPException(status_code=400, detail=f"Invalid action. Must be one of: {valid_actions}")
 
-    # Security: only allow cari-* services
-    if not action.service_name.startswith("cari-"):
-        raise HTTPException(status_code=403, detail="Can only control cari-* services")
+    # Security: only allow cari-* and *-output-* services
+    if not is_allowed_service(action.service_name):
+        raise HTTPException(status_code=403, detail="Can only control cari-* or *-output-* services")
 
     logger.info(f"Service control: {action.action} {action.service_name}")
 
@@ -743,8 +754,8 @@ async def control_service(action: ServiceAction):
 @app.get("/service/status/{service_name}")
 async def service_status(service_name: str):
     """Get status of a specific service"""
-    if not service_name.startswith("cari-"):
-        raise HTTPException(status_code=403, detail="Can only query cari-* services")
+    if not is_allowed_service(service_name):
+        raise HTTPException(status_code=403, detail="Can only query cari-* or *-output-* services")
 
     return get_service_status(service_name)
 
