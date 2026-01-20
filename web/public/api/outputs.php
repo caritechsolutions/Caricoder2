@@ -507,7 +507,7 @@ function create_rist_output($data, $id, $name, $service_name) {
         ],
         'destination_rist' => [
             'mode' => $data['rist_mode'] ?? 'caller',
-            'address' => $data['rist_address'] ?? '',
+            'address' => ltrim($data['rist_address'] ?? '', '@'), // Strip any leading @
             'port' => $data['rist_port'] ?? '5001',
             'profile' => $data['rist_profile'] ?? '1',
             'buffer' => $data['rist_buffer'] ?? '250',
@@ -521,16 +521,29 @@ function create_rist_output($data, $id, $name, $service_name) {
         ]
     ];
 
+    // Ensure outputs directory exists
+    $output_dir = CONFIG_PATH . '/outputs';
+    if (!is_dir($output_dir)) {
+        if (!mkdir($output_dir, 0755, true)) {
+            return ['success' => false, 'error' => 'Failed to create outputs directory'];
+        }
+    }
+
     // Save configuration
-    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+    $config_file = $output_dir . '/' . $id . '.conf';
     if (!save_config($config_file, $config)) {
-        return ['success' => false, 'error' => 'Failed to save configuration'];
+        return ['success' => false, 'error' => 'Failed to save configuration to: ' . $config_file];
+    }
+
+    // Verify config was saved
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Config file not created: ' . $config_file];
     }
 
     // Generate systemd service file for ristsender
     generate_rist_service_file($id, $name, $config);
 
-    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'message' => 'RIST output created successfully'];
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'config_file' => $config_file, 'message' => 'RIST output created successfully'];
 }
 
 /**
@@ -562,7 +575,7 @@ function generate_rist_service_file($id, $name, $config) {
 
     // Output URL
     $mode = $dest['mode'] ?? 'caller';
-    $rist_addr = $dest['address'] ?? '';
+    $rist_addr = ltrim($dest['address'] ?? '', '@'); // Strip any leading @ from address
     $rist_port = $dest['port'] ?? '5001';
     $profile = $dest['profile'] ?? '1';
     $buffer = $dest['buffer'] ?? '250';
@@ -706,7 +719,7 @@ function update_output($id, $data) {
 
         if (!isset($config['destination_rist'])) $config['destination_rist'] = [];
         if (isset($data['rist_mode'])) $config['destination_rist']['mode'] = $data['rist_mode'];
-        if (isset($data['rist_address'])) $config['destination_rist']['address'] = $data['rist_address'];
+        if (isset($data['rist_address'])) $config['destination_rist']['address'] = ltrim($data['rist_address'], '@');
         if (!empty($data['rist_port'])) $config['destination_rist']['port'] = $data['rist_port'];
         if (isset($data['rist_profile'])) $config['destination_rist']['profile'] = $data['rist_profile'];
         if (isset($data['rist_buffer'])) $config['destination_rist']['buffer'] = $data['rist_buffer'];
