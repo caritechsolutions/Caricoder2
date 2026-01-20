@@ -328,6 +328,7 @@ function get_output_config($id) {
  */
 function generate_output_service_file($id, $type, $name) {
     $service_name = $id . '-output-' . $type;
+    $config_path = CONFIG_PATH . '/outputs/' . $id . '.conf';
 
     $service_content = <<<EOT
 [Unit]
@@ -338,42 +339,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=caritrans
-Group=caritrans
+User=root
+Group=root
 
-# Configuration
-Environment="CONFIG_DIR=/etc/caritrans"
-Environment="RUN_DIR=/run/caritrans"
-Environment="LOG_DIR=/var/log/caritrans"
-
-# Main process
-ExecStart=/usr/local/bin/cari-output --config /etc/caritrans/outputs/{$id}.conf
+ExecStart=/usr/local/bin/cari-output --config {$config_path}
 ExecReload=/bin/kill -HUP \$MAINPID
 
-# Restart behavior
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Watchdog
-WatchdogSec=30
-
-# Resource limits
 LimitNOFILE=65535
 LimitNPROC=4096
 
-# Security
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/run/caritrans /var/log/caritrans /dev/shm
-
-# Network capabilities for multicast
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
-
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier={$service_name}
