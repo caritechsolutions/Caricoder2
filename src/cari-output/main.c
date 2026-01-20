@@ -44,6 +44,19 @@ typedef struct {
     uint64_t packets_sent;
     uint64_t send_errors;
     bool active;
+
+    /* SRT statistics (updated periodically) */
+    double rtt_ms;              /* Round-trip time in ms */
+    double bandwidth_mbps;      /* Estimated bandwidth in Mbps */
+    double send_rate_mbps;      /* Actual send rate in Mbps */
+    int negotiated_latency_ms;  /* Negotiated latency in ms */
+    int64_t packets_lost;       /* Packets lost (reported by receiver) */
+    int64_t packets_retrans;    /* Packets retransmitted */
+    int64_t packets_dropped;    /* Packets dropped (too late) */
+    int flight_size;            /* Packets in flight */
+    int send_buffer_ms;         /* Send buffer level in ms */
+    int congestion_window;      /* Congestion window size */
+    int64_t bytes_acked;        /* Total bytes acknowledged */
 } srt_client_t;
 
 /* Output state */
@@ -367,8 +380,23 @@ static void remove_srt_client(output_state_t *state, int slot) {
     if (slot >= 0 && slot < MAX_SRT_CLIENTS && state->srt_clients[slot].active) {
         srt_client_t *client = &state->srt_clients[slot];
 
-        CARI_LOG_INFO("SRT client disconnected: %s (sent %lu packets, %lu errors)",
-                      client->addr_str, client->packets_sent, client->send_errors);
+        /* Get final statistics before disconnecting */
+        SRT_TRACEBSTATS stats;
+        memset(&stats, 0, sizeof(stats));
+        srt_bstats(client->socket, &stats, 0);
+
+        /* Calculate connection duration */
+        time_t duration = time(NULL) - client->connected_at;
+        int hours = duration / 3600;
+        int mins = (duration % 3600) / 60;
+        int secs = duration % 60;
+
+        CARI_LOG_INFO("SRT client disconnected: %s", client->addr_str);
+        CARI_LOG_INFO("  Final stats: Duration=%02d:%02d:%02d, Sent=%lu pkts, Errs=%lu",
+                      hours, mins, secs, client->packets_sent, client->send_errors);
+        CARI_LOG_INFO("  SRT stats: RTT=%.1fms, Lost=%ld, Retrans=%ld, Dropped=%ld",
+                      stats.msRTT, (long)stats.pktSndLossTotal,
+                      (long)stats.pktRetransTotal, (long)stats.pktSndDropTotal);
 
         /* Remove from epoll before closing */
         srt_epoll_remove_usock(state->srt_epoll, client->socket);
@@ -404,6 +432,64 @@ static void check_client_connections(output_state_t *state) {
             remove_srt_client(state, i);
             pthread_mutex_lock(&state->srt_clients_lock);
         }
+    }
+
+    pthread_mutex_unlock(&state->srt_clients_lock);
+}
+
+/* Update SRT statistics for a client */
+static void update_client_stats(srt_client_t *client) {
+    SRT_TRACEBSTATS stats;
+    memset(&stats, 0, sizeof(stats));
+
+    /* Get statistics (clear=0 to keep accumulating, instantaneous=1 for current values) */
+    if (srt_bstats(client->socket, &stats, 0) == 0) {
+        client->rtt_ms = stats.msRTT;
+        client->bandwidth_mbps = stats.mbpsBandwidth;
+        client->send_rate_mbps = stats.mbpsSendRate;
+        client->negotiated_latency_ms = stats.msSndTsbPdDelay;
+        client->packets_lost = stats.pktSndLossTotal;
+        client->packets_retrans = stats.pktRetransTotal;
+        client->packets_dropped = stats.pktSndDropTotal;
+        client->flight_size = stats.pktFlightSize;
+        client->send_buffer_ms = stats.msSndBuf;
+        client->congestion_window = stats.pktCongestionWindow;
+        client->bytes_acked = stats.byteRecvTotal;  /* bytes received by peer (ACKed) */
+    }
+}
+
+/* Log detailed statistics for all clients */
+static void log_client_stats(output_state_t *state) {
+    pthread_mutex_lock(&state->srt_clients_lock);
+
+    for (int i = 0; i < MAX_SRT_CLIENTS; i++) {
+        if (!state->srt_clients[i].active) continue;
+
+        srt_client_t *client = &state->srt_clients[i];
+        update_client_stats(client);
+
+        /* Calculate connection duration */
+        time_t duration = time(NULL) - client->connected_at;
+        int hours = duration / 3600;
+        int mins = (duration % 3600) / 60;
+        int secs = duration % 60;
+
+        CARI_LOG_INFO("  Client[%d] %s: RTT=%.1fms, Latency=%dms, BW=%.1f/%.1f Mbps, "
+                      "Lost=%ld, Retrans=%ld, Drop=%ld, Flight=%d, Buf=%dms, "
+                      "Sent=%lu pkts, Errs=%lu, Time=%02d:%02d:%02d",
+                      i, client->addr_str,
+                      client->rtt_ms,
+                      client->negotiated_latency_ms,
+                      client->send_rate_mbps,
+                      client->bandwidth_mbps,
+                      (long)client->packets_lost,
+                      (long)client->packets_retrans,
+                      (long)client->packets_dropped,
+                      client->flight_size,
+                      client->send_buffer_ms,
+                      client->packets_sent,
+                      client->send_errors,
+                      hours, mins, secs);
     }
 
     pthread_mutex_unlock(&state->srt_clients_lock);
@@ -691,6 +777,12 @@ int main(int argc, char *argv[]) {
             CARI_LOG_INFO("Stats: recv=%lu pkts, sent=%lu pkts, %.2f Mbps, %d clients",
                           g_state.packets_received, g_state.packets_sent,
                           mbps, g_state.srt_client_count);
+
+            /* Log detailed per-client statistics if clients are connected */
+            if (g_state.srt_client_count > 0) {
+                log_client_stats(&g_state);
+            }
+
             g_state.stats_bytes_since_report = 0;
             g_state.stats_last_report = now;
         }
