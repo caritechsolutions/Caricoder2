@@ -47,6 +47,26 @@ include __DIR__ . '/../templates/header.php';
 ?>
 
 <div class="container-fluid py-4">
+    <!-- DEBUG: Output data inspection -->
+    <div class="alert alert-warning mb-3">
+        <strong>DEBUG INFO:</strong><br>
+        <strong>CONFIG_PATH:</strong> <?php echo CONFIG_PATH; ?><br>
+        <strong>Config files in outputs dir:</strong> <?php
+            $config_dir = CONFIG_PATH . '/outputs';
+            if (is_dir($config_dir)) {
+                $files = glob($config_dir . '/*.conf');
+                echo count($files) . ' files: ' . implode(', ', array_map('basename', $files));
+            } else {
+                echo 'Directory not found: ' . $config_dir;
+            }
+        ?><br>
+        <strong>Outputs from get_service_list:</strong> Found <?php echo count($outputs); ?> output(s)<br>
+        <?php foreach ($outputs as $o): ?>
+        <code>ID: <?php echo htmlspecialchars($o['id']); ?> | Name: <?php echo htmlspecialchars($o['name']); ?> | Type(top): <?php echo htmlspecialchars($o['type'] ?? 'null'); ?> | Type(nested): <?php echo htmlspecialchars($o['output']['type'] ?? 'null'); ?> | Resolved: <?php echo htmlspecialchars($o['resolved_type'] ?? 'null'); ?></code><br>
+        <?php endforeach; ?>
+    </div>
+    <!-- END DEBUG -->
+
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h2><i class="bi bi-upload me-2"></i>Outputs</h2>
         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addOutputModal">
@@ -662,6 +682,21 @@ let nameValid = false;
 let availableSources = [];
 let clientsRefreshInterval = null;
 let currentOutputId = null;
+
+// Debug: Log output data from PHP
+console.log('=== DEBUG: Output Data from PHP ===');
+<?php foreach ($outputs as $idx => $output): ?>
+console.log('Output <?php echo $idx; ?>:', {
+    id: '<?php echo addslashes($output['id'] ?? ''); ?>',
+    name: '<?php echo addslashes($output['name'] ?? ''); ?>',
+    type_top_level: '<?php echo addslashes($output['type'] ?? 'NOT SET'); ?>',
+    type_nested: '<?php echo addslashes($output['output']['type'] ?? 'NOT SET'); ?>',
+    resolved_type: '<?php echo addslashes($output['resolved_type'] ?? 'NOT SET'); ?>',
+    status: '<?php echo addslashes($output['status'] ?? ''); ?>',
+    config_file: '<?php echo addslashes($output['config_file'] ?? ''); ?>'
+});
+<?php endforeach; ?>
+console.log('=== END DEBUG ===');
 
 // Format duration from seconds to HH:MM:SS
 function formatDuration(seconds) {
