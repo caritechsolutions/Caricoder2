@@ -20,7 +20,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <time.h>
-#include <gst/gst.h>
 #include <srt/srt.h>
 
 #include "config.h"
@@ -577,7 +576,8 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    gst_init(&argc, &argv);
+    /* Initialize SRT library */
+    srt_startup();
 
     /* Open input buffer */
     g_state.input_buffer = ring_buffer_open(g_state.input_buffer_name, NULL, false);
@@ -655,9 +655,12 @@ int main(int argc, char *argv[]) {
 
     ring_buffer_close(g_state.input_buffer, false);
     config_free(&g_state.config);
-    log_shutdown();
+
+    /* Cleanup SRT library */
+    srt_cleanup();
 
     CARI_LOG_INFO("Shutdown complete");
+    log_shutdown();
 
     return 0;
 }

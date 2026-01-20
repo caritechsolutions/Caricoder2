@@ -4,13 +4,11 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2 -g -I../common
 LDFLAGS = -L../common -lcaricommon -lpthread -lrt -lssl -lcrypto
 
-GST_CFLAGS = $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 2>/dev/null)
-GST_LIBS = $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 2>/dev/null)
 SRT_CFLAGS = $(shell pkg-config --cflags srt 2>/dev/null)
 SRT_LIBS = $(shell pkg-config --libs srt 2>/dev/null)
 
-CFLAGS += $(GST_CFLAGS) $(SRT_CFLAGS)
-LDFLAGS += $(GST_LIBS) $(SRT_LIBS)
+CFLAGS += $(SRT_CFLAGS)
+LDFLAGS += $(SRT_LIBS)
 
 SRCS = main.c
 OBJS = $(SRCS:.c=.o)
