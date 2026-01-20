@@ -109,9 +109,9 @@ int config_load(config_t *cfg, const char *filename) {
         }
 
         config_entry_t *entry = &cfg->entries[cfg->entry_count++];
-        strncpy(entry->section, current_section, sizeof(entry->section) - 1);
-        strncpy(entry->key, key, sizeof(entry->key) - 1);
-        strncpy(entry->value, value, sizeof(entry->value) - 1);
+        snprintf(entry->section, sizeof(entry->section), "%s", current_section);
+        snprintf(entry->key, sizeof(entry->key), "%s", key);
+        snprintf(entry->value, sizeof(entry->value), "%s", value);
     }
 
     fclose(fp);

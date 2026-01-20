@@ -273,6 +273,15 @@ static int detect_stream(ServiceInput *svc) {
         free(stream_json);
         stream_pos++;
     }
+    return NULL;
+}
+
+/*
+ * Link a parser to the mux on a specific PID
+ */
+static gboolean link_parser_to_mux(GstElement *parser, int pid, const char *stream_type) {
+    char sink_pad_name[32];
+    snprintf(sink_pad_name, sizeof(sink_pad_name), "sink_%d", pid);
 
     free(output);
 
