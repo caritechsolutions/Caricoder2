@@ -667,7 +667,7 @@ Type=simple
 User=root
 Group=root
 
-ExecStart=/usr/bin/ristsender \\
+ExecStart=/usr/local/bin/ristsender \\
     {$cmd_line}
 
 Restart=always
