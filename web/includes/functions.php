@@ -174,17 +174,15 @@ function get_service_list($type) {
         // Get service status from systemd
         $status = 'stopped';
         $output = [];
-        // UDP inputs use cari-udp-{id} format, SRT inputs use cari-srt-{id}, HLS inputs use cari-hls-{id}, HTTP inputs use cari-http-{id}, RIST inputs use cari-rist-{id}, others use cari-{section}@{id}
-        if ($section === 'input' && $input_type === 'udp') {
-            $service_name = "cari-udp-{$id}";
-        } elseif ($section === 'input' && $input_type === 'srt') {
-            $service_name = "cari-srt-{$id}";
-        } elseif ($section === 'input' && $input_type === 'hls') {
-            $service_name = "cari-hls-{$id}";
-        } elseif ($section === 'input' && $input_type === 'http') {
-            $service_name = "cari-http-{$id}";
-        } elseif ($section === 'input' && $input_type === 'rist') {
-            $service_name = "cari-rist-{$id}";
+        // Service naming patterns:
+        // - Inputs: cari-{type}-{id} (e.g., cari-udp-myinput, cari-srt-myinput)
+        // - Outputs: {id}-output-{type} (e.g., myoutput-output-srt, myoutput-output-rist)
+        // - Others: cari-{section}@{id}
+        if ($section === 'input') {
+            $service_name = "cari-{$input_type}-{$id}";
+        } elseif ($section === 'output') {
+            // Output services use {id}-output-{type} naming pattern
+            $service_name = "{$id}-output-{$input_type}";
         } else {
             $service_name = "cari-{$section}@{$id}";
         }

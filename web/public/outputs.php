@@ -34,8 +34,11 @@ foreach ($outputs as &$output) {
         $output['output'] = $config['output'] ?? [];
     }
 
+    // Get type - first try from nested output config, then from top-level type field
+    $type = $output['output']['type'] ?? ($output['type'] ?? 'srt');
+    $output['resolved_type'] = $type; // Store resolved type for consistent access
+
     // Get running status
-    $type = $output['output']['type'] ?? 'srt';
     $output['status'] = get_output_status_local($output['id'], $type);
 }
 
@@ -82,7 +85,7 @@ include __DIR__ . '/../templates/header.php';
                         <?php else: ?>
                         <?php foreach ($outputs as $output): ?>
                         <?php
-                        $type = $output['output']['type'] ?? 'srt';
+                        $type = $output['resolved_type'] ?? ($output['output']['type'] ?? ($output['type'] ?? 'srt'));
                         $input_addr = $output['input']['address'] ?? '';
                         $input_port = $output['input']['port'] ?? '';
 
