@@ -149,6 +149,8 @@ void log_message(log_level_t level, const char *file, int line,
 
 void log_message_v(log_level_t level, const char *file, int line,
                    const char *func, const char *fmt, va_list args) {
+    (void)func;  /* Reserved for future use */
+
     if (level < g_config.min_level) {
         return;
     }
@@ -160,7 +162,7 @@ void log_message_v(log_level_t level, const char *file, int line,
 
     pthread_mutex_lock(&g_log_mutex);
 
-    char timestamp[32] = "";
+    char timestamp[48] = "";
     char message[4096];
     char full_message[8192];
 
