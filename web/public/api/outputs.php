@@ -641,7 +641,6 @@ function generate_rist_service_file($id, $name, $config) {
     $cmd_args[] = "--outputurl \"{$output_url}\"";
     $cmd_args[] = "--profile {$profile}";
     $cmd_args[] = "--verbose-level {$log_level}";
-    $cmd_args[] = "--statsinterval 1000";
 
     if ($npd) {
         $cmd_args[] = "--null-packet-deletion";
