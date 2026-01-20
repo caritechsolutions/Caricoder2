@@ -590,9 +590,13 @@ function start_output_service($id) {
 
     $config = parse_config($config_file);
     $type = $config['output']['type'] ?? 'srt';
+    $service_name = $id . '-output-' . $type;
 
-    // Call backend API to start service
-    $result = call_cari_api("/output/{$id}/start?output_type={$type}", 'POST');
+    // Use same endpoint as muxers
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'start',
+        'service_name' => $service_name
+    ]);
 
     if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output started'];
@@ -614,9 +618,13 @@ function stop_output_service($id) {
 
     $config = parse_config($config_file);
     $type = $config['output']['type'] ?? 'srt';
+    $service_name = $id . '-output-' . $type;
 
-    // Call backend API to stop service
-    $result = call_cari_api("/output/{$id}/stop?output_type={$type}", 'POST');
+    // Use same endpoint as muxers
+    $result = call_cari_api('/service/control', 'POST', [
+        'action' => 'stop',
+        'service_name' => $service_name
+    ]);
 
     if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output stopped'];

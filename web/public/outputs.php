@@ -12,6 +12,32 @@ require_once __DIR__ . '/../includes/functions.php';
 auth_require_login();
 
 $outputs = get_service_list('outputs');
+
+// Helper function to get output status
+function get_output_status_local($id, $type = 'srt') {
+    $service_name = "{$id}-output-{$type}.service";
+    exec("systemctl is-active " . escapeshellarg($service_name) . " 2>/dev/null", $output, $ret);
+    if ($ret === 0 && !empty($output) && trim($output[0]) === 'active') {
+        return 'running';
+    }
+    return 'stopped';
+}
+
+// Enhance output data with status and config details
+foreach ($outputs as &$output) {
+    $config_file = CONFIG_PATH . '/outputs/' . $output['id'] . '.conf';
+    if (file_exists($config_file)) {
+        $config = parse_config($config_file);
+        $output['input'] = $config['input'] ?? [];
+        $output['destination_srt'] = $config['destination_srt'] ?? [];
+        $output['output'] = $config['output'] ?? [];
+    }
+
+    // Get running status
+    $type = $output['output']['type'] ?? 'srt';
+    $output['status'] = get_output_status_local($output['id'], $type);
+}
+
 $page_title = 'Outputs';
 include __DIR__ . '/../templates/header.php';
 ?>
