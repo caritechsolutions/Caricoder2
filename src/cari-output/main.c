@@ -309,7 +309,7 @@ static void add_srt_client(output_state_t *state, SRTSOCKET sock, struct sockadd
     }
 
     if (slot < 0) {
-        CARI_LOG_WARN("No available client slots, rejecting connection");
+        CARI_LOG_WARNING("No available client slots, rejecting connection");
         srt_close(sock);
         pthread_mutex_unlock(&state->srt_clients_lock);
         return;
@@ -399,7 +399,7 @@ static void* srt_accept_thread_func(void *arg) {
 
                 if (client_sock != SRT_INVALID_SOCK) {
                     if (state->srt_client_count >= state->srt_max_clients) {
-                        CARI_LOG_WARN("Max clients reached (%d), rejecting connection",
+                        CARI_LOG_WARNING("Max clients reached (%d), rejecting connection",
                                       state->srt_max_clients);
                         srt_close(client_sock);
                     } else {
