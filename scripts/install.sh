@@ -875,7 +875,7 @@ build_tools() {
             make install
             log_info "cari-output installed to /usr/local/bin/"
         else
-            log_warn "Failed to build cari-output (SRT/GStreamer dev packages may be missing)"
+            log_warn "Failed to build cari-output (SRT dev packages may be missing)"
         fi
     fi
 
