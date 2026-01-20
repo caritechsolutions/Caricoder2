@@ -347,13 +347,17 @@ static int add_srt_client(output_state_t *state, SRTSOCKET client_sock,
         snprintf(client->addr_str, sizeof(client->addr_str), "unknown");
     }
 
+    /* Add client socket to epoll for monitoring disconnects */
+    int events = SRT_EPOLL_ERR;
+    srt_epoll_add_usock(state->srt_epoll, client_sock, &events);
+
     state->srt_client_count++;
 
     CARI_LOG_INFO("SRT client connected: %s (slot %d, total: %d)",
                   client->addr_str, slot, state->srt_client_count);
 
     pthread_mutex_unlock(&state->srt_clients_lock);
-    return 0;
+    return slot;
 }
 
 /* Remove SRT client */
@@ -366,9 +370,40 @@ static void remove_srt_client(output_state_t *state, int slot) {
         CARI_LOG_INFO("SRT client disconnected: %s (sent %lu packets, %lu errors)",
                       client->addr_str, client->packets_sent, client->send_errors);
 
+        /* Remove from epoll before closing */
+        srt_epoll_remove_usock(state->srt_epoll, client->socket);
         srt_close(client->socket);
+        client->socket = SRT_INVALID_SOCK;
         client->active = false;
         state->srt_client_count--;
+    }
+
+    pthread_mutex_unlock(&state->srt_clients_lock);
+}
+
+/* Find client slot by socket */
+static int find_client_by_socket(output_state_t *state, SRTSOCKET sock) {
+    for (int i = 0; i < MAX_SRT_CLIENTS; i++) {
+        if (state->srt_clients[i].active && state->srt_clients[i].socket == sock) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Check all client connections and remove disconnected ones */
+static void check_client_connections(output_state_t *state) {
+    pthread_mutex_lock(&state->srt_clients_lock);
+
+    for (int i = 0; i < MAX_SRT_CLIENTS; i++) {
+        if (!state->srt_clients[i].active) continue;
+
+        SRT_SOCKSTATUS status = srt_getsockstate(state->srt_clients[i].socket);
+        if (status == SRTS_BROKEN || status == SRTS_CLOSED || status == SRTS_NONEXIST) {
+            pthread_mutex_unlock(&state->srt_clients_lock);
+            remove_srt_client(state, i);
+            pthread_mutex_lock(&state->srt_clients_lock);
+        }
     }
 
     pthread_mutex_unlock(&state->srt_clients_lock);
@@ -418,12 +453,20 @@ static void *srt_accept_thread_func(void *arg) {
 
     CARI_LOG_DEBUG("SRT accept thread started");
 
+    time_t last_check = time(NULL);
+
     while (state->srt_accept_running) {
         ready_len = MAX_EPOLL_EVENTS;
         int result = srt_epoll_wait(state->srt_epoll, ready, &ready_len, NULL, NULL, 100, NULL, NULL, NULL, NULL);
 
         if (result < 0) {
             if (srt_getlasterror(NULL) == SRT_ETIMEOUT) {
+                /* Periodically check client connections every second */
+                time_t now = time(NULL);
+                if (now - last_check >= 1) {
+                    check_client_connections(state);
+                    last_check = now;
+                }
                 continue;
             }
             CARI_LOG_ERROR("SRT epoll error: %s", srt_getlasterror_str());
@@ -451,7 +494,23 @@ static void *srt_accept_thread_func(void *arg) {
                 }
 
                 add_srt_client(state, client_sock, &client_addr, addr_len);
+            } else {
+                /* Client socket event - check if it's a disconnect */
+                int slot = find_client_by_socket(state, ready[i]);
+                if (slot >= 0) {
+                    SRT_SOCKSTATUS status = srt_getsockstate(ready[i]);
+                    if (status == SRTS_BROKEN || status == SRTS_CLOSED || status == SRTS_NONEXIST) {
+                        remove_srt_client(state, slot);
+                    }
+                }
             }
+        }
+
+        /* Periodic check even when there are events */
+        time_t now = time(NULL);
+        if (now - last_check >= 1) {
+            check_client_connections(state);
+            last_check = now;
         }
     }
 
@@ -525,7 +584,12 @@ int main(int argc, char *argv[]) {
     }
 
     /* Initialize logging */
-    log_init(debug ? LOG_LEVEL_DEBUG : LOG_LEVEL_INFO, NULL);
+    log_config_t log_cfg = LOG_CONFIG_DEFAULT;
+    strncpy(log_cfg.ident, "cari-output", sizeof(log_cfg.ident));
+    if (debug) {
+        log_cfg.min_level = LOG_LEVEL_DEBUG;
+    }
+    log_init(&log_cfg);
     CARI_LOG_INFO("CariTranscoder Output v2.0.0 starting...");
 
     /* Load configuration */

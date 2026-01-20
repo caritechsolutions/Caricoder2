@@ -158,7 +158,16 @@ include __DIR__ . '/../templates/header.php';
                     <h6><i class="bi bi-arrow-down-circle me-2"></i>UDP Input (from mux/transcoder)</h6>
                     <div class="alert alert-info small mb-3">
                         <i class="bi bi-info-circle me-1"></i>
-                        Receives UDP stream from your muxer, transcoder, or input. For multicast, specify the group address.
+                        Select a source to auto-detect the UDP output, or manually configure the address and port.
+                    </div>
+                    <div class="row">
+                        <div class="col-md-12 mb-3">
+                            <label class="form-label">Source (optional)</label>
+                            <select class="form-select" id="sourceSelect">
+                                <option value="">-- Manual Configuration --</option>
+                            </select>
+                            <small class="text-muted">Select an input, transcoder, or muxer to auto-fill UDP settings</small>
+                        </div>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
@@ -254,6 +263,7 @@ include __DIR__ . '/../templates/header.php';
 
 <script>
 let nameValid = false;
+let availableSources = [];
 
 function updateServiceNamePreview() {
     const name = document.getElementById('outputName').value;
@@ -266,6 +276,107 @@ function updateServiceNamePreview() {
         preview.textContent = '-';
     }
 }
+
+// Load available sources (inputs, transcoders, muxers)
+function loadSources() {
+    fetch('api/outputs.php?action=available_sources')
+        .then(r => r.json())
+        .then(data => {
+            availableSources = data.sources || [];
+            populateSourceDropdown();
+        })
+        .catch(err => {
+            console.error('Failed to load sources:', err);
+        });
+}
+
+// Populate source dropdown
+function populateSourceDropdown() {
+    const select = document.getElementById('sourceSelect');
+    select.innerHTML = '<option value="">-- Manual Configuration --</option>';
+
+    // Group sources by type
+    const inputs = availableSources.filter(s => s.source_type === 'input');
+    const transcoders = availableSources.filter(s => s.source_type === 'transcoder');
+    const muxers = availableSources.filter(s => s.source_type === 'muxer');
+
+    if (inputs.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = 'Inputs';
+        inputs.forEach(source => {
+            const opt = document.createElement('option');
+            opt.value = JSON.stringify(source);
+            let label = source.display_name;
+            if (source.output_port) {
+                const addr = source.output_address || '*';
+                label += ` (udp://${addr}:${source.output_port})`;
+            }
+            if (source.status === 'running') {
+                label += ' [Running]';
+            }
+            opt.textContent = label;
+            group.appendChild(opt);
+        });
+        select.appendChild(group);
+    }
+
+    if (transcoders.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = 'Transcoders';
+        transcoders.forEach(source => {
+            const opt = document.createElement('option');
+            opt.value = JSON.stringify(source);
+            let label = source.display_name;
+            if (source.output_port) {
+                const addr = source.output_address || '*';
+                label += ` (udp://${addr}:${source.output_port})`;
+            }
+            if (source.status === 'running') {
+                label += ' [Running]';
+            }
+            opt.textContent = label;
+            group.appendChild(opt);
+        });
+        select.appendChild(group);
+    }
+
+    if (muxers.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = 'Muxers';
+        muxers.forEach(source => {
+            const opt = document.createElement('option');
+            opt.value = JSON.stringify(source);
+            let label = source.display_name;
+            if (source.output_port) {
+                const addr = source.output_address || '*';
+                label += ` (udp://${addr}:${source.output_port})`;
+            }
+            if (source.status === 'running') {
+                label += ' [Running]';
+            }
+            opt.textContent = label;
+            group.appendChild(opt);
+        });
+        select.appendChild(group);
+    }
+}
+
+// Handle source selection - auto-fill UDP settings
+document.getElementById('sourceSelect').addEventListener('change', function() {
+    const value = this.value;
+    if (!value) {
+        // Manual configuration - clear fields or leave as is
+        return;
+    }
+
+    try {
+        const source = JSON.parse(value);
+        document.getElementById('inputAddress').value = source.output_address || '';
+        document.getElementById('inputPort').value = source.output_port || '5000';
+    } catch (e) {
+        console.error('Failed to parse source:', e);
+    }
+});
 
 // Validate name uniqueness
 let validateTimeout = null;
@@ -392,15 +503,19 @@ function editService(type, id) {
     window.location.href = `${type}-edit.php?id=${id}`;
 }
 
-// Load buffers when modal opens
+// Load sources when modal opens
 document.getElementById('addOutputModal').addEventListener('show.bs.modal', function() {
     // Reset form
     document.getElementById('addOutputForm').reset();
     document.getElementById('nameValidation').textContent = '';
     document.getElementById('outputName').classList.remove('is-valid', 'is-invalid');
     document.getElementById('createBtn').disabled = false;
+    document.getElementById('sourceSelect').value = '';
     nameValid = false;
     updateServiceNamePreview();
+
+    // Load available sources
+    loadSources();
 });
 </script>
 

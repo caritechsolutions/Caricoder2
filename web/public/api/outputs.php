@@ -56,10 +56,11 @@ switch ($action) {
         }
         break;
 
-    case 'available_buffers':
-        // Get all available input buffers from inputs, transcoders, and muxers
-        $buffers = get_available_buffers();
-        json_response(['buffers' => $buffers]);
+    case 'available_sources':
+    case 'available_buffers':  // Legacy alias
+        // Get all available sources (inputs, transcoders, muxers) with their UDP output info
+        $sources = get_available_sources();
+        json_response(['sources' => $sources]);
         break;
 
     case 'check_name':
@@ -175,62 +176,90 @@ switch ($action) {
 }
 
 /**
- * Get all available input buffers from inputs, transcoders, and muxers
+ * Get all available sources (inputs, transcoders, muxers) with their UDP output info
  */
-function get_available_buffers() {
-    $buffers = [];
+function get_available_sources() {
+    $sources = [];
 
-    // Get buffers from inputs
+    // Get sources from inputs
     $inputs = get_service_list('inputs');
     foreach ($inputs as $input) {
         $id = $input['id'] ?? '';
         $name = $input['name'] ?? $id;
         if ($id) {
-            $buffers[] = [
-                'buffer_name' => $id . '-out',
-                'display_name' => $name . ' (Input)',
-                'source_type' => 'input',
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/inputs/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
                 'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'input',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
                 'status' => $input['status'] ?? 'unknown'
             ];
         }
     }
 
-    // Get buffers from transcoders
+    // Get sources from transcoders
     $transcoders = get_service_list('transcoders');
     foreach ($transcoders as $transcoder) {
         $id = $transcoder['id'] ?? '';
         $name = $transcoder['name'] ?? $id;
         if ($id) {
-            $buffers[] = [
-                'buffer_name' => $id . '-out',
-                'display_name' => $name . ' (Transcoder)',
-                'source_type' => 'transcoder',
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/transcoders/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
                 'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'transcoder',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
                 'status' => $transcoder['status'] ?? 'unknown'
             ];
         }
     }
 
-    // Get buffers from muxers
+    // Get sources from muxers
     $muxers = get_service_list('muxers');
     foreach ($muxers as $muxer) {
         $id = $muxer['id'] ?? '';
         $name = $muxer['name'] ?? $id;
-        // Check for output buffer_name in config
-        $buffer_name = $muxer['output']['buffer_name'] ?? ($id . '-out');
         if ($id) {
-            $buffers[] = [
-                'buffer_name' => $buffer_name,
-                'display_name' => $name . ' (Muxer)',
-                'source_type' => 'muxer',
+            // Get output address/port from config
+            $config_file = CONFIG_PATH . '/muxers/' . $id . '.conf';
+            $output_address = '';
+            $output_port = '';
+            if (file_exists($config_file)) {
+                $config = parse_config($config_file);
+                $output_address = $config['output']['address'] ?? '';
+                $output_port = $config['output']['port'] ?? '';
+            }
+            $sources[] = [
                 'source_id' => $id,
+                'display_name' => $name,
+                'source_type' => 'muxer',
+                'output_address' => $output_address,
+                'output_port' => $output_port,
                 'status' => $muxer['status'] ?? 'unknown'
             ];
         }
     }
 
-    return $buffers;
+    return $sources;
 }
 
 /**
