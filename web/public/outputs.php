@@ -67,7 +67,7 @@ include __DIR__ . '/../templates/header.php';
                             <span class="badge bg-<?php echo $type_badge; ?>">
                                 <i class="bi <?php echo $type_icon; ?> me-1"></i><?php echo strtoupper(htmlspecialchars($type)); ?>
                             </span>
-                            <?php if ($type === 'srt' && ($output['srt_mode'] ?? '') === 'listener'): ?>
+                            <?php if ($type === 'srt' && ($output['destination_srt']['mode'] ?? '') === 'listener'): ?>
                             <span class="badge bg-success ms-1" title="Multiple clients can connect">
                                 <i class="bi bi-people-fill"></i> 1:N
                             </span>
@@ -98,6 +98,10 @@ include __DIR__ . '/../templates/header.php';
                     <div class="mb-3">
                         <small class="text-muted">Input Buffer</small>
                         <div class="text-truncate"><?php echo htmlspecialchars($output['input']['buffer_name'] ?? $output['input_buffer'] ?? 'Not set'); ?></div>
+                    </div>
+                    <div class="mb-2">
+                        <small class="text-muted">Service</small>
+                        <div class="text-truncate font-monospace small"><?php echo htmlspecialchars($output['output']['service_name'] ?? $output['id'] . '-output-' . $type); ?></div>
                     </div>
                     <?php if ($type === 'srt' && $output['status'] === 'running'): ?>
                     <div class="row">
@@ -153,28 +157,24 @@ include __DIR__ . '/../templates/header.php';
                             <label class="form-label">Name <span class="text-danger">*</span></label>
                             <input type="text" class="form-control" name="name" id="outputName" required
                                    placeholder="e.g., Main SRT Output">
+                            <div id="nameValidation" class="form-text"></div>
                         </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">ID</label>
-                            <input type="text" class="form-control" name="id" id="outputId"
-                                   pattern="[a-z0-9-]+" placeholder="auto-generated">
-                            <small class="text-muted">Leave blank to auto-generate from name</small>
-                        </div>
-                    </div>
-                    <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">Output Type <span class="text-danger">*</span></label>
-                            <select class="form-select" name="type" id="outputType" onchange="updateOutputFields()">
+                            <select class="form-select" name="type" id="outputType" onchange="updateOutputFields(); validateName();">
                                 <option value="udp">UDP Multicast</option>
                                 <option value="srt" selected>SRT (One-to-Many)</option>
                                 <option value="hls">HLS</option>
                             </select>
                         </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Input Buffer <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="input_buffer" required
-                                   placeholder="e.g., mux-001-out">
-                            <small class="text-muted">Ring buffer name from muxer or transcoder</small>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-12 mb-3">
+                            <label class="form-label">Input Source <span class="text-danger">*</span></label>
+                            <select class="form-select" name="input_buffer" id="inputBufferSelect" required>
+                                <option value="">-- Loading available sources --</option>
+                            </select>
+                            <small class="text-muted">Select an input, transcoder, or muxer output buffer</small>
                         </div>
                     </div>
 
@@ -288,10 +288,16 @@ include __DIR__ . '/../templates/header.php';
                             </div>
                         </div>
                     </div>
+
+                    <!-- Service Name Preview -->
+                    <div class="mt-3">
+                        <small class="text-muted">Service Name: </small>
+                        <code id="serviceNamePreview">-</code>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" class="btn btn-primary" id="createBtn">
                         <i class="bi bi-plus-lg me-1"></i>Create Output
                     </button>
                 </div>
@@ -301,11 +307,15 @@ include __DIR__ . '/../templates/header.php';
 </div>
 
 <script>
+let availableBuffers = [];
+let nameValid = false;
+
 function updateOutputFields() {
     const type = document.getElementById('outputType').value;
     document.getElementById('out-udp-fields').style.display = type === 'udp' ? 'block' : 'none';
     document.getElementById('out-srt-fields').style.display = type === 'srt' ? 'block' : 'none';
     document.getElementById('out-hls-fields').style.display = type === 'hls' ? 'block' : 'none';
+    updateServiceNamePreview();
 }
 
 function updateSrtModeFields() {
@@ -324,23 +334,164 @@ function updateSrtModeFields() {
     }
 }
 
-// Auto-generate ID from name
-document.getElementById('outputName').addEventListener('input', function() {
-    const idField = document.getElementById('outputId');
-    if (!idField.dataset.manual) {
-        idField.value = this.value.toLowerCase()
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-|-$/g, '');
-    }
-});
+function updateServiceNamePreview() {
+    const name = document.getElementById('outputName').value;
+    const type = document.getElementById('outputType').value;
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const preview = document.getElementById('serviceNamePreview');
 
-document.getElementById('outputId').addEventListener('input', function() {
-    this.dataset.manual = this.value ? 'true' : '';
+    if (id) {
+        preview.textContent = id + '-output-' + type;
+    } else {
+        preview.textContent = '-';
+    }
+}
+
+// Load available buffers
+function loadAvailableBuffers() {
+    fetch('api/outputs.php?action=available_buffers')
+        .then(r => r.json())
+        .then(data => {
+            availableBuffers = data.buffers || [];
+            const select = document.getElementById('inputBufferSelect');
+            select.innerHTML = '';
+
+            if (availableBuffers.length === 0) {
+                select.innerHTML = '<option value="">-- No sources available --</option>';
+                return;
+            }
+
+            select.innerHTML = '<option value="">-- Select input source --</option>';
+
+            // Group by source type
+            const groups = {
+                'input': [],
+                'transcoder': [],
+                'muxer': []
+            };
+
+            availableBuffers.forEach(buf => {
+                if (groups[buf.source_type]) {
+                    groups[buf.source_type].push(buf);
+                }
+            });
+
+            // Add grouped options
+            if (groups.input.length > 0) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = 'Inputs';
+                groups.input.forEach(buf => {
+                    const opt = document.createElement('option');
+                    opt.value = buf.buffer_name;
+                    opt.textContent = buf.display_name + ' [' + buf.buffer_name + ']';
+                    if (buf.status === 'running') {
+                        opt.textContent += ' (running)';
+                    }
+                    optgroup.appendChild(opt);
+                });
+                select.appendChild(optgroup);
+            }
+
+            if (groups.transcoder.length > 0) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = 'Transcoders';
+                groups.transcoder.forEach(buf => {
+                    const opt = document.createElement('option');
+                    opt.value = buf.buffer_name;
+                    opt.textContent = buf.display_name + ' [' + buf.buffer_name + ']';
+                    if (buf.status === 'running') {
+                        opt.textContent += ' (running)';
+                    }
+                    optgroup.appendChild(opt);
+                });
+                select.appendChild(optgroup);
+            }
+
+            if (groups.muxer.length > 0) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = 'Muxers';
+                groups.muxer.forEach(buf => {
+                    const opt = document.createElement('option');
+                    opt.value = buf.buffer_name;
+                    opt.textContent = buf.display_name + ' [' + buf.buffer_name + ']';
+                    if (buf.status === 'running') {
+                        opt.textContent += ' (running)';
+                    }
+                    optgroup.appendChild(opt);
+                });
+                select.appendChild(optgroup);
+            }
+        })
+        .catch(err => {
+            console.error('Failed to load buffers:', err);
+            document.getElementById('inputBufferSelect').innerHTML =
+                '<option value="">-- Error loading sources --</option>';
+        });
+}
+
+// Validate name uniqueness
+let validateTimeout = null;
+function validateName() {
+    const nameInput = document.getElementById('outputName');
+    const name = nameInput.value.trim();
+    const type = document.getElementById('outputType').value;
+    const validation = document.getElementById('nameValidation');
+    const createBtn = document.getElementById('createBtn');
+
+    if (!name) {
+        validation.textContent = '';
+        validation.className = 'form-text';
+        nameValid = false;
+        createBtn.disabled = false;
+        return;
+    }
+
+    // Debounce
+    clearTimeout(validateTimeout);
+    validateTimeout = setTimeout(() => {
+        fetch(`api/outputs.php?action=check_name&name=${encodeURIComponent(name)}&type=${type}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.available) {
+                    validation.textContent = 'Name available';
+                    validation.className = 'form-text text-success';
+                    nameInput.classList.remove('is-invalid');
+                    nameInput.classList.add('is-valid');
+                    nameValid = true;
+                    createBtn.disabled = false;
+                } else {
+                    let msg = 'Name already in use';
+                    if (data.config_exists) msg = 'Output with this name already exists';
+                    if (data.service_exists) msg = 'Service file already exists: ' + data.service_name;
+                    validation.textContent = msg;
+                    validation.className = 'form-text text-danger';
+                    nameInput.classList.remove('is-valid');
+                    nameInput.classList.add('is-invalid');
+                    nameValid = false;
+                    createBtn.disabled = true;
+                }
+                updateServiceNamePreview();
+            })
+            .catch(err => {
+                validation.textContent = 'Error checking name';
+                validation.className = 'form-text text-warning';
+            });
+    }, 300);
+}
+
+// Name input handler
+document.getElementById('outputName').addEventListener('input', function() {
+    validateName();
 });
 
 // Form submission
 document.getElementById('addOutputForm').addEventListener('submit', function(e) {
     e.preventDefault();
+
+    if (!nameValid && document.getElementById('outputName').value.trim()) {
+        alert('Please choose a unique name for the output');
+        return;
+    }
 
     const formData = new FormData(this);
     formData.append('action', 'create');
@@ -406,6 +557,19 @@ function editService(type, id) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    updateOutputFields();
+    loadAvailableBuffers();
+});
+
+// Load buffers when modal opens
+document.getElementById('addOutputModal').addEventListener('show.bs.modal', function() {
+    loadAvailableBuffers();
+    // Reset form
+    document.getElementById('addOutputForm').reset();
+    document.getElementById('nameValidation').textContent = '';
+    document.getElementById('outputName').classList.remove('is-valid', 'is-invalid');
+    document.getElementById('createBtn').disabled = false;
+    nameValid = false;
     updateOutputFields();
 });
 </script>
