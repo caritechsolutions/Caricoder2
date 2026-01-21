@@ -198,7 +198,7 @@ static int find_or_create_client(const char *ip, uint16_t port) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!ctx.clients[i].active) {
             ctx.clients[i].active = 1;
-            strncpy(ctx.clients[i].ip, ip, sizeof(ctx.clients[i].ip) - 1);
+            snprintf(ctx.clients[i].ip, sizeof(ctx.clients[i].ip), "%s", ip);
             ctx.clients[i].port = port;
             ctx.clients[i].connect_time = time(NULL);
             ctx.clients[i].bytes_sent = 0;
