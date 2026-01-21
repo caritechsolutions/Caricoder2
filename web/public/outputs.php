@@ -928,34 +928,44 @@ function renderRistStats(metrics) {
     let recovered = 0;
     let notRecovered = 0;
 
-    // Parse sender metrics
-    (metrics.sender || []).forEach(m => {
-        if (m.name === 'rist_sender_bandwidth') bitrate = (m.value / 1000000).toFixed(2) + ' Mbps';
-    });
-
-    // Parse peer metrics
+    // Parse sender/peer metrics (ristsender uses rist_sender_peer_* format)
     const peers = [];
     const peerMetrics = {};
-    (metrics.peer || []).forEach(m => {
-        const peer = m.labels.peer || 'unknown';
-        if (!peerMetrics[peer]) peerMetrics[peer] = {};
-        peerMetrics[peer][m.name] = m.value;
+    const allMetrics = [...(metrics.sender || []), ...(metrics.peer || []), ...(metrics.other || [])];
+
+    allMetrics.forEach(m => {
+        // Group by peer_id from labels
+        const peerId = m.labels.peer_id || m.labels.peer || 'unknown';
+        if (!peerMetrics[peerId]) {
+            peerMetrics[peerId] = {
+                peer_url: m.labels.peer_url || '',
+                listening: m.labels.listening || '',
+                cname: m.labels.cname || ''
+            };
+        }
+        peerMetrics[peerId][m.name] = m.value;
     });
 
-    Object.entries(peerMetrics).forEach(([peer, pm]) => {
-        const peerRtt = pm.rist_peer_rtt || 0;
-        const peerSent = pm.rist_peer_sent || 0;
-        const peerRecv = pm.rist_peer_received || 0;
-        const peerRetx = pm.rist_peer_retransmitted || 0;
-        const peerQuality = pm.rist_peer_quality || 100;
-        const peerState = pm.rist_peer_state || 0;
+    Object.entries(peerMetrics).forEach(([peerId, pm]) => {
+        // Use actual metric names from ristsender
+        const peerBandwidth = pm.rist_sender_peer_bandwidth_bps || 0;
+        const peerRtt = (pm.rist_sender_peer_rtt_seconds || 0) * 1000; // Convert to ms
+        const peerSent = pm.rist_sender_peer_sent_packets || 0;
+        const peerRecv = pm.rist_sender_peer_received_packets || 0;
+        const peerRetx = pm.rist_sender_peer_retransmitted_packets || 0;
+        const peerQuality = pm.rist_sender_peer_quality || 100;
 
-        rtt = peerRtt.toFixed(1) + ' ms';
+        // Update summary values
+        if (peerBandwidth > 0) bitrate = (peerBandwidth / 1000000).toFixed(2) + ' Mbps';
+        if (peerRtt > 0) rtt = peerRtt.toFixed(1) + ' ms';
         retrans += peerRetx;
+        sent += peerSent;
 
+        const peerName = pm.peer_url || pm.listening || `Peer ${peerId}`;
         peers.push({
-            name: peer,
-            state: peerState === 1 ? 'Connected' : 'Disconnected',
+            name: peerName,
+            cname: pm.cname || '',
+            state: peerQuality > 0 ? 'Connected' : 'Disconnected',
             rtt: peerRtt.toFixed(1),
             sent: peerSent,
             received: peerRecv,
@@ -964,7 +974,7 @@ function renderRistStats(metrics) {
         });
     });
 
-    // Parse flow metrics
+    // Parse flow metrics (if available)
     (metrics.flow || []).forEach(m => {
         if (m.name === 'rist_flow_sent') sent = m.value;
         if (m.name === 'rist_flow_sent_bytes') bytes = m.value;

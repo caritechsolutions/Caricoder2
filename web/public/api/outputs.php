@@ -1094,8 +1094,8 @@ function get_rist_metrics($id) {
         return ['success' => false, 'error' => 'Cannot connect to RIST metrics server', 'status' => 'offline'];
     }
 
-    // If response is just "ok" or doesn't look like Prometheus metrics, try /metrics path
-    if (trim($response) === 'ok' || strpos($response, '# HELP') === false) {
+    // If response is just "OK" or doesn't look like Prometheus metrics, try /metrics path
+    if (strtolower(trim($response)) === 'ok' || strpos($response, '# HELP') === false) {
         $url_metrics = "http://127.0.0.1:{$metrics_port}/metrics";
         $response_metrics = @file_get_contents($url_metrics, false, $ctx);
         if ($response_metrics !== false && strpos($response_metrics, '# HELP') !== false) {
