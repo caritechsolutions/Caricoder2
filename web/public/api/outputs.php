@@ -1076,7 +1076,9 @@ function get_rist_metrics($id) {
     }
 
     $metrics_port = $config['output']['metrics_port'] ?? '9100';
-    $url = "http://127.0.0.1:{$metrics_port}/metrics";
+
+    // Try root URL first (ristsender serves metrics at root), fallback to /metrics
+    $url = "http://127.0.0.1:{$metrics_port}/";
 
     $ctx = stream_context_create([
         'http' => [
@@ -1087,6 +1089,19 @@ function get_rist_metrics($id) {
     ]);
 
     $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to RIST metrics server', 'status' => 'offline'];
+    }
+
+    // If response is just "ok" or doesn't look like Prometheus metrics, try /metrics path
+    if (trim($response) === 'ok' || strpos($response, '# HELP') === false) {
+        $url_metrics = "http://127.0.0.1:{$metrics_port}/metrics";
+        $response_metrics = @file_get_contents($url_metrics, false, $ctx);
+        if ($response_metrics !== false && strpos($response_metrics, '# HELP') !== false) {
+            $response = $response_metrics;
+        }
+    }
 
     if ($response === false) {
         return ['success' => false, 'error' => 'Cannot connect to RIST metrics server', 'status' => 'offline'];
