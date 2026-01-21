@@ -508,6 +508,7 @@ include __DIR__ . '/../templates/header.php';
                             <select class="form-select" id="outputTypeSelect" onchange="toggleOutputType()">
                                 <option value="srt">SRT (One-to-Many)</option>
                                 <option value="rist">RIST</option>
+                                <option value="http">HTTP (MPEG-TS Pull)</option>
                             </select>
                         </div>
                     </div>
@@ -680,6 +681,53 @@ include __DIR__ . '/../templates/header.php';
                                     <input class="form-check-input" type="checkbox" name="rist_npd" value="1" id="ristNpd">
                                     <label class="form-check-label" for="ristNpd">
                                         Null Packet Deletion
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- HTTP Output Section -->
+                    <div id="httpSection" style="display: none;">
+                        <hr>
+                        <h6><i class="bi bi-globe me-2"></i>HTTP MPEG-TS Output (Pull)</h6>
+                        <div class="alert alert-info small mb-3">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Clients can pull the stream via HTTP at: <code>http://&lt;server&gt;:&lt;port&gt;/&lt;path&gt;</code>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Listen Address</label>
+                                <input type="text" class="form-control" name="http_listen_address"
+                                       value="0.0.0.0" placeholder="0.0.0.0">
+                                <small class="text-muted">0.0.0.0 = all interfaces</small>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">HTTP Port <span class="text-danger">*</span></label>
+                                <input type="number" class="form-control" name="http_port" id="httpPort"
+                                       value="8888" min="1024" max="65535">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Stream Path</label>
+                                <input type="text" class="form-control" name="http_path" id="httpPath"
+                                       value="stream.ts" placeholder="stream.ts">
+                                <small class="text-muted">URL path (without leading /)</small>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">MIME Type</label>
+                                <select class="form-select" name="http_mime_type">
+                                    <option value="video/mp2t">video/mp2t (MPEG-TS)</option>
+                                    <option value="application/octet-stream">application/octet-stream</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Options</label>
+                                <div class="form-check mt-2">
+                                    <input class="form-check-input" type="checkbox" name="http_chunked" value="1" id="httpChunked" checked>
+                                    <label class="form-check-label" for="httpChunked">
+                                        Use Chunked Transfer Encoding
                                     </label>
                                 </div>
                             </div>
