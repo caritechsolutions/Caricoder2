@@ -1055,7 +1055,8 @@ function update_output($id, $data) {
         if (isset($data['http_stream_path'])) $config['destination_http']['stream_path'] = $data['http_stream_path'];
         if (isset($data['http_stats_path'])) $config['destination_http']['stats_path'] = $data['http_stats_path'];
         if (isset($data['http_mime_type'])) $config['destination_http']['mime_type'] = $data['http_mime_type'];
-        if (isset($data['http_chunked'])) $config['destination_http']['chunked_encoding'] = $data['http_chunked'] === '1' ? 'true' : 'false';
+        // Checkbox sends value only when checked, so treat missing as unchecked
+        $config['destination_http']['chunked_encoding'] = (isset($data['http_chunked']) && $data['http_chunked'] === '1') ? 'true' : 'false';
 
         if (!save_config($config_file, $config)) {
             return ['success' => false, 'error' => 'Failed to save configuration'];
