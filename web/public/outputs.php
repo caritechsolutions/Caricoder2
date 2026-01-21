@@ -31,6 +31,7 @@ foreach ($outputs as &$output) {
         $output['input'] = $config['input'] ?? [];
         $output['destination_srt'] = $config['destination_srt'] ?? [];
         $output['destination_rist'] = $config['destination_rist'] ?? [];
+        $output['destination_http'] = $config['destination_http'] ?? [];
         $output['output'] = $config['output'] ?? [];
     }
 
@@ -99,6 +100,13 @@ include __DIR__ . '/../templates/header.php';
                             $dest_display = ($rist_mode === 'listener' ? '@' : '') . "{$rist_addr}:{$rist_port}";
                             $type_badge = 'bg-warning text-dark';
                             $type_icon = 'bi-arrow-repeat';
+                        } elseif ($type === 'http') {
+                            $http_addr = $output['destination_http']['listen_address'] ?? '0.0.0.0';
+                            $http_port = $output['destination_http']['listen_port'] ?? '8888';
+                            $http_path = $output['destination_http']['stream_path'] ?? '/stream';
+                            $dest_display = "http://{$http_addr}:{$http_port}{$http_path}";
+                            $type_badge = 'bg-info text-dark';
+                            $type_icon = 'bi-globe';
                         } else {
                             $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
                             $srt_port = $output['destination_srt']['listen_port'] ?? '';
@@ -166,9 +174,13 @@ include __DIR__ . '/../templates/header.php';
                                     <button class="btn btn-outline-info" onclick="showClientsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
                                         <i class="bi bi-people"></i>
                                     </button>
-                                    <?php else: ?>
+                                    <?php elseif ($type === 'rist'): ?>
                                     <button class="btn btn-outline-info" onclick="showRistStatsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Stats">
                                         <i class="bi bi-graph-up"></i>
+                                    </button>
+                                    <?php elseif ($type === 'http'): ?>
+                                    <button class="btn btn-outline-info" onclick="showHttpStatsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
+                                        <i class="bi bi-people"></i>
                                     </button>
                                     <?php endif; ?>
                                     <button class="btn btn-outline-secondary" onclick="editOutput('<?php echo $output['id']; ?>')" title="Edit">
@@ -485,6 +497,93 @@ include __DIR__ . '/../templates/header.php';
     </div>
 </div>
 
+<!-- HTTP Stats Modal -->
+<div class="modal fade" id="httpStatsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-globe me-2"></i>HTTP Clients: <span id="httpStatsOutputName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="httpStatsOutputId">
+
+                <!-- Summary Stats -->
+                <div class="row mb-4">
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="httpClientCount">0</h4>
+                                <small class="text-muted">Clients</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="httpUptime">-</h4>
+                                <small class="text-muted">Uptime</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="httpBytesReceived">-</h4>
+                                <small class="text-muted">Bytes Received</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="httpPacketsReceived">-</h4>
+                                <small class="text-muted">Packets</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Clients Table -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0"><i class="bi bi-people me-2"></i>Connected Clients</h6>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="refreshHttpStats()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0" id="httpClientsTable">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Address</th>
+                                        <th>Country</th>
+                                        <th>Duration</th>
+                                        <th>Bytes Sent</th>
+                                        <th>Packets</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="httpClientsTableBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center py-3 text-muted">
+                                            <div class="spinner-border spinner-border-sm me-2"></div>
+                                            Loading...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Add Output Modal -->
 <div class="modal fade" id="addOutputModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -709,9 +808,9 @@ include __DIR__ . '/../templates/header.php';
                             </div>
                             <div class="col-md-4 mb-3">
                                 <label class="form-label">Stream Path</label>
-                                <input type="text" class="form-control" name="http_path" id="httpPath"
-                                       value="stream.ts" placeholder="stream.ts">
-                                <small class="text-muted">URL path (without leading /)</small>
+                                <input type="text" class="form-control" name="http_stream_path" id="httpPath"
+                                       value="/stream" placeholder="/stream">
+                                <small class="text-muted">URL path (with leading /)</small>
                             </div>
                         </div>
                         <div class="row">
@@ -1241,12 +1340,18 @@ function toggleOutputType() {
     const type = document.getElementById('outputTypeSelect').value;
     document.getElementById('outputType').value = type;
 
+    // Hide all sections first
+    document.getElementById('srtSection').style.display = 'none';
+    document.getElementById('ristSection').style.display = 'none';
+    document.getElementById('httpSection').style.display = 'none';
+
+    // Show the selected section
     if (type === 'rist') {
-        document.getElementById('srtSection').style.display = 'none';
         document.getElementById('ristSection').style.display = 'block';
+    } else if (type === 'http') {
+        document.getElementById('httpSection').style.display = 'block';
     } else {
         document.getElementById('srtSection').style.display = 'block';
-        document.getElementById('ristSection').style.display = 'none';
     }
 
     updateServiceNamePreview();
@@ -1402,6 +1507,7 @@ document.getElementById('addOutputModal').addEventListener('show.bs.modal', func
     document.getElementById('outputType').value = 'srt';
     document.getElementById('srtSection').style.display = 'block';
     document.getElementById('ristSection').style.display = 'none';
+    document.getElementById('httpSection').style.display = 'none';
     document.getElementById('ristSecretRow').style.display = 'none';
     nameValid = false;
     updateServiceNamePreview();
@@ -1445,12 +1551,117 @@ function loadClientCounts() {
                 } else {
                     el.innerHTML = '<strong>0</strong>';
                 }
+            } else if (outputType === 'http') {
+                const response = await fetch(`api/outputs.php?action=http_stats&id=${outputId}`);
+                const data = await response.json();
+                if (data.success && data.stats) {
+                    el.innerHTML = `<strong>${data.stats.client_count || 0}</strong>`;
+                } else {
+                    el.innerHTML = '<strong>0</strong>';
+                }
             }
         } catch (e) {
             // Keep current value on error
         }
     });
 }
+
+// HTTP Stats Modal
+let httpStatsRefreshInterval = null;
+
+function showHttpStatsModal(id, name) {
+    currentOutputId = id;
+    document.getElementById('httpStatsOutputId').value = id;
+    document.getElementById('httpStatsOutputName').textContent = name;
+
+    new bootstrap.Modal(document.getElementById('httpStatsModal')).show();
+    refreshHttpStats();
+    startHttpStatsAutoRefresh();
+}
+
+async function refreshHttpStats() {
+    const id = document.getElementById('httpStatsOutputId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=http_stats&id=${id}`);
+        const data = await response.json();
+
+        if (data.success && data.stats) {
+            renderHttpStats(data.stats);
+        } else {
+            document.getElementById('httpClientsTableBody').innerHTML = `
+                <tr><td colspan="6" class="text-center py-3 text-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i>${data.error}
+                </td></tr>`;
+        }
+    } catch (e) {
+        console.error('Failed to get HTTP stats:', e);
+        document.getElementById('httpClientsTableBody').innerHTML = `
+            <tr><td colspan="6" class="text-center py-3 text-danger">
+                <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
+            </td></tr>`;
+    }
+}
+
+async function renderHttpStats(stats) {
+    const server = stats.server || {};
+    const clients = stats.clients || [];
+
+    // Update summary cards
+    document.getElementById('httpClientCount').textContent = stats.client_count || 0;
+    document.getElementById('httpUptime').textContent = formatDuration(server.uptime || 0);
+    document.getElementById('httpBytesReceived').textContent = formatBytes(server.bytes_received || 0);
+    document.getElementById('httpPacketsReceived').textContent = (server.packets_received || 0).toLocaleString();
+
+    // Collect IPs for geolocation
+    const ips = clients.map(c => c.ip).filter(ip => ip);
+    if (ips.length > 0) {
+        await fetchGeolocations(ips);
+    }
+
+    // Render clients table
+    const tbody = document.getElementById('httpClientsTableBody');
+    if (clients.length === 0) {
+        tbody.innerHTML = `
+            <tr><td colspan="6" class="text-center py-3 text-muted">
+                <i class="bi bi-people me-2"></i>No clients connected
+            </td></tr>`;
+    } else {
+        let html = '';
+        clients.forEach(client => {
+            const geo = geoCache[client.ip] || {};
+            const flag = getCountryFlag(geo.countryCode);
+            const countryTitle = geo.city ? `${geo.city}, ${geo.country}` : (geo.country || 'Unknown');
+
+            html += `
+                <tr>
+                    <td><code>${client.ip}:${client.port}</code></td>
+                    <td title="${countryTitle}">${flag} ${geo.countryCode || '??'}</td>
+                    <td>${formatDuration(client.connected_duration || 0)}</td>
+                    <td>${formatBytes(client.bytes_sent || 0)}</td>
+                    <td>${(client.packets_sent || 0).toLocaleString()}</td>
+                </tr>`;
+        });
+        tbody.innerHTML = html;
+    }
+}
+
+function startHttpStatsAutoRefresh() {
+    stopHttpStatsAutoRefresh();
+    httpStatsRefreshInterval = setInterval(refreshHttpStats, 5000);
+}
+
+function stopHttpStatsAutoRefresh() {
+    if (httpStatsRefreshInterval) {
+        clearInterval(httpStatsRefreshInterval);
+        httpStatsRefreshInterval = null;
+    }
+}
+
+document.getElementById('httpStatsModal').addEventListener('hidden.bs.modal', function() {
+    stopHttpStatsAutoRefresh();
+});
 
 // Load client counts on page load and refresh every 5 seconds
 document.addEventListener('DOMContentLoaded', function() {
