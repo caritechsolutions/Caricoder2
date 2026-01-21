@@ -30,6 +30,44 @@ require_once __DIR__ . '/../../includes/functions.php';
 // Clear any output from includes
 ob_end_clean();
 
+/**
+ * Find an available port in a given range
+ * Checks both system ports and existing output configs
+ */
+function find_available_metrics_port($start_port = 9100, $end_port = 9199) {
+    // Get list of ports already used by existing outputs
+    $used_ports = [];
+    $outputs_dir = CONFIG_PATH . '/outputs';
+    if (is_dir($outputs_dir)) {
+        $files = glob($outputs_dir . '/*.conf');
+        foreach ($files as $file) {
+            $config = parse_config($file);
+            if (!empty($config['output']['metrics_port'])) {
+                $used_ports[] = intval($config['output']['metrics_port']);
+            }
+        }
+    }
+
+    // Find first available port
+    for ($port = $start_port; $port <= $end_port; $port++) {
+        // Skip if already used by another output
+        if (in_array($port, $used_ports)) {
+            continue;
+        }
+
+        // Check if port is actually available on the system
+        $socket = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
+        if ($socket === false) {
+            // Port is available (connection refused = not in use)
+            return $port;
+        }
+        fclose($socket);
+    }
+
+    // Fallback if no port found in range
+    return $start_port;
+}
+
 // Require login
 if (!auth_is_logged_in()) {
     json_response(['error' => 'Unauthorized'], 401);
@@ -490,9 +528,12 @@ function create_rist_output($data, $id, $name, $service_name) {
     // Log for debugging
     error_log("create_rist_output called: id={$id}, name={$name}");
 
-    // Assign metrics port (use provided or default to 9100 + offset based on RIST port)
-    $rist_port = intval($data['rist_port'] ?? 5001);
-    $metrics_port = intval($data['metrics_port'] ?? (9100 + ($rist_port % 1000)));
+    // Assign metrics port (use provided or find an available one)
+    $metrics_port = intval($data['metrics_port'] ?? 0);
+    if ($metrics_port === 0) {
+        $metrics_port = find_available_metrics_port(9100, 9199);
+    }
+    error_log("Using metrics port: {$metrics_port}");
 
     // Build configuration
     $config = [
