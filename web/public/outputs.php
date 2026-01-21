@@ -67,6 +67,7 @@ include __DIR__ . '/../templates/header.php';
                             <th>Type</th>
                             <th>UDP Input</th>
                             <th>Destination</th>
+                            <th>Clients</th>
                             <th>Status</th>
                             <th style="width: 220px;">Actions</th>
                         </tr>
@@ -74,7 +75,7 @@ include __DIR__ . '/../templates/header.php';
                     <tbody>
                         <?php if (empty($outputs)): ?>
                         <tr>
-                            <td colspan="7" class="text-center py-5">
+                            <td colspan="8" class="text-center py-5">
                                 <i class="bi bi-upload text-muted" style="font-size: 3rem;"></i>
                                 <h5 class="mt-3">No Outputs</h5>
                                 <p class="text-muted">Create an output to send your streams via SRT or RIST.</p>
@@ -135,6 +136,15 @@ include __DIR__ . '/../templates/header.php';
                                 <?php if ($type === 'rist'): ?>
                                 <br><small class="text-muted"><?php echo ucfirst($rist_mode); ?> mode</small>
                                 <?php endif; ?>
+                            </td>
+                            <td>
+                                <span class="client-count text-muted" data-output-id="<?php echo htmlspecialchars($output['id']); ?>" data-output-type="<?php echo $type; ?>">
+                                    <?php if (($output['status'] ?? 'stopped') === 'running'): ?>
+                                    <span class="spinner-border spinner-border-sm"></span>
+                                    <?php else: ?>
+                                    -
+                                    <?php endif; ?>
+                                </span>
                             </td>
                             <td>
                                 <span class="badge bg-<?php echo ($output['status'] ?? 'stopped') === 'running' ? 'success' : 'secondary'; ?>">
@@ -1266,6 +1276,52 @@ document.getElementById('addOutputModal').addEventListener('show.bs.modal', func
     updateServiceNamePreview();
     loadSources();
 });
+
+// Load client counts for all running outputs
+function loadClientCounts() {
+    document.querySelectorAll('.client-count').forEach(async (el) => {
+        const outputId = el.dataset.outputId;
+        const outputType = el.dataset.outputType;
+
+        // Skip if not running (already shows "-")
+        if (!el.querySelector('.spinner-border')) {
+            return;
+        }
+
+        try {
+            if (outputType === 'srt') {
+                const response = await fetch(`api/outputs.php?action=clients&id=${outputId}`);
+                const data = await response.json();
+                if (data.success) {
+                    el.innerHTML = `<strong>${data.client_count}</strong>`;
+                } else {
+                    el.textContent = '-';
+                }
+            } else if (outputType === 'rist') {
+                const response = await fetch(`api/outputs.php?action=rist_metrics&id=${outputId}`);
+                const data = await response.json();
+                if (data.success && data.metrics) {
+                    // Count unique peers from metrics
+                    const peerIds = new Set();
+                    const allMetrics = [...(data.metrics.sender || []), ...(data.metrics.peer || []), ...(data.metrics.other || [])];
+                    allMetrics.forEach(m => {
+                        if (m.labels && m.labels.peer_id) {
+                            peerIds.add(m.labels.peer_id);
+                        }
+                    });
+                    el.innerHTML = `<strong>${peerIds.size}</strong>`;
+                } else {
+                    el.textContent = '-';
+                }
+            }
+        } catch (e) {
+            el.textContent = '-';
+        }
+    });
+}
+
+// Load client counts on page load
+document.addEventListener('DOMContentLoaded', loadClientCounts);
 </script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>
