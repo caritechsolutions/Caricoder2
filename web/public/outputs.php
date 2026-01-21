@@ -382,7 +382,7 @@ include __DIR__ . '/../templates/header.php';
                                 <thead class="table-light">
                                     <tr>
                                         <th>Peer</th>
-                                        <th>State</th>
+                                        <th>Bitrate</th>
                                         <th>RTT</th>
                                         <th>Sent</th>
                                         <th>Received</th>
@@ -919,7 +919,7 @@ async function refreshRistStats() {
 
 function renderRistStats(metrics) {
     // Extract key metrics from the grouped data
-    let bitrate = '-';
+    let totalBitrate = 0;
     let rtt = '-';
     let lost = 0;
     let retrans = 0;
@@ -955,8 +955,8 @@ function renderRistStats(metrics) {
         const peerRetx = pm.rist_sender_peer_retransmitted_packets || 0;
         const peerQuality = pm.rist_sender_peer_quality || 100;
 
-        // Update summary values
-        if (peerBandwidth > 0) bitrate = (peerBandwidth / 1000000).toFixed(2) + ' Mbps';
+        // Sum up total bitrate from all peers
+        totalBitrate += peerBandwidth;
         if (peerRtt > 0) rtt = peerRtt.toFixed(1) + ' ms';
         retrans += peerRetx;
         sent += peerSent;
@@ -965,7 +965,7 @@ function renderRistStats(metrics) {
         peers.push({
             name: peerName,
             cname: pm.cname || '',
-            state: peerQuality > 0 ? 'Connected' : 'Disconnected',
+            bitrate: (peerBandwidth / 1000000).toFixed(2),
             rtt: peerRtt.toFixed(1),
             sent: peerSent,
             received: peerRecv,
@@ -973,6 +973,9 @@ function renderRistStats(metrics) {
             quality: peerQuality.toFixed(1)
         });
     });
+
+    // Format total bitrate
+    const bitrate = totalBitrate > 0 ? (totalBitrate / 1000000).toFixed(2) + ' Mbps' : '-';
 
     // Parse flow metrics (if available)
     (metrics.flow || []).forEach(m => {
@@ -1004,11 +1007,10 @@ function renderRistStats(metrics) {
     } else {
         let html = '';
         peers.forEach(p => {
-            const stateClass = p.state === 'Connected' ? 'text-success' : 'text-danger';
             html += `
                 <tr>
                     <td><code>${p.name}</code></td>
-                    <td><span class="${stateClass}">${p.state}</span></td>
+                    <td>${p.bitrate} Mbps</td>
                     <td>${p.rtt} ms</td>
                     <td>${p.sent.toLocaleString()}</td>
                     <td>${p.received.toLocaleString()}</td>
