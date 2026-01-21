@@ -190,17 +190,49 @@ include __DIR__ . '/../templates/header.php';
             <div class="modal-body">
                 <input type="hidden" id="clientsOutputId">
 
-                <!-- Summary -->
+                <!-- Summary Stats -->
                 <div class="row mb-4">
-                    <div class="col-md-4">
+                    <div class="col-md-2">
                         <div class="card bg-light">
-                            <div class="card-body text-center">
-                                <h3 class="mb-0"><span id="clientCount">0</span> / <span id="maxClients">10</span></h3>
-                                <small class="text-muted">Connected Clients</small>
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0"><span id="clientCount">0</span> / <span id="maxClients">10</span></h4>
+                                <small class="text-muted">Clients</small>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-8">
+                    <div class="col-md-2">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="srtTotalBitrate">-</h4>
+                                <small class="text-muted">Bitrate</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="srtAvgRtt">-</h4>
+                                <small class="text-muted">Avg RTT</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0 text-danger" id="srtTotalLost">0</h4>
+                                <small class="text-muted">Lost</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0 text-warning" id="srtTotalRetrans">0</h4>
+                                <small class="text-muted">Retrans</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
                         <div class="d-flex justify-content-end align-items-center h-100">
                             <button class="btn btn-outline-secondary" onclick="refreshClients()">
                                 <i class="bi bi-arrow-clockwise"></i> Refresh
@@ -716,29 +748,47 @@ async function refreshClients() {
 function renderClientsTable(clients) {
     const tbody = document.getElementById('clientsTableBody');
 
+    // Calculate summary stats
+    let totalBitrate = 0;
+    let totalRtt = 0;
+    let totalLost = 0;
+    let totalRetrans = 0;
+    let clientCount = clients.length;
+
     if (clients.length === 0) {
         tbody.innerHTML = `
             <tr><td colspan="7" class="text-center py-4 text-muted">
                 <i class="bi bi-people me-2"></i>No clients connected
             </td></tr>`;
+        // Reset summary stats
+        document.getElementById('srtTotalBitrate').textContent = '-';
+        document.getElementById('srtAvgRtt').textContent = '-';
+        document.getElementById('srtTotalLost').textContent = '0';
+        document.getElementById('srtTotalRetrans').textContent = '0';
         return;
     }
 
     let html = '';
     clients.forEach(client => {
         const duration = formatDuration(client.duration || 0);
-        const rtt = (client.rtt_ms || 0).toFixed(1);
-        const bw = (client.send_rate_mbps || 0).toFixed(2);
+        const rtt = (client.rtt_ms || 0);
+        const bw = (client.send_rate_mbps || 0);
         const lost = client.packets_lost || 0;
         const retrans = client.packets_retrans || 0;
+
+        // Sum up totals
+        totalBitrate += bw;
+        totalRtt += rtt;
+        totalLost += lost;
+        totalRetrans += retrans;
 
         html += `
             <tr class="client-row" onclick="showClientDetails(${client.slot})" style="cursor: pointer;">
                 <td><span class="badge bg-secondary">${client.slot}</span></td>
                 <td><code>${client.address}</code></td>
                 <td>${duration}</td>
-                <td>${rtt} ms</td>
-                <td>${bw} Mbps</td>
+                <td>${rtt.toFixed(1)} ms</td>
+                <td>${bw.toFixed(2)} Mbps</td>
                 <td>
                     <span class="text-danger">${lost}</span> /
                     <span class="text-warning">${retrans}</span>
@@ -752,6 +802,12 @@ function renderClientsTable(clients) {
     });
 
     tbody.innerHTML = html;
+
+    // Update summary stats
+    document.getElementById('srtTotalBitrate').textContent = totalBitrate.toFixed(2) + ' Mbps';
+    document.getElementById('srtAvgRtt').textContent = (totalRtt / clientCount).toFixed(1) + ' ms';
+    document.getElementById('srtTotalLost').textContent = totalLost.toLocaleString();
+    document.getElementById('srtTotalRetrans').textContent = totalRetrans.toLocaleString();
 }
 
 // Show client details
