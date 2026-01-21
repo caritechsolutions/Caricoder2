@@ -28,17 +28,14 @@ if (!file_exists($config_file)) {
 
 $config = parse_config($config_file);
 $output_name = $config['output']['name'] ?? $id;
-$output_type = $config['output']['type'] ?? 'udp';
-$input_buffer = $config['input']['buffer_name'] ?? '';
+$output_type = $config['output']['type'] ?? 'srt';
 
-// UDP settings
-$udp_address = $config['destination']['address'] ?? '239.1.1.1';
-$udp_port = $config['destination']['port'] ?? '5000';
-$udp_ttl = $config['destination']['ttl'] ?? '64';
-$udp_buffer_size = $config['destination']['buffer_size'] ?? '2097152';
+// UDP Input settings (common to both SRT and RIST)
+$input_address = $config['input']['address'] ?? '';
+$input_port = $config['input']['port'] ?? '5000';
+$input_interface = $config['input']['interface'] ?? '';
 
 // SRT settings
-$srt_mode = $config['destination_srt']['mode'] ?? 'listener';
 $srt_listen_address = $config['destination_srt']['listen_address'] ?? '0.0.0.0';
 $srt_port = $config['destination_srt']['listen_port'] ?? '4900';
 $srt_latency = $config['destination_srt']['latency'] ?? '120';
@@ -47,10 +44,19 @@ $srt_pbkeylen = $config['destination_srt']['pbkeylen'] ?? '0';
 $srt_streamid = $config['destination_srt']['streamid'] ?? '';
 $srt_max_clients = $config['destination_srt']['max_clients'] ?? '10';
 
-// HLS settings
-$hls_path = $config['destination_hls']['output_dir'] ?? '';
-$hls_segment = $config['destination_hls']['segment_duration'] ?? '4';
-$hls_playlist = $config['destination_hls']['playlist_length'] ?? '5';
+// RIST settings
+$rist_mode = $config['destination_rist']['mode'] ?? 'caller';
+$rist_address = $config['destination_rist']['address'] ?? '';
+$rist_port = $config['destination_rist']['port'] ?? '5001';
+$rist_profile = $config['destination_rist']['profile'] ?? '1';
+$rist_buffer = $config['destination_rist']['buffer'] ?? '250';
+$rist_encryption = $config['destination_rist']['encryption'] ?? '0';
+$rist_secret = $config['destination_rist']['secret'] ?? '';
+$rist_cname = $config['destination_rist']['cname'] ?? '';
+$rist_npd = ($config['destination_rist']['npd'] ?? 'false') === 'true';
+$rist_bandwidth = $config['destination_rist']['bandwidth'] ?? '0';
+$rist_congestion = $config['destination_rist']['congestion_control'] ?? '1';
+$rist_log_level = $config['destination_rist']['log_level'] ?? '6';
 
 $page_title = 'Edit Output: ' . $output_name;
 include __DIR__ . '/../templates/header.php';
@@ -67,128 +73,99 @@ include __DIR__ . '/../templates/header.php';
     <form id="editOutputForm">
         <input type="hidden" name="id" value="<?php echo htmlspecialchars($id); ?>">
 
+        <!-- Basic Info -->
         <div class="card mb-4">
             <div class="card-header">
                 <h5 class="mb-0">Basic Information</h5>
             </div>
             <div class="card-body">
                 <div class="row">
-                    <div class="col-md-4 mb-3">
+                    <div class="col-md-6 mb-3">
                         <label class="form-label">Output Name <span class="text-danger">*</span></label>
                         <input type="text" class="form-control" name="name"
                                value="<?php echo htmlspecialchars($output_name); ?>" required>
                     </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Output Type <span class="text-danger">*</span></label>
-                        <select class="form-select" name="type" id="outputType" onchange="updateOutputFields()">
-                            <option value="udp" <?php echo $output_type === 'udp' ? 'selected' : ''; ?>>UDP Multicast</option>
-                            <option value="srt" <?php echo $output_type === 'srt' ? 'selected' : ''; ?>>SRT (One-to-Many)</option>
-                            <option value="hls" <?php echo $output_type === 'hls' ? 'selected' : ''; ?>>HLS</option>
-                        </select>
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Input Buffer <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" name="input_buffer"
-                               value="<?php echo htmlspecialchars($input_buffer); ?>" required>
-                        <small class="text-muted">Ring buffer name from muxer or transcoder</small>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Output Type</label>
+                        <input type="text" class="form-control" value="<?php echo strtoupper($output_type); ?>" disabled>
+                        <small class="text-muted">Type cannot be changed after creation</small>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- UDP Settings -->
-        <div class="card mb-4" id="udp-settings" style="<?php echo $output_type !== 'udp' ? 'display:none;' : ''; ?>">
+        <!-- UDP Input Section -->
+        <div class="card mb-4">
             <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-broadcast me-2"></i>UDP Destination</h5>
+                <h5 class="mb-0"><i class="bi bi-arrow-down-circle me-2"></i>UDP Input (from mux/transcoder)</h5>
             </div>
             <div class="card-body">
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Multicast Address</label>
-                        <input type="text" class="form-control" name="udp_address"
-                               value="<?php echo htmlspecialchars($udp_address); ?>">
+                    <div class="col-md-5 mb-3">
+                        <label class="form-label">Input Address</label>
+                        <input type="text" class="form-control" name="input_address"
+                               value="<?php echo htmlspecialchars($input_address); ?>"
+                               placeholder="239.1.1.1 or leave empty for unicast">
+                        <small class="text-muted">Multicast group or empty for any unicast</small>
                     </div>
-                    <div class="col-md-2 mb-3">
-                        <label class="form-label">Port</label>
-                        <input type="number" class="form-control" name="udp_port"
-                               value="<?php echo htmlspecialchars($udp_port); ?>">
-                    </div>
-                    <div class="col-md-2 mb-3">
-                        <label class="form-label">TTL</label>
-                        <input type="number" class="form-control" name="udp_ttl"
-                               value="<?php echo htmlspecialchars($udp_ttl); ?>" min="1" max="255">
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Input Port <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" name="input_port"
+                               value="<?php echo htmlspecialchars($input_port); ?>"
+                               min="1024" max="65535" required>
                     </div>
                     <div class="col-md-4 mb-3">
-                        <label class="form-label">Socket Buffer Size</label>
-                        <select class="form-select" name="udp_buffer_size">
-                            <option value="1048576" <?php echo $udp_buffer_size == '1048576' ? 'selected' : ''; ?>>1 MB</option>
-                            <option value="2097152" <?php echo $udp_buffer_size == '2097152' ? 'selected' : ''; ?>>2 MB (Default)</option>
-                            <option value="4194304" <?php echo $udp_buffer_size == '4194304' ? 'selected' : ''; ?>>4 MB</option>
-                            <option value="8388608" <?php echo $udp_buffer_size == '8388608' ? 'selected' : ''; ?>>8 MB</option>
-                        </select>
+                        <label class="form-label">Interface (optional)</label>
+                        <input type="text" class="form-control" name="input_interface"
+                               value="<?php echo htmlspecialchars($input_interface); ?>"
+                               placeholder="e.g., 192.168.1.100">
+                        <small class="text-muted">For multicast source selection</small>
                     </div>
                 </div>
             </div>
         </div>
 
+        <?php if ($output_type === 'srt'): ?>
         <!-- SRT Settings -->
-        <div class="card mb-4" id="srt-settings" style="<?php echo $output_type !== 'srt' ? 'display:none;' : ''; ?>">
+        <div class="card mb-4">
             <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-shield-lock me-2"></i>SRT Configuration</h5>
+                <h5 class="mb-0"><i class="bi bi-shield-lock me-2"></i>SRT Output (One-to-Many)</h5>
             </div>
             <div class="card-body">
-                <div class="alert alert-info small mb-3">
-                    <i class="bi bi-info-circle me-1"></i>
-                    <strong>One-to-Many Mode:</strong> In listener mode, multiple clients can connect to the same port
-                    and receive the stream simultaneously. Perfect for distribution to multiple destinations.
-                </div>
                 <div class="row">
                     <div class="col-md-4 mb-3">
-                        <label class="form-label">Mode</label>
-                        <select class="form-select" name="srt_mode" id="srtMode" onchange="updateSrtModeFields()">
-                            <option value="listener" <?php echo $srt_mode === 'listener' ? 'selected' : ''; ?>>Listener (1:N - Recommended)</option>
-                            <option value="caller" <?php echo $srt_mode === 'caller' ? 'selected' : ''; ?>>Caller (1:1)</option>
-                        </select>
-                        <small class="text-muted">Listener allows multiple clients to pull</small>
+                        <label class="form-label">Listen Address</label>
+                        <input type="text" class="form-control" name="srt_listen_address"
+                               value="<?php echo htmlspecialchars($srt_listen_address); ?>"
+                               placeholder="0.0.0.0">
+                        <small class="text-muted">0.0.0.0 = all interfaces</small>
                     </div>
                     <div class="col-md-4 mb-3">
-                        <label class="form-label" id="srtAddressLabel"><?php echo $srt_mode === 'listener' ? 'Listen Address' : 'Remote Address'; ?></label>
-                        <input type="text" class="form-control" name="srt_listen_address" id="srtAddress"
-                               value="<?php echo htmlspecialchars($srt_listen_address); ?>">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Port</label>
+                        <label class="form-label">SRT Port <span class="text-danger">*</span></label>
                         <input type="number" class="form-control" name="srt_port"
-                               value="<?php echo htmlspecialchars($srt_port); ?>" min="1024" max="65535">
+                               value="<?php echo htmlspecialchars($srt_port); ?>"
+                               min="1024" max="65535">
                     </div>
-                </div>
-                <div class="row">
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Latency (ms)</label>
-                        <input type="number" class="form-control" name="srt_latency"
-                               value="<?php echo htmlspecialchars($srt_latency); ?>" min="20" max="8000">
-                        <small class="text-muted">Higher = more reliable</small>
-                    </div>
-                    <div class="col-md-3 mb-3">
+                    <div class="col-md-4 mb-3">
                         <label class="form-label">Max Clients</label>
                         <input type="number" class="form-control" name="srt_max_clients"
-                               value="<?php echo htmlspecialchars($srt_max_clients); ?>" min="1" max="100">
-                        <small class="text-muted">Maximum simultaneous connections</small>
+                               value="<?php echo htmlspecialchars($srt_max_clients); ?>"
+                               min="1" max="100">
                     </div>
-                    <div class="col-md-6 mb-3">
+                </div>
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Latency (ms)</label>
+                        <input type="number" class="form-control" name="srt_latency"
+                               value="<?php echo htmlspecialchars($srt_latency); ?>"
+                               min="20" max="8000">
+                    </div>
+                    <div class="col-md-4 mb-3">
                         <label class="form-label">Stream ID (optional)</label>
                         <input type="text" class="form-control" name="srt_streamid"
                                value="<?php echo htmlspecialchars($srt_streamid); ?>">
                     </div>
-                </div>
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Encryption Passphrase</label>
-                        <input type="password" class="form-control" name="srt_passphrase"
-                               value="<?php echo htmlspecialchars($srt_passphrase); ?>"
-                               placeholder="Leave empty for no encryption">
-                    </div>
-                    <div class="col-md-6 mb-3">
+                    <div class="col-md-4 mb-3">
                         <label class="form-label">Key Length</label>
                         <select class="form-select" name="srt_pbkeylen">
                             <option value="0" <?php echo $srt_pbkeylen == '0' ? 'selected' : ''; ?>>No Encryption</option>
@@ -198,35 +175,116 @@ include __DIR__ . '/../templates/header.php';
                         </select>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- HLS Settings -->
-        <div class="card mb-4" id="hls-settings" style="<?php echo $output_type !== 'hls' ? 'display:none;' : ''; ?>">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-collection-play me-2"></i>HLS Configuration</h5>
-            </div>
-            <div class="card-body">
                 <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Output Directory</label>
-                        <input type="text" class="form-control" name="hls_path"
-                               value="<?php echo htmlspecialchars($hls_path); ?>"
-                               placeholder="/var/www/hls/stream">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Segment Duration (s)</label>
-                        <input type="number" class="form-control" name="hls_segment"
-                               value="<?php echo htmlspecialchars($hls_segment); ?>" min="1" max="30">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Playlist Size</label>
-                        <input type="number" class="form-control" name="hls_playlist"
-                               value="<?php echo htmlspecialchars($hls_playlist); ?>" min="1" max="20">
+                    <div class="col-md-12 mb-3">
+                        <label class="form-label">Encryption Passphrase (optional)</label>
+                        <input type="password" class="form-control" name="srt_passphrase"
+                               value="<?php echo htmlspecialchars($srt_passphrase); ?>"
+                               placeholder="Leave empty for no encryption">
                     </div>
                 </div>
             </div>
         </div>
+        <?php endif; ?>
+
+        <?php if ($output_type === 'rist'): ?>
+        <!-- RIST Settings -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-arrow-repeat me-2"></i>RIST Output</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Mode</label>
+                        <select class="form-select" name="rist_mode" id="ristMode">
+                            <option value="caller" <?php echo $rist_mode === 'caller' ? 'selected' : ''; ?>>Caller (push to receiver)</option>
+                            <option value="listener" <?php echo $rist_mode === 'listener' ? 'selected' : ''; ?>>Listener (receiver connects)</option>
+                        </select>
+                        <small class="text-muted">Caller pushes, Listener waits</small>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Destination Address <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="rist_address"
+                               value="<?php echo htmlspecialchars($rist_address); ?>"
+                               placeholder="192.168.1.100">
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">RIST Port <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" name="rist_port"
+                               value="<?php echo htmlspecialchars($rist_port); ?>"
+                               min="1024" max="65535">
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Profile</label>
+                        <select class="form-select" name="rist_profile">
+                            <option value="0" <?php echo $rist_profile == '0' ? 'selected' : ''; ?>>Simple</option>
+                            <option value="1" <?php echo $rist_profile == '1' ? 'selected' : ''; ?>>Main</option>
+                            <option value="2" <?php echo $rist_profile == '2' ? 'selected' : ''; ?>>Advanced</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Buffer (ms)</label>
+                        <input type="number" class="form-control" name="rist_buffer"
+                               value="<?php echo htmlspecialchars($rist_buffer); ?>"
+                               min="0" max="10000">
+                        <small class="text-muted">Retransmission buffer</small>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Encryption</label>
+                        <select class="form-select" name="rist_encryption" id="ristEncryption" onchange="toggleRistSecret()">
+                            <option value="0" <?php echo $rist_encryption == '0' ? 'selected' : ''; ?>>None</option>
+                            <option value="128" <?php echo $rist_encryption == '128' ? 'selected' : ''; ?>>AES-128</option>
+                            <option value="256" <?php echo $rist_encryption == '256' ? 'selected' : ''; ?>>AES-256</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Congestion Ctrl</label>
+                        <select class="form-select" name="rist_congestion">
+                            <option value="0" <?php echo $rist_congestion == '0' ? 'selected' : ''; ?>>Disabled</option>
+                            <option value="1" <?php echo $rist_congestion == '1' ? 'selected' : ''; ?>>Normal</option>
+                            <option value="2" <?php echo $rist_congestion == '2' ? 'selected' : ''; ?>>Aggressive</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="row" id="ristSecretRow" style="<?php echo $rist_encryption == '0' ? 'display:none;' : ''; ?>">
+                    <div class="col-md-12 mb-3">
+                        <label class="form-label">Encryption Secret</label>
+                        <input type="password" class="form-control" name="rist_secret"
+                               value="<?php echo htmlspecialchars($rist_secret); ?>"
+                               placeholder="Encryption passphrase">
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Stream Name (cname)</label>
+                        <input type="text" class="form-control" name="rist_cname"
+                               value="<?php echo htmlspecialchars($rist_cname); ?>"
+                               placeholder="Optional stream identifier">
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Bandwidth Limit (Kbps)</label>
+                        <input type="number" class="form-control" name="rist_bandwidth"
+                               value="<?php echo htmlspecialchars($rist_bandwidth); ?>"
+                               min="0">
+                        <small class="text-muted">0 = unlimited</small>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Options</label>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="rist_npd" value="1" id="ristNpd"
+                                   <?php echo $rist_npd ? 'checked' : ''; ?>>
+                            <label class="form-check-label" for="ristNpd">
+                                Null Packet Deletion
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
 
         <div class="d-flex gap-2">
             <button type="submit" class="btn btn-primary">
@@ -241,29 +299,9 @@ include __DIR__ . '/../templates/header.php';
 </div>
 
 <script>
-function updateOutputFields() {
-    const type = document.getElementById('outputType').value;
-    document.getElementById('udp-settings').style.display = type === 'udp' ? 'block' : 'none';
-    document.getElementById('srt-settings').style.display = type === 'srt' ? 'block' : 'none';
-    document.getElementById('hls-settings').style.display = type === 'hls' ? 'block' : 'none';
-}
-
-function updateSrtModeFields() {
-    const mode = document.getElementById('srtMode').value;
-    const addrLabel = document.getElementById('srtAddressLabel');
-    const addrInput = document.getElementById('srtAddress');
-
-    if (mode === 'listener') {
-        addrLabel.textContent = 'Listen Address';
-        if (!addrInput.value || addrInput.value === '') {
-            addrInput.value = '0.0.0.0';
-        }
-    } else {
-        addrLabel.textContent = 'Remote Address';
-        if (addrInput.value === '0.0.0.0') {
-            addrInput.value = '';
-        }
-    }
+function toggleRistSecret() {
+    const encryption = document.getElementById('ristEncryption').value;
+    document.getElementById('ristSecretRow').style.display = encryption !== '0' ? 'block' : 'none';
 }
 
 document.getElementById('editOutputForm').addEventListener('submit', function(e) {

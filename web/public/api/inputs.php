@@ -1013,17 +1013,8 @@ function generate_rist_input_service($id, $config) {
 }
 
 /**
- * Sanitize name to ID (lowercase, alphanumeric, hyphens)
- */
-function sanitize_name_to_id($name) {
-    $id = strtolower(trim($name));
-    $id = preg_replace('/[^a-z0-9]+/', '-', $id);
-    $id = trim($id, '-');
-    return $id ?: 'input-' . time();
-}
-
-/**
  * Check if input exists
+ * Note: sanitize_name_to_id() is defined in includes/functions.php
  */
 function input_exists($id, $exclude_id = '') {
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
@@ -2214,8 +2205,13 @@ function start_input_service($id) {
 
     // Check input type to determine which service to use
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    error_log("start_input_service: Looking for config at: {$config_file}");
+
     $config = file_exists($config_file) ? parse_config($config_file) : [];
-    $type = $config['general']['type'] ?? 'udp';
+    // Check both 'input' and 'general' sections for type
+    $type = $config['input']['type'] ?? $config['general']['type'] ?? 'udp';
+
+    error_log("start_input_service: id={$id}, type={$type}, config_exists=" . (file_exists($config_file) ? 'yes' : 'no'));
 
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
@@ -2284,8 +2280,13 @@ function stop_input_service($id) {
 
     // Check input type to determine which service to use
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
+    error_log("stop_input_service: Looking for config at: {$config_file}");
+
     $config = file_exists($config_file) ? parse_config($config_file) : [];
-    $type = $config['general']['type'] ?? 'udp';
+    // Check both 'input' and 'general' sections for type
+    $type = $config['input']['type'] ?? $config['general']['type'] ?? 'udp';
+
+    error_log("stop_input_service: id={$id}, type={$type}, config_exists=" . (file_exists($config_file) ? 'yes' : 'no'));
 
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
