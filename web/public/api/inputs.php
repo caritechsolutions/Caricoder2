@@ -2215,7 +2215,8 @@ function start_input_service($id) {
     // Check input type to determine which service to use
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
     $config = file_exists($config_file) ? parse_config($config_file) : [];
-    $type = $config['general']['type'] ?? 'udp';
+    // Check both 'input' and 'general' sections for type
+    $type = $config['input']['type'] ?? $config['general']['type'] ?? 'udp';
 
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
@@ -2285,7 +2286,8 @@ function stop_input_service($id) {
     // Check input type to determine which service to use
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
     $config = file_exists($config_file) ? parse_config($config_file) : [];
-    $type = $config['general']['type'] ?? 'udp';
+    // Check both 'input' and 'general' sections for type
+    $type = $config['input']['type'] ?? $config['general']['type'] ?? 'udp';
 
     // UDP inputs use the API endpoint directly
     if ($type === 'udp') {
