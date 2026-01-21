@@ -409,7 +409,8 @@ function get_output_service_name($id) {
     if (!$config) {
         return null;
     }
-    $type = $config['output']['type'] ?? 'udp';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
     return $id . '-output-' . $type;
 }
 
@@ -712,7 +713,8 @@ function update_output($id, $data) {
 
     // Load existing config
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'srt';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
 
     // Stop service if running
     stop_output_service($id);
@@ -793,7 +795,8 @@ function delete_output($id) {
 
     // Get type for service file deletion
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'udp';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
 
     // Stop service first
     stop_output_service($id);
@@ -846,18 +849,24 @@ function start_output_service($id) {
     $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
 
     if (!file_exists($config_file)) {
+        error_log("start_output_service: Config file not found: {$config_file}");
         return ['success' => false, 'error' => 'Output not found'];
     }
 
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'srt';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
     $service_name = $id . '-output-' . $type;
+
+    error_log("start_output_service: id={$id}, type={$type}, service_name={$service_name}");
 
     // Use same endpoint as muxers
     $result = call_cari_api('/service/control', 'POST', [
         'action' => 'start',
         'service_name' => $service_name
     ]);
+
+    error_log("start_output_service: API result: " . json_encode($result));
 
     if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output started'];
@@ -878,14 +887,19 @@ function stop_output_service($id) {
     }
 
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'srt';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
     $service_name = $id . '-output-' . $type;
+
+    error_log("stop_output_service: id={$id}, type={$type}, service_name={$service_name}");
 
     // Use same endpoint as muxers
     $result = call_cari_api('/service/control', 'POST', [
         'action' => 'stop',
         'service_name' => $service_name
     ]);
+
+    error_log("stop_output_service: API result: " . json_encode($result));
 
     if (isset($result['success']) && $result['success']) {
         return ['success' => true, 'message' => 'Output stopped'];
@@ -906,7 +920,8 @@ function get_output_status($id) {
     }
 
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'srt';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
     $service_name = get_output_service_name($id);
 
     // Call backend API to get status
@@ -936,7 +951,8 @@ function get_output_metrics($id) {
     }
 
     $config = parse_config($config_file);
-    $type = $config['output']['type'] ?? 'udp';
+    // Check both 'output' and 'general' sections for type (for consistency)
+    $type = $config['output']['type'] ?? $config['general']['type'] ?? 'srt';
     $service_name = get_output_service_name($id);
 
     // Get status via backend API
