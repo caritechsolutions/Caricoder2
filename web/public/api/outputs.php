@@ -68,6 +68,79 @@ function find_available_metrics_port($start_port = 9100, $end_port = 9199) {
     return $start_port;
 }
 
+/**
+ * Get geolocation info for an IP address using ip-api.com
+ * Results are cached in /tmp to avoid rate limits
+ */
+function get_ip_geolocation($ip) {
+    // Skip private/local IPs
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+        return ['country' => 'Local', 'countryCode' => 'LO', 'city' => '', 'isp' => 'Private Network'];
+    }
+
+    // Check cache first (cache for 24 hours)
+    $cache_dir = '/tmp/geoip_cache';
+    if (!is_dir($cache_dir)) {
+        @mkdir($cache_dir, 0755, true);
+    }
+    $cache_file = $cache_dir . '/' . md5($ip) . '.json';
+
+    if (file_exists($cache_file) && (time() - filemtime($cache_file)) < 86400) {
+        $cached = json_decode(file_get_contents($cache_file), true);
+        if ($cached) {
+            return $cached;
+        }
+    }
+
+    // Query ip-api.com (free, no API key needed, 45 req/min limit)
+    $url = "http://ip-api.com/json/{$ip}?fields=status,message,country,countryCode,city,isp";
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 3,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+    if ($response === false) {
+        return ['country' => 'Unknown', 'countryCode' => '??', 'city' => '', 'isp' => ''];
+    }
+
+    $data = json_decode($response, true);
+    if (!$data || ($data['status'] ?? '') !== 'success') {
+        return ['country' => 'Unknown', 'countryCode' => '??', 'city' => '', 'isp' => ''];
+    }
+
+    $result = [
+        'country' => $data['country'] ?? 'Unknown',
+        'countryCode' => $data['countryCode'] ?? '??',
+        'city' => $data['city'] ?? '',
+        'isp' => $data['isp'] ?? ''
+    ];
+
+    // Cache the result
+    @file_put_contents($cache_file, json_encode($result));
+
+    return $result;
+}
+
+/**
+ * Extract IP address from various URL formats
+ */
+function extract_ip_from_url($url) {
+    // Handle formats like: rist://192.168.1.1:5001, 192.168.1.1:5000, etc.
+    $url = preg_replace('/^[a-z]+:\/\//', '', $url); // Remove protocol
+    $url = preg_replace('/@/', '', $url); // Remove @ for listener mode
+    $parts = explode(':', $url);
+    $ip = $parts[0] ?? '';
+
+    // Validate it's an IP
+    if (filter_var($ip, FILTER_VALIDATE_IP)) {
+        return $ip;
+    }
+    return null;
+}
+
 // Require login
 if (!auth_is_logged_in()) {
     json_response(['error' => 'Unauthorized'], 401);
@@ -79,6 +152,28 @@ switch ($action) {
     case 'list':
         $outputs = get_service_list('outputs');
         json_response(['outputs' => $outputs]);
+        break;
+
+    case 'geoip':
+        // Get geolocation for one or multiple IPs
+        $ip = $_GET['ip'] ?? '';
+        $ips = $_GET['ips'] ?? '';
+
+        if (!empty($ips)) {
+            // Multiple IPs (comma-separated)
+            $ip_list = array_filter(array_map('trim', explode(',', $ips)));
+            $results = [];
+            foreach ($ip_list as $single_ip) {
+                $results[$single_ip] = get_ip_geolocation($single_ip);
+            }
+            json_response(['success' => true, 'results' => $results]);
+        } elseif (!empty($ip)) {
+            // Single IP
+            $result = get_ip_geolocation($ip);
+            json_response(['success' => true, 'ip' => $ip, 'geo' => $result]);
+        } else {
+            json_response(['error' => 'IP address required'], 400);
+        }
         break;
 
     case 'get':

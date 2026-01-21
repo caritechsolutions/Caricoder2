@@ -263,6 +263,7 @@ include __DIR__ . '/../templates/header.php';
                                     <tr>
                                         <th>Slot</th>
                                         <th>Address</th>
+                                        <th>Country</th>
                                         <th>Duration</th>
                                         <th>RTT</th>
                                         <th>Bandwidth</th>
@@ -272,7 +273,7 @@ include __DIR__ . '/../templates/header.php';
                                 </thead>
                                 <tbody id="clientsTableBody">
                                     <tr>
-                                        <td colspan="7" class="text-center py-4 text-muted">
+                                        <td colspan="8" class="text-center py-4 text-muted">
                                             <div class="spinner-border spinner-border-sm me-2"></div>
                                             Loading clients...
                                         </td>
@@ -424,6 +425,8 @@ include __DIR__ . '/../templates/header.php';
                                 <thead class="table-light">
                                     <tr>
                                         <th>Peer</th>
+                                        <th>Country</th>
+                                        <th>CNAME</th>
                                         <th>Bitrate</th>
                                         <th>RTT</th>
                                         <th>Sent</th>
@@ -434,7 +437,7 @@ include __DIR__ . '/../templates/header.php';
                                 </thead>
                                 <tbody id="ristPeersTableBody">
                                     <tr>
-                                        <td colspan="7" class="text-center py-3 text-muted">
+                                        <td colspan="9" class="text-center py-3 text-muted">
                                             <div class="spinner-border spinner-border-sm me-2"></div>
                                             Loading...
                                         </td>
@@ -748,14 +751,54 @@ async function refreshClients() {
     } catch (e) {
         console.error('Failed to get clients:', e);
         document.getElementById('clientsTableBody').innerHTML = `
-            <tr><td colspan="7" class="text-center py-4 text-danger">
+            <tr><td colspan="8" class="text-center py-4 text-danger">
                 <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
             </td></tr>`;
     }
 }
 
+// Cache for geolocation data
+const geoCache = {};
+
+// Get country flag emoji from country code
+function getCountryFlag(countryCode) {
+    if (!countryCode || countryCode === '??' || countryCode === 'LO') {
+        return countryCode === 'LO' ? '🏠' : '🌍';
+    }
+    // Convert country code to flag emoji
+    const codePoints = countryCode
+        .toUpperCase()
+        .split('')
+        .map(char => 127397 + char.charCodeAt(0));
+    return String.fromCodePoint(...codePoints);
+}
+
+// Extract IP from address (handles "ip:port" format)
+function extractIp(address) {
+    if (!address) return null;
+    const parts = address.split(':');
+    return parts[0] || null;
+}
+
+// Fetch geolocation for multiple IPs
+async function fetchGeolocations(ips) {
+    // Filter out IPs we already have cached
+    const uncachedIps = ips.filter(ip => !geoCache[ip]);
+    if (uncachedIps.length === 0) return;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=geoip&ips=${encodeURIComponent(uncachedIps.join(','))}`);
+        const data = await response.json();
+        if (data.success && data.results) {
+            Object.assign(geoCache, data.results);
+        }
+    } catch (e) {
+        console.error('Failed to fetch geolocation:', e);
+    }
+}
+
 // Render clients table
-function renderClientsTable(clients) {
+async function renderClientsTable(clients) {
     const tbody = document.getElementById('clientsTableBody');
 
     // Calculate summary stats
@@ -767,7 +810,7 @@ function renderClientsTable(clients) {
 
     if (clients.length === 0) {
         tbody.innerHTML = `
-            <tr><td colspan="7" class="text-center py-4 text-muted">
+            <tr><td colspan="8" class="text-center py-4 text-muted">
                 <i class="bi bi-people me-2"></i>No clients connected
             </td></tr>`;
         // Reset summary stats
@@ -777,6 +820,10 @@ function renderClientsTable(clients) {
         document.getElementById('srtTotalRetrans').textContent = '0';
         return;
     }
+
+    // Collect all IPs and fetch geolocation data
+    const ips = clients.map(c => extractIp(c.address)).filter(ip => ip);
+    await fetchGeolocations(ips);
 
     let html = '';
     clients.forEach(client => {
@@ -792,10 +839,17 @@ function renderClientsTable(clients) {
         totalLost += lost;
         totalRetrans += retrans;
 
+        // Get geolocation
+        const ip = extractIp(client.address);
+        const geo = geoCache[ip] || {};
+        const flag = getCountryFlag(geo.countryCode);
+        const countryTitle = geo.city ? `${geo.city}, ${geo.country}` : (geo.country || 'Unknown');
+
         html += `
             <tr class="client-row" onclick="showClientDetails(${client.slot})" style="cursor: pointer;">
                 <td><span class="badge bg-secondary">${client.slot}</span></td>
                 <td><code>${client.address}</code></td>
+                <td title="${countryTitle}">${flag} ${geo.countryCode || '??'}</td>
                 <td>${duration}</td>
                 <td>${rtt.toFixed(1)} ms</td>
                 <td>${bw.toFixed(2)} Mbps</td>
@@ -970,20 +1024,35 @@ async function refreshRistStats() {
             renderRistStats(data.metrics || {});
         } else {
             document.getElementById('ristPeersTableBody').innerHTML = `
-                <tr><td colspan="7" class="text-center py-3 text-danger">
+                <tr><td colspan="9" class="text-center py-3 text-danger">
                     <i class="bi bi-exclamation-triangle me-2"></i>${data.error}
                 </td></tr>`;
         }
     } catch (e) {
         console.error('Failed to get RIST stats:', e);
         document.getElementById('ristPeersTableBody').innerHTML = `
-            <tr><td colspan="7" class="text-center py-3 text-danger">
+            <tr><td colspan="9" class="text-center py-3 text-danger">
                 <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
             </td></tr>`;
     }
 }
 
-function renderRistStats(metrics) {
+// Extract IP from RIST URL (e.g., "rist://192.168.1.1:5001" -> "192.168.1.1")
+function extractIpFromRistUrl(url) {
+    if (!url) return null;
+    // Remove protocol
+    let addr = url.replace(/^rist:\/\//, '').replace(/^@/, '');
+    // Extract IP before port
+    const parts = addr.split(':');
+    const ip = parts[0];
+    // Validate it's an IP
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+        return ip;
+    }
+    return null;
+}
+
+async function renderRistStats(metrics) {
     // Extract key metrics from the grouped data
     let totalBitrate = 0;
     let totalRtt = 0;
@@ -1056,19 +1125,33 @@ function renderRistStats(metrics) {
     document.getElementById('ristFlowRecovered').textContent = totalReceived.toLocaleString();
     document.getElementById('ristFlowNotRecovered').textContent = totalRetrans.toLocaleString();
 
+    // Fetch geolocation for all peers
+    const ips = peers.map(p => extractIpFromRistUrl(p.name)).filter(ip => ip);
+    if (ips.length > 0) {
+        await fetchGeolocations(ips);
+    }
+
     // Render peers table
     const tbody = document.getElementById('ristPeersTableBody');
     if (peers.length === 0) {
         tbody.innerHTML = `
-            <tr><td colspan="7" class="text-center py-3 text-muted">
+            <tr><td colspan="9" class="text-center py-3 text-muted">
                 <i class="bi bi-diagram-3 me-2"></i>No peer connections
             </td></tr>`;
     } else {
         let html = '';
         peers.forEach(p => {
+            // Get geolocation
+            const ip = extractIpFromRistUrl(p.name);
+            const geo = ip ? (geoCache[ip] || {}) : {};
+            const flag = getCountryFlag(geo.countryCode);
+            const countryTitle = geo.city ? `${geo.city}, ${geo.country}` : (geo.country || 'Unknown');
+
             html += `
                 <tr>
                     <td><code>${p.name}</code></td>
+                    <td title="${countryTitle}">${flag} ${geo.countryCode || '??'}</td>
+                    <td>${p.cname || '<span class="text-muted">-</span>'}</td>
                     <td>${p.bitrate} Mbps</td>
                     <td>${p.rtt} ms</td>
                     <td>${p.sent.toLocaleString()}</td>
