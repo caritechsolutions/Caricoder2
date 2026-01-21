@@ -1283,8 +1283,9 @@ function loadClientCounts() {
         const outputId = el.dataset.outputId;
         const outputType = el.dataset.outputType;
 
-        // Skip if not running (already shows "-")
-        if (!el.querySelector('.spinner-border')) {
+        // Check if output is running (has spinner or already has a count)
+        const isRunning = el.querySelector('.spinner-border') || el.querySelector('strong');
+        if (!isRunning && el.textContent.trim() === '-') {
             return;
         }
 
@@ -1295,7 +1296,7 @@ function loadClientCounts() {
                 if (data.success) {
                     el.innerHTML = `<strong>${data.client_count}</strong>`;
                 } else {
-                    el.textContent = '-';
+                    el.innerHTML = '<strong>0</strong>';
                 }
             } else if (outputType === 'rist') {
                 const response = await fetch(`api/outputs.php?action=rist_metrics&id=${outputId}`);
@@ -1311,17 +1312,20 @@ function loadClientCounts() {
                     });
                     el.innerHTML = `<strong>${peerIds.size}</strong>`;
                 } else {
-                    el.textContent = '-';
+                    el.innerHTML = '<strong>0</strong>';
                 }
             }
         } catch (e) {
-            el.textContent = '-';
+            // Keep current value on error
         }
     });
 }
 
-// Load client counts on page load
-document.addEventListener('DOMContentLoaded', loadClientCounts);
+// Load client counts on page load and refresh every 5 seconds
+document.addEventListener('DOMContentLoaded', function() {
+    loadClientCounts();
+    setInterval(loadClientCounts, 5000);
+});
 </script>
 
 <?php include __DIR__ . '/../templates/footer.php'; ?>
