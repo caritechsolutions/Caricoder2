@@ -406,7 +406,7 @@ include __DIR__ . '/../templates/header.php';
                 <!-- Flow Info -->
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h6 class="mb-0"><i class="bi bi-activity me-2"></i>Flow Statistics</h6>
+                        <h6 class="mb-0"><i class="bi bi-activity me-2"></i>Total Statistics</h6>
                         <button class="btn btn-outline-secondary btn-sm" onclick="refreshRistStats()">
                             <i class="bi bi-arrow-clockwise"></i> Refresh
                         </button>
@@ -418,16 +418,16 @@ include __DIR__ . '/../templates/header.php';
                                 <div class="fw-bold" id="ristFlowSent">-</div>
                             </div>
                             <div class="col-md-3 mb-2">
-                                <small class="text-muted">Bytes Sent</small>
+                                <small class="text-muted">Peers Connected</small>
                                 <div class="fw-bold" id="ristFlowBytes">-</div>
                             </div>
                             <div class="col-md-3 mb-2">
-                                <small class="text-muted">Recovered</small>
+                                <small class="text-muted">RTCP Received</small>
                                 <div class="fw-bold text-success" id="ristFlowRecovered">-</div>
                             </div>
                             <div class="col-md-3 mb-2">
-                                <small class="text-muted">Not Recovered</small>
-                                <div class="fw-bold text-danger" id="ristFlowNotRecovered">-</div>
+                                <small class="text-muted">Retransmitted</small>
+                                <div class="fw-bold text-warning" id="ristFlowNotRecovered">-</div>
                             </div>
                         </div>
                     </div>
@@ -920,13 +920,11 @@ async function refreshRistStats() {
 function renderRistStats(metrics) {
     // Extract key metrics from the grouped data
     let totalBitrate = 0;
-    let rtt = '-';
-    let lost = 0;
-    let retrans = 0;
-    let sent = 0;
-    let bytes = 0;
-    let recovered = 0;
-    let notRecovered = 0;
+    let totalRtt = 0;
+    let peerCount = 0;
+    let totalRetrans = 0;
+    let totalSent = 0;
+    let totalReceived = 0;
 
     // Parse sender/peer metrics (ristsender uses rist_sender_peer_* format)
     const peers = [];
@@ -955,11 +953,13 @@ function renderRistStats(metrics) {
         const peerRetx = pm.rist_sender_peer_retransmitted_packets || 0;
         const peerQuality = pm.rist_sender_peer_quality || 100;
 
-        // Sum up total bitrate from all peers
+        // Sum up totals
         totalBitrate += peerBandwidth;
-        if (peerRtt > 0) rtt = peerRtt.toFixed(1) + ' ms';
-        retrans += peerRetx;
-        sent += peerSent;
+        totalRtt += peerRtt;
+        totalRetrans += peerRetx;
+        totalSent += peerSent;
+        totalReceived += peerRecv;
+        peerCount++;
 
         const peerName = pm.peer_url || pm.listening || `Peer ${peerId}`;
         peers.push({
@@ -974,28 +974,21 @@ function renderRistStats(metrics) {
         });
     });
 
-    // Format total bitrate
+    // Format summary values
     const bitrate = totalBitrate > 0 ? (totalBitrate / 1000000).toFixed(2) + ' Mbps' : '-';
-
-    // Parse flow metrics (if available)
-    (metrics.flow || []).forEach(m => {
-        if (m.name === 'rist_flow_sent') sent = m.value;
-        if (m.name === 'rist_flow_sent_bytes') bytes = m.value;
-        if (m.name === 'rist_flow_recovered') recovered = m.value;
-        if (m.name === 'rist_flow_not_recovered') { notRecovered = m.value; lost = m.value; }
-    });
+    const avgRtt = peerCount > 0 ? (totalRtt / peerCount).toFixed(1) + ' ms' : '-';
 
     // Update summary cards
     document.getElementById('ristBitrate').textContent = bitrate;
-    document.getElementById('ristRtt').textContent = rtt;
-    document.getElementById('ristLost').textContent = lost.toLocaleString();
-    document.getElementById('ristRetrans').textContent = retrans.toLocaleString();
+    document.getElementById('ristRtt').textContent = avgRtt;
+    document.getElementById('ristLost').textContent = '-'; // Not available from ristsender
+    document.getElementById('ristRetrans').textContent = totalRetrans.toLocaleString();
 
-    // Update flow stats
-    document.getElementById('ristFlowSent').textContent = sent.toLocaleString();
-    document.getElementById('ristFlowBytes').textContent = formatBytes(bytes);
-    document.getElementById('ristFlowRecovered').textContent = recovered.toLocaleString();
-    document.getElementById('ristFlowNotRecovered').textContent = notRecovered.toLocaleString();
+    // Update flow stats (using peer totals since ristsender doesn't provide flow metrics)
+    document.getElementById('ristFlowSent').textContent = totalSent.toLocaleString();
+    document.getElementById('ristFlowBytes').textContent = peerCount > 0 ? peerCount + ' peer(s)' : '-';
+    document.getElementById('ristFlowRecovered').textContent = totalReceived.toLocaleString();
+    document.getElementById('ristFlowNotRecovered').textContent = totalRetrans.toLocaleString();
 
     // Render peers table
     const tbody = document.getElementById('ristPeersTableBody');
