@@ -1013,17 +1013,8 @@ function generate_rist_input_service($id, $config) {
 }
 
 /**
- * Sanitize name to ID (lowercase, alphanumeric, hyphens)
- */
-function sanitize_name_to_id($name) {
-    $id = strtolower(trim($name));
-    $id = preg_replace('/[^a-z0-9]+/', '-', $id);
-    $id = trim($id, '-');
-    return $id ?: 'input-' . time();
-}
-
-/**
  * Check if input exists
+ * Note: sanitize_name_to_id() is defined in includes/functions.php
  */
 function input_exists($id, $exclude_id = '') {
     $config_file = CONFIG_DIR . '/inputs/' . $id . '.conf';
