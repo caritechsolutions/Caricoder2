@@ -647,9 +647,10 @@ function generate_rist_service_file($id, $name, $config) {
     }
 
     // Enable metrics HTTP server
+    $cmd_args[] = "-M";
     $cmd_args[] = "--metrics-http";
-    $cmd_args[] = "--metrics-port {$metrics_port}";
-    $cmd_args[] = "--metrics-ip 127.0.0.1";
+    $cmd_args[] = "--metrics-port={$metrics_port}";
+    $cmd_args[] = "-S 1000";
 
     $cmd_line = implode(" \\\n    ", $cmd_args);
 
