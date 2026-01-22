@@ -57,7 +57,12 @@ static void write_stats_file(void) {
     snprintf(tmp_path, sizeof(tmp_path), "%s/stats.json.tmp", ctx.output_dir);
 
     FILE *f = fopen(tmp_path, "w");
-    if (!f) return;
+    if (!f) {
+        if (ctx.verbose) {
+            fprintf(stderr, "[HLS] Failed to write stats file: %s (%s)\n", tmp_path, strerror(errno));
+        }
+        return;
+    }
 
     time_t now = time(NULL);
     int ffmpeg_running = (ctx.ffmpeg_pid > 0 && kill(ctx.ffmpeg_pid, 0) == 0);
@@ -112,7 +117,11 @@ static void write_stats_file(void) {
     );
 
     fclose(f);
-    rename(tmp_path, stats_path);
+    if (rename(tmp_path, stats_path) != 0) {
+        if (ctx.verbose) {
+            fprintf(stderr, "[HLS] Failed to rename stats file: %s\n", strerror(errno));
+        }
+    }
 }
 
 /* Start FFmpeg process */
