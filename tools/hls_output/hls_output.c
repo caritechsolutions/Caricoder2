@@ -24,6 +24,7 @@
 
 #define MAX_VARIANTS 8
 #define MAX_PATH_LEN 512
+#define MAX_FULL_PATH_LEN 768  /* MAX_PATH_LEN + space for filename */
 #define DEFAULT_SEGMENT_DURATION 2
 #define DEFAULT_SEGMENT_COUNT 5
 #define STATS_UPDATE_INTERVAL 5  /* seconds between stats updates */
@@ -50,8 +51,8 @@ static AppContext ctx;
 
 /* Write stats JSON file */
 static void write_stats_file(void) {
-    char stats_path[MAX_PATH_LEN];
-    char tmp_path[MAX_PATH_LEN];
+    char stats_path[MAX_FULL_PATH_LEN];
+    char tmp_path[MAX_FULL_PATH_LEN];
 
     snprintf(stats_path, sizeof(stats_path), "%s/stats.json", ctx.output_dir);
     snprintf(tmp_path, sizeof(tmp_path), "%s/stats.json.tmp", ctx.output_dir);
@@ -81,7 +82,7 @@ static void write_stats_file(void) {
     }
 
     /* Check if playlist exists */
-    char playlist_path[MAX_PATH_LEN];
+    char playlist_path[MAX_FULL_PATH_LEN];
     snprintf(playlist_path, sizeof(playlist_path), "%s/playlist.m3u8", ctx.output_dir);
     int playlist_ready = (access(playlist_path, F_OK) == 0);
 
@@ -136,8 +137,8 @@ static int start_ffmpeg(void) {
     if (pid == 0) {
         /* Child process - exec ffmpeg */
         char input_url[512];
-        char segment_pattern[MAX_PATH_LEN];
-        char playlist_path[MAX_PATH_LEN];
+        char segment_pattern[MAX_FULL_PATH_LEN];
+        char playlist_path[MAX_FULL_PATH_LEN];
         char duration_str[16];
         char list_size_str[16];
 
@@ -162,7 +163,7 @@ static int start_ffmpeg(void) {
                 strncat(var_stream_map, var_entry, sizeof(var_stream_map) - strlen(var_stream_map) - 1);
 
                 /* Create variant directory */
-                char var_dir[MAX_PATH_LEN];
+                char var_dir[MAX_FULL_PATH_LEN];
                 snprintf(var_dir, sizeof(var_dir), "%s/v%d", ctx.output_dir, i);
                 mkdir(var_dir, 0755);
             }
