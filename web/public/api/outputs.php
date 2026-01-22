@@ -1010,6 +1010,12 @@ EOT;
 function create_hls_output($data, $id, $name, $service_name) {
     error_log("create_hls_output called: id={$id}, name={$name}");
 
+    // Auto-generate output directory if not provided
+    $output_dir = $data['hls_output_dir'] ?? '';
+    if (empty(trim($output_dir))) {
+        $output_dir = '/var/www/caritrans/public/hls/' . $id;
+    }
+
     // Build configuration
     $config = [
         'output' => [
@@ -1026,7 +1032,7 @@ function create_hls_output($data, $id, $name, $service_name) {
         ],
         'destination_hls' => [
             'http_port' => $data['hls_port'] ?? '8080',
-            'output_dir' => $data['hls_output_dir'] ?? '/var/www/caritrans/public/hls/' . $id,
+            'output_dir' => $output_dir,
             'segment_duration' => $data['hls_segment_duration'] ?? '2',
             'segment_count' => $data['hls_segment_count'] ?? '5',
             'variants' => $data['hls_variants'] ?? '1'
