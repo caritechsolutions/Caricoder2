@@ -1926,8 +1926,9 @@ function get_hls_clients_from_nginx_log($output_dir) {
         $hls_path = '/hls/' . basename($output_dir);
     }
 
-    // Common nginx log locations
+    // Common nginx log locations - check HLS-specific log first
     $log_files = [
+        '/var/log/nginx/hls.access.log',    // HLS-specific log with port tracking
         '/var/log/nginx/access.log',
         '/var/log/nginx/caritrans.access.log',
         '/var/log/caritrans/access.log'
@@ -1968,7 +1969,9 @@ function get_hls_clients_from_nginx_log($output_dir) {
     fclose($fp);
 
     // Parse log lines for HLS requests
-    // Common nginx log format: IP - - [date] "METHOD /path HTTP/x.x" status size "referer" "user-agent"
+    // Supports two formats:
+    // - Standard: IP - - [date] "request" status size "referer" "user-agent"
+    // - With port: IP:PORT - - [date] "request" status size "referer" "user-agent"
     $client_data = [];
 
     foreach ($lines as $line) {
@@ -1977,16 +1980,24 @@ function get_hls_clients_from_nginx_log($output_dir) {
             continue;
         }
 
-        // Parse nginx combined log format
-        // Example: 192.168.1.100 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        // Parse nginx combined log format (with optional port)
+        // Example: 192.168.1.100:54321 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
         if (preg_match('/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"/', $line, $m)) {
-            $ip = $m[1];
+            $ip_field = $m[1];
             $date_str = $m[2];
             $method = $m[3];
             $path = $m[4];
             $status = $m[5];
             $bytes = $m[6] === '-' ? 0 : intval($m[6]);
             $user_agent = $m[8];
+
+            // Extract IP and port (format: IP:PORT or just IP)
+            $ip = $ip_field;
+            $client_port = '';
+            if (preg_match('/^(.+):(\d+)$/', $ip_field, $ip_match)) {
+                $ip = $ip_match[1];
+                $client_port = $ip_match[2];
+            }
 
             // Parse date (format: 22/Jan/2026:12:34:56 +0000)
             // Convert to "22 Jan 2026 12:34:56 +0000" for strtotime
@@ -2003,8 +2014,13 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 continue;
             }
 
-            // Use IP + User-Agent as unique client key (distinguishes different devices from same IP)
-            $client_key = $ip . '|' . $user_agent;
+            // Use IP:PORT as unique key if port available, otherwise IP + User-Agent
+            // Port is the best identifier as it's unique per TCP connection
+            if (!empty($client_port)) {
+                $client_key = $ip . ':' . $client_port;
+            } else {
+                $client_key = $ip . '|' . $user_agent;
+            }
 
             // Parse user agent for device info
             $device_info = parse_user_agent_device($user_agent);
@@ -2013,6 +2029,7 @@ function get_hls_clients_from_nginx_log($output_dir) {
             if (!isset($client_data[$client_key])) {
                 $client_data[$client_key] = [
                     'ip' => $ip,
+                    'port' => $client_port,
                     'first_seen' => $log_time,
                     'last_seen' => $log_time,
                     'requests' => 0,
