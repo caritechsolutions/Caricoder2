@@ -817,7 +817,7 @@ update_avsync_service() {
     log_info "A/V Sync Monitor service updated"
 }
 
-# Update nginx config (add missing locations like /preview)
+# Update nginx config (add missing locations like /preview, /hls)
 update_nginx_config() {
     log_step "Updating nginx configuration..."
 
@@ -828,9 +828,63 @@ update_nginx_config() {
         return
     fi
 
+    # Add HLS tracking log format config if missing
+    if [[ ! -f "/etc/nginx/conf.d/hls_tracking.conf" ]]; then
+        log_info "Adding HLS tracking log format..."
+        cat > /etc/nginx/conf.d/hls_tracking.conf << 'HLSCONF'
+# Custom log format with client port for HLS client tracking
+# This allows tracking unique clients even when multiple streams come from same IP
+log_format hls_tracking '$remote_addr:$remote_port - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent"';
+HLSCONF
+    fi
+
+    # Create HLS output directory
+    mkdir -p /var/www/caritrans/public/hls
+    chown -R www-data:www-data /var/www/caritrans/public/hls
+
+    # Add /hls location if missing (for HLS outputs with client tracking)
+    if ! grep -q "location /hls/" "$NGINX_CONF"; then
+        log_info "Adding /hls location for HLS output streams..."
+
+        # Insert the hls location before the preview location or WebSocket
+        if grep -q "location /preview/" "$NGINX_CONF"; then
+            sed -i '/# HLS preview streams/i \
+    # HLS output streams - with client tracking via port logging\
+    location /hls/ {\
+        alias /var/www/caritrans/public/hls/;\
+        access_log /var/log/nginx/hls.access.log hls_tracking;\
+        add_header Access-Control-Allow-Origin *;\
+        add_header Cache-Control "no-cache, no-store, must-revalidate";\
+        types {\
+            application/vnd.apple.mpegurl m3u8;\
+            video/mp2t ts;\
+        }\
+    }\
+\
+' "$NGINX_CONF"
+        else
+            sed -i '/# WebSocket proxy/i \
+    # HLS output streams - with client tracking via port logging\
+    location /hls/ {\
+        alias /var/www/caritrans/public/hls/;\
+        access_log /var/log/nginx/hls.access.log hls_tracking;\
+        add_header Access-Control-Allow-Origin *;\
+        add_header Cache-Control "no-cache, no-store, must-revalidate";\
+        types {\
+            application/vnd.apple.mpegurl m3u8;\
+            video/mp2t ts;\
+        }\
+    }\
+\
+' "$NGINX_CONF"
+        fi
+    fi
+
     # Add /preview location if missing
     if ! grep -q "location /preview/" "$NGINX_CONF"; then
-        log_info "Adding /preview location for HLS streams..."
+        log_info "Adding /preview location for HLS preview streams..."
 
         # Insert the preview location before the WebSocket location
         sed -i '/# WebSocket proxy/i \
@@ -845,15 +899,15 @@ update_nginx_config() {
         }\
     }\
 ' "$NGINX_CONF"
-
-        # Test nginx config
-        if nginx -t 2>/dev/null; then
-            log_info "Nginx config updated successfully"
-        else
-            log_warn "Nginx config test failed - reverting"
-        fi
     else
         log_info "Nginx config already has /preview location"
+    fi
+
+    # Test nginx config
+    if nginx -t 2>/dev/null; then
+        log_info "Nginx config updated successfully"
+    else
+        log_warn "Nginx config test failed - please check /etc/nginx/sites-available/caritrans"
     fi
 }
 

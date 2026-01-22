@@ -1132,6 +1132,19 @@ configure_nginx() {
 
     log_info "Using PHP-FPM socket: $PHP_FPM_SOCK"
 
+    # Create HLS tracking log format config
+    cat > /etc/nginx/conf.d/hls_tracking.conf << 'HLSCONF'
+# Custom log format with client port for HLS client tracking
+# This allows tracking unique clients even when multiple streams come from same IP
+log_format hls_tracking '$remote_addr:$remote_port - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent"';
+HLSCONF
+
+    # Create HLS output directory
+    mkdir -p /var/www/caritrans/public/hls
+    chown -R www-data:www-data /var/www/caritrans/public/hls
+
     # Create Nginx config
     cat > /etc/nginx/sites-available/caritrans << NGINX
 server {
@@ -1154,6 +1167,18 @@ server {
 
     location ~ /\\.(ht|git) {
         deny all;
+    }
+
+    # HLS output streams - with client tracking via port logging
+    location /hls/ {
+        alias /var/www/caritrans/public/hls/;
+        access_log /var/log/nginx/hls.access.log hls_tracking;
+        add_header Access-Control-Allow-Origin *;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/mp2t ts;
+        }
     }
 
     # HLS preview streams - serve directly without PHP auth
