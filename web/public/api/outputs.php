@@ -1904,7 +1904,14 @@ function get_hls_clients_from_nginx_log($output_dir) {
             $user_agent = $m[8];
 
             // Parse date (format: 22/Jan/2026:12:34:56 +0000)
-            $log_time = strtotime(str_replace(':', ' ', $date_str));
+            // Convert to "22 Jan 2026 12:34:56 +0000" for strtotime
+            $parsed_date = preg_replace('#^(\d{2})/(\w{3})/(\d{4}):(.*)$#', '$1 $2 $3 $4', $date_str);
+            $log_time = strtotime($parsed_date);
+
+            // Skip if we couldn't parse the date
+            if ($log_time === false) {
+                continue;
+            }
 
             // Only include recent requests
             if ($log_time < $cutoff) {
