@@ -1771,21 +1771,48 @@ function get_hls_stats($id) {
         return ['success' => false, 'error' => 'Cannot read stats file', 'status' => 'offline'];
     }
 
-    $stats = json_decode($response, true);
-    if (!$stats) {
+    $raw_stats = json_decode($response, true);
+    if (!$raw_stats) {
         return ['success' => false, 'error' => 'Invalid stats file'];
-    }
-
-    // Check if stats are stale (older than 30 seconds)
-    $stats_age = time() - ($stats['timestamp'] ?? 0);
-    if ($stats_age > 30) {
-        $stats['warning'] = 'Stats may be stale (last update ' . $stats_age . ' seconds ago)';
     }
 
     // Get client stats from nginx access log
     $clients = get_hls_clients_from_nginx_log($output_dir);
-    $stats['client_count'] = count($clients);
-    $stats['clients'] = $clients;
+
+    // Calculate total requests and bytes from clients
+    $total_requests = 0;
+    $total_bytes = 0;
+    foreach ($clients as $client) {
+        $total_requests += $client['requests'] ?? 0;
+        $total_bytes += $client['bytes_sent'] ?? 0;
+    }
+
+    // Restructure stats to match expected format for GUI
+    $stats = [
+        'server' => [
+            'uptime' => $raw_stats['uptime'] ?? 0,
+            'udp_input' => $raw_stats['udp_input'] ?? '',
+            'output_dir' => $raw_stats['output_dir'] ?? $output_dir,
+            'variants' => $raw_stats['variants'] ?? 1,
+            'segment_duration' => $raw_stats['segment_duration'] ?? 2,
+            'segment_count' => $raw_stats['segment_count'] ?? 5,
+            'segments_on_disk' => $raw_stats['segments_on_disk'] ?? 0,
+            'playlist_ready' => $raw_stats['playlist_ready'] ?? false,
+            'total_requests' => $total_requests,
+            'total_bytes_sent' => $total_bytes
+        ],
+        'ffmpeg_running' => $raw_stats['ffmpeg_running'] ?? false,
+        'ffmpeg_pid' => $raw_stats['ffmpeg_pid'] ?? 0,
+        'restart_count' => $raw_stats['restart_count'] ?? 0,
+        'client_count' => count($clients),
+        'clients' => $clients
+    ];
+
+    // Check if stats are stale (older than 30 seconds)
+    $stats_age = time() - ($raw_stats['timestamp'] ?? 0);
+    if ($stats_age > 30) {
+        $stats['warning'] = 'Stats may be stale (last update ' . $stats_age . ' seconds ago)';
+    }
 
     return [
         'success' => true,
