@@ -32,6 +32,7 @@ foreach ($outputs as &$output) {
         $output['destination_srt'] = $config['destination_srt'] ?? [];
         $output['destination_rist'] = $config['destination_rist'] ?? [];
         $output['destination_http'] = $config['destination_http'] ?? [];
+        $output['destination_hls'] = $config['destination_hls'] ?? [];
         $output['output'] = $config['output'] ?? [];
     }
 
@@ -107,6 +108,12 @@ include __DIR__ . '/../templates/header.php';
                             $dest_display = "http://{$http_addr}:{$http_port}{$http_path}";
                             $type_badge = 'bg-info text-dark';
                             $type_icon = 'bi-globe';
+                        } elseif ($type === 'hls') {
+                            $hls_dir = $output['destination_hls']['output_dir'] ?? '/var/www/caritrans/public/hls/' . $output_id;
+                            $hls_variants = $output['destination_hls']['variants'] ?? '1';
+                            $dest_display = basename($hls_dir) . "/playlist.m3u8" . ($hls_variants > 1 ? " (ABR:{$hls_variants})" : '');
+                            $type_badge = 'bg-success';
+                            $type_icon = 'bi-collection-play';
                         } else {
                             $srt_addr = $output['destination_srt']['listen_address'] ?? '0.0.0.0';
                             $srt_port = $output['destination_srt']['listen_port'] ?? '';
@@ -180,6 +187,10 @@ include __DIR__ . '/../templates/header.php';
                                     </button>
                                     <?php elseif ($type === 'http'): ?>
                                     <button class="btn btn-outline-info" onclick="showHttpStatsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
+                                        <i class="bi bi-people"></i>
+                                    </button>
+                                    <?php elseif ($type === 'hls'): ?>
+                                    <button class="btn btn-outline-info" onclick="showHlsStatsModal('<?php echo $output['id']; ?>', '<?php echo htmlspecialchars($output['name']); ?>')" title="Clients">
                                         <i class="bi bi-people"></i>
                                     </button>
                                     <?php endif; ?>
@@ -584,6 +595,103 @@ include __DIR__ . '/../templates/header.php';
     </div>
 </div>
 
+<!-- HLS Stats Modal -->
+<div class="modal fade" id="hlsStatsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-collection-play me-2"></i>HLS Clients: <span id="hlsStatsOutputName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="hlsStatsOutputId">
+
+                <!-- Summary Stats -->
+                <div class="row mb-4">
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="hlsClientCount">0</h4>
+                                <small class="text-muted">Clients</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="hlsUptime">-</h4>
+                                <small class="text-muted">Uptime</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="hlsTotalRequests">-</h4>
+                                <small class="text-muted">Total Requests</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light">
+                            <div class="card-body text-center py-2">
+                                <h4 class="mb-0" id="hlsTotalBytes">-</h4>
+                                <small class="text-muted">Total Bytes</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- FFmpeg Status -->
+                <div class="alert alert-info small mb-3">
+                    <i class="bi bi-info-circle me-1"></i>
+                    FFmpeg Status: <strong id="hlsFfmpegStatus">-</strong>
+                    | Variants: <strong id="hlsVariantCount">-</strong>
+                </div>
+
+                <!-- Clients Table -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0"><i class="bi bi-people me-2"></i>Active Clients</h6>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="refreshHlsStats()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0" id="hlsClientsTable">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>IP Address</th>
+                                        <th>Device</th>
+                                        <th>Country</th>
+                                        <th>Duration</th>
+                                        <th>Requests</th>
+                                        <th>Manifests</th>
+                                        <th>Segments</th>
+                                        <th>Bytes</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="hlsClientsTableBody">
+                                    <tr>
+                                        <td colspan="8" class="text-center py-3 text-muted">
+                                            <div class="spinner-border spinner-border-sm me-2"></div>
+                                            Loading...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Add Output Modal -->
 <div class="modal fade" id="addOutputModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -608,6 +716,7 @@ include __DIR__ . '/../templates/header.php';
                                 <option value="srt">SRT (One-to-Many)</option>
                                 <option value="rist">RIST</option>
                                 <option value="http">HTTP (MPEG-TS Pull)</option>
+                                <option value="hls">HLS (HTTP Live Streaming)</option>
                             </select>
                         </div>
                     </div>
@@ -829,6 +938,46 @@ include __DIR__ . '/../templates/header.php';
                                         Use Chunked Transfer Encoding
                                     </label>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- HLS Output Section -->
+                    <div id="hlsSection" style="display: none;">
+                        <hr>
+                        <h6><i class="bi bi-collection-play me-2"></i>HLS Output (HTTP Live Streaming)</h6>
+                        <div class="alert alert-info small mb-3">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Generates HLS segments via FFmpeg. Files are served by nginx at <code>/hls/{output_id}/playlist.m3u8</code>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Output Directory</label>
+                                <input type="text" class="form-control" name="hls_output_dir" id="hlsOutputDir"
+                                       placeholder="/var/www/caritrans/public/hls/{id}">
+                                <small class="text-muted">Leave empty for auto-generated path (served by nginx)</small>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Variants (ABR)</label>
+                                <select class="form-select" name="hls_variants" id="hlsVariants">
+                                    <option value="1">1 - Single stream</option>
+                                    <option value="2">2 - Two quality levels</option>
+                                    <option value="3">3 - Three quality levels</option>
+                                    <option value="4">4 - Four quality levels</option>
+                                </select>
+                                <small class="text-muted">Set to match ABR transcoder output count</small>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Segment Duration (sec)</label>
+                                <input type="number" class="form-control" name="hls_segment_duration"
+                                       value="2" min="1" max="10">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Segments to Keep</label>
+                                <input type="number" class="form-control" name="hls_segment_count"
+                                       value="5" min="2" max="20">
                             </div>
                         </div>
                     </div>
@@ -1344,12 +1493,15 @@ function toggleOutputType() {
     document.getElementById('srtSection').style.display = 'none';
     document.getElementById('ristSection').style.display = 'none';
     document.getElementById('httpSection').style.display = 'none';
+    document.getElementById('hlsSection').style.display = 'none';
 
     // Show the selected section
     if (type === 'rist') {
         document.getElementById('ristSection').style.display = 'block';
     } else if (type === 'http') {
         document.getElementById('httpSection').style.display = 'block';
+    } else if (type === 'hls') {
+        document.getElementById('hlsSection').style.display = 'block';
     } else {
         document.getElementById('srtSection').style.display = 'block';
     }
@@ -1508,6 +1660,7 @@ document.getElementById('addOutputModal').addEventListener('show.bs.modal', func
     document.getElementById('srtSection').style.display = 'block';
     document.getElementById('ristSection').style.display = 'none';
     document.getElementById('httpSection').style.display = 'none';
+    document.getElementById('hlsSection').style.display = 'none';
     document.getElementById('ristSecretRow').style.display = 'none';
     nameValid = false;
     updateServiceNamePreview();
@@ -1553,6 +1706,14 @@ function loadClientCounts() {
                 }
             } else if (outputType === 'http') {
                 const response = await fetch(`api/outputs.php?action=http_stats&id=${outputId}`);
+                const data = await response.json();
+                if (data.success && data.stats) {
+                    el.innerHTML = `<strong>${data.stats.client_count || 0}</strong>`;
+                } else {
+                    el.innerHTML = '<strong>0</strong>';
+                }
+            } else if (outputType === 'hls') {
+                const response = await fetch(`api/outputs.php?action=hls_stats&id=${outputId}`);
                 const data = await response.json();
                 if (data.success && data.stats) {
                     el.innerHTML = `<strong>${data.stats.client_count || 0}</strong>`;
@@ -1661,6 +1822,122 @@ function stopHttpStatsAutoRefresh() {
 
 document.getElementById('httpStatsModal').addEventListener('hidden.bs.modal', function() {
     stopHttpStatsAutoRefresh();
+});
+
+// HLS Stats Modal
+let hlsStatsRefreshInterval = null;
+
+function showHlsStatsModal(id, name) {
+    currentOutputId = id;
+    document.getElementById('hlsStatsOutputId').value = id;
+    document.getElementById('hlsStatsOutputName').textContent = name;
+
+    new bootstrap.Modal(document.getElementById('hlsStatsModal')).show();
+    refreshHlsStats();
+    startHlsStatsAutoRefresh();
+}
+
+async function refreshHlsStats() {
+    const id = document.getElementById('hlsStatsOutputId').value;
+    if (!id) return;
+
+    try {
+        const response = await fetch(`api/outputs.php?action=hls_stats&id=${id}`);
+        const data = await response.json();
+
+        if (data.success && data.stats) {
+            renderHlsStats(data.stats);
+        } else {
+            document.getElementById('hlsClientsTableBody').innerHTML = `
+                <tr><td colspan="8" class="text-center py-3 text-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i>${data.error || 'Cannot connect'}
+                </td></tr>`;
+        }
+    } catch (e) {
+        console.error('Failed to get HLS stats:', e);
+        document.getElementById('hlsClientsTableBody').innerHTML = `
+            <tr><td colspan="8" class="text-center py-3 text-danger">
+                <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
+            </td></tr>`;
+    }
+}
+
+function getDeviceIcon(deviceType) {
+    switch (deviceType) {
+        case 'player': return '<i class="bi bi-play-circle text-primary"></i>';
+        case 'mobile': return '<i class="bi bi-phone text-success"></i>';
+        case 'tv': return '<i class="bi bi-tv text-info"></i>';
+        case 'browser': return '<i class="bi bi-globe text-warning"></i>';
+        default: return '<i class="bi bi-question-circle text-muted"></i>';
+    }
+}
+
+async function renderHlsStats(stats) {
+    const server = stats.server || {};
+    const clients = stats.clients || [];
+
+    // Update summary cards
+    document.getElementById('hlsClientCount').textContent = stats.client_count || 0;
+    document.getElementById('hlsUptime').textContent = formatDuration(server.uptime || 0);
+    document.getElementById('hlsTotalRequests').textContent = (server.total_requests || 0).toLocaleString();
+    document.getElementById('hlsTotalBytes').textContent = formatBytes(server.total_bytes_sent || 0);
+
+    // Update FFmpeg status
+    document.getElementById('hlsFfmpegStatus').textContent = stats.ffmpeg_running ? 'Running' : 'Stopped';
+    document.getElementById('hlsFfmpegStatus').className = stats.ffmpeg_running ? 'text-success' : 'text-danger';
+    document.getElementById('hlsVariantCount').textContent = server.variants || 1;
+
+    // Collect IPs for geolocation
+    const ips = clients.map(c => c.ip).filter(ip => ip);
+    if (ips.length > 0) {
+        await fetchGeolocations(ips);
+    }
+
+    // Render clients table
+    const tbody = document.getElementById('hlsClientsTableBody');
+    if (clients.length === 0) {
+        tbody.innerHTML = `
+            <tr><td colspan="8" class="text-center py-3 text-muted">
+                <i class="bi bi-people me-2"></i>No active clients
+            </td></tr>`;
+    } else {
+        let html = '';
+        clients.forEach(client => {
+            const geo = geoCache[client.ip] || {};
+            const flag = getCountryFlag(geo.countryCode);
+            const countryTitle = geo.city ? `${geo.city}, ${geo.country}` : (geo.country || 'Unknown');
+            const deviceIcon = getDeviceIcon(client.device_type);
+
+            html += `
+                <tr>
+                    <td><code>${client.ip}</code></td>
+                    <td title="${client.user_agent || ''}">${deviceIcon} ${client.device || 'Unknown'}</td>
+                    <td title="${countryTitle}">${flag} ${geo.countryCode || '??'}</td>
+                    <td>${formatDuration(client.connected_duration || 0)}</td>
+                    <td>${(client.requests || 0).toLocaleString()}</td>
+                    <td>${(client.manifest_requests || 0).toLocaleString()}</td>
+                    <td>${(client.segment_requests || 0).toLocaleString()}</td>
+                    <td>${formatBytes(client.bytes_sent || 0)}</td>
+                </tr>`;
+        });
+        tbody.innerHTML = html;
+    }
+}
+
+function startHlsStatsAutoRefresh() {
+    stopHlsStatsAutoRefresh();
+    hlsStatsRefreshInterval = setInterval(refreshHlsStats, 5000);
+}
+
+function stopHlsStatsAutoRefresh() {
+    if (hlsStatsRefreshInterval) {
+        clearInterval(hlsStatsRefreshInterval);
+        hlsStatsRefreshInterval = null;
+    }
+}
+
+document.getElementById('hlsStatsModal').addEventListener('hidden.bs.modal', function() {
+    stopHlsStatsAutoRefresh();
 });
 
 // Load client counts on page load and refresh every 5 seconds

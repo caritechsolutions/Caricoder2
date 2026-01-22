@@ -892,6 +892,19 @@ build_tools() {
         fi
     fi
 
+    # Build hls_output (HLS output server with client tracking)
+    if [[ -d "$INSTALL_DIR/tools/hls_output" ]]; then
+        cd "$INSTALL_DIR/tools/hls_output"
+        log_info "Building hls_output..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "hls_output installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build hls_output (libmicrohttpd may be missing)"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
@@ -1119,6 +1132,20 @@ configure_nginx() {
 
     log_info "Using PHP-FPM socket: $PHP_FPM_SOCK"
 
+    # Create HLS tracking log format config with session ID
+    cat > /etc/nginx/conf.d/hls_tracking.conf << 'HLSCONF'
+# Custom log format with session ID for HLS client tracking
+# Uses userid module to assign unique session IDs via cookie
+# Format: IP|SESSION_ID - - [date] "request" status bytes "referer" "user-agent"
+log_format hls_tracking '$remote_addr|$uid_got$uid_set - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent"';
+HLSCONF
+
+    # Create HLS output directory
+    mkdir -p /var/www/caritrans/public/hls
+    chown -R www-data:www-data /var/www/caritrans/public/hls
+
     # Create Nginx config
     cat > /etc/nginx/sites-available/caritrans << NGINX
 server {
@@ -1141,6 +1168,25 @@ server {
 
     location ~ /\\.(ht|git) {
         deny all;
+    }
+
+    # HLS output streams - with session-based client tracking
+    location /hls/ {
+        alias /var/www/caritrans/public/hls/;
+
+        # Enable userid module for unique client session tracking
+        userid on;
+        userid_name hlsid;
+        userid_expires max;
+        userid_path /hls/;
+
+        access_log /var/log/nginx/hls.access.log hls_tracking;
+        add_header Access-Control-Allow-Origin *;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/mp2t ts;
+        }
     }
 
     # HLS preview streams - serve directly without PHP auth

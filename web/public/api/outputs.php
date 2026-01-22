@@ -245,6 +245,16 @@ switch ($action) {
         json_response($stats);
         break;
 
+    case 'hls_stats':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $stats = get_hls_stats($id);
+        json_response($stats);
+        break;
+
     case 'create':
         $data = $_POST;
         if (empty($data) || empty($data['name'])) {
@@ -585,6 +595,10 @@ function create_output($data) {
 
     if ($type === 'http') {
         return create_http_output($data, $id, $name, $service_name);
+    }
+
+    if ($type === 'hls') {
+        return create_hls_output($data, $id, $name, $service_name);
     }
 
     // SRT output (default)
@@ -991,6 +1005,146 @@ EOT;
 }
 
 /**
+ * Create HLS output
+ */
+function create_hls_output($data, $id, $name, $service_name) {
+    error_log("create_hls_output called: id={$id}, name={$name}");
+
+    // Auto-generate output directory if not provided
+    $output_dir = $data['hls_output_dir'] ?? '';
+    if (empty(trim($output_dir))) {
+        $output_dir = '/var/www/caritrans/public/hls/' . $id;
+    }
+
+    // Build configuration
+    $config = [
+        'output' => [
+            'id' => $id,
+            'name' => $name,
+            'type' => 'hls',
+            'enabled' => 'true',
+            'service_name' => $service_name
+        ],
+        'input' => [
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_hls' => [
+            'output_dir' => $output_dir,
+            'segment_duration' => $data['hls_segment_duration'] ?? '2',
+            'segment_count' => $data['hls_segment_count'] ?? '5',
+            'variants' => $data['hls_variants'] ?? '1'
+        ]
+    ];
+
+    // Ensure outputs directory exists
+    $output_dir = CONFIG_PATH . '/outputs';
+    if (!is_dir($output_dir)) {
+        if (!mkdir($output_dir, 0755, true)) {
+            return ['success' => false, 'error' => 'Failed to create outputs directory'];
+        }
+    }
+
+    // Save configuration
+    $config_file = $output_dir . '/' . $id . '.conf';
+    if (!save_config($config_file, $config)) {
+        return ['success' => false, 'error' => 'Failed to save configuration'];
+    }
+
+    // Generate systemd service file
+    generate_hls_service_file($id, $name, $config);
+
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'config_file' => $config_file, 'message' => 'HLS output created successfully'];
+}
+
+/**
+ * Generate systemd service file for HLS output
+ */
+function generate_hls_service_file($id, $name, $config) {
+    $service_name = $id . '-output-hls';
+
+    $input = $config['input'] ?? [];
+    $dest = $config['destination_hls'] ?? [];
+
+    // Input settings
+    $input_addr = $input['address'] ?? '';
+    $input_port = $input['port'] ?? '5000';
+
+    // Build UDP input string
+    if (!empty($input_addr)) {
+        $udp_input = "{$input_addr}:{$input_port}";
+    } else {
+        $udp_input = ":{$input_port}";
+    }
+
+    // HLS settings (files served by nginx, no embedded HTTP server)
+    $output_dir = $dest['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
+    $segment_duration = $dest['segment_duration'] ?? '2';
+    $segment_count = $dest['segment_count'] ?? '5';
+    $variants = $dest['variants'] ?? '1';
+
+    // Build command arguments
+    $cmd_args = [];
+    $cmd_args[] = "-i \"{$udp_input}\"";
+    $cmd_args[] = "-o \"{$output_dir}\"";
+    $cmd_args[] = "-d {$segment_duration}";
+    $cmd_args[] = "-n {$segment_count}";
+
+    if (intval($variants) > 1) {
+        $cmd_args[] = "-V {$variants}";
+    }
+
+    $cmd_args[] = "-v";
+
+    $cmd_line = implode(" \\\n    ", $cmd_args);
+
+    $service_content = <<<EOT
+[Unit]
+Description=CariTranscoder HLS Output - {$name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/hls_output \\
+    {$cmd_line}
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOT;
+
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
+
+    error_log("Failed to create HLS service file: " . json_encode($result));
+    return $service_name;
+}
+
+/**
  * Update existing output
  */
 function update_output($id, $data) {
@@ -1065,6 +1219,24 @@ function update_output($id, $data) {
         // Regenerate service file
         $name = $config['output']['name'] ?? $id;
         generate_http_service_file($id, $name, $config);
+    } elseif ($type === 'hls') {
+        // Update HLS output fields
+        $config['output']['service_name'] = $id . '-output-hls';
+
+        if (!isset($config['destination_hls'])) $config['destination_hls'] = [];
+        if (!empty($data['hls_port'])) $config['destination_hls']['http_port'] = $data['hls_port'];
+        if (isset($data['hls_output_dir'])) $config['destination_hls']['output_dir'] = $data['hls_output_dir'];
+        if (!empty($data['hls_segment_duration'])) $config['destination_hls']['segment_duration'] = $data['hls_segment_duration'];
+        if (!empty($data['hls_segment_count'])) $config['destination_hls']['segment_count'] = $data['hls_segment_count'];
+        if (!empty($data['hls_variants'])) $config['destination_hls']['variants'] = $data['hls_variants'];
+
+        if (!save_config($config_file, $config)) {
+            return ['success' => false, 'error' => 'Failed to save configuration'];
+        }
+
+        // Regenerate service file
+        $name = $config['output']['name'] ?? $id;
+        generate_hls_service_file($id, $name, $config);
     } else {
         // SRT output
         $config['output']['type'] = 'srt';
@@ -1566,4 +1738,339 @@ function get_http_stats($id) {
         'type' => 'http',
         'stats' => $stats
     ];
+}
+
+/**
+ * Get HLS output stats from hls_output server
+ */
+function get_hls_stats($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+
+    if (($config['output']['type'] ?? '') !== 'hls') {
+        return ['success' => false, 'error' => 'Not an HLS output'];
+    }
+
+    // Get output directory from config
+    $output_dir = $config['destination_hls']['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
+    $stats_file = $output_dir . '/stats.json';
+
+    // Read stats from JSON file written by hls_output
+    if (!file_exists($stats_file)) {
+        return ['success' => false, 'error' => 'Stats file not found - HLS output may not be running', 'status' => 'offline'];
+    }
+
+    $response = @file_get_contents($stats_file);
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot read stats file', 'status' => 'offline'];
+    }
+
+    $raw_stats = json_decode($response, true);
+    if (!$raw_stats) {
+        return ['success' => false, 'error' => 'Invalid stats file'];
+    }
+
+    // Get client stats from nginx access log
+    $clients = get_hls_clients_from_nginx_log($output_dir);
+
+    // Calculate total requests and bytes from clients
+    $total_requests = 0;
+    $total_bytes = 0;
+    foreach ($clients as $client) {
+        $total_requests += $client['requests'] ?? 0;
+        $total_bytes += $client['bytes_sent'] ?? 0;
+    }
+
+    // Restructure stats to match expected format for GUI
+    $stats = [
+        'server' => [
+            'uptime' => $raw_stats['uptime'] ?? 0,
+            'udp_input' => $raw_stats['udp_input'] ?? '',
+            'output_dir' => $raw_stats['output_dir'] ?? $output_dir,
+            'variants' => $raw_stats['variants'] ?? 1,
+            'segment_duration' => $raw_stats['segment_duration'] ?? 2,
+            'segment_count' => $raw_stats['segment_count'] ?? 5,
+            'segments_on_disk' => $raw_stats['segments_on_disk'] ?? 0,
+            'playlist_ready' => $raw_stats['playlist_ready'] ?? false,
+            'total_requests' => $total_requests,
+            'total_bytes_sent' => $total_bytes
+        ],
+        'ffmpeg_running' => $raw_stats['ffmpeg_running'] ?? false,
+        'ffmpeg_pid' => $raw_stats['ffmpeg_pid'] ?? 0,
+        'restart_count' => $raw_stats['restart_count'] ?? 0,
+        'client_count' => count($clients),
+        'clients' => $clients
+    ];
+
+    // Check if stats are stale (older than 30 seconds)
+    $stats_age = time() - ($raw_stats['timestamp'] ?? 0);
+    if ($stats_age > 30) {
+        $stats['warning'] = 'Stats may be stale (last update ' . $stats_age . ' seconds ago)';
+    }
+
+    return [
+        'success' => true,
+        'id' => $id,
+        'name' => $config['output']['name'] ?? $id,
+        'type' => 'hls',
+        'stats' => $stats
+    ];
+}
+
+/**
+ * Parse User-Agent string to determine device/player type
+ */
+function parse_user_agent_device($user_agent) {
+    $ua = strtolower($user_agent);
+
+    // Common video players
+    if (strpos($ua, 'vlc') !== false) {
+        if (preg_match('/vlc\/([\d.]+)/', $ua, $m)) {
+            return ['device' => 'VLC', 'version' => $m[1], 'type' => 'player'];
+        }
+        return ['device' => 'VLC', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'mpv') !== false) {
+        return ['device' => 'MPV', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'ffmpeg') !== false || strpos($ua, 'lavf') !== false) {
+        return ['device' => 'FFmpeg', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'gstreamer') !== false) {
+        return ['device' => 'GStreamer', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'kodi') !== false || strpos($ua, 'xbmc') !== false) {
+        return ['device' => 'Kodi', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'exoplayer') !== false) {
+        return ['device' => 'ExoPlayer', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'avplayer') !== false) {
+        return ['device' => 'AVPlayer', 'version' => '', 'type' => 'mobile'];
+    }
+
+    // Mobile devices
+    if (strpos($ua, 'iphone') !== false) {
+        return ['device' => 'iPhone', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'ipad') !== false) {
+        return ['device' => 'iPad', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'android') !== false) {
+        return ['device' => 'Android', 'version' => '', 'type' => 'mobile'];
+    }
+
+    // Smart TVs and streaming devices
+    if (strpos($ua, 'smarttv') !== false || strpos($ua, 'smart-tv') !== false) {
+        return ['device' => 'Smart TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'tizen') !== false) {
+        return ['device' => 'Samsung TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'webos') !== false) {
+        return ['device' => 'LG TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'roku') !== false) {
+        return ['device' => 'Roku', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'firetv') !== false || strpos($ua, 'fire tv') !== false) {
+        return ['device' => 'Fire TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'chromecast') !== false) {
+        return ['device' => 'Chromecast', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'appletv') !== false) {
+        return ['device' => 'Apple TV', 'version' => '', 'type' => 'tv'];
+    }
+
+    // Browsers
+    if (strpos($ua, 'safari') !== false && strpos($ua, 'chrome') === false) {
+        return ['device' => 'Safari', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'chrome') !== false && strpos($ua, 'edge') === false) {
+        return ['device' => 'Chrome', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'firefox') !== false) {
+        return ['device' => 'Firefox', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'edge') !== false) {
+        return ['device' => 'Edge', 'version' => '', 'type' => 'browser'];
+    }
+
+    // Default
+    return ['device' => 'Unknown', 'version' => '', 'type' => 'unknown'];
+}
+
+/**
+ * Parse nginx access log to get HLS client stats
+ * Looks for requests to the HLS output directory in the last 60 seconds
+ * Uses nginx userid module session IDs to distinguish unique clients
+ */
+function get_hls_clients_from_nginx_log($output_dir) {
+    $clients = [];
+    $now = time();
+    $cutoff = $now - 60; // Look at last 60 seconds of logs
+
+    // Extract the HLS path from output_dir (e.g., /var/www/caritrans/public/hls/bbcw4 -> /hls/bbcw4)
+    $hls_path = '';
+    if (preg_match('#/public(/hls/[^/]+)#', $output_dir, $matches)) {
+        $hls_path = $matches[1];
+    } else {
+        // Fallback: use basename
+        $hls_path = '/hls/' . basename($output_dir);
+    }
+
+    // Common nginx log locations - check HLS-specific log first
+    $log_files = [
+        '/var/log/nginx/hls.access.log',    // HLS-specific log with session tracking
+        '/var/log/nginx/access.log',
+        '/var/log/nginx/caritrans.access.log',
+        '/var/log/caritrans/access.log'
+    ];
+
+    $log_file = null;
+    foreach ($log_files as $lf) {
+        if (file_exists($lf) && is_readable($lf)) {
+            $log_file = $lf;
+            break;
+        }
+    }
+
+    if (!$log_file) {
+        return [];
+    }
+
+    // Read last 1000 lines of log (tail)
+    $lines = [];
+    $fp = @fopen($log_file, 'r');
+    if (!$fp) {
+        return [];
+    }
+
+    // Seek to approximate position for last 1000 lines (~200 bytes per line)
+    $file_size = filesize($log_file);
+    $seek_pos = max(0, $file_size - 200000);
+    fseek($fp, $seek_pos);
+
+    // Skip partial line if we seeked
+    if ($seek_pos > 0) {
+        fgets($fp);
+    }
+
+    while (($line = fgets($fp)) !== false) {
+        $lines[] = $line;
+    }
+    fclose($fp);
+
+    // Parse log lines for HLS requests
+    // Supports formats:
+    // - Session ID (userid module): IP|SESSION_ID - - [date] "request" status size "referer" "user-agent"
+    // - Legacy (no session): IP - - [date] "request" status size "referer" "user-agent"
+    $client_data = [];
+
+    foreach ($lines as $line) {
+        // Check if this line is for our HLS path
+        if (strpos($line, $hls_path) === false) {
+            continue;
+        }
+
+        // Parse nginx combined log format with optional session ID
+        // Format with session: 192.168.1.100|ABC123DEF456 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        // Format without: 192.168.1.100 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        if (preg_match('/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"/', $line, $m)) {
+            $ip_field = $m[1];
+            $date_str = $m[2];
+            $method = $m[3];
+            $path = $m[4];
+            $status = $m[5];
+            $bytes = $m[6] === '-' ? 0 : intval($m[6]);
+            $user_agent = $m[8];
+
+            // Extract IP and session ID (format: IP|SESSION_ID or just IP)
+            $ip = $ip_field;
+            $session_id = '';
+            if (strpos($ip_field, '|') !== false) {
+                // New format with session ID from userid module
+                $parts = explode('|', $ip_field, 2);
+                $ip = $parts[0];
+                $session_id = $parts[1] ?? '';
+            }
+
+            // Parse date (format: 22/Jan/2026:12:34:56 +0000)
+            // Convert to "22 Jan 2026 12:34:56 +0000" for strtotime
+            $parsed_date = preg_replace('#^(\d{2})/(\w{3})/(\d{4}):(.*)$#', '$1 $2 $3 $4', $date_str);
+            $log_time = strtotime($parsed_date);
+
+            // Skip if we couldn't parse the date
+            if ($log_time === false) {
+                continue;
+            }
+
+            // Only include recent requests
+            if ($log_time < $cutoff) {
+                continue;
+            }
+
+            // Use session ID as unique key (best - persists across connections)
+            // Fall back to IP + User-Agent if no session ID
+            if (!empty($session_id)) {
+                $client_key = $session_id;
+            } else {
+                $client_key = $ip . '|' . $user_agent;
+            }
+
+            // Parse user agent for device info
+            $device_info = parse_user_agent_device($user_agent);
+
+            // Track client
+            if (!isset($client_data[$client_key])) {
+                $client_data[$client_key] = [
+                    'ip' => $ip,
+                    'session_id' => $session_id,
+                    'first_seen' => $log_time,
+                    'last_seen' => $log_time,
+                    'requests' => 0,
+                    'bytes_sent' => 0,
+                    'manifest_requests' => 0,
+                    'segment_requests' => 0,
+                    'user_agent' => $user_agent,
+                    'device' => $device_info['device'],
+                    'device_type' => $device_info['type']
+                ];
+            }
+
+            $client_data[$client_key]['last_seen'] = max($client_data[$client_key]['last_seen'], $log_time);
+            $client_data[$client_key]['first_seen'] = min($client_data[$client_key]['first_seen'], $log_time);
+            $client_data[$client_key]['requests']++;
+            $client_data[$client_key]['bytes_sent'] += $bytes;
+
+            // Categorize request
+            if (strpos($path, '.m3u8') !== false) {
+                $client_data[$client_key]['manifest_requests']++;
+            } elseif (strpos($path, '.ts') !== false) {
+                $client_data[$client_key]['segment_requests']++;
+            }
+        }
+    }
+
+    // Convert to array and calculate durations
+    $result = [];
+    foreach ($client_data as $key => $data) {
+        $data['connected_duration'] = $now - $data['first_seen'];
+        $data['idle_time'] = $now - $data['last_seen'];
+        $result[] = $data;
+    }
+
+    // Sort by most recent activity
+    usort($result, function($a, $b) {
+        return $b['last_seen'] - $a['last_seen'];
+    });
+
+    return $result;
 }
