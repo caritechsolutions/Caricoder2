@@ -20,3 +20,4 @@ src/cari-output/*.o
 # Common library
 src/common/*.o
 src/common/*.a
+tools/http_ts_server/http_ts_server

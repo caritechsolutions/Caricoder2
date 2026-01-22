@@ -235,6 +235,16 @@ switch ($action) {
         json_response($metrics);
         break;
 
+    case 'http_stats':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $stats = get_http_stats($id);
+        json_response($stats);
+        break;
+
     case 'create':
         $data = $_POST;
         if (empty($data) || empty($data['name'])) {
@@ -573,6 +583,10 @@ function create_output($data) {
         return create_rist_output($data, $id, $name, $service_name);
     }
 
+    if ($type === 'http') {
+        return create_http_output($data, $id, $name, $service_name);
+    }
+
     // SRT output (default)
     // Auto-assign API port (SRT port + 1000)
     $srt_port = intval($data['srt_port'] ?? 4900);
@@ -837,6 +851,146 @@ EOT;
 }
 
 /**
+ * Create HTTP MPEG-TS output
+ */
+function create_http_output($data, $id, $name, $service_name) {
+    // Log for debugging
+    error_log("create_http_output called: id={$id}, name={$name}");
+
+    // Build configuration
+    $config = [
+        'output' => [
+            'id' => $id,
+            'name' => $name,
+            'type' => 'http',
+            'enabled' => 'true',
+            'service_name' => $service_name
+        ],
+        'input' => [
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_http' => [
+            'listen_address' => $data['http_listen_address'] ?? '0.0.0.0',
+            'listen_port' => $data['http_port'] ?? '8888',
+            'stream_path' => $data['http_stream_path'] ?? '/stream',
+            'stats_path' => $data['http_stats_path'] ?? '/stats',
+            'mime_type' => $data['http_mime_type'] ?? 'video/mp2t',
+            'chunked_encoding' => ($data['http_chunked'] ?? '0') === '1' ? 'true' : 'false'
+        ]
+    ];
+
+    // Ensure outputs directory exists
+    $output_dir = CONFIG_PATH . '/outputs';
+    if (!is_dir($output_dir)) {
+        if (!mkdir($output_dir, 0755, true)) {
+            return ['success' => false, 'error' => 'Failed to create outputs directory'];
+        }
+    }
+
+    // Save configuration
+    $config_file = $output_dir . '/' . $id . '.conf';
+    if (!save_config($config_file, $config)) {
+        return ['success' => false, 'error' => 'Failed to save configuration'];
+    }
+
+    // Generate systemd service file
+    generate_http_service_file($id, $name, $config);
+
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'config_file' => $config_file, 'message' => 'HTTP output created successfully'];
+}
+
+/**
+ * Generate systemd service file for HTTP MPEG-TS output
+ */
+function generate_http_service_file($id, $name, $config) {
+    $service_name = $id . '-output-http';
+
+    // Build http_ts_server command
+    $input = $config['input'] ?? [];
+    $dest = $config['destination_http'] ?? [];
+
+    // Input URL
+    $input_addr = $input['address'] ?? '';
+    $input_port = $input['port'] ?? '5000';
+
+    // Build UDP input string for http_ts_server
+    if (!empty($input_addr)) {
+        $udp_input = "{$input_addr}:{$input_port}";
+    } else {
+        $udp_input = ":{$input_port}";
+    }
+
+    // HTTP settings
+    $http_port = $dest['listen_port'] ?? '8888';
+    $stream_path = $dest['stream_path'] ?? '/stream';
+    $stats_path = $dest['stats_path'] ?? '/stats';
+    $mime_type = $dest['mime_type'] ?? 'video/mp2t';
+    $chunked = ($dest['chunked_encoding'] ?? 'false') === 'true';
+
+    // Build command arguments
+    $cmd_args = [];
+    $cmd_args[] = "-i \"{$udp_input}\"";
+    $cmd_args[] = "-p {$http_port}";
+    $cmd_args[] = "-s \"{$stream_path}\"";
+    $cmd_args[] = "-a \"{$stats_path}\"";
+    $cmd_args[] = "-m \"{$mime_type}\"";
+
+    if ($chunked) {
+        $cmd_args[] = "-c";
+    }
+
+    $cmd_args[] = "-v";
+
+    $cmd_line = implode(" \\\n    ", $cmd_args);
+
+    $service_content = <<<EOT
+[Unit]
+Description=CariTranscoder HTTP MPEG-TS Output - {$name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/http_ts_server \\
+    {$cmd_line}
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOT;
+
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
+
+    error_log("Failed to create HTTP service file: " . json_encode($result));
+    return $service_name;
+}
+
+/**
  * Update existing output
  */
 function update_output($id, $data) {
@@ -891,6 +1045,26 @@ function update_output($id, $data) {
         // Regenerate service file
         $name = $config['output']['name'] ?? $id;
         generate_rist_service_file($id, $name, $config);
+    } elseif ($type === 'http') {
+        // Update HTTP output fields
+        $config['output']['service_name'] = $id . '-output-http';
+
+        if (!isset($config['destination_http'])) $config['destination_http'] = [];
+        if (isset($data['http_listen_address'])) $config['destination_http']['listen_address'] = $data['http_listen_address'];
+        if (!empty($data['http_port'])) $config['destination_http']['listen_port'] = $data['http_port'];
+        if (isset($data['http_stream_path'])) $config['destination_http']['stream_path'] = $data['http_stream_path'];
+        if (isset($data['http_stats_path'])) $config['destination_http']['stats_path'] = $data['http_stats_path'];
+        if (isset($data['http_mime_type'])) $config['destination_http']['mime_type'] = $data['http_mime_type'];
+        // Checkbox sends value only when checked, so treat missing as unchecked
+        $config['destination_http']['chunked_encoding'] = (isset($data['http_chunked']) && $data['http_chunked'] === '1') ? 'true' : 'false';
+
+        if (!save_config($config_file, $config)) {
+            return ['success' => false, 'error' => 'Failed to save configuration'];
+        }
+
+        // Regenerate service file
+        $name = $config['output']['name'] ?? $id;
+        generate_http_service_file($id, $name, $config);
     } else {
         // SRT output
         $config['output']['type'] = 'srt';
@@ -1342,4 +1516,54 @@ function parse_prometheus_metrics($text) {
     }
 
     return $grouped;
+}
+
+/**
+ * Get HTTP MPEG-TS output stats from http_ts_server
+ */
+function get_http_stats($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+
+    if (($config['output']['type'] ?? '') !== 'http') {
+        return ['success' => false, 'error' => 'Not an HTTP output'];
+    }
+
+    $http_port = $config['destination_http']['listen_port'] ?? '8888';
+    $stats_path = $config['destination_http']['stats_path'] ?? '/stats';
+
+    $url = "http://127.0.0.1:{$http_port}{$stats_path}";
+
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => 5,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to HTTP stats server', 'status' => 'offline'];
+    }
+
+    $stats = json_decode($response, true);
+    if (!$stats) {
+        return ['success' => false, 'error' => 'Invalid stats response'];
+    }
+
+    return [
+        'success' => true,
+        'id' => $id,
+        'name' => $config['output']['name'] ?? $id,
+        'type' => 'http',
+        'stats' => $stats
+    ];
 }

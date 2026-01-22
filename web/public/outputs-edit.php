@@ -58,6 +58,14 @@ $rist_bandwidth = $config['destination_rist']['bandwidth'] ?? '0';
 $rist_congestion = $config['destination_rist']['congestion_control'] ?? '1';
 $rist_log_level = $config['destination_rist']['log_level'] ?? '6';
 
+// HTTP settings
+$http_listen_address = $config['destination_http']['listen_address'] ?? '0.0.0.0';
+$http_port = $config['destination_http']['listen_port'] ?? '8888';
+$http_stream_path = $config['destination_http']['stream_path'] ?? '/stream';
+$http_stats_path = $config['destination_http']['stats_path'] ?? '/stats';
+$http_mime_type = $config['destination_http']['mime_type'] ?? 'video/mp2t';
+$http_chunked = ($config['destination_http']['chunked_encoding'] ?? 'false') === 'true';
+
 $page_title = 'Edit Output: ' . $output_name;
 include __DIR__ . '/../templates/header.php';
 ?>
@@ -278,6 +286,69 @@ include __DIR__ . '/../templates/header.php';
                                    <?php echo $rist_npd ? 'checked' : ''; ?>>
                             <label class="form-check-label" for="ristNpd">
                                 Null Packet Deletion
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if ($output_type === 'http'): ?>
+        <!-- HTTP Settings -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-globe me-2"></i>HTTP MPEG-TS Output (Pull)</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info small mb-3">
+                    <i class="bi bi-info-circle me-1"></i>
+                    Clients can pull the stream via: <code>http://&lt;server&gt;:<?php echo htmlspecialchars($http_port); ?><?php echo htmlspecialchars($http_stream_path); ?></code>
+                </div>
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Listen Address</label>
+                        <input type="text" class="form-control" name="http_listen_address"
+                               value="<?php echo htmlspecialchars($http_listen_address); ?>"
+                               placeholder="0.0.0.0">
+                        <small class="text-muted">0.0.0.0 = all interfaces</small>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">HTTP Port <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" name="http_port"
+                               value="<?php echo htmlspecialchars($http_port); ?>"
+                               min="1024" max="65535">
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Stream Path</label>
+                        <input type="text" class="form-control" name="http_stream_path"
+                               value="<?php echo htmlspecialchars($http_stream_path); ?>"
+                               placeholder="/stream">
+                        <small class="text-muted">URL path (with leading /)</small>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Stats Path</label>
+                        <input type="text" class="form-control" name="http_stats_path"
+                               value="<?php echo htmlspecialchars($http_stats_path); ?>"
+                               placeholder="/stats">
+                        <small class="text-muted">JSON API endpoint</small>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">MIME Type</label>
+                        <select class="form-select" name="http_mime_type">
+                            <option value="video/mp2t" <?php echo $http_mime_type === 'video/mp2t' ? 'selected' : ''; ?>>video/mp2t (MPEG-TS)</option>
+                            <option value="application/octet-stream" <?php echo $http_mime_type === 'application/octet-stream' ? 'selected' : ''; ?>>application/octet-stream</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Options</label>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="http_chunked" value="1" id="httpChunked"
+                                   <?php echo $http_chunked ? 'checked' : ''; ?>>
+                            <label class="form-check-label" for="httpChunked">
+                                Use Chunked Transfer Encoding
                             </label>
                         </div>
                     </div>

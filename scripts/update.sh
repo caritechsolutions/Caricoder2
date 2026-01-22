@@ -619,6 +619,19 @@ build_tools() {
         fi
     fi
 
+    # Build http_ts_server (HTTP MPEG-TS pull output server)
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/http_ts_server" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/http_ts_server"
+        log_info "Building http_ts_server..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "http_ts_server installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build http_ts_server (libmicrohttpd may be missing)"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
