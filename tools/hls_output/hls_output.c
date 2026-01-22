@@ -759,17 +759,22 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Start HTTP server */
+    /* Start HTTP server with SO_REUSEADDR for quick restarts */
     ctx.http_daemon = MHD_start_daemon(
-        MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD,
+        MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG,
         ctx.http_port,
         NULL, NULL,
         request_handler, NULL,
+        MHD_OPTION_LISTENING_ADDRESS_REUSE, 1,
         MHD_OPTION_END
     );
 
     if (!ctx.http_daemon) {
         fprintf(stderr, "Failed to start HTTP server on port %d\n", ctx.http_port);
+        fprintf(stderr, "Possible causes:\n");
+        fprintf(stderr, "  - Port %d is already in use by another process\n", ctx.http_port);
+        fprintf(stderr, "  - Insufficient permissions to bind to port %d\n", ctx.http_port);
+        fprintf(stderr, "  - libmicrohttpd error (check system logs)\n");
         stop_ffmpeg();
         return 1;
     }
