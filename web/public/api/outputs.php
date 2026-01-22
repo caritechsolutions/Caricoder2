@@ -1824,8 +1824,93 @@ function get_hls_stats($id) {
 }
 
 /**
+ * Parse User-Agent string to determine device/player type
+ */
+function parse_user_agent_device($user_agent) {
+    $ua = strtolower($user_agent);
+
+    // Common video players
+    if (strpos($ua, 'vlc') !== false) {
+        if (preg_match('/vlc\/([\d.]+)/', $ua, $m)) {
+            return ['device' => 'VLC', 'version' => $m[1], 'type' => 'player'];
+        }
+        return ['device' => 'VLC', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'mpv') !== false) {
+        return ['device' => 'MPV', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'ffmpeg') !== false || strpos($ua, 'lavf') !== false) {
+        return ['device' => 'FFmpeg', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'gstreamer') !== false) {
+        return ['device' => 'GStreamer', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'kodi') !== false || strpos($ua, 'xbmc') !== false) {
+        return ['device' => 'Kodi', 'version' => '', 'type' => 'player'];
+    }
+    if (strpos($ua, 'exoplayer') !== false) {
+        return ['device' => 'ExoPlayer', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'avplayer') !== false) {
+        return ['device' => 'AVPlayer', 'version' => '', 'type' => 'mobile'];
+    }
+
+    // Mobile devices
+    if (strpos($ua, 'iphone') !== false) {
+        return ['device' => 'iPhone', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'ipad') !== false) {
+        return ['device' => 'iPad', 'version' => '', 'type' => 'mobile'];
+    }
+    if (strpos($ua, 'android') !== false) {
+        return ['device' => 'Android', 'version' => '', 'type' => 'mobile'];
+    }
+
+    // Smart TVs and streaming devices
+    if (strpos($ua, 'smarttv') !== false || strpos($ua, 'smart-tv') !== false) {
+        return ['device' => 'Smart TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'tizen') !== false) {
+        return ['device' => 'Samsung TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'webos') !== false) {
+        return ['device' => 'LG TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'roku') !== false) {
+        return ['device' => 'Roku', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'firetv') !== false || strpos($ua, 'fire tv') !== false) {
+        return ['device' => 'Fire TV', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'chromecast') !== false) {
+        return ['device' => 'Chromecast', 'version' => '', 'type' => 'tv'];
+    }
+    if (strpos($ua, 'appletv') !== false) {
+        return ['device' => 'Apple TV', 'version' => '', 'type' => 'tv'];
+    }
+
+    // Browsers
+    if (strpos($ua, 'safari') !== false && strpos($ua, 'chrome') === false) {
+        return ['device' => 'Safari', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'chrome') !== false && strpos($ua, 'edge') === false) {
+        return ['device' => 'Chrome', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'firefox') !== false) {
+        return ['device' => 'Firefox', 'version' => '', 'type' => 'browser'];
+    }
+    if (strpos($ua, 'edge') !== false) {
+        return ['device' => 'Edge', 'version' => '', 'type' => 'browser'];
+    }
+
+    // Default
+    return ['device' => 'Unknown', 'version' => '', 'type' => 'unknown'];
+}
+
+/**
  * Parse nginx access log to get HLS client stats
  * Looks for requests to the HLS output directory in the last 60 seconds
+ * Distinguishes clients by IP + User-Agent combination
  */
 function get_hls_clients_from_nginx_log($output_dir) {
     $clients = [];
@@ -1918,9 +2003,15 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 continue;
             }
 
+            // Use IP + User-Agent as unique client key (distinguishes different devices from same IP)
+            $client_key = $ip . '|' . $user_agent;
+
+            // Parse user agent for device info
+            $device_info = parse_user_agent_device($user_agent);
+
             // Track client
-            if (!isset($client_data[$ip])) {
-                $client_data[$ip] = [
+            if (!isset($client_data[$client_key])) {
+                $client_data[$client_key] = [
                     'ip' => $ip,
                     'first_seen' => $log_time,
                     'last_seen' => $log_time,
@@ -1928,27 +2019,29 @@ function get_hls_clients_from_nginx_log($output_dir) {
                     'bytes_sent' => 0,
                     'manifest_requests' => 0,
                     'segment_requests' => 0,
-                    'user_agent' => $user_agent
+                    'user_agent' => $user_agent,
+                    'device' => $device_info['device'],
+                    'device_type' => $device_info['type']
                 ];
             }
 
-            $client_data[$ip]['last_seen'] = max($client_data[$ip]['last_seen'], $log_time);
-            $client_data[$ip]['first_seen'] = min($client_data[$ip]['first_seen'], $log_time);
-            $client_data[$ip]['requests']++;
-            $client_data[$ip]['bytes_sent'] += $bytes;
+            $client_data[$client_key]['last_seen'] = max($client_data[$client_key]['last_seen'], $log_time);
+            $client_data[$client_key]['first_seen'] = min($client_data[$client_key]['first_seen'], $log_time);
+            $client_data[$client_key]['requests']++;
+            $client_data[$client_key]['bytes_sent'] += $bytes;
 
             // Categorize request
             if (strpos($path, '.m3u8') !== false) {
-                $client_data[$ip]['manifest_requests']++;
+                $client_data[$client_key]['manifest_requests']++;
             } elseif (strpos($path, '.ts') !== false) {
-                $client_data[$ip]['segment_requests']++;
+                $client_data[$client_key]['segment_requests']++;
             }
         }
     }
 
     // Convert to array and calculate durations
     $result = [];
-    foreach ($client_data as $ip => $data) {
+    foreach ($client_data as $key => $data) {
         $data['connected_duration'] = $now - $data['first_seen'];
         $data['idle_time'] = $now - $data['last_seen'];
         $result[] = $data;

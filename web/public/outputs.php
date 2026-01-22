@@ -663,6 +663,7 @@ include __DIR__ . '/../templates/header.php';
                                 <thead class="table-light">
                                     <tr>
                                         <th>IP Address</th>
+                                        <th>Device</th>
                                         <th>Country</th>
                                         <th>Duration</th>
                                         <th>Requests</th>
@@ -673,7 +674,7 @@ include __DIR__ . '/../templates/header.php';
                                 </thead>
                                 <tbody id="hlsClientsTableBody">
                                     <tr>
-                                        <td colspan="7" class="text-center py-3 text-muted">
+                                        <td colspan="8" class="text-center py-3 text-muted">
                                             <div class="spinner-border spinner-border-sm me-2"></div>
                                             Loading...
                                         </td>
@@ -1848,16 +1849,26 @@ async function refreshHlsStats() {
             renderHlsStats(data.stats);
         } else {
             document.getElementById('hlsClientsTableBody').innerHTML = `
-                <tr><td colspan="7" class="text-center py-3 text-danger">
+                <tr><td colspan="8" class="text-center py-3 text-danger">
                     <i class="bi bi-exclamation-triangle me-2"></i>${data.error || 'Cannot connect'}
                 </td></tr>`;
         }
     } catch (e) {
         console.error('Failed to get HLS stats:', e);
         document.getElementById('hlsClientsTableBody').innerHTML = `
-            <tr><td colspan="7" class="text-center py-3 text-danger">
+            <tr><td colspan="8" class="text-center py-3 text-danger">
                 <i class="bi bi-exclamation-triangle me-2"></i>Failed to connect to API
             </td></tr>`;
+    }
+}
+
+function getDeviceIcon(deviceType) {
+    switch (deviceType) {
+        case 'player': return '<i class="bi bi-play-circle text-primary"></i>';
+        case 'mobile': return '<i class="bi bi-phone text-success"></i>';
+        case 'tv': return '<i class="bi bi-tv text-info"></i>';
+        case 'browser': return '<i class="bi bi-globe text-warning"></i>';
+        default: return '<i class="bi bi-question-circle text-muted"></i>';
     }
 }
 
@@ -1886,7 +1897,7 @@ async function renderHlsStats(stats) {
     const tbody = document.getElementById('hlsClientsTableBody');
     if (clients.length === 0) {
         tbody.innerHTML = `
-            <tr><td colspan="7" class="text-center py-3 text-muted">
+            <tr><td colspan="8" class="text-center py-3 text-muted">
                 <i class="bi bi-people me-2"></i>No active clients
             </td></tr>`;
     } else {
@@ -1895,10 +1906,12 @@ async function renderHlsStats(stats) {
             const geo = geoCache[client.ip] || {};
             const flag = getCountryFlag(geo.countryCode);
             const countryTitle = geo.city ? `${geo.city}, ${geo.country}` : (geo.country || 'Unknown');
+            const deviceIcon = getDeviceIcon(client.device_type);
 
             html += `
                 <tr>
                     <td><code>${client.ip}</code></td>
+                    <td title="${client.user_agent || ''}">${deviceIcon} ${client.device || 'Unknown'}</td>
                     <td title="${countryTitle}">${flag} ${geo.countryCode || '??'}</td>
                     <td>${formatDuration(client.connected_duration || 0)}</td>
                     <td>${(client.requests || 0).toLocaleString()}</td>
