@@ -21,3 +21,4 @@ src/cari-output/*.o
 src/common/*.o
 src/common/*.a
 tools/http_ts_server/http_ts_server
+tools/hls_output/hls_output

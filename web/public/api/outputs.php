@@ -245,6 +245,16 @@ switch ($action) {
         json_response($stats);
         break;
 
+    case 'hls_stats':
+        $id = $_GET['id'] ?? '';
+        if (empty($id)) {
+            json_response(['error' => 'Output ID required'], 400);
+        }
+
+        $stats = get_hls_stats($id);
+        json_response($stats);
+        break;
+
     case 'create':
         $data = $_POST;
         if (empty($data) || empty($data['name'])) {
@@ -585,6 +595,10 @@ function create_output($data) {
 
     if ($type === 'http') {
         return create_http_output($data, $id, $name, $service_name);
+    }
+
+    if ($type === 'hls') {
+        return create_hls_output($data, $id, $name, $service_name);
     }
 
     // SRT output (default)
@@ -991,6 +1005,143 @@ EOT;
 }
 
 /**
+ * Create HLS output
+ */
+function create_hls_output($data, $id, $name, $service_name) {
+    error_log("create_hls_output called: id={$id}, name={$name}");
+
+    // Build configuration
+    $config = [
+        'output' => [
+            'id' => $id,
+            'name' => $name,
+            'type' => 'hls',
+            'enabled' => 'true',
+            'service_name' => $service_name
+        ],
+        'input' => [
+            'address' => $data['input_address'] ?? '',
+            'port' => $data['input_port'] ?? '5000',
+            'interface' => $data['input_interface'] ?? ''
+        ],
+        'destination_hls' => [
+            'http_port' => $data['hls_port'] ?? '8080',
+            'output_dir' => $data['hls_output_dir'] ?? '/var/www/caritrans/public/hls/' . $id,
+            'segment_duration' => $data['hls_segment_duration'] ?? '2',
+            'segment_count' => $data['hls_segment_count'] ?? '5',
+            'variants' => $data['hls_variants'] ?? '1'
+        ]
+    ];
+
+    // Ensure outputs directory exists
+    $output_dir = CONFIG_PATH . '/outputs';
+    if (!is_dir($output_dir)) {
+        if (!mkdir($output_dir, 0755, true)) {
+            return ['success' => false, 'error' => 'Failed to create outputs directory'];
+        }
+    }
+
+    // Save configuration
+    $config_file = $output_dir . '/' . $id . '.conf';
+    if (!save_config($config_file, $config)) {
+        return ['success' => false, 'error' => 'Failed to save configuration'];
+    }
+
+    // Generate systemd service file
+    generate_hls_service_file($id, $name, $config);
+
+    return ['success' => true, 'id' => $id, 'service_name' => $service_name, 'config_file' => $config_file, 'message' => 'HLS output created successfully'];
+}
+
+/**
+ * Generate systemd service file for HLS output
+ */
+function generate_hls_service_file($id, $name, $config) {
+    $service_name = $id . '-output-hls';
+
+    $input = $config['input'] ?? [];
+    $dest = $config['destination_hls'] ?? [];
+
+    // Input settings
+    $input_addr = $input['address'] ?? '';
+    $input_port = $input['port'] ?? '5000';
+
+    // Build UDP input string
+    if (!empty($input_addr)) {
+        $udp_input = "{$input_addr}:{$input_port}";
+    } else {
+        $udp_input = ":{$input_port}";
+    }
+
+    // HLS settings
+    $http_port = $dest['http_port'] ?? '8080';
+    $output_dir = $dest['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
+    $segment_duration = $dest['segment_duration'] ?? '2';
+    $segment_count = $dest['segment_count'] ?? '5';
+    $variants = $dest['variants'] ?? '1';
+
+    // Build command arguments
+    $cmd_args = [];
+    $cmd_args[] = "-i \"{$udp_input}\"";
+    $cmd_args[] = "-p {$http_port}";
+    $cmd_args[] = "-o \"{$output_dir}\"";
+    $cmd_args[] = "-d {$segment_duration}";
+    $cmd_args[] = "-n {$segment_count}";
+
+    if (intval($variants) > 1) {
+        $cmd_args[] = "-V {$variants}";
+    }
+
+    $cmd_args[] = "-v";
+
+    $cmd_line = implode(" \\\n    ", $cmd_args);
+
+    $service_content = <<<EOT
+[Unit]
+Description=CariTranscoder HLS Output - {$name}
+Documentation=https://github.com/caritechsolutions/caritranscoder
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/hls_output \\
+    {$cmd_line}
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={$service_name}
+
+[Install]
+WantedBy=multi-user.target
+EOT;
+
+    // Use backend API to create service file
+    $result = call_cari_api('/service/file/create', 'POST', [
+        'service_name' => $service_name,
+        'content' => $service_content
+    ]);
+
+    if (isset($result['success']) && $result['success']) {
+        return $service_name;
+    }
+
+    error_log("Failed to create HLS service file: " . json_encode($result));
+    return $service_name;
+}
+
+/**
  * Update existing output
  */
 function update_output($id, $data) {
@@ -1065,6 +1216,24 @@ function update_output($id, $data) {
         // Regenerate service file
         $name = $config['output']['name'] ?? $id;
         generate_http_service_file($id, $name, $config);
+    } elseif ($type === 'hls') {
+        // Update HLS output fields
+        $config['output']['service_name'] = $id . '-output-hls';
+
+        if (!isset($config['destination_hls'])) $config['destination_hls'] = [];
+        if (!empty($data['hls_port'])) $config['destination_hls']['http_port'] = $data['hls_port'];
+        if (isset($data['hls_output_dir'])) $config['destination_hls']['output_dir'] = $data['hls_output_dir'];
+        if (!empty($data['hls_segment_duration'])) $config['destination_hls']['segment_duration'] = $data['hls_segment_duration'];
+        if (!empty($data['hls_segment_count'])) $config['destination_hls']['segment_count'] = $data['hls_segment_count'];
+        if (!empty($data['hls_variants'])) $config['destination_hls']['variants'] = $data['hls_variants'];
+
+        if (!save_config($config_file, $config)) {
+            return ['success' => false, 'error' => 'Failed to save configuration'];
+        }
+
+        // Regenerate service file
+        $name = $config['output']['name'] ?? $id;
+        generate_hls_service_file($id, $name, $config);
     } else {
         // SRT output
         $config['output']['type'] = 'srt';
@@ -1564,6 +1733,55 @@ function get_http_stats($id) {
         'id' => $id,
         'name' => $config['output']['name'] ?? $id,
         'type' => 'http',
+        'stats' => $stats
+    ];
+}
+
+/**
+ * Get HLS output stats from hls_output server
+ */
+function get_hls_stats($id) {
+    $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+    $config_file = CONFIG_PATH . '/outputs/' . $id . '.conf';
+
+    if (!file_exists($config_file)) {
+        return ['success' => false, 'error' => 'Output not found'];
+    }
+
+    $config = parse_config($config_file);
+
+    if (($config['output']['type'] ?? '') !== 'hls') {
+        return ['success' => false, 'error' => 'Not an HLS output'];
+    }
+
+    $http_port = $config['destination_hls']['http_port'] ?? '8080';
+
+    $url = "http://127.0.0.1:{$http_port}/stats";
+
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => 5,
+            'ignore_errors' => true
+        ]
+    ]);
+
+    $response = @file_get_contents($url, false, $ctx);
+
+    if ($response === false) {
+        return ['success' => false, 'error' => 'Cannot connect to HLS stats server', 'status' => 'offline'];
+    }
+
+    $stats = json_decode($response, true);
+    if (!$stats) {
+        return ['success' => false, 'error' => 'Invalid stats response'];
+    }
+
+    return [
+        'success' => true,
+        'id' => $id,
+        'name' => $config['output']['name'] ?? $id,
+        'type' => 'hls',
         'stats' => $stats
     ];
 }

@@ -632,6 +632,19 @@ build_tools() {
         fi
     fi
 
+    # Build hls_output (HLS output server with client tracking)
+    if [[ -d "$TEMP_DIR/caritrans_latest/tools/hls_output" ]]; then
+        cd "$TEMP_DIR/caritrans_latest/tools/hls_output"
+        log_info "Building hls_output..."
+        make clean 2>/dev/null || true
+        if make; then
+            make install
+            log_info "hls_output installed to /usr/local/bin/"
+        else
+            log_warn "Failed to build hls_output (libmicrohttpd may be missing)"
+        fi
+    fi
+
     log_info "Tools build completed"
 }
 
