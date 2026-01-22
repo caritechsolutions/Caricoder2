@@ -1910,7 +1910,7 @@ function parse_user_agent_device($user_agent) {
 /**
  * Parse nginx access log to get HLS client stats
  * Looks for requests to the HLS output directory in the last 60 seconds
- * Distinguishes clients by IP + User-Agent combination
+ * Uses nginx userid module session IDs to distinguish unique clients
  */
 function get_hls_clients_from_nginx_log($output_dir) {
     $clients = [];
@@ -1928,7 +1928,7 @@ function get_hls_clients_from_nginx_log($output_dir) {
 
     // Common nginx log locations - check HLS-specific log first
     $log_files = [
-        '/var/log/nginx/hls.access.log',    // HLS-specific log with port tracking
+        '/var/log/nginx/hls.access.log',    // HLS-specific log with session tracking
         '/var/log/nginx/access.log',
         '/var/log/nginx/caritrans.access.log',
         '/var/log/caritrans/access.log'
@@ -1969,9 +1969,9 @@ function get_hls_clients_from_nginx_log($output_dir) {
     fclose($fp);
 
     // Parse log lines for HLS requests
-    // Supports two formats:
-    // - Standard: IP - - [date] "request" status size "referer" "user-agent"
-    // - With port: IP:PORT - - [date] "request" status size "referer" "user-agent"
+    // Supports formats:
+    // - Session ID (userid module): IP|SESSION_ID - - [date] "request" status size "referer" "user-agent"
+    // - Legacy (no session): IP - - [date] "request" status size "referer" "user-agent"
     $client_data = [];
 
     foreach ($lines as $line) {
@@ -1980,8 +1980,9 @@ function get_hls_clients_from_nginx_log($output_dir) {
             continue;
         }
 
-        // Parse nginx combined log format (with optional port)
-        // Example: 192.168.1.100:54321 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        // Parse nginx combined log format with optional session ID
+        // Format with session: 192.168.1.100|ABC123DEF456 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        // Format without: 192.168.1.100 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
         if (preg_match('/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"/', $line, $m)) {
             $ip_field = $m[1];
             $date_str = $m[2];
@@ -1991,12 +1992,14 @@ function get_hls_clients_from_nginx_log($output_dir) {
             $bytes = $m[6] === '-' ? 0 : intval($m[6]);
             $user_agent = $m[8];
 
-            // Extract IP and port (format: IP:PORT or just IP)
+            // Extract IP and session ID (format: IP|SESSION_ID or just IP)
             $ip = $ip_field;
-            $client_port = '';
-            if (preg_match('/^(.+):(\d+)$/', $ip_field, $ip_match)) {
-                $ip = $ip_match[1];
-                $client_port = $ip_match[2];
+            $session_id = '';
+            if (strpos($ip_field, '|') !== false) {
+                // New format with session ID from userid module
+                $parts = explode('|', $ip_field, 2);
+                $ip = $parts[0];
+                $session_id = $parts[1] ?? '';
             }
 
             // Parse date (format: 22/Jan/2026:12:34:56 +0000)
@@ -2014,10 +2017,10 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 continue;
             }
 
-            // Use IP:PORT as unique key if port available, otherwise IP + User-Agent
-            // Port is the best identifier as it's unique per TCP connection
-            if (!empty($client_port)) {
-                $client_key = $ip . ':' . $client_port;
+            // Use session ID as unique key (best - persists across connections)
+            // Fall back to IP + User-Agent if no session ID
+            if (!empty($session_id)) {
+                $client_key = $session_id;
             } else {
                 $client_key = $ip . '|' . $user_agent;
             }
@@ -2029,7 +2032,7 @@ function get_hls_clients_from_nginx_log($output_dir) {
             if (!isset($client_data[$client_key])) {
                 $client_data[$client_key] = [
                     'ip' => $ip,
-                    'port' => $client_port,
+                    'session_id' => $session_id,
                     'first_seen' => $log_time,
                     'last_seen' => $log_time,
                     'requests' => 0,

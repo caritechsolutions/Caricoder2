@@ -828,32 +828,38 @@ update_nginx_config() {
         return
     fi
 
-    # Add HLS tracking log format config if missing
-    if [[ ! -f "/etc/nginx/conf.d/hls_tracking.conf" ]]; then
-        log_info "Adding HLS tracking log format..."
-        cat > /etc/nginx/conf.d/hls_tracking.conf << 'HLSCONF'
-# Custom log format with client port for HLS client tracking
-# This allows tracking unique clients even when multiple streams come from same IP
-log_format hls_tracking '$remote_addr:$remote_port - $remote_user [$time_local] '
+    # Add/update HLS tracking log format config with session ID
+    log_info "Updating HLS tracking log format..."
+    cat > /etc/nginx/conf.d/hls_tracking.conf << 'HLSCONF'
+# Custom log format with session ID for HLS client tracking
+# Uses userid module to assign unique session IDs via cookie
+# Format: IP|SESSION_ID - - [date] "request" status bytes "referer" "user-agent"
+log_format hls_tracking '$remote_addr|$uid_got$uid_set - $remote_user [$time_local] '
                         '"$request" $status $body_bytes_sent '
                         '"$http_referer" "$http_user_agent"';
 HLSCONF
-    fi
 
     # Create HLS output directory
     mkdir -p /var/www/caritrans/public/hls
     chown -R www-data:www-data /var/www/caritrans/public/hls
 
-    # Add /hls location if missing (for HLS outputs with client tracking)
+    # Add or update /hls location (for HLS outputs with session-based client tracking)
     if ! grep -q "location /hls/" "$NGINX_CONF"; then
         log_info "Adding /hls location for HLS output streams..."
 
         # Insert the hls location before the preview location or WebSocket
         if grep -q "location /preview/" "$NGINX_CONF"; then
             sed -i '/# HLS preview streams/i \
-    # HLS output streams - with client tracking via port logging\
+    # HLS output streams - with session-based client tracking\
     location /hls/ {\
         alias /var/www/caritrans/public/hls/;\
+\
+        # Enable userid module for unique client session tracking\
+        userid on;\
+        userid_name hlsid;\
+        userid_expires max;\
+        userid_path /hls/;\
+\
         access_log /var/log/nginx/hls.access.log hls_tracking;\
         add_header Access-Control-Allow-Origin *;\
         add_header Cache-Control "no-cache, no-store, must-revalidate";\
@@ -866,9 +872,16 @@ HLSCONF
 ' "$NGINX_CONF"
         else
             sed -i '/# WebSocket proxy/i \
-    # HLS output streams - with client tracking via port logging\
+    # HLS output streams - with session-based client tracking\
     location /hls/ {\
         alias /var/www/caritrans/public/hls/;\
+\
+        # Enable userid module for unique client session tracking\
+        userid on;\
+        userid_name hlsid;\
+        userid_expires max;\
+        userid_path /hls/;\
+\
         access_log /var/log/nginx/hls.access.log hls_tracking;\
         add_header Access-Control-Allow-Origin *;\
         add_header Cache-Control "no-cache, no-store, must-revalidate";\
@@ -879,6 +892,22 @@ HLSCONF
     }\
 \
 ' "$NGINX_CONF"
+        fi
+    else
+        # Update existing /hls location if it doesn't have userid module
+        if ! grep -q "userid on" "$NGINX_CONF"; then
+            log_info "Updating /hls location with userid module..."
+            # Add userid directives after the alias line
+            sed -i '/location \/hls\// {
+                n
+                /alias/ a\
+\
+        # Enable userid module for unique client session tracking\
+        userid on;\
+        userid_name hlsid;\
+        userid_expires max;\
+        userid_path /hls/;
+            }' "$NGINX_CONF"
         fi
     fi
 
