@@ -1,8 +1,9 @@
-# HLS Output Server Makefile
+# HLS Output Generator Makefile
+# Generates HLS segments via FFmpeg - no embedded HTTP server needed
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -pthread
-LDFLAGS = -lmicrohttpd -lpthread
+CFLAGS = -Wall -Wextra -O2
+LDFLAGS =
 
 TARGET = hls_output
 SRC = hls_output.c

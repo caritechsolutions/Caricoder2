@@ -109,9 +109,9 @@ include __DIR__ . '/../templates/header.php';
                             $type_badge = 'bg-info text-dark';
                             $type_icon = 'bi-globe';
                         } elseif ($type === 'hls') {
-                            $hls_port = $output['destination_hls']['http_port'] ?? '8080';
+                            $hls_dir = $output['destination_hls']['output_dir'] ?? '/var/www/caritrans/public/hls/' . $output_id;
                             $hls_variants = $output['destination_hls']['variants'] ?? '1';
-                            $dest_display = "http://0.0.0.0:{$hls_port}/playlist.m3u8" . ($hls_variants > 1 ? " (ABR:{$hls_variants})" : '');
+                            $dest_display = basename($hls_dir) . "/playlist.m3u8" . ($hls_variants > 1 ? " (ABR:{$hls_variants})" : '');
                             $type_badge = 'bg-success';
                             $type_icon = 'bi-collection-play';
                         } else {
@@ -947,31 +947,14 @@ include __DIR__ . '/../templates/header.php';
                         <h6><i class="bi bi-collection-play me-2"></i>HLS Output (HTTP Live Streaming)</h6>
                         <div class="alert alert-info small mb-3">
                             <i class="bi bi-info-circle me-1"></i>
-                            Generates HLS segments and serves them via HTTP. Playlist URL: <code>http://&lt;server&gt;:&lt;port&gt;/playlist.m3u8</code>
-                        </div>
-                        <div class="row">
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">HTTP Port <span class="text-danger">*</span></label>
-                                <input type="number" class="form-control" name="hls_port" id="hlsPort"
-                                       value="8080" min="1024" max="65535">
-                            </div>
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Segment Duration (sec)</label>
-                                <input type="number" class="form-control" name="hls_segment_duration"
-                                       value="2" min="1" max="10">
-                            </div>
-                            <div class="col-md-4 mb-3">
-                                <label class="form-label">Segments to Keep</label>
-                                <input type="number" class="form-control" name="hls_segment_count"
-                                       value="5" min="2" max="20">
-                            </div>
+                            Generates HLS segments via FFmpeg. Files are served by nginx at <code>/hls/{output_id}/playlist.m3u8</code>
                         </div>
                         <div class="row">
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">Output Directory</label>
                                 <input type="text" class="form-control" name="hls_output_dir" id="hlsOutputDir"
                                        placeholder="/var/www/caritrans/public/hls/{id}">
-                                <small class="text-muted">Leave empty for auto-generated path</small>
+                                <small class="text-muted">Leave empty for auto-generated path (served by nginx)</small>
                             </div>
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">Variants (ABR)</label>
@@ -982,6 +965,18 @@ include __DIR__ . '/../templates/header.php';
                                     <option value="4">4 - Four quality levels</option>
                                 </select>
                                 <small class="text-muted">Set to match ABR transcoder output count</small>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Segment Duration (sec)</label>
+                                <input type="number" class="form-control" name="hls_segment_duration"
+                                       value="2" min="1" max="10">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Segments to Keep</label>
+                                <input type="number" class="form-control" name="hls_segment_count"
+                                       value="5" min="2" max="20">
                             </div>
                         </div>
                     </div>

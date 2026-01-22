@@ -66,8 +66,7 @@ $http_stats_path = $config['destination_http']['stats_path'] ?? '/stats';
 $http_mime_type = $config['destination_http']['mime_type'] ?? 'video/mp2t';
 $http_chunked = ($config['destination_http']['chunked_encoding'] ?? 'false') === 'true';
 
-// HLS settings
-$hls_port = $config['destination_hls']['http_port'] ?? '8080';
+// HLS settings (no HTTP port - files served by nginx)
 $hls_output_dir = $config['destination_hls']['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
 $hls_segment_duration = $config['destination_hls']['segment_duration'] ?? '2';
 $hls_segment_count = $config['destination_hls']['segment_count'] ?? '5';
@@ -373,33 +372,14 @@ include __DIR__ . '/../templates/header.php';
             <div class="card-body">
                 <div class="alert alert-info small mb-3">
                     <i class="bi bi-info-circle me-1"></i>
-                    Playlist URL: <code>http://&lt;server&gt;:<?php echo htmlspecialchars($hls_port); ?>/playlist.m3u8</code>
-                </div>
-                <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">HTTP Port <span class="text-danger">*</span></label>
-                        <input type="number" class="form-control" name="hls_port"
-                               value="<?php echo htmlspecialchars($hls_port); ?>"
-                               min="1024" max="65535">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Segment Duration (sec)</label>
-                        <input type="number" class="form-control" name="hls_segment_duration"
-                               value="<?php echo htmlspecialchars($hls_segment_duration); ?>"
-                               min="1" max="10">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Segments to Keep</label>
-                        <input type="number" class="form-control" name="hls_segment_count"
-                               value="<?php echo htmlspecialchars($hls_segment_count); ?>"
-                               min="2" max="20">
-                    </div>
+                    HLS files are served by nginx. Playlist: <code>/hls/<?php echo htmlspecialchars(basename($hls_output_dir)); ?>/playlist.m3u8</code>
                 </div>
                 <div class="row">
                     <div class="col-md-6 mb-3">
                         <label class="form-label">Output Directory</label>
                         <input type="text" class="form-control" name="hls_output_dir"
                                value="<?php echo htmlspecialchars($hls_output_dir); ?>">
+                        <small class="text-muted">Directory where HLS files are written (served by nginx)</small>
                     </div>
                     <div class="col-md-6 mb-3">
                         <label class="form-label">Variants (ABR)</label>
@@ -410,6 +390,20 @@ include __DIR__ . '/../templates/header.php';
                             <option value="4" <?php echo $hls_variants == '4' ? 'selected' : ''; ?>>4 - Four quality levels</option>
                         </select>
                         <small class="text-muted">Set to match ABR transcoder output count</small>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Segment Duration (sec)</label>
+                        <input type="number" class="form-control" name="hls_segment_duration"
+                               value="<?php echo htmlspecialchars($hls_segment_duration); ?>"
+                               min="1" max="10">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label">Segments to Keep</label>
+                        <input type="number" class="form-control" name="hls_segment_count"
+                               value="<?php echo htmlspecialchars($hls_segment_count); ?>"
+                               min="2" max="20">
                     </div>
                 </div>
             </div>

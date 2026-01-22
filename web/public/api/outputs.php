@@ -1031,7 +1031,6 @@ function create_hls_output($data, $id, $name, $service_name) {
             'interface' => $data['input_interface'] ?? ''
         ],
         'destination_hls' => [
-            'http_port' => $data['hls_port'] ?? '8080',
             'output_dir' => $output_dir,
             'segment_duration' => $data['hls_segment_duration'] ?? '2',
             'segment_count' => $data['hls_segment_count'] ?? '5',
@@ -1079,8 +1078,7 @@ function generate_hls_service_file($id, $name, $config) {
         $udp_input = ":{$input_port}";
     }
 
-    // HLS settings
-    $http_port = $dest['http_port'] ?? '8080';
+    // HLS settings (files served by nginx, no embedded HTTP server)
     $output_dir = $dest['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
     $segment_duration = $dest['segment_duration'] ?? '2';
     $segment_count = $dest['segment_count'] ?? '5';
@@ -1089,7 +1087,6 @@ function generate_hls_service_file($id, $name, $config) {
     // Build command arguments
     $cmd_args = [];
     $cmd_args[] = "-i \"{$udp_input}\"";
-    $cmd_args[] = "-p {$http_port}";
     $cmd_args[] = "-o \"{$output_dir}\"";
     $cmd_args[] = "-d {$segment_duration}";
     $cmd_args[] = "-n {$segment_count}";
@@ -1760,27 +1757,29 @@ function get_hls_stats($id) {
         return ['success' => false, 'error' => 'Not an HLS output'];
     }
 
-    $http_port = $config['destination_hls']['http_port'] ?? '8080';
+    // Get output directory from config
+    $output_dir = $config['destination_hls']['output_dir'] ?? '/var/www/caritrans/public/hls/' . $id;
+    $stats_file = $output_dir . '/stats.json';
 
-    $url = "http://127.0.0.1:{$http_port}/stats";
+    // Read stats from JSON file written by hls_output
+    if (!file_exists($stats_file)) {
+        return ['success' => false, 'error' => 'Stats file not found - HLS output may not be running', 'status' => 'offline'];
+    }
 
-    $ctx = stream_context_create([
-        'http' => [
-            'method' => 'GET',
-            'timeout' => 5,
-            'ignore_errors' => true
-        ]
-    ]);
-
-    $response = @file_get_contents($url, false, $ctx);
-
+    $response = @file_get_contents($stats_file);
     if ($response === false) {
-        return ['success' => false, 'error' => 'Cannot connect to HLS stats server', 'status' => 'offline'];
+        return ['success' => false, 'error' => 'Cannot read stats file', 'status' => 'offline'];
     }
 
     $stats = json_decode($response, true);
     if (!$stats) {
-        return ['success' => false, 'error' => 'Invalid stats response'];
+        return ['success' => false, 'error' => 'Invalid stats file'];
+    }
+
+    // Check if stats are stale (older than 30 seconds)
+    $stats_age = time() - ($stats['timestamp'] ?? 0);
+    if ($stats_age > 30) {
+        $stats['warning'] = 'Stats may be stale (last update ' . $stats_age . ' seconds ago)';
     }
 
     return [
