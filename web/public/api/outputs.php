@@ -1782,6 +1782,11 @@ function get_hls_stats($id) {
         $stats['warning'] = 'Stats may be stale (last update ' . $stats_age . ' seconds ago)';
     }
 
+    // Get client stats from nginx access log
+    $clients = get_hls_clients_from_nginx_log($output_dir);
+    $stats['client_count'] = count($clients);
+    $stats['clients'] = $clients;
+
     return [
         'success' => true,
         'id' => $id,
@@ -1789,4 +1794,136 @@ function get_hls_stats($id) {
         'type' => 'hls',
         'stats' => $stats
     ];
+}
+
+/**
+ * Parse nginx access log to get HLS client stats
+ * Looks for requests to the HLS output directory in the last 60 seconds
+ */
+function get_hls_clients_from_nginx_log($output_dir) {
+    $clients = [];
+    $now = time();
+    $cutoff = $now - 60; // Look at last 60 seconds of logs
+
+    // Extract the HLS path from output_dir (e.g., /var/www/caritrans/public/hls/bbcw4 -> /hls/bbcw4)
+    $hls_path = '';
+    if (preg_match('#/public(/hls/[^/]+)#', $output_dir, $matches)) {
+        $hls_path = $matches[1];
+    } else {
+        // Fallback: use basename
+        $hls_path = '/hls/' . basename($output_dir);
+    }
+
+    // Common nginx log locations
+    $log_files = [
+        '/var/log/nginx/access.log',
+        '/var/log/nginx/caritrans.access.log',
+        '/var/log/caritrans/access.log'
+    ];
+
+    $log_file = null;
+    foreach ($log_files as $lf) {
+        if (file_exists($lf) && is_readable($lf)) {
+            $log_file = $lf;
+            break;
+        }
+    }
+
+    if (!$log_file) {
+        return [];
+    }
+
+    // Read last 1000 lines of log (tail)
+    $lines = [];
+    $fp = @fopen($log_file, 'r');
+    if (!$fp) {
+        return [];
+    }
+
+    // Seek to approximate position for last 1000 lines (~200 bytes per line)
+    $file_size = filesize($log_file);
+    $seek_pos = max(0, $file_size - 200000);
+    fseek($fp, $seek_pos);
+
+    // Skip partial line if we seeked
+    if ($seek_pos > 0) {
+        fgets($fp);
+    }
+
+    while (($line = fgets($fp)) !== false) {
+        $lines[] = $line;
+    }
+    fclose($fp);
+
+    // Parse log lines for HLS requests
+    // Common nginx log format: IP - - [date] "METHOD /path HTTP/x.x" status size "referer" "user-agent"
+    $client_data = [];
+
+    foreach ($lines as $line) {
+        // Check if this line is for our HLS path
+        if (strpos($line, $hls_path) === false) {
+            continue;
+        }
+
+        // Parse nginx combined log format
+        // Example: 192.168.1.100 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
+        if (preg_match('/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"/', $line, $m)) {
+            $ip = $m[1];
+            $date_str = $m[2];
+            $method = $m[3];
+            $path = $m[4];
+            $status = $m[5];
+            $bytes = $m[6] === '-' ? 0 : intval($m[6]);
+            $user_agent = $m[8];
+
+            // Parse date (format: 22/Jan/2026:12:34:56 +0000)
+            $log_time = strtotime(str_replace(':', ' ', $date_str));
+
+            // Only include recent requests
+            if ($log_time < $cutoff) {
+                continue;
+            }
+
+            // Track client
+            if (!isset($client_data[$ip])) {
+                $client_data[$ip] = [
+                    'ip' => $ip,
+                    'first_seen' => $log_time,
+                    'last_seen' => $log_time,
+                    'requests' => 0,
+                    'bytes_sent' => 0,
+                    'manifest_requests' => 0,
+                    'segment_requests' => 0,
+                    'user_agent' => $user_agent
+                ];
+            }
+
+            $client_data[$ip]['last_seen'] = max($client_data[$ip]['last_seen'], $log_time);
+            $client_data[$ip]['first_seen'] = min($client_data[$ip]['first_seen'], $log_time);
+            $client_data[$ip]['requests']++;
+            $client_data[$ip]['bytes_sent'] += $bytes;
+
+            // Categorize request
+            if (strpos($path, '.m3u8') !== false) {
+                $client_data[$ip]['manifest_requests']++;
+            } elseif (strpos($path, '.ts') !== false) {
+                $client_data[$ip]['segment_requests']++;
+            }
+        }
+    }
+
+    // Convert to array and calculate durations
+    $result = [];
+    foreach ($client_data as $ip => $data) {
+        $data['connected_duration'] = $now - $data['first_seen'];
+        $data['idle_time'] = $now - $data['last_seen'];
+        $result[] = $data;
+    }
+
+    // Sort by most recent activity
+    usort($result, function($a, $b) {
+        return $b['last_seen'] - $a['last_seen'];
+    });
+
+    return $result;
 }
