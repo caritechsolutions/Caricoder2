@@ -1910,7 +1910,7 @@ function parse_user_agent_device($user_agent) {
 /**
  * Parse nginx access log to get HLS client stats
  * Looks for requests to the HLS output directory in the last 60 seconds
- * Groups clients by IP + User-Agent to handle race conditions with session cookies
+ * Only counts .ts segment requests to avoid race condition with initial parallel requests
  */
 function get_hls_clients_from_nginx_log($output_dir) {
     $clients = [];
@@ -1969,9 +1969,8 @@ function get_hls_clients_from_nginx_log($output_dir) {
     fclose($fp);
 
     // Parse log lines for HLS requests
-    // Supports formats:
-    // - Session ID (userid module): IP|SESSION_ID - - [date] "request" status size "referer" "user-agent"
-    // - Legacy (no session): IP - - [date] "request" status size "referer" "user-agent"
+    // Only count .ts segment requests for client tracking - by the time segments are
+    // requested, the session cookie is established, avoiding race condition duplicates
     $client_data = [];
 
     foreach ($lines as $line) {
@@ -1981,8 +1980,6 @@ function get_hls_clients_from_nginx_log($output_dir) {
         }
 
         // Parse nginx combined log format with optional session ID
-        // Format with session: 192.168.1.100|ABC123DEF456 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
-        // Format without: 192.168.1.100 - - [22/Jan/2026:12:34:56 +0000] "GET /hls/bbcw4/playlist.m3u8 HTTP/1.1" 200 1234 "-" "VLC/3.0"
         if (preg_match('/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"/', $line, $m)) {
             $ip_field = $m[1];
             $date_str = $m[2];
@@ -1992,22 +1989,29 @@ function get_hls_clients_from_nginx_log($output_dir) {
             $bytes = $m[6] === '-' ? 0 : intval($m[6]);
             $user_agent = $m[8];
 
+            // Determine request type
+            $is_segment = (strpos($path, '.ts') !== false);
+            $is_manifest = (strpos($path, '.m3u8') !== false);
+
+            // Only use segment requests for client identification (cookie is set by then)
+            // Skip manifest-only requests for client tracking to avoid race condition
+            if (!$is_segment) {
+                continue;
+            }
+
             // Extract IP and session ID (format: IP|SESSION_ID or just IP)
             $ip = $ip_field;
             $session_id = '';
             if (strpos($ip_field, '|') !== false) {
-                // New format with session ID from userid module
                 $parts = explode('|', $ip_field, 2);
                 $ip = $parts[0];
                 $session_id = $parts[1] ?? '';
             }
 
             // Parse date (format: 22/Jan/2026:12:34:56 +0000)
-            // Convert to "22 Jan 2026 12:34:56 +0000" for strtotime
             $parsed_date = preg_replace('#^(\d{2})/(\w{3})/(\d{4}):(.*)$#', '$1 $2 $3 $4', $date_str);
             $log_time = strtotime($parsed_date);
 
-            // Skip if we couldn't parse the date
             if ($log_time === false) {
                 continue;
             }
@@ -2017,10 +2021,13 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 continue;
             }
 
-            // Use IP + User-Agent as primary key to avoid race condition duplicates
-            // When HLS player first connects, it makes parallel requests before cookie is set,
-            // resulting in multiple session IDs for the same client. Using IP+UA groups them.
-            $client_key = $ip . '|' . $user_agent;
+            // Use session ID as unique key to distinguish multiple identical clients
+            // Fall back to IP + User-Agent if no session ID
+            if (!empty($session_id)) {
+                $client_key = $session_id;
+            } else {
+                $client_key = $ip . '|' . $user_agent;
+            }
 
             // Parse user agent for device info
             $device_info = parse_user_agent_device($user_agent);
@@ -2042,22 +2049,11 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 ];
             }
 
-            // Update session_id if we have one (prefer non-empty)
-            if (!empty($session_id) && empty($client_data[$client_key]['session_id'])) {
-                $client_data[$client_key]['session_id'] = $session_id;
-            }
-
             $client_data[$client_key]['last_seen'] = max($client_data[$client_key]['last_seen'], $log_time);
             $client_data[$client_key]['first_seen'] = min($client_data[$client_key]['first_seen'], $log_time);
             $client_data[$client_key]['requests']++;
             $client_data[$client_key]['bytes_sent'] += $bytes;
-
-            // Categorize request
-            if (strpos($path, '.m3u8') !== false) {
-                $client_data[$client_key]['manifest_requests']++;
-            } elseif (strpos($path, '.ts') !== false) {
-                $client_data[$client_key]['segment_requests']++;
-            }
+            $client_data[$client_key]['segment_requests']++;
         }
     }
 
