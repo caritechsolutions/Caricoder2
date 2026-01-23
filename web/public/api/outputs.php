@@ -1910,7 +1910,7 @@ function parse_user_agent_device($user_agent) {
 /**
  * Parse nginx access log to get HLS client stats
  * Looks for requests to the HLS output directory in the last 60 seconds
- * Uses nginx userid module session IDs to distinguish unique clients
+ * Groups clients by IP + User-Agent to handle race conditions with session cookies
  */
 function get_hls_clients_from_nginx_log($output_dir) {
     $clients = [];
@@ -2017,13 +2017,10 @@ function get_hls_clients_from_nginx_log($output_dir) {
                 continue;
             }
 
-            // Use session ID as unique key (best - persists across connections)
-            // Fall back to IP + User-Agent if no session ID
-            if (!empty($session_id)) {
-                $client_key = $session_id;
-            } else {
-                $client_key = $ip . '|' . $user_agent;
-            }
+            // Use IP + User-Agent as primary key to avoid race condition duplicates
+            // When HLS player first connects, it makes parallel requests before cookie is set,
+            // resulting in multiple session IDs for the same client. Using IP+UA groups them.
+            $client_key = $ip . '|' . $user_agent;
 
             // Parse user agent for device info
             $device_info = parse_user_agent_device($user_agent);
@@ -2043,6 +2040,11 @@ function get_hls_clients_from_nginx_log($output_dir) {
                     'device' => $device_info['device'],
                     'device_type' => $device_info['type']
                 ];
+            }
+
+            // Update session_id if we have one (prefer non-empty)
+            if (!empty($session_id) && empty($client_data[$client_key]['session_id'])) {
+                $client_data[$client_key]['session_id'] = $session_id;
             }
 
             $client_data[$client_key]['last_seen'] = max($client_data[$client_key]['last_seen'], $log_time);
