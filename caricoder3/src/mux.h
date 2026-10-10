@@ -56,6 +56,9 @@ void mux_skip_to(struct mux *m, stc_t stc);
 /* Discards the queued units that are flagged tentative. */
 void mux_drop_tentative(struct mux *m);
 
+/* The doubt is over: what was queued meanwhile is good after all. */
+void mux_clear_tentative(struct mux *m);
+
 /* Discards everything queued (counted as dropped). */
 void mux_drop_all(struct mux *m);
 

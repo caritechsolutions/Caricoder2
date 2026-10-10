@@ -198,7 +198,8 @@ def build(cfg):
     pat = build_pat(ts_id, programs)
     sdt_progs = [p for p in programs
                  if p["number"] in cfg.get("sdt_services", [q["number"] for q in programs])]
-    sdt = build_sdt(ts_id, sdt_progs) if cfg.get("sdt", True) else None
+    sdt = build_sdt(ts_id, sdt_progs, version=cfg.get("sdt_version", 0)) \
+        if cfg.get("sdt", True) else None
     pmts = [build_pmt(p) for p in programs]
     cc = {}
     out = bytearray()

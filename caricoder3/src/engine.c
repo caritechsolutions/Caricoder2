@@ -30,11 +30,12 @@
 #include "log.h"
 
 #define RESYNC_LIMIT    (STC_HZ / 5)    /* live: PCR this far off the model ... */
+#define RESYNC_STABLE   (STC_HZ / 20)   /* ... without moving more than this   */
 #define RESYNC_HOLD_NS  300000000LL     /* ... for this long ...               */
 #define RESYNC_SAMPLES  5               /* ... over this many PCRs = new clock */
 #define PCR_QUIET_NS    500000000LL     /* live: data but no PCR for this long */
 #define ANCHOR_EVERY_NS 100000000LL
-#define FLOW_GAP_NS     100000000LL     /* live: a pause this long restarts the run */
+#define FLOW_GAP_NS     400000000LL     /* live: a pause at least this long restarts the run */
 #define CATCHUP_MAX     (STC_HZ / 2)    /* live: further behind than this, skip */
 #define FILE_SPLICE_MIN (STC_HZ / 10)   /* file: breaks smaller than this are left */
 #define DRAIN_LIMIT     (30 * STC_HZ)   /* file: most output written after the end */
@@ -63,6 +64,7 @@ struct engine {
      * until it has stayed there (see on_pcr) */
     bool    suspect;
     int64_t suspect_since;
+    stc_t   suspect_err;
     int     suspect_n;
 
     /* input thread only */
@@ -71,10 +73,13 @@ struct engine {
     int64_t last_anchor_rx;     /* last time we stood in for a missing PCR */
     int64_t prev_rx;            /* arrival time of the previous datagram */
     int64_t flow_start;         /* start of the present unbroken run of input */
+    int64_t dgram_interval;     /* smoothed time between datagrams, ns */
 
     /* warnings about the clock: at most one line a second */
     int64_t warn_last_ns;
     unsigned warn_suppressed;
+    int64_t prog_log_ns;
+    unsigned prog_log_suppressed;
 
     /* byte-stream input */
     uint8_t *sbuf;
@@ -114,6 +119,19 @@ static void on_program(void *opaque, const struct program *p)
     e->have_prog = true;
     pthread_mutex_unlock(&e->lock);
 
+    /* A source whose tables flap must not flood the log. */
+    int64_t now = clock_now_ns();
+
+    if (now - e->prog_log_ns < LOG_EVERY_NS && e->prog_log_ns) {
+        e->prog_log_suppressed++;
+        return;
+    }
+    e->prog_log_ns = now;
+    if (e->prog_log_suppressed) {
+        log_info("service: %u further table change(s) not shown",
+                 e->prog_log_suppressed);
+        e->prog_log_suppressed = 0;
+    }
     if (same_streams) {
         log_info("service %u: tables updated (%s)", np.number,
                  np.have_sdt ? "SDT present" : "no SDT");
@@ -209,19 +227,26 @@ static void on_pcr(void *opaque, stc_t pcr, stc_t expected, bool jump)
             stc_t err = obs - pll_eval(&e->pll, e->rx_ns);
 
             if (err <= RESYNC_LIMIT && err >= -RESYNC_LIMIT) {
-                e->suspect = false;
+                if (e->suspect) {
+                    e->suspect = false;
+                    mux_clear_tentative(e->mux);
+                }
                 pll_update(&e->pll, e->rx_ns, obs);
-            } else if (!e->suspect) {
+            } else if (!e->suspect || err - e->suspect_err > RESYNC_STABLE ||
+                       err - e->suspect_err < -RESYNC_STABLE) {
                 /*
                  * Far from where the source clock should be. Either data
-                 * that was held up and is now arriving in a burst (it will
-                 * catch up with the wall clock within the burst), or a
-                 * source that restarted on a new clock (it will stay off).
-                 * Only time tells them apart, so wait before acting, and
-                 * keep the outliers away from the PLL meanwhile.
+                 * that was held up and is now being delivered faster than
+                 * real time (the error shrinks as it catches up with the
+                 * wall clock), or a source that restarted on a new clock
+                 * (the error stays put). Only time tells them apart, so
+                 * wait for the error to hold still before acting, and
+                 * keep the outliers away from the PLL meanwhile. Each time
+                 * the error moves, the wait starts again.
                  */
                 e->suspect = true;
                 e->suspect_since = e->rx_ns;
+                e->suspect_err = err;
                 e->suspect_n = 1;
             } else if (++e->suspect_n >= RESYNC_SAMPLES &&
                        e->rx_ns - e->suspect_since >= RESYNC_HOLD_NS) {
@@ -303,9 +328,22 @@ void engine_push_datagram(struct engine *e, const uint8_t *buf, size_t len,
     }
 
     e->rx_ns = rx_ns;
-    /* Where the present uninterrupted run of input began. */
-    if (e->flow_start == 0 || rx_ns - e->prev_rx > FLOW_GAP_NS)
+    /* Where the present uninterrupted run of input began. What counts
+     * as an interruption depends on the stream: a 64 kb/s radio service
+     * sends a datagram only every 160 ms. */
+    if (e->flow_start == 0) {
         e->flow_start = rx_ns;
+    } else {
+        int64_t gap = rx_ns - e->prev_rx;
+        int64_t limit = 5 * e->dgram_interval;
+
+        if (limit < FLOW_GAP_NS)
+            limit = FLOW_GAP_NS;
+        if (gap > limit)
+            e->flow_start = rx_ns;
+        else
+            e->dgram_interval += (gap - e->dgram_interval) / 16;
+    }
     e->prev_rx = rx_ns;
     while (n >= TS_SIZE) {
         if (p[0] == TS_SYNC) {

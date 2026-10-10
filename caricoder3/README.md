@@ -167,7 +167,7 @@ The same figures go to the log every 10 seconds (`--stats-interval`).
 ## Tests
 
 ```
-make test                         # 38 tests, about three minutes
+make test                         # 42 tests, about four minutes
 python3 tests/run_tests.py --list
 python3 tests/run_tests.py live   # only the tests with "live" in the name
 make fuzz && build/fuzz_engine -max_len=400000 build/corpus

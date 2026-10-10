@@ -85,6 +85,7 @@ struct demux {
     stc_t   pcr_unw;            /* same, unwrapped */
     struct pcr_pt hist[PCR_HIST];
     int     hist_n, hist_head;  /* ring: hist_head is the oldest entry */
+    bool    anchored;           /* newest history came from an anchor */
     int64_t slope_num, slope_den; /* ticks per packet of the last segment */
     int64_t peak_pps;           /* highest packet rate seen between two PCRs */
     int64_t pcr_wait_pkts;
@@ -112,7 +113,9 @@ static void hist_add(struct demux *d, int64_t idx, stc_t pcr)
     if (d->hist_n > 0) {
         const struct pcr_pt *last = hist_at(d, d->hist_n - 1);
 
-        if (idx > last->idx && pcr > last->pcr) {
+        /* Intervals under a millisecond say nothing reliable about the
+         * rate (two PCRs back to back, or a damaged one). */
+        if (idx > last->idx && pcr - last->pcr >= STC_PER_MS) {
             int64_t pps;
 
             d->slope_num = pcr - last->pcr;
@@ -127,6 +130,7 @@ static void hist_add(struct demux *d, int64_t idx, stc_t pcr)
              * followed by a key frame thirty times the size.
              */
             pps = d->slope_den * STC_HZ / d->slope_num;
+            d->peak_pps -= d->peak_pps / 256;   /* forget old peaks slowly */
             if (pps > d->peak_pps)
                 d->peak_pps = pps;
             d->pcr_wait_pkts = 2 * d->peak_pps;
@@ -154,14 +158,26 @@ static stc_t extrapolate(const struct demux *d, const struct pcr_pt *from,
                          int64_t idx)
 {
     int64_t n = idx - from->idx;
+    int64_t num = d->slope_num, den = d->slope_den;
     stc_t dt;
 
-    if (d->slope_den <= 0)
+    if (den <= 0)
         return from->pcr;
-    if (d->slope_num > SLOPE_MAX * d->slope_den)
+    /* Prefer the rate over everything we remember (some seconds) to the
+     * rate of the last interval alone: steadier, and for a VBR stream it
+     * is the average rather than whatever the last 30 ms happened to be. */
+    if (d->hist_n >= 2) {
+        const struct pcr_pt *a = hist_at(d, 0), *b = hist_at(d, d->hist_n - 1);
+
+        if (b->idx > a->idx && b->pcr - a->pcr >= STC_PER_MS) {
+            num = b->pcr - a->pcr;
+            den = b->idx - a->idx;
+        }
+    }
+    if (num > SLOPE_MAX * den)
         dt = n * SLOPE_MAX;
     else
-        dt = n * d->slope_num / d->slope_den;
+        dt = n * num / den;
     if (dt < -PCR_GAP_MAX)
         dt = -PCR_GAP_MAX;
     return from->pcr + dt;
@@ -634,6 +650,19 @@ static void handle_pcr(struct demux *d, const uint8_t *pkt)
     int64_t delta = mod_diff(raw, d->pcr_raw, PCR_MOD);
     bool jump = (pkt[5] & 0x80) || delta <= 0 || delta > PCR_GAP_MAX;
 
+    /*
+     * The PCR is back after anchors stood in for it (demux_time_anchor).
+     * If it reads about what the anchors said, the gap since the last
+     * real PCR is no break at all: the other streams never stopped, and
+     * what they have half assembled must not be thrown away.
+     */
+    if (jump && d->anchored && !(pkt[5] & 0x80) && delta > 0) {
+        stc_t off = d->pcr_unw + delta - idx_to_stc(d, d->idx);
+
+        if (off > -PCR_GAP_MAX && off < PCR_GAP_MAX)
+            jump = false;
+    }
+    d->anchored = false;
     d->pcr_raw = raw;
     if (jump) {
         stc_t expected = idx_to_stc(d, d->idx);
@@ -810,6 +839,7 @@ void demux_time_anchor(struct demux *d, stc_t input_stc)
     if (input_stc <= hist_at(d, d->hist_n - 1)->pcr)
         return;                             /* time must move forward */
     hist_add(d, d->idx, input_stc);
+    d->anchored = true;
     d->stats.pcr_missing++;
     resolve_pending(d, false);
 }

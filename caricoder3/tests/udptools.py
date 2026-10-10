@@ -54,8 +54,9 @@ class Player:
 
     def play(self, path, gate=None, speed=1.0, stall=None, at=None):
         """
-        stall=(when, seconds): stop sending for that long, then send the
-        backlog as fast as possible (data held up, nothing lost).
+        stall=(when, seconds[, speed]): stop sending for that long, then
+        send the backlog (data held up, nothing lost): as fast as possible,
+        or at `speed` times real time if given.
         at={seconds: callable}: call back once when that point is reached.
         """
         with open(path, "rb") as f:
@@ -65,13 +66,19 @@ class Player:
         t0 = time.perf_counter()
         n = 0
         at = dict(at or {})
+        lag = 0.0                       # how far behind schedule we are sending
+        drain = 0.0                     # seconds of lag recovered per datagram
         for off in range(0, len(data) - 7 * TS + 1, 7 * TS):
-            due = t0 + n * step
+            due = t0 + n * step + lag
             delay = due - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
+            lag = max(0.0, lag - drain)
             if stall and n * step >= stall[0]:
                 time.sleep(stall[1])
+                if len(stall) > 2:      # release the backlog at a finite rate
+                    lag = stall[1]
+                    drain = step * (1 - 1 / stall[2])
                 stall = None
             for when in [k for k in at if n * step >= k]:
                 at.pop(when)()

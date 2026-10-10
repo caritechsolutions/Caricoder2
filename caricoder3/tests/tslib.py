@@ -206,6 +206,7 @@ class Analysis:
         self.pat_idx, self.pmt_idx, self.sdt_idx = [], [], []
         self.pat_versions, self.pmt_versions = [], []
         self.sdt_seen = set()           # every (service id, name) ever listed
+        self.sdt_by_version = {}        # version -> set of distinct sections
         self.pcr_disc = 0               # PCR packets flagged as a discontinuity
         self.pcrs = []                  # (packet index, pcr) on the PCR PID
         self.pes = {}                   # pid -> list of dict
@@ -302,6 +303,7 @@ class Analysis:
                         continue
                     self.sdt = parse_sdt(sec)
                     self.sdt_idx.append(pkt.idx)
+                    self.sdt_by_version.setdefault(self.sdt["version"], set()).add(sec)
                     for sid, svc in self.sdt["services"].items():
                         self.sdt_seen.add((sid, svc["name"]))
 
@@ -406,6 +408,21 @@ class Analysis:
                 if t > dts27:
                     late += 1
         return late
+
+    def lateness_ms(self):
+        """For every PES packet that misses its own DTS: by how much, in ms."""
+        out = []
+        for lst in self.pes.values():
+            for r in lst:
+                if r["dts"] is None:
+                    continue
+                t = self.stc_at(r["last"] + 1)
+                if t is None:
+                    continue
+                dts27 = (t // 300 + mod_diff(r["dts"], int(t // 300) % PTS_MOD, PTS_MOD)) * 300
+                if t > dts27:
+                    out.append((t - dts27) / 27000.0)
+        return out
 
     def max_interval_ms(self, idx_list):
         """Longest gap between table repetitions, measured on the PCR clock."""

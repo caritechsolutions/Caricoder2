@@ -126,12 +126,13 @@ happens next depends on the mode.
 within 200 ms of that is normal running. One further off is not acted on
 at once, because two different things look the same at first:
 
-- data that was held up and is now arriving in a burst. It catches up with
-  the wall clock within the burst, and nothing should change;
-- a source that restarted on a new clock. It stays off.
+- data that was held up and is now being delivered faster than real time.
+  The error shrinks as it catches up, and nothing should change;
+- a source that restarted on a new clock. The error stays where it is.
 
 Only time tells them apart. So the outliers are kept away from the PLL, and
-if the PCR is still off after 300 ms and five samples, it is a new clock:
+only if the error has held still (within 50 ms) for 300 ms and five
+samples is it a new clock:
 `ts_offset` moves by exactly the difference, the new content lands on the
 existing output time line, and what was queued during those 300 ms with the
 old offset is discarded. The output PCR never steps.

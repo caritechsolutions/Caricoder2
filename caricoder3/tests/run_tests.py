@@ -105,7 +105,7 @@ _cache = {}
 
 
 def synth(name, duration=6.0, muxrate=4_000_000, pcr_base=10.0, mpts=False,
-          separate_pcr=False, seed=1, programs=None):
+          separate_pcr=False, seed=1, programs=None, **extra):
     """Generates (once) a synthetic stream and returns its path."""
     path = w(name + ".ts")
     if name in _cache:
@@ -116,7 +116,7 @@ def synth(name, duration=6.0, muxrate=4_000_000, pcr_base=10.0, mpts=False,
             programs.insert(0, gen_ts.default_program(
                 2000, video_rate=1_500_000, sections=False, name="Other"))
     cfg = {"muxrate": muxrate, "duration": duration, "seed": seed,
-           "pcr_base": int(pcr_base * HZ), "programs": programs}
+           "pcr_base": int(pcr_base * HZ), "programs": programs, **extra}
     write(path, gen_ts.build(cfg))
     _cache[name] = True
     return path
@@ -411,6 +411,28 @@ def file_service_switch():
     need((1650, "Other") not in out.sdt_seen,
          "SDT announced the new service under the old one's name")
     return "service 2000 then 1650; SDT never mislabels the new one"
+
+
+@test
+def file_sdt_version_moves():
+    """Different SDT content never goes out under the same version number."""
+    p2000 = gen_ts.default_program(2000, video_rate=1_500_000, sections=False, name="Other")
+    p1650 = gen_ts.default_program(sections=False, name="Vacation")
+    def mk(name, order, base, seed):
+        cfg = {"muxrate": 7_000_000, "duration": 3.0, "seed": seed, "sdt_version": 5,
+               "pcr_base": int(base * HZ), "programs": order}
+        return write(w(name), gen_ts.build(cfg))
+    a = mk("sv_a.ts", [dict(p2000), dict(p1650)], 10.0, 71)
+    b = mk("sv_b.ts", [dict(p1650), dict(p2000)], 13.0, 72)
+    src = write(w("sdtver.ts"), read(a) + read(b))
+    run_file(src, w("sdtver_out.ts"), "-r", "4M")
+    out = Analysis(w("sdtver_out.ts"))
+    need(out.total_cc_errors() == 0 and out.psi_crc_errors == 0, "output not clean")
+    names = {n for _, n in out.sdt_seen}
+    need(names == {"Other", "Vacation"}, f"SDT names seen: {names}")
+    clash = {v: len(s) for v, s in out.sdt_by_version.items() if len(s) > 1}
+    need(not clash, f"version(s) reused for different content: {clash}")
+    return f"versions {sorted(out.sdt_by_version)}: one content each"
 
 
 @test
@@ -843,6 +865,81 @@ def live_pcr_stops():
 
 
 @test
+def live_pcr_pauses_and_returns():
+    """Live: the PCR stream stops for 4 s and comes back; the others never notice."""
+    src = synth("pcrpause_src", duration=12.0, seed=81)
+    data = read(src)
+    n = len(data) // TS
+    out = bytearray()
+    for i in range(n):
+        pid = (data[i * TS + 1] & 0x1F) << 8 | data[i * TS + 2]
+        hole = n * 3 // 12 < i < n * 7 // 12
+        out += gen_ts.NULL if (hole and pid == 1651) else data[i * TS:(i + 1) * TS]
+    cut = write(w("pcrpause.ts"), bytes(out))
+    st, cap, _ = live(lambda p: p.play(cut), "-r", "4M", capture_name="live_pcrpause.ts")
+    must_pass(w("live_pcrpause.ts"), cbr=True, allow_late=True)
+    must_match(src, w("live_pcrpause.ts"), subset=True)
+    a, b = Analysis(src), Analysis(w("live_pcrpause.ts"))
+    for pid in (1652, 1653):
+        need(len(b.pes[pid]) >= len(a.pes[pid]) - 4,
+             f"PID {pid}: {len(b.pes[pid])} of {len(a.pes[pid])} PES")
+    need(len(b.pes[1651]) > len(a.pes[1651]) * 0.55, "video did not resume")
+    need(st["clock"]["discontinuities"] == 0, "time line was re-based")
+    # only the video PES cut off at each edge of the hole may be discarded
+    need(st["input"]["pes_dropped"] <= 2, f"{st['input']['pes_dropped']} PES discarded")
+    return f"audio {len(b.pes[1652])}/{len(a.pes[1652])} and " \
+           f"{len(b.pes[1653])}/{len(a.pes[1653])} PES straight through; video " \
+           f"resumed; {st['input']['pes_dropped']} PES discarded in all"
+
+
+@test
+def live_low_rate_pcr_stops():
+    """Live, 64 kb/s service (a datagram every 160 ms): PCR stops, audio continues."""
+    prog = {"number": 300, "pmt_pid": 0x100, "pcr_pid": 0x1F0, "name": "Radio",
+            "provider": "Coop", "streams": [
+                {"pid": 0x101, "type": 0x03, "kind": "audio", "bitrate": 24_000,
+                 "frame_ms": 48.0}]}
+    src = synth("radio_src", duration=14.0, muxrate=64_000, programs=[prog], seed=82,
+                pcr_ms=95, psi_ms=500, sdt_ms=2000)
+    a = Analysis(src)
+    need(len(a.pes[0x101]) > 250 and a.total_cc_errors() == 0,
+         "test stream itself is broken")
+    data = read(src)
+    n = len(data) // TS
+    out = bytearray()
+    for i in range(n):
+        pid = (data[i * TS + 1] & 0x1F) << 8 | data[i * TS + 2]
+        out += gen_ts.NULL if (i > n * 4 // 14 and pid == 0x1F0) else data[i * TS:(i + 1) * TS]
+    cut = write(w("radio.ts"), bytes(out))
+    st, cap, _ = live(lambda p: p.play(cut), "-r", "160k", capture_name="live_radio.ts",
+                      tail=1.5)
+    must_pass(w("live_radio.ts"), cbr=True, allow_late=True)
+    must_match(src, w("live_radio.ts"), subset=True)
+    b = Analysis(w("live_radio.ts"))
+    need(len(b.pes[0x101]) >= len(a.pes[0x101]) - 12,
+         f"audio: {len(b.pes[0x101])} of {len(a.pes[0x101])} PES")
+    need(st["input"]["pcr_missing"] > 20, "the missing PCR went unnoticed")
+    return f"audio {len(b.pes[0x101])}/{len(a.pes[0x101])} PES, 10 s of it with no PCR"
+
+
+@test
+def live_delayed_slow_drain():
+    """Input held up for 0.8 s, backlog then released at twice real time."""
+    src = synth("live_src", duration=10.0)
+    st, cap, _ = live(lambda p: p.play(src, stall=(3.0, 0.8, 2.0)), "-r", "4M",
+                      capture_name="live_drain.ts")
+    must_pass(w("live_drain.ts"), cbr=True, allow_late=True)
+    must_match(src, w("live_drain.ts"), subset=True)
+    need(st["clock"]["discontinuities"] == 0,
+         f"{st['clock']['discontinuities']} time-base steps for data that was only late")
+    need(st["clock"]["ts_offset_ms"] == 0, "time stamps were shifted")
+    orig = sum(len(v) for v in Analysis(src).pes.values())
+    got = sum(len(v) for v in Analysis(w("live_drain.ts")).pes.values())
+    need(got >= orig - 3, f"only {got} of {orig} PES delivered")
+    return f"no time-base step, {got}/{orig} PES delivered"
+
+
+@test
 def live_delayed_burst():
     """Input held up for 0.8 s then delivered in a burst: time line untouched."""
     src = synth("live_src", duration=10.0)
@@ -865,7 +962,7 @@ def live_delayed_burst():
 
 @test
 def live_process_stall():
-    """The process itself is frozen for 1.5 s (as in a VM pause)."""
+    """The process itself is frozen for 2.5 s (as in a VM pause)."""
     src = synth("live_src", duration=10.0)
     marks = {}
 
@@ -873,7 +970,7 @@ def live_process_stall():
         def freeze():
             proc.send_signal(signal.SIGSTOP)
             marks["stop"] = time.perf_counter()
-            time.sleep(1.5)
+            time.sleep(2.5)
             marks["cont"] = time.perf_counter()
             proc.send_signal(signal.SIGCONT)
         p.play(src, at={4.0: freeze})
@@ -881,8 +978,8 @@ def live_process_stall():
     st, cap, _ = live(feed, "-r", "4M", capture_name="live_stall.ts", with_proc=True)
     # The freeze is a real hole in the output; everything around it must be clean.
     must_pass(w("live_stall.ts"), allow_late=True,
-              limits={"pcr_interval_ms": 2500, "pat_interval_ms": 2500,
-                      "pmt_interval_ms": 2500, "sdt_interval_ms": 4000})
+              limits={"pcr_interval_ms": 3500, "pat_interval_ms": 3500,
+                      "pmt_interval_ms": 3500, "sdt_interval_ms": 5000})
     must_match(src, w("live_stall.ts"), subset=True)
     need(st["output"]["clock_skips"] >= 1, "stall not noticed")
     burst = sum(len(c) for c, ts in zip(cap.chunks, cap.times)
@@ -891,6 +988,10 @@ def live_process_stall():
     need(burst_s < 0.9, f"{burst_s:.2f} s of stream sent in the 0.2 s after resuming")
     out = Analysis(w("live_stall.ts"))
     need(out.pcr_disc >= 1, "PCR step not flagged in the stream")
+    # Each stream may finish the one PES packet it was in the middle of
+    # when time stopped; nothing else from before the freeze may follow.
+    stale = [x for x in out.lateness_ms() if x > 1000]
+    need(len(stale) <= 3, f"{len(stale)} PES sent more than 1 s after their time")
     need(st["clock"]["discontinuities"] == 0, "input time line was re-based")
     return f"skipped ahead instead of bursting ({burst_s:.2f} s of stream in the first " \
            f"0.2 s), step flagged on the PCR, input time line untouched"

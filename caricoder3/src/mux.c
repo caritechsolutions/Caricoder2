@@ -75,6 +75,7 @@ struct mux {
     stc_t   next_pcr, next_psi, next_sdt;
 
     struct psi_table pat, pmt, sdt;
+    bool    sdt_active;         /* the service currently has an SDT entry */
     uint8_t psiq[PSIQ_MAX][TS_SIZE];
     int     psiq_head, psiq_n;
     bool    psi_urgent;         /* new tables go out ahead of everything */
@@ -328,6 +329,18 @@ static void pcr_only_packet(struct mux *m, stc_t now)
     emit(m, pkt);
 }
 
+/* Hopelessly late units go, and so does anything timed absurdly far
+ * ahead (it would block its stream until then). Never one that is
+ * already half sent. */
+static void stream_prune(struct mux *m, struct mstream *s, stc_t now)
+{
+    while (s->head && s->off == 0 &&
+           (now - s->head->t1 > m->max_late || s->head->t0 - now > MAX_EARLY)) {
+        head_pop(m, s);
+        m->stats.dropped_units++;
+    }
+}
+
 static struct mstream *pick_stream(struct mux *m, stc_t now)
 {
     struct mstream *best = NULL;
@@ -338,14 +351,7 @@ static struct mstream *pick_stream(struct mux *m, stc_t now)
 
         if (!s->used)
             continue;
-        /* Hopelessly late units go, and so does anything timed absurdly
-         * far ahead (it would block its stream until then). Never one
-         * that is already half sent. */
-        while (s->head && s->off == 0 &&
-               (now - s->head->t1 > m->max_late || s->head->t0 - now > MAX_EARLY)) {
-            head_pop(m, s);
-            m->stats.dropped_units++;
-        }
+        stream_prune(m, s, now);
         if (!s->head)
             continue;
 
@@ -370,7 +376,7 @@ static void slot(struct mux *m)
                         ? now + m->psi_interval
                         : m->next_psi + m->psi_interval;
         }
-        if (m->sdt.present && now >= m->next_sdt) {
+        if (m->sdt_active && now >= m->next_sdt) {
             psi_enqueue(m, &m->sdt);
             m->next_sdt = now - m->next_sdt > m->sdt_interval
                         ? now + m->sdt_interval
@@ -395,6 +401,8 @@ static void slot(struct mux *m)
         if (m->pcr_pid != PID_NULL && now >= m->next_pcr) {
             struct mstream *ps = m->pcr_stream >= 0 ? &m->st[m->pcr_stream] : NULL;
 
+            if (ps)
+                stream_prune(m, ps, now);
             if (ps && ps->kind == ES_PES && ps->head && next_sched(ps) <= now) {
                 m->next_pcr = now + m->pcr_interval;
                 stream_packet(m, ps, now, true);
@@ -469,7 +477,7 @@ stc_t mux_next_event(const struct mux *m)
         return m->stc;
     if (m->have_prog) {
         t = m->next_psi;
-        if (m->sdt.present && m->next_sdt < t)
+        if (m->sdt_active && m->next_sdt < t)
             t = m->next_sdt;
         if (m->pcr_pid != PID_NULL && m->next_pcr < t)
             t = m->next_pcr;
@@ -509,6 +517,9 @@ void mux_skip_to(struct mux *m, stc_t stc)
 {
     if (!m->started || stc <= m->stc)
         return;
+    /* A unit that was part-way out when time stopped is still finished,
+     * late as it is: cutting it short would put a malformed PES packet on
+     * the wire, and a late one is merely ignored by a decoder. */
     m->stc = stc;
     m->rem = 0;
     m->pcr_disc = true;                     /* the PCR steps: say so */
@@ -548,6 +559,13 @@ void mux_drop_tentative(struct mux *m)
         if (s->off == 0)
             head_begin(s);
     }
+}
+
+void mux_clear_tentative(struct mux *m)
+{
+    for (int i = 0; i < MAX_ES; i++)
+        for (struct es_unit *u = m->st[i].head; u; u = u->next)
+            u->tentative = false;
 }
 
 void mux_drop_all(struct mux *m)
@@ -629,11 +647,16 @@ void mux_set_program(struct mux *m, const struct program *p)
 
     changed = table_update(&m->pat, psi_build_pat, p, PID_PAT, p->pat_version);
     changed |= table_update(&m->pmt, psi_build_pmt, p, p->pmt_pid, p->pmt_version);
+    /* When the service has no SDT entry the table stops being sent, but
+     * its last version number is remembered (sdt.present stays set), so
+     * that whatever comes next is never mistaken for the old content. */
     if (p->have_sdt) {
-        if (table_update(&m->sdt, psi_build_sdt, p, PID_SDT, p->sdt_version))
+        if (table_update(&m->sdt, psi_build_sdt, p, PID_SDT, p->sdt_version) ||
+            !m->sdt_active)
             m->next_sdt = m->stc;
+        m->sdt_active = true;
     } else {
-        m->sdt.present = false;
+        m->sdt_active = false;
     }
     if (changed || !m->have_prog) {
         m->next_psi = m->stc;               /* announce it straight away */

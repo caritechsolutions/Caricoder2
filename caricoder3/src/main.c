@@ -656,8 +656,8 @@ int main(int argc, char **argv)
     } else {
         o.eng.mux.vbr = vbr_flag;
     }
-    if (o.eng.mux.muxrate < 100000 || o.eng.mux.muxrate > 400000000LL) {
-        fprintf(stderr, "--muxrate must be between 100k and 400M\n");
+    if (o.eng.mux.muxrate < 20000 || o.eng.mux.muxrate > 400000000LL) {
+        fprintf(stderr, "--muxrate must be between 20k and 400M\n");
         return 2;
     }
     if (o.eng.delay_ms < 20 || o.eng.delay_ms > 10000 ||
