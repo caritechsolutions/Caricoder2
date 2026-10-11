@@ -21,7 +21,20 @@ Stage 1 contains no codec. It proves the parts every later stage stands on:
 the demultiplexer, the multiplexer, the clock, and the behaviour when the
 input misbehaves. MPEG-2 video is parked by decision.
 
-## Build
+## Install on a server
+
+```
+curl -fsSL "https://raw.githubusercontent.com/caritechsolutions/Caricoder2/claude/caricoder3-stage1/caricoder3/install.sh?$(date +%s)" | sudo bash
+```
+
+Needs no git. It installs gcc and make if they are missing, builds in a
+scratch folder, and only if that succeeds puts the source in
+`/opt/caricoder3` and the binary in `/usr/local/bin/caricoder3`. It starts
+and stops nothing; running it again upgrades. Add `-s -- --test` after
+`bash` to run the self-tests before anything is installed. Keep the
+`?$(date +%s)`: without it GitHub may hand you a cached, older script.
+
+## Build by hand
 
 ```
 cd caricoder3
