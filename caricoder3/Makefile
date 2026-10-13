@@ -4,7 +4,7 @@
 #   make            optimised build        -> ./caricoder3
 #   make debug      AddressSanitizer build -> ./caricoder3-asan
 #   make test       build both and run the test suite
-#   make fuzz       libFuzzer harnesses (need clang) -> build/fuzz_engine, build/fuzz_live
+#   make fuzz       libFuzzer harnesses (need clang) -> build/fuzz_engine, fuzz_live, fuzz_xcode
 #   make install    copy the binary to $(PREFIX)/bin
 
 CC      ?= gcc
@@ -62,6 +62,14 @@ ifeq ($(call have_pkg,x265),yes)
 CODEC_DEFS += -DHAVE_X265 $(shell $(PKG_CONFIG) --cflags x265)
 CODEC_LIBS += $(shell $(PKG_CONFIG) --libs x265)
 endif
+# NVIDIA needs nothing installed to build: the headers are in third_party
+# and the driver's libraries are opened when the program runs. On a
+# machine without the driver the two backends say "unavailable".
+# `make NVIDIA=0` leaves them out.
+ifneq ($(NVIDIA),0)
+CODEC_DEFS += -DHAVE_NVIDIA
+CODEC_LIBS += -ldl
+endif
 endif
 CPPFLAGS += $(CODEC_DEFS)
 LDLIBS   += $(CODEC_LIBS)
@@ -69,7 +77,8 @@ LDLIBS   += $(CODEC_LIBS)
 CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/engine.c src/codec.c src/xcode.c src/xc_audio.c src/xc_video.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
-       src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c
+       src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
+       src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_selftest.c
 SRC  = $(CORE) src/udp.c src/main.c
 
 OBJ      = $(SRC:src/%.c=build/rel/%.o)
@@ -104,7 +113,7 @@ build/asan/%.o: src/%.c build/config
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 $(CPPFLAGS) -O1 -g $(SAN) $(WARN) -c $< -o $@
 
-fuzz: build/fuzz_engine build/fuzz_live
+fuzz: build/fuzz_engine build/fuzz_live build/fuzz_xcode
 
 build/fuzz_%: tests/fuzz_%.c $(CORE) build/config
 	@mkdir -p build

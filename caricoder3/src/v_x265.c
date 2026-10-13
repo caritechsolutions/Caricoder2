@@ -20,6 +20,7 @@ struct x5_enc {
     x265_picture *pic;
     int depth;
     int delay;
+    int64_t frame90;            /* one picture, 90 kHz */
     bool flushing, done;
     bool have;
     struct vpacket out;
@@ -100,6 +101,7 @@ static void *x5_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     }
     api->encoder_parameters(e->h, p);       /* what it actually settled on */
     e->delay = p->lookaheadDepth + p->bframes + p->frameNumThreads + 2;
+    e->frame90 = (int64_t)(90000.0 / fps + 0.5);
     api->picture_init(p, e->pic);
     if (cfg->interlaced)
         log_warn("x265: interlaced video is encoded as whole frames");
@@ -125,8 +127,19 @@ static void take(struct x5_enc *e, x265_nal *nal, uint32_t n_nal, const x265_pic
         bytes += nal[i].sizeBytes;
     e->out.data = nal[0].payload;
     e->out.len = bytes;
-    e->out.pts = out->pts * STC_PER_90K;
-    e->out.dts = out->dts * STC_PER_90K;
+    {
+        int64_t pts = out->pts, dts = out->dts;
+
+        /* The decode time of the first pictures out is worked out by the
+         * library from a value it only sets once it has been given a few
+         * pictures. An encoder closed before that hands back whatever was
+         * in memory. A decode time that is not shortly before its picture
+         * is not believed. */
+        if (dts > pts || dts < pts - 90000 * 10)
+            dts = pts - 2 * e->frame90;
+        e->out.pts = pts * STC_PER_90K;
+        e->out.dts = dts * STC_PER_90K;
+    }
     e->out.key = out->sliceType == X265_TYPE_IDR;
     e->have = true;
 }

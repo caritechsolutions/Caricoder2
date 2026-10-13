@@ -1,0 +1,18 @@
+These five header files declare NVIDIA's Video Codec SDK interfaces
+(NVDEC through libnvcuvid, NVENC through libnvidia-encode, and the parts
+of CUDA they need).
+
+Origin : https://github.com/FFmpeg/nv-codec-headers  tag n12.1.14.0
+         (NVIDIA's own SDK headers, repackaged so that the driver's
+         libraries can be opened at run time instead of linked)
+API    : Video Codec SDK 12.1. Needs NVIDIA driver 530.41.03 or newer on
+         Linux.
+Licence: MIT. The full text is at the top of each file.
+Changes: none. The files are as published.
+
+No FFmpeg code is involved: the project that publishes them is run by
+FFmpeg developers, but the files contain declarations and a small loader
+only.
+
+To move to a newer SDK, replace the five files with those of a newer tag
+and check the driver version it asks for.

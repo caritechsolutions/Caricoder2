@@ -573,6 +573,8 @@ static void usage(FILE *f)
 "      --stats-interval S   log a status line every S seconds (default 10, 0 off)\n"
 "      --rt-prio N          SCHED_FIFO priority for the output thread\n"
 "      --backends           list codec backends and exit\n"
+"      --gpu-test           try the NVIDIA decoder and encoder on made-up pictures\n"
+"                           (card chosen with --gpu) and report each step\n"
 "  -v, --verbose            more logging\n"
 "  -q, --quiet              errors and warnings only\n"
 "  -V, --version\n"
@@ -618,7 +620,7 @@ enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET,
-    OPT_GOP, OPT_VBV,
+    OPT_GOP, OPT_VBV, OPT_GPU_TEST,
 };
 
 static bool parse_where(const char *s, enum codec_where *out)
@@ -660,6 +662,7 @@ int main(int argc, char **argv)
         { "preset", required_argument, 0, OPT_PRESET },
         { "gop", required_argument, 0, OPT_GOP },
         { "vbv", required_argument, 0, OPT_VBV },
+        { "gpu-test", no_argument, 0, OPT_GPU_TEST },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -671,7 +674,7 @@ int main(int argc, char **argv)
     struct udp_addr in_addr, out_addr;
     struct sigaction sa;
     char err[256];
-    bool vbr_flag = false, delay_given = false;
+    bool vbr_flag = false, delay_given = false, gpu_test = false;
     FILE *in_fp = NULL;
     int opt, rc;
 
@@ -736,6 +739,7 @@ int main(int argc, char **argv)
         case OPT_PRESET: o.eng.preset = optarg; break;
         case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;
         case OPT_VBV: o.eng.vbv_ms = atoi(optarg); break;
+        case OPT_GPU_TEST: gpu_test = true; break;
         case 'v': log_level = LOG_DBG; break;
         case 'q': log_level = LOG_WARN; break;
         case 'V': printf("caricoder3 %s\n", CC3_VERSION); return 0;
@@ -743,6 +747,8 @@ int main(int argc, char **argv)
         default: usage(stderr); return 2;
         }
     }
+    if (gpu_test)
+        return nv_selftest(stdout, o.eng.gpu);
     if (!o.input || !o.output || optind < argc) {
         usage(stderr);
         return 2;

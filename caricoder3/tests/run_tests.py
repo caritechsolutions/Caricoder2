@@ -1960,7 +1960,9 @@ def psnr(out, src):
     picture that is in the wrong place in time is compared with the wrong
     original, and on a moving test picture that shows at once.
     """
-    p = subprocess.run(["ffmpeg", "-v", "info", "-i", out, "-i", src, "-lavfi",
+    # -copyts: pair pictures by the time stamps they carry, not by how far
+    # each is from the start of its own file.
+    p = subprocess.run(["ffmpeg", "-v", "info", "-copyts", "-i", out, "-i", src, "-lavfi",
                         "[0:v]format=yuv420p[a];[1:v]format=yuv420p[b];"
                         "[a][b]psnr=shortest=1:repeatlast=0",
                         "-an", "-f", "null", "-"], capture_output=True, text=True)
@@ -2113,37 +2115,53 @@ def xc_video_formats():
 
 @test
 def xc_video_send_times():
-    """Each new access unit is complete at the receiver about one buffer (1 s) before
-    it is due, in VBR and in CBR; --vbv and --gop do what they say."""
+    """New video is sent at its own bit rate: every picture complete before it is due,
+    none earlier than the buffer allows, the receiver never holding more than the
+    buffer, no burst for a key frame; in VBR and in CBR. --vbv and --gop do what they say."""
     skip = xc_ready("libavcodec", "x264")
     if skip:
         return skip
-    src = v_source("xc_v_h264", "h264")
+    # (a source whose clock does not start at 0, like any real one: the first
+    # new pictures are sent before anything in the input was)
+    src = v_source("xc_v_h264_late", "h264", extra=("-output_ts_offset", "20"))
     res = []
+    rate = 500000
     for name, args, cbr in (("vbr", (), False), ("cbr", ("-r", "1200k"), True)):
         out = w(f"xc_v_lead_{name}.ts")
         st = run_file(src, out, "--video", "h264:500k", *args)
         must_pass(out, cbr=cbr)
         a = Analysis(out)
         lead = [x for x in _leads(a, 0x100)]
-        need(min(lead) > 150, f"{name}: a picture was complete only {min(lead):.0f} ms "
-                              f"before its decode time")
-        need(800 < sorted(lead)[len(lead) // 2] < 1150,
-             f"{name}: typical lead {sorted(lead)[len(lead) // 2]:.0f} ms, expected about 1000")
-        res.append(f"{name}: lead {min(lead):.0f} to {max(lead):.0f} ms")
+        need(min(lead) > 15, f"{name}: a picture was complete only {min(lead):.0f} ms "
+                             f"before its decode time")
+        need(max(lead) < 1000 + 40 + 60, f"{name}: a picture arrived {max(lead):.0f} ms early, "
+                                         f"more than the 1000 ms buffer")
+        # what the receiver must hold: never more than the encoder's buffer and a picture
+        peak = a.buffer_peak(0x100)
+        need(peak < rate / 8 * 1.04 * 1.1 + 4000, f"{name}: the receiver would hold "
+             f"{peak:.0f} bytes of video; the buffer is {rate // 8} bytes")
+        # the video is spread at its own bit rate: no burst for a key frame
+        top = a.peak_rate(0x100, 400)
+        need(top < rate * 1.25, f"{name}: video took {top / 1000:.0f} kb/s over 400 ms; "
+                                f"it is coded at {rate // 1000} kb/s")
+        res.append(f"{name}: complete {min(lead):.0f} to {max(lead):.0f} ms early, receiver "
+                   f"holds at most {peak / 1000:.0f} kB, never above {top / 1000:.0f} kb/s")
     out = w("xc_v_lead_small.ts")
     st = run_file(src, out, "--video", "h264:500k", "--vbv", "300", "--gop", "500")
     must_pass(out)
-    lead = _leads(Analysis(out), 0x100)
-    need(250 < sorted(lead)[len(lead) // 2] < 400, f"--vbv 300: typical lead "
-         f"{sorted(lead)[len(lead) // 2]:.0f} ms")
+    a = Analysis(out)
+    lead = _leads(a, 0x100)
+    need(min(lead) > 15 and max(lead) < 300 + 40 + 60,
+         f"--vbv 300: complete {min(lead):.0f} to {max(lead):.0f} ms early")
+    peak = a.buffer_peak(0x100)
+    need(peak < rate / 8 * 0.34 * 1.1 + 4000, f"--vbv 300: the receiver would hold {peak:.0f} bytes")
     p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "frame=key_frame", "-of", "csv=p=0", out], capture_output=True, text=True)
     keys = [i for i, x in enumerate(p.stdout.split()) if x.strip(",") == "1"]
     gaps = [b - a for a, b in zip(keys, keys[1:])]
     need(gaps and max(gaps) <= 12, f"--gop 500: key frames {max(gaps, default=0)} pictures apart")
-    res.append(f"--vbv 300 gives {sorted(lead)[len(lead) // 2]:.0f} ms, --gop 500 a key frame "
-               f"every {max(gaps)} pictures at most")
+    res.append(f"--vbv 300: at most {max(lead):.0f} ms early and {peak / 1000:.0f} kB held; "
+               f"--gop 500 a key frame every {max(gaps)} pictures at most")
     return "; ".join(res)
 
 
@@ -2154,6 +2172,186 @@ def _leads(a, pid):
         if t is not None and r["dts"] is not None:
             out.append((r["dts"] * 300 - t) / 27000.0)
     return out
+
+
+def es_join_source(name, parts, size="720x576", seconds=4):
+    """One H.264 stream whose format changes on the way: each part is coded
+    by itself (ffmpeg arguments), the elementary streams are joined end to
+    end and wrapped as one transport stream."""
+    path = w(name + ".ts")
+    if name in _cache and os.path.exists(path):
+        return path
+    es = b""
+    for i, extra in enumerate(parts):
+        f = w(f"{name}_{i}.h264")
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                            "-i", f"testsrc2=size={size}:rate=25:duration={seconds}",
+                            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+                            "-b:v", "1500k", "-g", "25", "-bf", "0", *extra, "-f", "h264", f],
+                           capture_output=True, text=True)
+        need(p.returncode == 0, f"ffmpeg could not make {name}: {p.stderr[-400:]}")
+        es += read(f)
+    joined = w(name + ".h264")
+    with open(joined, "wb") as f:
+        f.write(es)
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-r", "25",
+                        "-i", joined, "-c", "copy", "-f", "mpegts", "-muxrate", "3000k", path],
+                       capture_output=True, text=True)
+    need(p.returncode == 0, f"ffmpeg could not wrap {name}: {p.stderr[-400:]}")
+    _cache[name] = True
+    return path
+
+
+def frame_shapes(path):
+    """Per picture, in order: (pixel shape, interlaced?)."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "frame=sample_aspect_ratio,interlaced_frame", "-of", "json", path],
+                       capture_output=True, text=True)
+    return [(f.get("sample_aspect_ratio"), f.get("interlaced_frame"))
+            for f in json.loads(p.stdout)["frames"]]
+
+
+@test
+def xc_video_shape_change():
+    """A channel that goes from 4:3 to 16:9, or from progressive to interlaced, while
+    running: the new video follows, at the picture where the source changed."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    res = []
+    for name, parts, what in (
+            ("xc_v_sarchg", (("-aspect", "4:3"), ("-aspect", "16:9")), "4:3 to 16:9"),
+            ("xc_v_ilchg", (("-aspect", "4:3"), ("-aspect", "4:3", "-flags", "+ildct+ilme",
+                                                 "-top", "1")), "progressive to interlaced")):
+        src = es_join_source(name, parts)
+        out = w(name + "_out.ts")
+        st = run_file(src, out, "--video", "h264:1500k")
+        must_pass(out)
+        decodes_clean(out, what + ": ")
+        a, b = frame_shapes(src), frame_shapes(out)
+        need(len(set(a)) == 2, f"{what}: the test stream does not change ({set(a)})")
+        need(len(b) >= len(a) - 3, f"{what}: {len(b)} of {len(a)} pictures came out")
+        need(b == a[len(a) - len(b):], f"{what}: the output has {sorted(set(b))} "
+             f"({[b.count(x) for x in sorted(set(b))]} pictures), the source {sorted(set(a))} "
+             f"({[a.count(x) for x in sorted(set(a))]})")
+        need(xstats(st, 0x100)["frames_out"] == len(b), "pictures counted and found differ")
+        res.append(f"{what}: {len(b)}/{len(a)} pictures, each as the source had it")
+    return "; ".join(res)
+
+
+@test
+def xc_video_codec_change():
+    """The source changes the coding of its video (H.264, then H.265, then back) with
+    a new PMT: each transcoder gives out what it still held before it goes."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    parts = [v_source("xc_v_cc0", "h264", duration=4),
+             v_source("xc_v_cc1c", "hevc", duration=4, extra=("-output_ts_offset", "4.2")),
+             v_source("xc_v_cc2c", "h264", duration=4, extra=("-output_ts_offset", "8.4"))]
+    src = w("xc_v_codec_change.ts")
+    with open(src, "wb") as f:
+        for p in parts:
+            f.write(read(p))
+    out = w("xc_v_codec_change_out.ts")
+    st = run_file(src, out, "--video", "h264:500k")
+    an, o = Analysis(src), Analysis(out)
+    need(o.sync_errors == 0, "output lost sync")
+    n_in, n_out = len(an.pes[0x100]), len(o.pes[0x100])
+    need(n_out >= n_in - 9, f"{n_out} of {n_in} pictures came out (a transcoder was "
+                            f"dropped with pictures still in it)")
+    need({r["pts"] for r in o.pes[0x100]} <= {r["pts"] for r in an.pes[0x100]},
+         "pictures at times the source had none")
+    types = {s["pid"]: s["type"] for s in o.pmt["streams"]}
+    need(types[0x100] == 0x1B, f"PMT says type 0x{types[0x100]:02X} at the end")
+    d = [r["dts"] for r in o.pes[0x100]]
+    need(all(y > x for x, y in zip(d, d[1:])), "decode times go backwards at a change")
+    # (the copied audio of the joined test stream overlaps itself at the joins,
+    # so ffmpeg's complaints about the whole file prove nothing: count pictures)
+    got = video_pts(out)
+    need(len(got) >= n_in - 12 and got == sorted(got) and len(set(got)) == len(got),
+         f"{len(got)} pictures decode, or not in order")
+    return f"{n_out} of {n_in} pictures out across two changes of coding, all H.264, " \
+           f"{len(got)} decode, times only move forward"
+
+
+def fakecpu_lib():
+    lib = w("fakecpu.so")
+    if not os.path.exists(lib):
+        p = subprocess.run(["cc", "-shared", "-fPIC", "-O1", "-o", lib,
+                            os.path.join(HERE, "fakecpu.c")], capture_output=True, text=True)
+        if p.returncode:
+            return None
+    return lib
+
+
+@test
+def xc_video_many_processors():
+    """On a server with 64 processors the codecs hold back no more pictures than on a
+    small machine, so the default delay is enough there too."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    lib = fakecpu_lib()
+    if not lib:
+        return "SKIPPED: could not build tests/fakecpu.c"
+    src = v_source("xc_v_1080", "h264", size="1920x1080", duration=6)
+    res = []
+    for codec in ("h264", "hevc"):
+        slack = {}
+        for cpus in (2, 64):
+            out = w(f"xc_v_cpus_{codec}_{cpus}.ts")
+            sf = out + ".json"
+            p = subprocess.run([BIN, "-q", "-i", src, "-o", out, "--stats-file", sf,
+                                "--video", f"{codec}:3M"], capture_output=True, text=True,
+                               timeout=600, env=dict(os.environ, LD_PRELOAD=lib,
+                                                     FAKE_CPUS=str(cpus)))
+            need(p.returncode == 0, p.stderr[-400:])
+            st = json.load(open(sf))
+            x = xstats(st, 0x100)
+            need(x["frames_out"] >= 140, f"{codec}, {cpus} processors: {x['frames_out']} pictures")
+            slack[cpus] = x["slack_min_ms"]
+            must_pass(out)
+        need(slack[64] > 1000, f"{codec}: with 64 processors the video has {slack[64]:.0f} ms "
+                               f"of the 3 s default delay to spare")
+        need(slack[2] - slack[64] < 400, f"{codec}: {slack[2]:.0f} ms to spare with 2 "
+                                         f"processors, {slack[64]:.0f} with 64")
+        res.append(f"{codec}: {slack[2]:.0f} ms to spare with 2 processors, "
+                   f"{slack[64]:.0f} ms with 64")
+    return "; ".join(res) + " (of the default 3 s delay, 1080p)"
+
+
+@test
+def xc_audio_decoder_buffer():
+    """New audio never fills a standard decoder's audio buffer (3584 bytes) and is never
+    late, at low and high bit rates, also beside new video in a tight CBR mux."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123", "twolame", "lame")
+    if skip:
+        return skip
+    src = av_source("xc_tstd", [A_AAC], duration=10)
+    res = []
+    # (CBR throughout: only there does every packet have an exact time)
+    for spec, frame_ms, extra, cbr in (
+            ("mp2:192k", 24.0, ("-r", "2800k"), False), ("mp2:384k", 24.0, ("-r", "3000k"), False),
+            ("mp2:64k", 24.0, ("-r", "2800k"), False),
+            ("aac:128k", 1024 / 48.0, ("-r", "2800k"), False),
+            ("aac:256k", 1024 / 48.0, ("-r", "2800k"), False),
+            ("mp3:128k", 24.0, ("-r", "2800k"), False),
+            ("mp2:192k", 24.0, ("--video", "h264:600k", "-r", "950k"), True)):
+        out = w("xc_tstd_out.ts")
+        st = run_file(src, out, "--audio", spec, *extra)
+        must_pass(out, cbr=True)
+        a = Analysis(out)
+        peak = a.buffer_peak(0x101, frame_ms)
+        need(peak <= 3584, f"{spec}{' beside video in CBR' if cbr else ''}: a decoder would "
+                           f"hold {peak:.0f} bytes of audio; its buffer is 3584")
+        lead = [(r["dts"] * 300 - a.stc_at(r["last"] + 1)) / 27000.0 for r in a.pes[0x101]
+                if a.stc_at(r["last"] + 1) is not None]
+        need(min(lead) > 10, f"{spec}: an audio packet was complete only {min(lead):.0f} ms "
+                             f"before it was due")
+        res.append(f"{spec}{' + video, CBR' if cbr else ''}: {peak:.0f} bytes, "
+                   f"{min(lead):.0f} ms early at least")
+    return "; ".join(res)
 
 
 @test
@@ -2205,7 +2403,7 @@ def xc_video_damaged_input():
 
 
 def psnr_tail(out, src, from_pts):
-    p = subprocess.run(["ffmpeg", "-v", "info", "-i", out, "-i", src, "-lavfi",
+    p = subprocess.run(["ffmpeg", "-v", "info", "-copyts", "-i", out, "-i", src, "-lavfi",
                         f"[0:v]format=yuv420p,trim=start_pts={from_pts},setpts=PTS[a];"
                         f"[1:v]format=yuv420p,trim=start_pts={from_pts},setpts=PTS[b];[a][b]psnr",
                         "-an", "-f", "null", "-"], capture_output=True, text=True)
@@ -2251,6 +2449,52 @@ def live_xc_video():
 
 
 @test
+def live_xc_overload():
+    """Live: an encoder setting far too slow for this machine. The program says so,
+    throws away input it can never catch up on (counted), keeps the audio whole, and
+    stops when told."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_1080_long", "h264", size="1920x1080", duration=14)
+    st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "--video", "h264:3M",
+                        "--preset", "veryslow", capture_name="live_xc_overload.ts", tail=5.0)
+    out = w("live_xc_overload.ts")
+    x = xstats(st, 0x100)
+    need("slower than the stream" in log, "falling behind was not reported:\n" + log[-600:])
+    need(x["input_dropped"] > 0, f"no input counted as dropped: {x}")
+    need(x["queued"] < 60, f"{x['queued']} packets still waiting for the encoder: the queue "
+                           f"is not being cleared")
+    o = Analysis(out)
+    need(o.sync_errors == 0 and not o.cc_errors, "the output is damaged")
+    must_match(src, out, only={0x101}, subset=True)
+    need(len(o.pes[0x101]) >= len(Analysis(src).pes[0x101]) - 3, "audio is missing")
+    n = len(o.pes.get(0x100, []))
+    return f"reported, {x['input_dropped']} packets of video input skipped in " \
+           f"{log.count('slower than the stream')} catch-ups, audio complete and identical, " \
+           f"{n} pictures still made it out in time"
+
+
+@test
+def live_xc_delay_too_short():
+    """Live: --delay set shorter than the pictures the codecs hold back. The video
+    cannot be in time; the program says why, and does not throw input away for it."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "--video", "h264:500k",
+                        "--delay", "600", capture_name="live_xc_shortdelay.ts", tail=2.0)
+    x = xstats(st, 0x100)
+    need("--delay is too short" in log, "nothing said about the delay:\n" + log[-600:])
+    need("slower than the stream" not in log and x["input_dropped"] == 0,
+         f"input was thrown away though the codec keeps up: {x}")
+    need(x["frames_out"] >= 150, f"the transcoder stopped working: {x}")
+    must_match(src, w("live_xc_shortdelay.ts"), only={0x101}, subset=True)
+    return f"reported ({x['slack_min_ms']:.0f} ms to spare), no input discarded, audio untouched"
+
+
+@test
 def live_xc_video_source_restart():
     """Source comes back on another clock while video and audio are being transcoded."""
     skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
@@ -2285,6 +2529,186 @@ def live_xc_video_source_restart():
     no_pause(cap)
     return f"{len(pts)} of 250 pictures across the restart, times only move forward, " \
            f"{len(late)} late"
+
+
+# ---- NVIDIA, against stand-in libraries
+
+def nvmock_dir():
+    """
+    Builds tests/nvmock.c into stand-ins for the three NVIDIA driver
+    libraries and returns the directory to put on LD_LIBRARY_PATH, or None.
+    """
+    d = w("nvmock")
+    lib = os.path.join(d, "libcuda.so.1")
+    if os.path.exists(lib) and os.path.getmtime(lib) >= os.path.getmtime(os.path.join(HERE, "nvmock.c")):
+        return d
+    os.makedirs(d, exist_ok=True)
+    loader = read(os.path.join(ROOT, "third_party", "ffnvcodec", "dynlink_loader.h")).decode()
+    src = read(os.path.join(HERE, "nvmock.c")).decode()
+    import re
+    have = set(re.findall(r"^(?:CUresult|NVENCSTATUS NVENCAPI) (\w+)\(", src, re.M))
+    stubs = ["/* Generated by the test suite: names the loader requires that the stand-in\n"
+             " * does not implement. Calling one is a violation. */\n"]
+    seen = set()
+    for opt, sym in re.findall(r'LOAD_SYMBOL(_OPT)?\(\w+, \w+, "(\w+)"\)', loader):
+        if not opt and sym not in have and sym not in seen:
+            seen.add(sym)
+            stubs.append(f'int {sym}(void);\nint {sym}(void) {{ VIOLATION("{sym} is not '
+                         f'implemented by the stand-in"); }}\n')
+    with open(os.path.join(d, "nvmock_stubs.h"), "w") as f:
+        f.write("".join(stubs))
+    p = subprocess.run(["cc", "-shared", "-fPIC", "-O1", "-g", f"-I{d}",
+                        "-o", lib, os.path.join(HERE, "nvmock.c")], capture_output=True, text=True)
+    if p.returncode:
+        return None
+    for name in ("libnvcuvid.so.1", "libnvidia-encode.so.1"):
+        if not os.path.exists(os.path.join(d, name)):
+            os.symlink("libcuda.so.1", os.path.join(d, name))  # one library, one state
+    return d
+
+
+def run_mock(src, dst, *args, env_extra=None, expect=0):
+    binary = ASAN if os.path.exists(ASAN) else BIN
+    env = dict(SAN_ENV, LD_LIBRARY_PATH=nvmock_dir(), NVMOCK_CHECK_LEAKS="1",
+               **(env_extra or {}))
+    sf = dst + ".json"
+    if os.path.exists(sf):
+        os.remove(sf)
+    p = subprocess.run([binary, "-i", src, "-o", dst, "--stats-file", sf, *args],
+                       capture_output=True, text=True, timeout=300, env=env)
+    if "NVMOCK VIOLATION" in p.stderr:
+        raise Fail("the NVIDIA code broke a rule of the API: " +
+                   p.stderr[p.stderr.index("NVMOCK VIOLATION"):][:300])
+    if "AddressSanitizer" in p.stderr or "runtime error" in p.stderr:
+        raise Fail("sanitizer error:\n" + p.stderr[-2000:])
+    need(p.returncode == expect, f"exit status {p.returncode}\n{p.stderr[-600:]}")
+    return (json.load(open(sf)) if os.path.exists(sf) else None), p.stderr
+
+
+@test
+def xc_nvidia_standin():
+    """The NVIDIA code against stand-in driver libraries that enforce the API's rules.
+
+    Not a test of video: the stand-ins encode nothing. It shows that our
+    calls come in the right order with the right structures, that no copy
+    leaves the memory it was given, and that nothing is left behind; and
+    that the choice between card and CPU, and the fall-back, work."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    d = nvmock_dir()
+    if not d:
+        return "SKIPPED: could not build the stand-in libraries"
+    binary = ASAN if os.path.exists(ASAN) else BIN
+    env = dict(SAN_ENV, LD_LIBRARY_PATH=d, NVMOCK_CHECK_LEAKS="1")
+
+    # the self-test: memory -> card encode -> card decode -> card encode, three formats
+    p = subprocess.run([binary, "--gpu-test"], capture_output=True, text=True, env=env,
+                       timeout=300)
+    need("NVMOCK VIOLATION" not in p.stderr, p.stderr[-400:])
+    need("AddressSanitizer" not in p.stderr and "runtime error" not in p.stderr, p.stderr[-1500:])
+    need(p.returncode == 0 and "all steps passed" in p.stdout, p.stdout[-600:] + p.stderr[-300:])
+
+    src = v_source("xc_v_h264", "h264")
+    an = Analysis(src)
+    in_pts = {r["pts"] for r in an.pes[0x100]}
+    res = []
+
+    # a whole channel run, card for both by default
+    out = w("xc_nv_auto.ts")
+    st, log = run_mock(src, out, "--video", "hevc:500k")
+    must_pass(out)
+    x = xstats(st, 0x100)
+    need((x["decoder"], x["encoder"]) == ("nvdec", "nvenc"), f"auto chose {x['decoder']} and "
+                                                             f"{x['encoder']} with a card present")
+    o = Analysis(out)
+    types = {s["pid"]: s["type"] for s in o.pmt["streams"]}
+    need(types[0x100] == 0x24, f"PMT type 0x{types[0x100]:02X} for H.265")
+    v = o.pes[0x100]
+    need(len(v) >= len(an.pes[0x100]) - 3, f"{len(v)} of {len(an.pes[0x100])} video PES")
+    need({r["pts"] for r in v} <= in_pts, "video time stamps that the input did not have")
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0, "late or dropped")
+    must_match(src, out, only={0x101})
+    res.append("card decode + card encode")
+
+    # CPU decoder feeding the card's encoder (the upload path)
+    out = w("xc_nv_cpudec.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", "--decoder", "cpu")
+    must_pass(out)
+    x = xstats(st, 0x100)
+    need((x["decoder"], x["encoder"]) == ("libavcodec", "nvenc"), str(x))
+    need(x["frames_out"] >= 198, f"{x['frames_out']} pictures out")
+    res.append("CPU decode + card encode")
+
+    # 10-bit video that must come out as 8-bit H.264: the card converts
+    src10 = v_source("xc_v_hevc10", "hevc", pix="yuv420p10le")
+    out = w("xc_nv_10to8.ts")
+    st, log = run_mock(src10, out, "--video", "h264:500k",
+                       env_extra={"NVMOCK_FORMAT": "320x240:10"})
+    must_pass(out)
+    need(xstats(st, 0x100)["frames_out"] >= 195, "10-bit to 8-bit on the card produced nothing")
+    res.append("10-bit in, 8-bit out")
+
+    # the card has no encode session to give: carry on on the CPU, for real
+    out = w("xc_nv_fallback.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", env_extra={"NVMOCK_FAIL": "session"})
+    must_pass(out)
+    need("falling back to the CPU" in log, "no fall-back announced")
+    x = xstats(st, 0x100)
+    need((x["decoder"], x["encoder"]) == ("libavcodec", "x264"), str(x))
+    decodes_clean(out, "after falling back: ")
+    q = psnr(out, src)
+    need(q >= 27 and len(video_pts(out)) >= 150, f"after falling back: {q:.1f} dB, "
+                                                 f"{len(video_pts(out))} pictures")
+    res.append(f"no session on the card -> CPU, {len(video_pts(out))}/200 pictures at {q:.0f} dB")
+
+    # the same with the card insisted on: no silent substitute
+    out = w("xc_nv_insist.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", "--encoder", "nvidia",
+                       "--decoder", "nvidia", env_extra={"NVMOCK_FAIL": "session"})
+    need("stream is silent" in log, "card insisted on and unusable, but nothing said")
+    need(xstats(st, 0x100)["failed"], "not reported as failed in the statistics")
+    res.append("card insisted on and unusable: reported, not substituted")
+
+    # the card has no decoder to give (or will not take the format): the CPU decodes,
+    # from the very first unit, and the card still encodes
+    out = w("xc_nv_nodec.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", env_extra={"NVMOCK_FAIL": "decoder"})
+    must_pass(out)
+    need("decoding on the CPU" in log, "no change of decoder announced")
+    x = xstats(st, 0x100)
+    need((x["decoder"], x["encoder"]) == ("libavcodec", "nvenc") and not x["failed"], str(x))
+    need(x["frames_out"] >= 198, f"card would not decode: only {x['frames_out']} of 200 "
+                                 f"pictures came out after changing to the CPU")
+    res.append(f"no decoder on the card -> CPU decode, card encode, {x['frames_out']}/200 pictures")
+
+    # ... and with the card insisted on, that is said once and counted, not hidden
+    out = w("xc_nv_nodec_insist.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", "--decoder", "nvidia",
+                       env_extra={"NVMOCK_FAIL": "decoder"})
+    need(log.count("cannot decode this stream") == 1, "the decoder's failure was not "
+         "reported exactly once:\n" + log[-500:])
+    need(xstats(st, 0x100)["failed"], "decoder failure not in the statistics")
+
+    # interlaced video: the card's encoder is put in field mode ...
+    out = w("xc_nv_fields.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k",
+                       env_extra={"NVMOCK_FORMAT": "320x240:8:i"})
+    must_pass(out)
+    need("interlaced" in log and xstats(st, 0x100)["frames_out"] >= 195, log[-400:])
+    # ... and if it then refuses field mode it still encodes, as frames, on the card
+    out = w("xc_nv_fields_refused.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k",
+                       env_extra={"NVMOCK_FORMAT": "320x240:8:i", "NVMOCK_FAIL": "field"})
+    must_pass(out)
+    x = xstats(st, 0x100)
+    need("interlaced encoding was refused" in log, "refusal of field mode not reported")
+    need(x["encoder"] == "nvenc" and x["frames_out"] >= 195, str(x))
+    res.append("interlaced: field mode, and frames on the card when field mode is refused")
+    return "; ".join(res)
 
 
 def main():

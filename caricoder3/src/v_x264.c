@@ -64,6 +64,10 @@ static void *x4_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     /* Time stamps are passed through in 90 kHz units and are what the
      * rate control goes by, so a source that skips or stutters is coded
      * for the time it really takes. */
+    /* x264 on its own starts one and a half threads per processor, and
+     * holds back one more picture for every thread: on a large server
+     * that is seconds of delay, for speed a single stream cannot use. */
+    p.i_threads = codec_threads(CODEC_THREADS_X264);
     p.b_vfr_input = 1;
     p.i_timebase_num = 1;
     p.i_timebase_den = 90000;

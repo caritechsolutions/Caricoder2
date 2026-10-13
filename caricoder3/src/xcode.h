@@ -70,8 +70,22 @@ void xcode_free(struct xcode *x);
 /* One PES packet of the stream. Ownership passes. */
 void xcode_push(struct xcode *x, struct es_unit *u);
 
-/* End of input (file run): everything still inside comes out. */
+/* End of input: everything queued is worked off and what the codecs
+ * still hold comes out. In a live run this waits for the thread, but not
+ * for long: a codec that is far behind is stopped and what it held is
+ * lost. No more may be pushed afterwards. Not with the engine lock held:
+ * the units that come out take it. */
 void xcode_finish(struct xcode *x);
+
+/*
+ * When one transcoder takes over a PID from another (the source changed
+ * its coding): the decode time of the last unit the old one gave out,
+ * asked after its xcode_finish(), is handed to the new one before its
+ * first unit, so that decode times on the PID still only move forward.
+ * NOPTS if there is none (audio has no decode times of its own).
+ */
+int64_t xcode_last_dts(const struct xcode *x);
+void xcode_start_after(struct xcode *x, int64_t dts90);
 
 void xcode_get_stats(struct xcode *x, struct xcode_stats *st);
 
@@ -116,5 +130,8 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
 void vxc_free(struct vxc *v);
 void vxc_unit(struct vxc *v, const struct es_unit *u);
 void vxc_finish(struct vxc *v);
+void vxc_reset(struct vxc *v);
+int64_t vxc_last_dts(const struct vxc *v);
+void vxc_start_after(struct vxc *v, int64_t dts90);
 
 #endif

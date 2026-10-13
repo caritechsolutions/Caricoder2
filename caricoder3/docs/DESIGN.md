@@ -15,9 +15,10 @@ built on them without re-deriving anything. File names refer to `src/`.
                              clock.c, engine.c
 ```
 
-Stage 2 and 3 put a decoder and an encoder on the arrow in the middle for
-the streams that are transcoded. Copied streams keep using the arrow as it
-is. Nothing else moves.
+A stream that is transcoded leaves that arrow after it has been given its
+place in time, goes through a decoder and an encoder, and joins the arrow
+again as new units ("Transcoding" below). Copied streams use the arrow as
+it is. Nothing else moves.
 
 | File | Job |
 |---|---|
@@ -28,7 +29,11 @@ is. Nothing else moves.
 | `clock.c` | The PLL that locks to the source clock |
 | `engine.c` | Glue: time lines, discontinuities, live and file running |
 | `udp.c`, `main.c` | Sockets, threads, options, statistics, systemd |
-| `codec.c` | Registry for codec backends (empty in stage 1) |
+| `codec.h`, `codec.c` | The four interfaces a codec backend implements; the registry that picks one |
+| `xcode.c` | One transcoded stream: its queue and thread, PES packets, option parsing |
+| `xc_audio.c`, `aframe.c` | Audio: framing, sample counting, encoder feed |
+| `xc_video.c` | Video: decoder to encoder, send times |
+| `a_*.c`, `v_*.c`, `nv_*.c` | One file per codec library |
 
 ## One time base
 
@@ -327,7 +332,8 @@ and anything thrown away is thrown away whole and shows up in a counter.
 
 ## Threads
 
-Three in live running, and one mutex around the mux and the clock.
+Three in live running, plus one for each transcoded stream, and one mutex
+around the mux and the clock.
 
 - *Input* blocks in `recvmmsg()`, runs the demux, and takes the mutex only
   to queue a finished unit or feed the PLL.
@@ -336,33 +342,37 @@ Three in live running, and one mutex around the mux and the clock.
   runs the mux up to now, and sends.
 - *Main* writes statistics once a second and pets the systemd watchdog if
   the other two are alive.
+- *One per transcoded stream* takes that stream's units from a queue,
+  decodes, encodes, and takes the mutex only to hand a finished unit to
+  the mux. The codec libraries start threads of their own inside that.
 
 A file run uses one thread and no clock.
 
-## Where codecs will plug in
+## Transcoding
 
-`codec.h` describes a backend: a name, the codecs it handles, decoder or
-encoder, a priority, and a `probe()` that says whether its hardware, driver
-and library are usable on this machine now. Backends are compiled in only
-when their library is found at build time and probed at start-up. One
-binary then runs on a box with an NVIDIA card, one with an Intel GPU, or
-one with neither, and picks the best backend that works unless the channel
-names one.
+### Backends
 
-Planned libraries, each called directly:
+`codec.h` holds four small interfaces: audio decoder, audio encoder, video
+decoder, video encoder. A backend implements one of them for one library
+and says which codecs it handles, whether it runs on the CPU or on an
+NVIDIA card, and how good it is (priority). Each lives in a file of its
+own and is compiled only if the Makefile found its library. At run time
+`codec_find()` returns the best one that is usable right now; a backend
+with a `probe()` (the NVIDIA ones) can say "not on this machine". One
+binary therefore runs on a box with a card and on one without.
 
-| Job | Library |
-|---|---|
-| H.264 / H.265 encode on CPU | x264, x265 |
-| H.264 / H.265 decode on CPU | libavcodec (decided, see below) |
-| H.264 / H.265 on NVIDIA | NVIDIA Video Codec SDK (NVDEC, NVENC) |
-| H.264 / H.265 on Intel | Intel VPL |
-| AAC | fdk-aac |
-| MP2 / MP3 | twolame, LAME, mpg123 |
-| AC-3 decode | liba52 |
-
-Each stream will take `auto`, `nvidia` or `cpu` for its decoder. `auto`
-tries the GPUs in turn and then the CPU.
+| Job | Library | File |
+|---|---|---|
+| AAC decode, AAC-LC encode | fdk-aac | `a_fdk.c` |
+| MPEG audio layers I-III decode | mpg123 | `a_mpg123.c` |
+| AC-3 decode | liba52 | `a_a52.c` |
+| MP2 encode | twolame | `a_twolame.c` |
+| MP3 encode | LAME | `a_lame.c` |
+| H.264 / H.265 decode, CPU | libavcodec | `v_avcodec.c` |
+| H.264 encode, CPU | x264 | `v_x264.c` |
+| H.265 encode, CPU | x265 | `v_x265.c` |
+| H.264 / H.265 decode, NVIDIA | NVDEC (libnvcuvid) | `v_nvdec.c` |
+| H.264 / H.265 encode, NVIDIA | NVENC (libnvidia-encode) | `v_nvenc.c` |
 
 **CPU decoding uses libavcodec** (decided 11 October 2026). No standalone
 H.264 decoder was found fit for broadcast: OpenH264's own documentation
@@ -374,20 +384,208 @@ demux, mux, clock and timestamps stay our own; nothing of FFmpeg's
 pipeline, formats or tools is used; and a build without it is still a
 complete GPU transcoder.
 
-**NVIDIA target** (facts for the first deployment box, driver 535.247.01,
-two Tesla P40): write against Video Codec SDK 12.1, which needs driver
-530.41.03 or newer; 12.2 needs 550.54.14. A P40 has two encoder engines
-and unrestricted sessions, encodes H.264 and H.265 including 10-bit, and
-has no H.265 B-frames and no AV1.
+### Where a transcoded stream leaves the pipeline and rejoins it
 
-The frame-level interface (packets in, frames out, and the reverse) will be
-written with the first backend that needs it. Guessing it now would mean
-rewriting it then.
+The engine gives every unit from the demux its place on the output time
+line (the offset, and everything in "Discontinuities"). Only then does it
+look at the PID: a copied stream's unit goes to the mux; a transcoded
+stream's unit goes to that stream's `xcode`. So a source clock step is
+dealt with once, in one place, and the codecs only ever see time that runs
+on. What an `xcode` produces comes back as ordinary units with send
+windows and goes into the mux like any other.
+
+In a live run each `xcode` has a thread and a queue, so neither the input
+nor the output thread ever waits on a codec; the rest of the service is
+never held up by one. In a file run the work is done in the caller's
+thread, with no queue.
+
+**Falling behind.** What comes out of a transcoder after its send time is
+dropped by the mux, so a codec that is behind produces nothing of use
+while still doing all the work. The thread watches for that (`check_late`
+in `xcode.c`). Output late for 3 s on end with more than half a second of
+input piled up means the codec is slower than the stream and will never
+catch up by itself: the queue is thrown away (counted as
+`input_dropped`), a video decoder is reset and its input skipped up to
+the next key frame, and a warning says so. A codec fast enough catches up
+on a start-up backlog well inside the 3 s and is left alone. Output late
+with nothing piled up is a different fault, `--delay` shorter than what
+the codecs hold back; that is reported every 10 s and nothing is thrown
+away, since it would not help. A 48 MB cap on the queue remains as a
+guard on memory.
+
+When the PMT changes, the set of transcoders is brought in line: one whose
+stream and settings are unchanged is kept running; the others are
+finished (the queue worked off, the codecs emptied, so the end of the old
+stream goes out), stopped and replaced, outside the lock, since that means
+waiting for a thread. The wait is limited to 0.3 s, because it is the
+input thread that waits: a codec not through by then was behind anyway,
+and what it held is given up. A new transcoder taking over a PID is told the last
+decode time its predecessor gave out, so decode times on the PID only
+move forward.
+
+### Audio: time by counting samples
+
+A PES packet carries a run of audio bytes that need not start or end on a
+frame boundary, and one time stamp, for the first frame that starts in it.
+`aframe.c` cuts that into whole frames, each with its time, and finds its
+way back after damage (a first frame is believed only if another follows
+it; AC-3 frames are CRC-checked, because liba52 does not look).
+
+From there on, time is kept by counting samples, not by trusting each
+stamp on its own. The first block of samples fixes an origin. Each later
+block is expected where the samples before it end:
+
+- its stamp agrees to within 10 ms: nothing changes, so rounding in the
+  source cannot make the output jitter;
+- its stamp is later (audio is missing, typically a lost packet): the hole
+  is filled with silence, up to one second, and the output frames keep
+  their spacing;
+- its stamp is earlier: the overlap is cut;
+- more than a second either way: a new origin. That is what a source
+  clock step looks like from here.
+
+Encoder frames are timed from the same count: frame k begins at sample
+k x frame size, less the delay the codec itself adds, so that what a
+receiver plays at a given moment is what the source had at that moment.
+Those delays are 1024 + 576 samples for AAC-LC (reported by the library),
+481 for MP2 and 576 + 529 for MP3. They are not taken on trust: the tests
+decode both the original and the result with a reference decoder and
+slide the two against each other, and every pairing comes out within
+0.02 ms.
+
+HE-AAC needs one more rule. The library reports that its HE-AAC output
+lags by the delay of its SBR stage plus its own post-processing. Of that,
+962 samples are the SBR delay every HE-AAC decoder has, and receivers play
+such a stream with that lag built in. So only the rest is taken out.
+
+**Output packets and the decoder's buffer.** A standard decoder has 3584
+bytes for an audio stream. What sits in it is the audio between "has
+arrived" and "is played". A PES packet is sent over as long as it plays
+and has all arrived a lead before its first sample is due, so the buffer
+holds (packet + lead) of audio at the bit rate. Both are sized per
+encoder to keep that under 3000 bytes, and under 200 ms at low bit rates:
+AAC at 128 kb/s gets four frames to a packet and about 100 ms of lead, MP2
+at 384 kb/s one frame and about 40 ms. Measured in a CBR mux: 1760 to
+3384 bytes across six codings and rates, and never less than 39 ms early.
+
+### Video: pictures keep their time
+
+Pictures go from decoder to encoder with their time stamps untouched, and
+the encoder is told to use them (variable frame rate input), so a source
+that skips or stutters is coded for the time it really takes. Size, frame
+rate, pixel shape, field order and colour description are passed on.
+They are compared on every picture, and a change reopens the encoder at
+that picture. Field or frame is a flag on each picture and interlaced
+streams carry progressive pictures among the others, so one interlaced
+picture makes the stream interlaced at once, and only 500 progressive
+pictures in a row make it progressive again.
+H.264 is encoded at 8 bits whatever comes in (10-bit pictures are
+converted, rounded); H.265 keeps the depth of the source.
+
+libavcodec reads slightly past the end of what it is given and requires
+zeroed room there. A PES packet has none, so its payload is copied to a
+buffer that does. (AddressSanitizer found this.)
+
+**When each access unit is sent.** An encoder that holds to a buffer of B
+seconds at its bit rate R promises this: if its output is delivered at R,
+starting B before the first picture is due, every picture is complete in
+the receiver before it is needed. So that is how the output is delivered.
+Each access unit takes (its size / R) to send, one follows the other, and
+none starts earlier than (its decode time - B - one picture). B is
+`--vbv`, 1 s by default. A large key frame is thus spread over the time
+it takes at R instead of being pushed out in one picture's time, so the
+video never asks the mux for more than R and the audio beside it is not
+held up. An encoder that overruns its buffer is still delivered by half a
+picture before its decode time. Measured on the wire at 500 kb/s: every
+picture complete 0.68 to 1.02 s early, the receiver never holding more
+than 65 kB (the buffer is 62.5 kB plus a picture), never more than 560
+kb/s over any 400 ms, in VBR and in CBR. In a file run the output clock
+starts B earlier than the first unit, since the first new pictures are
+sent before anything in the input was.
+
+**Delay.** An access unit can only be sent once it exists, and it exists
+only after the decoder and the encoder have had the pictures they hold
+back and done their work. Left alone, x264 starts one and a half threads
+per processor and libavcodec one per processor, and each thread is one
+more picture held back: 17 pictures on a 2-processor machine, 48 on a
+32-processor one, which is more than the delay allows. So the threads are
+limited per stream (4 to decode, 6 for x264; x265 limits itself to 6),
+and what is held back no longer depends on the machine. The engine's
+delay has to cover that plus B. It is fixed when the program starts,
+because changing it later would be a step in the output clock; so it
+defaults to 3 s for video and 0.8 s for audio. On every unit that comes
+back from a transcoder the engine measures how long it still had before
+it was due (`slack`). At 1080p in a file run the video had 1.6 to 1.8 s
+to spare with 2 processors and 1.5 s with 64; in the live test, 1.8 s.
+
+### NVIDIA
+
+Not yet run on a card: see the README. What the code does:
+
+- `nv_common.c` opens the driver's three libraries at run time and keeps
+  one CUDA context per card for the whole process. Everything on a card
+  shares it, which is what lets a decoded picture be handed to the encoder
+  without leaving the card.
+- `v_nvdec.c` feeds the card's own parser, which calls back when it knows
+  the format (the decoder is created then), when a picture is to be
+  decoded, and when one is ready to show. Shown pictures are queued and
+  handed out one at a time, mapped as one NV12 (or 16-bit) surface.
+  Asked for 8-bit pictures from 10-bit video, the card converts.
+- `v_nvenc.c` keeps a pool of eight surfaces registered with the encoder.
+  A picture from the card is copied into one, card to card; a picture
+  from the CPU decoder is interleaved and uploaded. No B-frames and no
+  look-ahead: every picture comes back coded at once, and decode time
+  equals presentation time. Rate control is VBR capped at the bit rate,
+  with the same buffer as on the CPU.
+- If the card will not decode a stream (a format it does not take, no
+  decoder to be had) and nobody insisted on the card, the CPU decoder
+  takes over from the very unit that failed; the encoder stays on the
+  card and gets its pictures by upload.
+- If the encoder will not open and nobody insisted on the card, the
+  stream's decoder is replaced by the CPU one and encoding goes to the
+  CPU too. One group of pictures is lost at the switch.
+- Interlaced H.264 is encoded as fields if the card says it can. If
+  initialising then fails, a fresh session encodes the fields together as
+  frames rather than losing the card for the stream.
+
+`tests/nvmock.c` builds stand-ins for the three libraries that enforce
+the API's rules (structure versions, call order, context, mapping limits)
+and keep "card" memory in ordinary memory of exactly the size asked for,
+so that AddressSanitizer sees any overrun. The self-test and whole channel
+runs pass against them. That proves our side is consistent with our
+reading of the headers. It does not prove the reading is right. In
+particular the stand-ins cannot show: the layout of a decoded surface
+(they reproduce our own assumption), time stamps on pictures whose access
+unit had none, the reuse of a picture index while that picture still
+waits to be fetched (possible when one PES packet holds several
+pictures), field mode, rate control, and which levels and presets a real
+card accepts. Those are for the first run on a card.
+
+**Target** (facts for the first deployment box, driver 535.247.01, two
+Tesla P40): Video Codec SDK 12.1 headers, which need driver 530.41.03 or
+newer; 12.2 needs 550.54.14. A P40 has two encoder engines and
+unrestricted sessions, encodes H.264 and H.265 including 10-bit, and has
+no H.265 B-frames and no AV1.
+
+### Decisions still open
+
+**HE-AAC.** Ubuntu ships fdk-aac with the HE-AAC parts removed. With it
+an HE-AAC source is transcoded from its half-rate core. The two ways out:
+build the original fdk-aac from source in the installer (full band, and
+HE-AAC output becomes possible; its licence and the AAC patent situation
+are for the owner to weigh), or let libavcodec, already present for
+video, decode AAC as well (full band in; no HE-AAC out). Neither is done.
+
+**B-frames on NVENC.** Left out to keep the first hardware bring-up
+simple. They are worth roughly a tenth of the bit rate on H.264.
 
 ### Licensing, to check before anything is distributed
 
-x264 and x265 are GPL. fdk-aac's licence is not GPL-compatible. Running
-both on your own servers is not distribution and raises no issue. Shipping
-a binary that links both to a third party would. This is not legal advice;
-it is a flag to raise with whoever advises you before a binary leaves your
-hands.
+x264 and x265 are GPL. fdk-aac's licence is not GPL-compatible. Ubuntu's
+libavcodec is built with GPL parts enabled. Running all of them on your
+own servers is not distribution and raises no issue. Shipping a binary
+that links them to a third party would. This is not legal advice; it is a
+flag to raise with whoever advises you before a binary leaves your hands.
+
+The NVIDIA headers in `third_party/ffnvcodec` are under the MIT licence
+(see `third_party/ffnvcodec/README`).

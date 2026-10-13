@@ -1,47 +1,71 @@
 # caricoder3
 
-A live MPEG-TS to MPEG-TS processor written from the ground up in C.
-No GStreamer, no FFmpeg, no libraries beyond the C library.
+A live MPEG-TS to MPEG-TS processor and transcoder written from the ground
+up in C. No GStreamer and no FFmpeg pipeline: the demultiplexer, the
+multiplexer, the clock and all handling of time are our own. Codec
+libraries are called directly, each behind a small interface, and each is
+optional: the program builds and runs with whichever are installed.
 
 This is the foundation for replacing Flussonic's transcoder. It lives in its
 own folder and shares no code with the GStreamer-based CariTranscoder in the
 rest of this repository.
 
-## Where it stands: stage 1 of 5
+## Where it stands
 
 | Stage | What | State |
 |---|---|---|
-| 1 | TS in → demux → remux → TS out, every stream copied | **this folder** |
-| 2 | Audio transcode (AAC, MP2, MP3 in and out; AC-3 in) | not started |
-| 3 | Video decode + encode: x264/x265, NVIDIA, Intel | not started |
+| 1 | TS in → demux → remux → TS out, every stream copied | done; ran 34 hours on a live satellite feed |
+| 2 | Audio transcode: MP2, MP3, AAC, AC-3 in; AAC, MP2, MP3 out | done, tested |
+| 3a | Video transcode on the CPU: H.264, H.265 in and out | done, tested |
+| 3b | Video transcode on NVIDIA cards (NVDEC, NVENC) | **written, not yet run on a card** (see "NVIDIA") |
+| 3c | Video on Intel (VPL) | not started |
 | 4 | Scaling, deinterlace, several outputs from one decode | not started |
 | 5 | Supervision, API, GUI, side-by-side run against Flussonic | not started |
 
-Stage 1 contains no codec. It proves the parts every later stage stands on:
-the demultiplexer, the multiplexer, the clock, and the behaviour when the
-input misbehaves. MPEG-2 video is parked by decision.
+MPEG-2 video is parked by decision: it is copied, not transcoded.
 
 ## Install on a server
 
 ```
-curl -fsSL "https://raw.githubusercontent.com/caritechsolutions/Caricoder2/claude/caricoder3-stage1/caricoder3/install.sh?$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/caritechsolutions/Caricoder2/claude/caricoder3-stage2/caricoder3/install.sh?$(date +%s)" | sudo bash
 ```
 
-Needs no git. It installs gcc and make if they are missing, builds in a
-scratch folder, and only if that succeeds puts the source in
-`/opt/caricoder3` and the binary in `/usr/local/bin/caricoder3`. It starts
-and stops nothing; running it again upgrades. Add `-s -- --test` after
-`bash` to run the self-tests before anything is installed. Keep the
-`?$(date +%s)`: without it GitHub may hand you a cached, older script.
+Needs no git. It installs gcc and make if they are missing, and the codec
+libraries (below); builds in a scratch folder; and only if that succeeds
+puts the source in `/opt/caricoder3` and the binary in
+`/usr/local/bin/caricoder3`. It starts and stops nothing; running it again
+upgrades. It ends by listing what the build can do. Add `-s -- --test`
+after `bash` to run the self-tests before anything is installed, or
+`-s -- --no-codecs` for the plain remultiplexer. Keep the `?$(date +%s)`:
+without it GitHub may hand you a cached, older script.
 
 ## Build by hand
 
 ```
 cd caricoder3
-make            # -> ./caricoder3        needs only gcc and make
+make            # -> ./caricoder3
 make test       # builds the sanitizer version too and runs the test suite
 sudo make install
+./caricoder3 --backends     # what this build can decode and encode
 ```
+
+Only gcc and make are required. Each codec library is used if it is
+installed and left out if it is not:
+
+| For | Library | Ubuntu package |
+|---|---|---|
+| AAC decode and encode | fdk-aac | `libfdk-aac-dev` |
+| MP2 / MP3 decode | mpg123 | `libmpg123-dev` |
+| AC-3 decode | liba52 | `liba52-0.7.4-dev` |
+| MP2 encode | twolame | `libtwolame-dev` |
+| MP3 encode | LAME | `libmp3lame-dev` |
+| H.264 / H.265 decode on the CPU | libavcodec | `libavcodec-dev libavutil-dev` |
+| H.264 encode on the CPU | x264 | `libx264-dev` |
+| H.265 encode on the CPU | x265 | `libx265-dev` |
+| H.264 / H.265 on NVIDIA | the driver's own libraries | nothing to install |
+
+plus `pkg-config` to find them. `make CODECS=none` builds without any,
+`make NVIDIA=0` without the NVIDIA part.
 
 ## Use
 
@@ -63,6 +87,18 @@ caricoder3 -i ... -o ... --service-name "Vacation" --service-provider "Coop Cabl
 
 # File to file: as fast as the disk allows, same result every time
 caricoder3 -i capture.ts -o out.ts --muxrate 4M
+
+# Audio to AAC at 128 kb/s, video copied
+caricoder3 -i udp://239.5.5.5:5000 -o udp://239.6.6.6:6000 --audio aac:128k
+
+# Only the AC-3 stream on PID 0x103 to AAC; everything else copied
+caricoder3 -i ... -o ... --audio 0x103=aac:96k
+
+# Video to H.264 at 3 Mb/s and audio to MP2, constant 4 Mb/s out
+caricoder3 -i ... -o ... --video h264:3M --audio mp2:192k --muxrate 4M
+
+# The same, video on NVIDIA card 1
+caricoder3 -i ... -o ... --video h264:3M --audio mp2:192k --muxrate 4M --gpu 1
 ```
 
 `caricoder3 --help` lists every option. The ones that matter most:
@@ -71,8 +107,15 @@ caricoder3 -i capture.ts -o out.ts --muxrate 4M
 |---|---|
 | `--muxrate RATE` | CBR output at this rate (`5M`, `4500k`). Must exceed the content rate by a few percent |
 | `--vbr` | With `--muxrate`: VBR capped at that rate |
-| `--delay MS` | Input-to-output buffer, default 500. See "Delay" below |
+| `--delay MS` | Input-to-output buffer. Default 500; 800 when audio is transcoded, 3000 when video is. See "Delay" below |
 | `--program N` | Service to take. Default: the first one in the PAT |
+| `--audio SPEC` | Transcode audio to `aac`, `mp2` or `mp3`, optionally with a bit rate (`aac:128k`). `PID=SPEC` for one stream; may be repeated. Default: copy |
+| `--video SPEC` | Transcode video to `h264` or `hevc` with a bit rate (`h264:3M`). Default: copy |
+| `--decoder`, `--encoder` | Where video is decoded and encoded: `auto` (the card if there is one, else the CPU), `nvidia`, `cpu` |
+| `--gpu N` | Which NVIDIA card. Default 0 |
+| `--preset NAME` | Encoder speed, in the encoder's own words: x264/x265 `ultrafast` … `medium` (default `veryfast`), NVENC `p1` … `p7` (default `p4`) |
+| `--gop MS` | Longest distance between key frames. Default 2000 |
+| `--vbv MS` | Video decoder buffer, as time at the bit rate. Default 1000 |
 | `--stats-file PATH` | JSON status, rewritten atomically once a second |
 | `--rt-prio N` | Real-time priority for the output thread (needs `CAP_SYS_NICE`) |
 
@@ -112,6 +155,107 @@ The process reports `READY=1` once its threads are up and pets the watchdog
 once a second, but only while both the input and the output thread are
 really turning over. A hung process is restarted by systemd; a missing
 input is not a hang and does not cause a restart.
+
+## Transcoding
+
+A stream is either copied or transcoded; the two mix freely in one
+service. What is transcoded keeps its PID and its place in time: time
+stamps pass through, so audio and video stay where they were against each
+other. The PMT is rewritten for a transcoded stream (stream type, and only
+its language and stream-identifier descriptors kept).
+
+**Audio.** In: MPEG audio layers I to III, AAC (ADTS and LATM), AC-3.
+Out: AAC-LC, MP2, MP3. The sample rate is kept; mono stays mono; anything
+with more than two channels is mixed down to stereo. A bit rate the coding
+does not allow at that sample rate is moved to the nearest it does. Lost
+input is filled with silence so that the output keeps its rhythm.
+Measured with ffmpeg as the reference decoder, audio lands within 0.02 ms
+of where the original sat, for every pairing.
+
+**Video.** In: H.264, H.265. Out: H.264, H.265. Picture size, frame rate,
+pixel shape, field order and colour description are kept, and followed
+when the source changes them while running (a channel going from 4:3 to
+16:9, say: the encoder is restarted at that picture). H.264 goes out at
+8 bits (10-bit input is converted); H.265 keeps the depth of the source.
+Every picture comes out at the time stamp it came in with.
+
+New video is sent at its own bit rate: a large key frame is spread over
+the time it takes at that rate, so the video never asks the multiplexer
+for more than it was coded at, and a receiver never has to hold more than
+the encoder's buffer (`--vbv`, 1 s by default). New audio is packed and
+timed to stay inside the 3584 bytes a standard decoder has for audio.
+
+**Delay.** Decoding and encoding take time, and an encoder holds pictures
+back to look ahead. `--delay` defaults to 800 ms when audio is transcoded
+and 3000 ms when video is. The statistics show, per transcoded stream, the
+least time a unit had to spare when it reached the multiplexer
+(`slack_min_ms`). If that is large, `--delay` can come down by about that
+much. If it is negative the units came too late and were dropped; the log
+then says which of two things is wrong:
+
+- "`--delay is too short`": the codec keeps up, but holds back more
+  pictures than the delay allows for. Raise `--delay`.
+- "`slower than the stream`": the codec cannot keep up at all (too slow a
+  `--preset` for the machine). Input that could never be caught up on is
+  thrown away and counted (`input_dropped`), so that what does come out is
+  current; the other streams of the service are not affected.
+
+The CPU codecs are held to a few threads per stream (4 to decode, 6 for
+x264), because every extra thread is one more picture held back. The
+delay is therefore the same on a 72-processor server as on a small
+machine; measured at 1080p, the video has about 1.5 s of the 3 s to spare.
+
+**Not decodable here** (the stream is copied, with a warning): E-AC-3,
+MPEG-2 video, anything else.
+
+### HE-AAC
+
+Ubuntu's `libfdk-aac` package is a build with the HE-AAC parts removed
+("fdk-aac-free"). With it, plain AAC (AAC-LC) works fully in both
+directions, but an HE-AAC input is decoded from its half-rate core only:
+nothing above 12 kHz comes through, HE-AAC v2 comes out mono, and the
+audio sits 20 ms early. The program says so in the log when it meets such
+a stream. Built against the original fdk-aac library the same streams
+come out full band and in sync (tested). Which way to go is a decision,
+not a defect: see the end of `docs/DESIGN.md`.
+
+### NVIDIA
+
+**The NVIDIA code has not yet run on an NVIDIA card.** It was written on a
+machine without one. What has been done instead: it compiles against the
+headers of NVIDIA's Video Codec SDK 12.1 (needs driver 530.41.03 or
+newer), and it runs against stand-in libraries (`tests/nvmock.c`) that
+hold it to the rules of the API as the headers state them: structure
+versions, the order of calls, a context current around each, no more
+pictures mapped than asked for, no copy outside its memory. That shows
+our side is consistent. Only a card can show that the driver agrees.
+
+The first thing to run on a machine with a card:
+
+```
+caricoder3 --gpu-test            # card 0
+caricoder3 --gpu-test --gpu 1 -v
+```
+
+It needs no input. It makes pictures itself and takes them through the
+same code a channel uses: encode from memory, decode on the card, encode
+again without leaving the card, for H.264, H.265, 10-bit H.265 and
+interlaced H.264, and says after each step whether it worked and what the
+driver answered.
+
+How it is built: pictures decoded on the card stay on it and are copied,
+card to card, into the encoder's input. No B-frames and no look-ahead
+for now, so the encoder adds no delay. When the card lets a stream down
+and nobody insisted on the card (`--decoder nvidia`, `--encoder nvidia`),
+the CPU takes over and the log says so: if the card will not decode the
+stream (a format it does not take, no decoder free), the CPU decodes and
+the card still encodes; if the card's encoder will not open (no session
+free, say), decoding and encoding both carry on on the CPU. With the card
+insisted on, the stream is silent instead, which is said once and shown
+as `failed` in the statistics. If the card refuses to encode interlaced
+video as fields, it encodes the fields together as frames, with a
+warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
+`--decoder nvidia --encoder cpu` is not built yet.
 
 ## What it does to a stream
 
@@ -168,8 +312,8 @@ Everything waits `--delay` milliseconds between input and output. That is
 what allows a whole PES packet to be collected before it is sent and still
 leave on schedule. The default of 500 ms reproduces the input's own pacing
 exactly. A smaller value still gives a valid, complete stream (tested at
-60 ms); large frames then leave in a burst instead of evenly. Stage 3 will
-need more than 500 ms once decoding and encoding sit in the path.
+60 ms); large frames then leave in a burst instead of evenly. Transcoding
+needs more: see "Transcoding" above.
 
 ## Statistics
 
@@ -180,7 +324,11 @@ need more than 500 ms once decoding and encoding sit in the path.
   service and on the rest of the multiplex, sync losses, kernel socket
   overflows, damaged PES dropped, bad tables, PCR jumps, single damaged
   PCRs set aside (`pcr_glitches`), PCR missing
-- `service`: PIDs, stream types, how each stream is handled
+- `service`: PIDs, stream types, how each stream is handled; for a
+  transcoded stream also the decoder and encoder in use, units and frames
+  in and out, frames that would not decode, input dropped because the
+  codec fell behind, silence inserted, and the time units had to spare
+  (`slack_ms` since the last report, `slack_min_ms` since the start)
 - `clock`: locked or not, measured drift against the source in ppm, arrival
   jitter, time-line offset, number of discontinuities absorbed, units held
   back at this moment because the source clock is in doubt
@@ -193,15 +341,26 @@ The same figures go to the log every 10 seconds (`--stats-interval`).
 ## Tests
 
 ```
-make test                         # 51 tests, about five minutes
+make test                         # 74 tests, about eight minutes
 python3 tests/run_tests.py --list
 python3 tests/run_tests.py live   # only the tests with "live" in the name
+python3 tests/run_tests.py xc_    # only the transcoding tests
 
 make fuzz                         # needs clang
 build/fuzz_engine -max_len=400000 build/corpus
 python3 tests/fuzz_seeds.py build/corpus-live
 build/fuzz_live -max_len=400000 build/corpus-live
+python3 tests/fuzz_seeds.py --xcode build/corpus-xcode      # needs ffmpeg
+LSAN_OPTIONS=suppressions=tests/lsan.supp build/fuzz_xcode -max_len=400000 build/corpus-xcode
+
+python3 tests/av_sync.py in.ts out.ts     # audio sync of a transcode, measured
 ```
+
+The transcoding tests need ffmpeg and numpy, and skip themselves without.
+ffmpeg is used only by the tests: to make real streams, and as the
+reference decoder that the output is judged by (does it decode cleanly,
+is every picture at its original time, how close is it to the source, and
+where does the audio sit).
 
 The checker in `tests/` is a second, independent implementation of the
 transport stream standard in Python. It shares nothing with the C code, so
@@ -211,12 +370,15 @@ TSDuck are installed, the suite also has them decode and verify the output.
 File tests run under AddressSanitizer and UndefinedBehaviorSanitizer. Live
 tests run in real time over UDP on the loopback interface.
 
-There are two fuzzers. `fuzz_engine` feeds the pipeline as a file run.
+There are three fuzzers. `fuzz_engine` feeds the pipeline as a file run.
 `fuzz_live` feeds it as a live channel, with made-up arrival times, so
 that the clock handling is fuzzed too: stalls, bursts, restarts, missing
-and damaged PCRs. Both check every output packet for a valid header, an
-unbroken continuity counter and a forward-moving PCR, on top of the usual
-memory checks.
+and damaged PCRs. `fuzz_xcode` runs with audio and video transcoding on,
+so that mangled data goes through our framing and into the codec
+libraries. All check every output packet for a valid header, an unbroken
+continuity counter and a forward-moving PCR, on top of the usual memory
+checks. `fuzz_xcode` is a file run on the CPU: it does not reach the
+transcoder threads, the live clock handling, or the NVIDIA code.
 
 To check a stream of your own, on any machine with Python 3:
 
@@ -224,7 +386,44 @@ To check a stream of your own, on any machine with Python 3:
 python3 tests/ts_check.py out.ts --cbr --against in.ts
 ```
 
-## Known limits of stage 1
+## Known limits
+
+Transcoding:
+
+- No scaling, no change of frame rate, no deinterlacing (stage 4). The
+  audio sample rate is not changed either.
+- No AC-3 or HE-AAC output. No E-AC-3 input.
+- HE-AAC input is half band with Ubuntu's library (see "HE-AAC").
+- The NVIDIA path has not run on a card yet (see "NVIDIA"). It encodes
+  without B-frames. Decoding on the card for an encoder on the CPU is not
+  built. Read against the SDK but untested, because the stand-in
+  libraries cannot show them: PES packets that hold several pictures (a
+  picture waiting to be fetched could be overwritten), the pictures in
+  flight at a change of picture size (dropped), and streams that carry no
+  frame rate (25 a second is assumed, which skews the bit rate if wrong).
+- A change of picture format restarts the encoder with a key frame. An
+  interlaced stream that turns progressive is only followed after 500
+  progressive pictures in a row, because interlaced streams carry
+  progressive pictures among the others.
+- When the source's clock steps, units that were already on their way to
+  a transcoder with the old clock's time are not moved (a copied stream's
+  are): up to 2 s of video or 1 s of audio around the step can be lost.
+- MP2 or MP3 made from another coding at 16, 22.05 or 24 kHz is announced
+  as stream type 0x03, where 0x04 would be exact (from MPEG audio input
+  the type is kept).
+- Interlaced video stays interlaced through x264. x265, and NVENC for
+  H.265, encode the two fields together as one frame.
+- A picture format the encoder cannot take (4:2:2, more than 10 bits)
+  cannot be transcoded.
+- When the input stops, the pictures the encoder was holding back (up to
+  0.7 s with x264) stay inside it until the input returns.
+- An AAC output is not announced with a DVB AAC descriptor in the PMT;
+  receivers that insist on one may need it added.
+- libx265 3.5 does not give back 1 to 5 kB each time an encoder is opened
+  (a fault in the library: a bare open and close shows it). That happens
+  once per stream, and again only if the picture format changes.
+
+Remultiplexing:
 
 - IPv4 only.
 - One service per process. A multi-program input is fine; the output is

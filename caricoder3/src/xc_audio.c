@@ -27,10 +27,19 @@
 
 #define TOLERANCE       (STC_HZ / 100)      /* stamps this close are "on time" */
 #define MEND_MAX        STC_HZ              /* holes and overlaps up to this are mended */
-#define PES_TARGET      (STC_HZ / 10)       /* about this much audio per PES packet */
 #define PES_BYTES_MAX   32768
-#define LEAD            (STC_HZ * 15 / 100) /* a PES packet has left this long before
-                                             * its first sample is due */
+/*
+ * A standard decoder has 3584 bytes of buffer for an audio stream. What
+ * sits in it is the audio between "has arrived" and "is played": a packet
+ * is sent over as long as it plays, and has all arrived `lead` before its
+ * first sample is due, so that is (packet + lead) of audio at the bit
+ * rate. Both are sized, per encoder, to stay inside TSTD_BUDGET bytes
+ * (the buffer less room for packet headers and a late transport packet),
+ * and never more than LEAD_TOTAL_MAX however low the bit rate.
+ */
+#define TSTD_BUDGET     3000
+#define LEAD_TOTAL_MAX  (STC_HZ / 5)
+#define LEAD_MIN        (STC_HZ / 50)
 #define ENC_OUT_MAX     16384
 #define SEGMENTS        4
 
@@ -72,6 +81,10 @@ struct axc {
     uint8_t *pes;
     size_t pes_len;
     stc_t pes_pts, pes_dur;
+    int pes_n;                  /* frames in it */
+    int pes_frames;             /* frames to a packet */
+    stc_t lead;                 /* a packet has all left this long before its
+                                 * first sample is due */
     stc_t last_t1;
 };
 
@@ -102,7 +115,7 @@ static void pes_flush(struct axc *a)
     u = pes_unit_new(a->cfg.pid, 0xC0, a->pes_len, pts90, NOPTS, &off);
     if (u) {
         memcpy(u->data + off, a->pes, a->pes_len);
-        u->t1 = a->pes_pts - LEAD;
+        u->t1 = a->pes_pts - a->lead;
         u->t0 = u->t1 - a->pes_dur;
         if (u->t0 < a->last_t1 && a->last_t1 - u->t0 < STC_HZ)
             u->t0 = a->last_t1;             /* never two at once */
@@ -114,6 +127,7 @@ static void pes_flush(struct axc *a)
     }
     a->pes_len = 0;
     a->pes_dur = 0;
+    a->pes_n = 0;
 }
 
 static void pes_add(struct axc *a, const uint8_t *au, size_t len, stc_t pts, stc_t dur)
@@ -132,7 +146,7 @@ static void pes_add(struct axc *a, const uint8_t *au, size_t len, stc_t pts, stc
     a->pes_len += len;
     a->pes_dur += dur;
     a->st->frames_out++;
-    if (a->pes_dur + dur > PES_TARGET + dur / 2)
+    if (++a->pes_n >= a->pes_frames)
         pes_flush(a);
 }
 
@@ -257,6 +271,19 @@ static bool encoder_open(struct axc *a, int rate, int ch)
     snprintf(a->st->encoder, sizeof(a->st->encoder), "%s", b->name);
     a->rate = rate;
     a->ch = ch;
+    {
+        stc_t frame_dur = samples_to_stc(a->frame, rate);
+        stc_t total = (stc_t)TSTD_BUDGET * 8 * STC_HZ / (bitrate > 0 ? bitrate : 1);
+
+        if (total > LEAD_TOTAL_MAX)
+            total = LEAD_TOTAL_MAX;
+        a->pes_frames = (int)(total / 2 / (frame_dur > 0 ? frame_dur : 1));
+        if (a->pes_frames < 1)
+            a->pes_frames = 1;
+        a->lead = total - a->pes_frames * frame_dur;
+        if (a->lead < LEAD_MIN)
+            a->lead = LEAD_MIN;
+    }
     a->fifo_n = 0;
     a->fed = 0;
     a->frames_out = 0;

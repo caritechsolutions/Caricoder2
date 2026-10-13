@@ -3,7 +3,7 @@
 # caricoder3 installer
 # Copyright (c) 2026 CariTech Solutions
 #
-#   curl -fsSL "https://raw.githubusercontent.com/caritechsolutions/Caricoder2/claude/caricoder3-stage1/caricoder3/install.sh?$(date +%s)" | sudo bash
+#   curl -fsSL "https://raw.githubusercontent.com/caritechsolutions/Caricoder2/claude/caricoder3-stage2/caricoder3/install.sh?$(date +%s)" | sudo bash
 #
 # The "?$(date +%s)" matters: raw.githubusercontent.com caches files for a
 # few minutes, and without it you can be handed the previous version.
@@ -12,12 +12,19 @@
 #
 #   ... | sudo bash -s -- --test             also run the self-tests
 #   ... | sudo bash -s -- --branch main      install from another branch
+#   ... | sudo bash -s -- --no-codecs        build the plain remultiplexer only
 #
 # What it does, in this order:
 #   1. installs gcc and make if they are missing (apt)
-#   2. downloads the source (no git needed) and builds it in a scratch copy
-#   3. only if the build succeeded: puts the source in /opt/caricoder3 and
+#   2. installs the codec libraries that transcoding needs (apt). One that
+#      cannot be installed is reported and left out: the program is built
+#      with the others
+#   3. downloads the source (no git needed) and builds it in a scratch copy
+#   4. only if the build succeeded: puts the source in /opt/caricoder3 and
 #      the binary in /usr/local/bin/caricoder3
+#
+# NVIDIA needs nothing installed here: the driver's own libraries are used
+# when the program runs.
 #
 # What it does not do: it starts nothing, stops nothing and creates no
 # services. Channels that are already running keep running on the binary
@@ -26,11 +33,26 @@
 set -euo pipefail
 
 REPO="caritechsolutions/Caricoder2"
-BRANCH="${CARICODER3_BRANCH:-claude/caricoder3-stage1}"
+BRANCH="${CARICODER3_BRANCH:-claude/caricoder3-stage2}"
 SRC_DIR="${CARICODER3_SRC:-/opt/caricoder3}"
 PREFIX="${PREFIX:-/usr/local}"
 RUN_TESTS=0
+WITH_CODECS=1
 WORK=""
+
+# package : what it is for
+CODEC_PKGS="
+pkg-config:finding the libraries below
+libfdk-aac-dev:AAC decode and encode
+libmpg123-dev:MP2 / MP3 decode
+liba52-0.7.4-dev:AC-3 decode
+libtwolame-dev:MP2 encode
+libmp3lame-dev:MP3 encode
+libavcodec-dev:H.264 / H.265 decode on the CPU
+libavutil-dev:(needed by libavcodec)
+libx264-dev:H.264 encode on the CPU
+libx265-dev:H.265 encode on the CPU
+"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -50,6 +72,7 @@ caricoder3 installer
 
   --test           also run the self-tests before installing (needs python3)
   --branch NAME    install from another branch
+  --no-codecs      do not install codec libraries; build the remultiplexer only
   -h, --help       this text
 
 Builds in a scratch folder first. Source goes to /opt/caricoder3, the binary
@@ -82,10 +105,47 @@ install_build_tools() {
         die "could not install ${missing[*]}"
 }
 
+install_codec_libs() {
+    local line pkg what missing=() failed=()
+
+    command -v apt-get >/dev/null 2>&1 || {
+        note "not an apt system: install the codec libraries yourself (see README)"
+        return 0
+    }
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        pkg="${line%%:*}"
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$line")
+    done <<< "$CODEC_PKGS"
+    if [ "${#missing[@]}" -eq 0 ]; then
+        note "all codec libraries are already here"
+        return 0
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null >/dev/null 2>&1 ||
+        note "apt-get update reported a problem; carrying on with the lists we have"
+    # One at a time: a package this system does not offer must not stop
+    # the others from being installed.
+    for line in "${missing[@]}"; do
+        pkg="${line%%:*}"
+        what="${line#*:}"
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+               "$pkg" </dev/null >/dev/null 2>&1; then
+            note "installed $pkg ($what)"
+        else
+            failed+=("$pkg: $what")
+        fi
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        note "could NOT be installed, and will be missing from the build:"
+        for line in "${failed[@]}"; do note "    $line"; done
+    fi
+}
+
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --test)    RUN_TESTS=1 ;;
+            --no-codecs) WITH_CODECS=0 ;;
             --branch)  [ $# -ge 2 ] || die "--branch needs a name"
                        BRANCH="$2"; shift ;;
             -h|--help) usage; exit 0 ;;
@@ -106,6 +166,11 @@ main() {
 
     say "Build tools"
     install_build_tools
+
+    if [ "$WITH_CODECS" -eq 1 ]; then
+        say "Codec libraries"
+        install_codec_libs
+    fi
 
     # Scratch space next to the destination: same disk, so the finished
     # tree can be moved into place in one step, and never a noexec /tmp.
@@ -135,8 +200,10 @@ main() {
     printf '%s\n' "${commit:-unknown}" > "$WORK/tree/COMMIT"
 
     say "Building"
+    local make_args=()
+    [ "$WITH_CODECS" -eq 1 ] || make_args+=(CODECS=none)
     make -C "$WORK/tree" clean >/dev/null 2>&1 || true
-    if ! make -C "$WORK/tree" >"$WORK/build.log" 2>&1 </dev/null; then
+    if ! make -C "$WORK/tree" ${make_args[@]+"${make_args[@]}"} >"$WORK/build.log" 2>&1 </dev/null; then
         tail -n 30 "$WORK/build.log" >&2
         die "build failed; nothing on this machine was changed"
     fi
@@ -147,8 +214,9 @@ main() {
 
     if [ "$RUN_TESTS" -eq 1 ]; then
         say "Self-tests (file tests only: no network ports are used)"
+        note "the transcoding tests need ffmpeg and python3-numpy and skip themselves without"
         if command -v python3 >/dev/null 2>&1; then
-            if ! (cd "$WORK/tree" && python3 tests/run_tests.py file </dev/null); then
+            if ! (cd "$WORK/tree" && python3 tests/run_tests.py file xc_ </dev/null); then
                 die "self-tests failed; nothing on this machine was changed"
             fi
             rm -rf "$WORK/tree/build/test-work"
@@ -183,7 +251,11 @@ main() {
     fi
 
     say "Done: $("$PREFIX/bin/caricoder3" --version)"
+    say "What this build can do (caricoder3 --backends)"
+    "$PREFIX/bin/caricoder3" --backends 2>&1 | while IFS= read -r line; do note "$line"; done
+    note ""
     note "try:  caricoder3 --help"
+    note "      caricoder3 --gpu-test        (checks the NVIDIA path on card 0)"
 }
 
 # Everything above is only definitions. Running main from the last line

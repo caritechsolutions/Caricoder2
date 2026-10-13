@@ -54,7 +54,9 @@ static void *avd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
     if (!d->ctx || !d->parser || !d->pkt || !d->cur)
         goto fail;
     d->ctx->pkt_timebase = (AVRational){ 1, 90000 };
-    d->ctx->thread_count = 0;               /* as many as the machine has */
+    /* Each thread is one more picture held back, so not "as many as the
+     * machine has". */
+    d->ctx->thread_count = codec_threads(CODEC_THREADS_DECODE);
     d->ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     if (avcodec_open2(d->ctx, codec, NULL) < 0) {
         snprintf(err, errlen, "libavcodec would not open its %s decoder",

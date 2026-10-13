@@ -446,6 +446,58 @@ class Analysis:
                 out.append((dts27 - t) / 27000.0)
         return out
 
+    def buffer_peak(self, pid, frame_ms=None):
+        """Most bytes of one stream that a receiver holds at once.
+
+        Bytes arrive evenly between a PES packet's first and last transport
+        packet. Video (frame_ms None): a packet leaves whole at its decode
+        time. Audio: a packet is frames of frame_ms each, and each leaves
+        at its own time."""
+        ev = []                         # (arrive from, arrive to, bytes, [(time, bytes)])
+        for k, r in enumerate(self.pes[pid]):
+            t0, t1 = self.stc_at(r["first"]), self.stc_at(r["last"] + 1)
+            if t0 is None or t1 is None or r["dts"] is None:
+                continue
+            due = (t1 // 300 + mod_diff(r["dts"], int(t1 // 300) % PTS_MOD, PTS_MOD)) * 300
+            if frame_ms is None:
+                out = [(due, r["len"])]
+            else:
+                nxt = self.pes[pid][k + 1] if k + 1 < len(self.pes[pid]) else None
+                dur = mod_diff(nxt["dts"], r["dts"], PTS_MOD) / 90.0 if nxt and nxt["dts"] is not None \
+                    else frame_ms
+                n = max(1, round(dur / frame_ms))
+                out = [(due + int(i * frame_ms * 27000), r["len"] / n) for i in range(n)]
+            ev.append((t0, t1, r["len"], out))
+        peak = 0.0
+        for i, (_, t, _, _) in enumerate(ev):   # fullest just as a packet has all arrived
+            occ = 0.0
+            for a0, a1, size, out in ev[max(0, i - 400):i + 400]:
+                if a0 >= t:
+                    continue
+                got = size if t >= a1 else size * (t - a0) / max(a1 - a0, 1)
+                occ += got - sum(b for when, b in out if when < t)
+            peak = max(peak, occ)
+        return peak
+
+    def peak_rate(self, pid, window_ms=200):
+        """Largest bit rate of one PID over any window of that length, on
+        the stream's own clock (transport packets, headers and all)."""
+        times = []
+        with open(self.path, "rb") as f:
+            data = f.read()
+        for i in range(len(data) // TS):
+            if ((data[i * TS + 1] & 0x1F) << 8 | data[i * TS + 2]) == pid:
+                t = self.stc_at(i)
+                if t is not None:
+                    times.append(t)
+        win = window_ms * 27000
+        best, j = 0, 0
+        for i, t in enumerate(times):
+            while times[j] < t - win:
+                j += 1
+            best = max(best, i - j + 1)
+        return best * TS * 8 * 1000.0 / window_ms
+
     def max_interval_ms(self, idx_list):
         """Longest gap between table repetitions, measured on the PCR clock."""
         if len(idx_list) < 2:

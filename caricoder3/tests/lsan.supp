@@ -1,6 +1,7 @@
 # Leaks that are inside a library and reproduce without any of our code.
 #
-# libx265 3.5: x265_encoder_open() keeps 1168 bytes that x265_encoder_close()
-# does not give back. A bare open + close shows it. One per encoder opened,
-# so it does not grow while a channel runs.
+# libx265 3.5: x265_encoder_open() keeps memory that x265_encoder_close()
+# does not give back: 1.2 kB with most presets, about 5 kB with
+# "ultrafast". A program that only opens and closes the encoder shows it.
+# One lot per encoder opened, so it does not grow while a channel runs.
 leak:x265_encoder_open

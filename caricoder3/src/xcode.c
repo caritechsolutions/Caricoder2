@@ -12,11 +12,25 @@
 #include <sys/prctl.h>
 #include <time.h>
 
+#include "clock.h"
 #include "log.h"
 #include "psi.h"
 
 #define QUEUE_BYTES_MAX (48u * 1024 * 1024) /* input waiting for the codec */
 #define IDLE_NS         200000000LL         /* no input this long: flush what is half built */
+/*
+ * Falling behind. Output that reaches the mux after its send time is of
+ * no use to anyone. If that goes on for LATE_NS and input is piling up
+ * (BEHIND of it waiting), the codec is slower than the stream and will
+ * never catch up by itself: what is waiting is thrown away, so that it
+ * works on current input again. If output is late with nothing piled up,
+ * the codec is fast enough but --delay is too short for the pictures it
+ * holds back: that is only reported.
+ */
+#define LATE_NS         3000000000LL
+#define BEHIND          (STC_HZ / 2)
+#define LATE_WARN_NS    10000000000LL
+#define FINISH_WAIT_NS   300000000L          /* longest a finish may hold up its caller */
 
 struct xcode {
     struct xcode_cfg cfg;
@@ -30,15 +44,24 @@ struct xcode {
     struct xcode_stats pub;
     uint64_t overflow;
     int64_t slack_min, slack_ever;
+    int64_t late_since;         /* ns; 0: the last unit out was on time */
+    int64_t late_last;          /* ns; when the last late unit came out */
+    int64_t late_worst;         /* most a unit was late since the last report */
+    int64_t late_warned;        /* worker only */
+    bool skip_to_key;           /* worker only: video input was thrown away */
 
     bool threaded;
+    bool joined;                /* the thread has been told to finish, and has */
     pthread_t th;
     pthread_mutex_t q_lock;
     pthread_cond_t q_cond;
+    pthread_cond_t done_cond;   /* the thread has left its loop */
+    bool exited;
     struct es_unit *q_head, *q_tail;
     size_t q_bytes;
     unsigned q_units;
     bool stop;
+    bool stop_when_empty;
     bool overflow_logged;
 };
 
@@ -219,14 +242,108 @@ static void publish(struct xcode *x)
     pthread_mutex_unlock(&x->st_lock);
 }
 
+/* Does this PES packet hold the start of a picture a decoder can begin
+ * with? Looked for by its NAL unit types: an IDR picture or a sequence
+ * parameter set in H.264; an IRAP picture or a parameter set in H.265. */
+static bool starts_at_key(enum codec_id codec, const uint8_t *d, size_t len)
+{
+    for (size_t i = 0; i + 4 < len; i++) {
+        unsigned type;
+
+        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1)
+            continue;
+        if (codec == CODEC_H264) {
+            type = d[i + 3] & 0x1F;
+            if (type == 5 || type == 7)
+                return true;
+        } else {
+            type = (d[i + 3] >> 1) & 0x3F;
+            if ((type >= 16 && type <= 21) || type == 32 || type == 33)
+                return true;
+        }
+        i += 2;
+    }
+    return false;
+}
+
 static void process(struct xcode *x, struct es_unit *u)
 {
+    if (x->skip_to_key) {
+        int off = pes_payload_offset(u->data, u->len);
+
+        if (off < 0 || !starts_at_key(x->cfg.in, u->data + off, u->len - (size_t)off)) {
+            pthread_mutex_lock(&x->q_lock);
+            x->overflow++;
+            pthread_mutex_unlock(&x->q_lock);
+            free(u);
+            return;
+        }
+        x->skip_to_key = false;
+    }
     if (x->video)
         vxc_unit(x->v, u);
     else
         axc_unit(x->a, u);
     free(u);
     publish(x);
+}
+
+/* Worker, after each unit: is the output late, and what is to be done? */
+static void check_late(struct xcode *x)
+{
+    int64_t now, since, worst;
+    struct es_unit *drop = NULL;
+    unsigned n = 0;
+
+    pthread_mutex_lock(&x->st_lock);
+    since = x->late_since;
+    worst = x->late_worst;
+    pthread_mutex_unlock(&x->st_lock);
+    if (!since)
+        return;
+    now = clock_now_ns();
+    if (now - since < LATE_NS)
+        return;
+
+    pthread_mutex_lock(&x->q_lock);
+    if (x->q_head && x->q_tail->t0 - x->q_head->t0 > BEHIND) {
+        drop = x->q_head;
+        n = x->q_units;
+        x->q_head = x->q_tail = NULL;
+        x->q_bytes = 0;
+        x->q_units = 0;
+        x->overflow += n;
+    }
+    pthread_mutex_unlock(&x->q_lock);
+
+    if (drop) {
+        while (drop) {
+            struct es_unit *u = drop;
+
+            drop = u->next;
+            free(u);
+        }
+        if (x->video) {
+            vxc_reset(x->v);
+            x->skip_to_key = true;
+        }
+        pthread_mutex_lock(&x->st_lock);
+        x->late_since = 0;
+        x->late_worst = 0;
+        pthread_mutex_unlock(&x->st_lock);
+        x->late_warned = now;
+        log_warn("PID 0x%04X: the %s transcoder is slower than the stream (output %lld ms "
+                 "late); %u packets of input skipped to catch up", x->cfg.pid,
+                 x->video ? "video" : "audio", (long long)(worst / STC_PER_MS), n);
+    } else if (now - x->late_warned > LATE_WARN_NS) {
+        pthread_mutex_lock(&x->st_lock);
+        x->late_worst = 0;
+        pthread_mutex_unlock(&x->st_lock);
+        x->late_warned = now;
+        log_warn("PID 0x%04X: transcoded %s reaches the output up to %lld ms too late and "
+                 "is dropped: --delay is too short for what this codec holds back",
+                 x->cfg.pid, x->video ? "video" : "audio", (long long)(worst / STC_PER_MS));
+    }
 }
 
 static void *worker(void *arg)
@@ -245,6 +362,8 @@ static void *worker(void *arg)
             struct timespec ts;
             int rc;
 
+            if (x->stop_when_empty)
+                break;
             clock_gettime(CLOCK_MONOTONIC, &ts);
             ts.tv_nsec += IDLE_NS;
             if (ts.tv_nsec >= 1000000000L) {
@@ -252,7 +371,8 @@ static void *worker(void *arg)
                 ts.tv_nsec -= 1000000000L;
             }
             rc = pthread_cond_timedwait(&x->q_cond, &x->q_lock, &ts);
-            if (rc == ETIMEDOUT && !x->q_head && !x->stop && !x->video) {
+            if (rc == ETIMEDOUT && !x->q_head && !x->stop && !x->stop_when_empty &&
+                !x->video) {
                 /* The input has gone quiet. A packet that is part full
                  * goes out now rather than when the input returns. */
                 pthread_mutex_unlock(&x->q_lock);
@@ -271,9 +391,12 @@ static void *worker(void *arg)
 
         u->next = NULL;
         process(x, u);
+        check_late(x);
 
         pthread_mutex_lock(&x->q_lock);
     }
+    x->exited = true;
+    pthread_cond_signal(&x->done_cond);
     pthread_mutex_unlock(&x->q_lock);
     return NULL;
 }
@@ -317,8 +440,41 @@ void xcode_push(struct xcode *x, struct es_unit *u)
 
 void xcode_finish(struct xcode *x)
 {
-    if (x->threaded)
-        return;                             /* a live run has no end */
+    if (x->threaded && !x->joined) {
+        struct timespec ts;
+        bool in_time;
+
+        /* The thread works off what is queued, then goes. The caller is
+         * the input thread of a live channel and cannot wait long: a
+         * codec that is not through in FINISH_WAIT_NS is one that was
+         * behind anyway, and what it holds is given up. */
+        pthread_mutex_lock(&x->q_lock);
+        x->stop_when_empty = true;
+        pthread_cond_signal(&x->q_cond);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += FINISH_WAIT_NS;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        while (!x->exited)
+            if (pthread_cond_timedwait(&x->done_cond, &x->q_lock, &ts) == ETIMEDOUT)
+                break;
+        in_time = x->exited;
+        if (!in_time) {
+            x->stop = true;
+            pthread_cond_signal(&x->q_cond);
+        }
+        pthread_mutex_unlock(&x->q_lock);
+        pthread_join(x->th, NULL);
+        x->joined = true;
+        if (!in_time) {
+            log_warn("PID 0x%04X: the %s transcoder was behind when its stream ended; "
+                     "what it still held is lost", x->cfg.pid, x->video ? "video" : "audio");
+            publish(x);
+            return;
+        }
+    }
     if (x->video)
         vxc_finish(x->v);
     else
@@ -333,7 +489,30 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
         x->slack_min = slack;
     if (slack < x->slack_ever)
         x->slack_ever = slack;
+    if (slack >= 0) {
+        x->late_since = 0;
+    } else {
+        int64_t now = clock_now_ns();
+
+        /* Lateness from before a pause in the output is not this one's. */
+        if (!x->late_since || now - x->late_last > 1000000000LL)
+            x->late_since = now;
+        x->late_last = now;
+        if (-slack > x->late_worst)
+            x->late_worst = -slack;
+    }
     pthread_mutex_unlock(&x->st_lock);
+}
+
+int64_t xcode_last_dts(const struct xcode *x)
+{
+    return x->video ? vxc_last_dts(x->v) : NOPTS;
+}
+
+void xcode_start_after(struct xcode *x, int64_t dts90)
+{
+    if (x->video && dts90 != NOPTS)
+        vxc_start_after(x->v, dts90);
 }
 
 void xcode_get_stats(struct xcode *x, struct xcode_stats *st)
@@ -375,6 +554,7 @@ struct xcode *xcode_new(const struct xcode_cfg *cfg, bool threaded,
         pthread_condattr_init(&ca);
         pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
         pthread_cond_init(&x->q_cond, &ca);
+        pthread_cond_init(&x->done_cond, &ca);
         pthread_condattr_destroy(&ca);
     }
     if (x->video)
@@ -401,7 +581,7 @@ void xcode_free(struct xcode *x)
 {
     if (!x)
         return;
-    if (x->threaded) {
+    if (x->threaded && !x->joined) {
         pthread_mutex_lock(&x->q_lock);
         x->stop = true;
         pthread_cond_signal(&x->q_cond);
@@ -417,6 +597,7 @@ void xcode_free(struct xcode *x)
     axc_free(x->a);
     vxc_free(x->v);
     pthread_cond_destroy(&x->q_cond);
+    pthread_cond_destroy(&x->done_cond);
     pthread_mutex_destroy(&x->q_lock);
     pthread_mutex_destroy(&x->st_lock);
     free(x);

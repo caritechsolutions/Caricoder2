@@ -4,6 +4,7 @@
  */
 #include "codec.h"
 
+#include <sched.h>
 #include <string.h>
 
 /* Each backend lives in its own file and exists only when the Makefile
@@ -68,6 +69,20 @@ static const struct codec_backend *const backends[] = {
 #endif
     NULL
 };
+
+int codec_threads(int most)
+{
+    cpu_set_t set;
+    int n = 1;
+
+    /* The processors this process may run on, which is what counts when
+     * it has been confined to some of them. */
+    if (sched_getaffinity(0, sizeof(set), &set) == 0)
+        n = CPU_COUNT(&set);
+    if (n < 1)
+        n = 1;
+    return n < most ? n : most;
+}
 
 const char *codec_name(enum codec_id id)
 {

@@ -73,7 +73,43 @@ def bad_pcr(ts, which, shift):
     return bytes(data)
 
 
+def xcode_seeds(out_dir):
+    """Short real streams (made by ffmpeg) for tests/fuzz_xcode.c."""
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        print("ffmpeg is needed to make the transcoding seeds")
+        return 1
+    os.makedirs(out_dir, exist_ok=True)
+    n = 0
+    for name, v, a in (
+            ("h264_mp2", ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "300k", "-g", "12"],
+             ["-c:a", "mp2", "-b:a", "96k"]),
+            ("h264_aac", ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "300k", "-g", "12",
+                          "-bf", "2"], ["-c:a", "aac", "-b:a", "64k"]),
+            ("hevc_ac3", ["-c:v", "libx265", "-preset", "ultrafast", "-b:v", "300k",
+                          "-x265-params", "log-level=error:keyint=12"],
+             ["-c:a", "ac3", "-b:a", "96k"]),
+            ("h264_mp3", ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "300k", "-g", "12"],
+             ["-c:a", "libmp3lame", "-b:a", "64k"])):
+        p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                            "testsrc2=size=160x120:rate=25:duration=3", "-f", "lavfi", "-i",
+                            "sine=frequency=700:sample_rate=48000:duration=3",
+                            "-pix_fmt", "yuv420p", *v, *a, "-f", "mpegts", "-muxrate", "700k",
+                            "-"], capture_output=True)
+        if p.returncode or not p.stdout:
+            continue
+        for mode in (0, 1, 2, 3, 8, 18):
+            with open(os.path.join(out_dir, f"seed_{name}_{mode}"), "wb") as f:
+                f.write(bytes([mode]) + p.stdout[:399_000])
+            n += 1
+    print(f"{n} seeds written to {out_dir}")
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--xcode":
+        return xcode_seeds(sys.argv[2] if len(sys.argv) > 2 else "build/corpus-xcode")
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus-live"
     os.makedirs(out_dir, exist_ok=True)
     a = stream(1, 10.0)
@@ -124,4 +160,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

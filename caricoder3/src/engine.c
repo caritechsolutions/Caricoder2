@@ -221,13 +221,19 @@ static bool plan_stream(struct engine *e, const struct program *p, int idx,
 /* How the transcoded stream is announced in the PMT. */
 static void announce(struct program *np, int idx, enum codec_id out)
 {
+    /* MPEG audio at 16, 22.05 or 24 kHz is type 0x04, at the full rates
+     * 0x03. The sample rate is kept, so the type of an MPEG audio input
+     * tells; from another coding the rate is not known this early and
+     * 0x03 is written (receivers decode either under either type). */
+    int mpa_type = np->es[idx].stream_type == 0x04 ? 0x04 : 0x03;
+
     static const uint8_t keep[] = { 0x0A, 0x52 };       /* language, stream id */
     static const uint8_t hevc_reg[] = { 0x05, 0x04, 'H', 'E', 'V', 'C' };
 
     switch (out) {
     case CODEC_AAC:  program_set_es(np, idx, 0x0F, keep, 2, NULL, 0); break;
     case CODEC_MP2:
-    case CODEC_MP3:  program_set_es(np, idx, 0x03, keep, 2, NULL, 0); break;
+    case CODEC_MP3:  program_set_es(np, idx, mpa_type, keep, 2, NULL, 0); break;
     case CODEC_H264: program_set_es(np, idx, 0x1B, keep, 2, NULL, 0); break;
     case CODEC_HEVC: program_set_es(np, idx, 0x24, keep, 2, hevc_reg, 6); break;
     default: break;
@@ -243,6 +249,8 @@ static void announce(struct program *np, int idx, enum codec_id out)
 static void update_xcodes(struct engine *e, const struct program *p, struct program *np)
 {
     struct xcode *gone[MAX_ES], *keep[MAX_ES];
+    int gone_pid[MAX_ES];
+    int64_t gone_dts[MAX_ES];
     struct xcode_cfg want[MAX_ES], keep_cfg[MAX_ES];
     bool wanted[MAX_ES] = { false };
     int n_gone = 0, n_keep = 0;
@@ -262,6 +270,7 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
             keep[n_keep] = e->xc_list[k];
             keep_cfg[n_keep++] = e->xc_cfg[k];
         } else {
+            gone_pid[n_gone] = e->xc_cfg[k].pid;
             gone[n_gone++] = e->xc_list[k];
             e->xc_by_pid[e->xc_cfg[k].pid] = NULL;
         }
@@ -271,8 +280,12 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
     e->n_xc = n_keep;
     pthread_mutex_unlock(&e->lock);
 
-    for (int k = 0; k < n_gone; k++)
+    /* What they still hold is the end of the old stream: it goes out. */
+    for (int k = 0; k < n_gone; k++) {
+        xcode_finish(gone[k]);
+        gone_dts[k] = xcode_last_dts(gone[k]);
         xcode_free(gone[k]);
+    }
 
     for (int i = 0; i < p->n_es; i++) {
         struct xcode *x = NULL;
@@ -292,6 +305,9 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
                 wanted[i] = false;
                 continue;
             }
+            for (int k = 0; k < n_gone; k++)
+                if (gone_pid[k] == want[i].pid)
+                    xcode_start_after(x, gone_dts[k]);
             pthread_mutex_lock(&e->lock);
             e->xc_list[e->n_xc] = x;
             e->xc_cfg[e->n_xc++] = want[i];
@@ -459,8 +475,18 @@ static void on_unit(void *opaque, struct es_unit *u)
          * (on_pcr), but units keep it moving if the PCR has gone. */
         stamp(e, u);
         t1 = u->t1;
-        if (!mux_started(e->mux))
-            mux_start(e->mux, u->t0);
+        if (!mux_started(e->mux)) {
+            /* New video is sent from one encoder buffer before it is due
+             * (xc_video.c), which for the first pictures is earlier than
+             * anything in the input: the clock starts that much sooner. */
+            stc_t early = 0;
+
+            if (e->cfg.n_video)
+                early = (stc_t)((e->cfg.vbv_ms > 0 ? e->cfg.vbv_ms : 1000) + 100) * STC_PER_MS;
+            if (early > u->t0)              /* but not before time 0: that */
+                early = u->t0 > 0 ? u->t0 : 0;  /* would start in a wrap */
+            mux_start(e->mux, u->t0 - early);
+        }
         deliver(e, u);
         if (t1 > e->last_out_time) {
             e->last_out_time = t1;
@@ -782,8 +808,9 @@ void engine_finish(struct engine *e)
     e->sbuf_len = 0;
 
     demux_flush(e->dmx);
-    for (int k = 0; k < e->n_xc; k++)
-        xcode_finish(e->xc_list[k]);
+    if (!e->cfg.live)                       /* a live run has no end to tidy */
+        for (int k = 0; k < e->n_xc; k++)
+            xcode_finish(e->xc_list[k]);
 
     pthread_mutex_lock(&e->lock);
     while (mux_started(e->mux) && !mux_idle(e->mux) &&

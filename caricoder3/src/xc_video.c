@@ -9,12 +9,15 @@
  *
  * When each new access unit is sent
  * ---------------------------------
- * An encoder that holds to a buffer of B seconds at its bit rate promises
- * that a decoder which starts a picture's data arriving B before the
- * picture is due will always have it complete in time. So each access
- * unit is given to the mux to send from (its decode time - B - one
- * picture), spread over one picture's duration. That is the lead a
- * receiver sees on the transcoded video, whatever the source had.
+ * An encoder that holds to a buffer of B seconds at its bit rate R
+ * promises this: if its output is delivered at R, starting B before the
+ * first picture is due, every picture is complete in the receiver before
+ * it is needed. So that is how the output is delivered: each access unit
+ * takes (its size / R) to send, one follows the other, and none starts
+ * earlier than (its decode time - B - one picture). A large key frame is
+ * therefore spread over the time it takes at R, not pushed out in one
+ * picture's time: the video never asks the mux for more than R, and the
+ * audio beside it is not held up.
  *
  * The cost is delay: an access unit can only be sent once it exists, and
  * it exists only after the decoder and the encoder have had the pictures
@@ -31,7 +34,8 @@
 #define DEFAULT_VBV_MS  1000
 #define DEFAULT_GOP_MS  2000
 #define RESTART_BACK    (2 * STC_HZ)    /* time going back further than this: a new start */
-#define FRAME_DUR_MAX   (STC_HZ / 5)
+#define PROGRESSIVE_RUN 500             /* pictures in a row before an interlaced
+                                         * encoder is given up for a progressive one */
 
 struct vxc {
     struct xcode_cfg cfg;
@@ -43,9 +47,12 @@ struct vxc {
     void *dctx, *ectx;
     bool want_cuda;
     bool enc_failed;
-    int e_width, e_height, e_depth;     /* what the encoder was opened for */
-    enum vframe_mem e_mem;
+    bool fall_back;                     /* the card let us down: carry on on the CPU */
+    bool dec_failed;                    /* the decoder cannot do this stream; said once */
+    struct vframe e_fmt;                /* the picture the encoder was opened for */
+    int progressive_run;
     int out_depth;
+    int64_t rate;                       /* bits per second the encoder holds to */
 
     stc_t frame_dur;
     stc_t last_in;                      /* time of the last picture encoded */
@@ -81,14 +88,21 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
     memcpy(u->data + off, p->data, p->len);
     u->rai = p->key;
 
+    /* Sent at the encoder's own bit rate, one after the other, and not
+     * sooner than the buffer allows (see the top of this file). */
     dts = dts90 * STC_PER_90K;
     u->t0 = dts - (stc_t)v->vbv_ms * STC_PER_MS - v->frame_dur;
-    u->t1 = u->t0 + v->frame_dur;
-    if (u->t0 < v->last_t1 && v->last_t1 - u->t0 < STC_HZ) {
+    if (u->t0 < v->last_t1 &&
+        v->last_t1 - u->t0 < (stc_t)v->vbv_ms * STC_PER_MS + RESTART_BACK)
         u->t0 = v->last_t1;
-        if (u->t1 <= u->t0)
-            u->t1 = u->t0 + 1;
-    }
+    u->t1 = u->t0 + (stc_t)((int64_t)u->len * 8 * STC_HZ / (v->rate > 0 ? v->rate : 1));
+    /* An encoder that overran its buffer, or one just opened while the
+     * last one's output is still going out: the unit must be there in
+     * good time for its decode time all the same. */
+    if (u->t1 > dts - v->frame_dur / 2)
+        u->t1 = dts - v->frame_dur / 2;
+    if (u->t1 <= u->t0)
+        u->t1 = u->t0 + 1;
     v->last_t1 = u->t1;
     v->st->frames_out++;
     v->st->units_out++;
@@ -149,6 +163,7 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
             rate = 300000;
     }
     c.bitrate = (int)rate;
+    v->rate = rate;
     c.vbv_ms = v->vbv_ms;
     c.gop_ms = v->cfg.gop_ms > 0 ? v->cfg.gop_ms : DEFAULT_GOP_MS;
     c.preset = v->cfg.preset;
@@ -176,16 +191,25 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
         log_warn("PID 0x%04X: %s: %s", v->cfg.pid, b->name, err);
     }
     if (!v->ectx) {
+        v->enc_failed = true;
+        if (f->mem == VMEM_CUDA && v->cfg.decoder == WHERE_AUTO &&
+            v->cfg.encoder == WHERE_AUTO &&
+            codec_find(CODEC_VIDEO, CODEC_ENCODER, v->cfg.out, WHERE_CPU, 0) &&
+            codec_find(CODEC_VIDEO, CODEC_DECODER, v->cfg.in, WHERE_CPU, 0)) {
+            /* The pictures are on a card whose encoder will not open, and
+             * nobody insisted on the card. Decode again on the CPU. */
+            log_warn("PID 0x%04X: falling back to the CPU for decoding and encoding",
+                     v->cfg.pid);
+            v->fall_back = true;
+            return false;
+        }
         log_err("PID 0x%04X: no encoder for %s could be opened at %dx%d; the stream "
                 "is silent", v->cfg.pid, codec_name(v->cfg.out), f->width, f->height);
-        v->enc_failed = true;
         v->st->failed = true;
         return false;
     }
-    v->e_width = f->width;
-    v->e_height = f->height;
-    v->e_depth = f->depth;
-    v->e_mem = f->mem;
+    v->e_fmt = *f;
+    v->progressive_run = 0;
     v->out_depth = c.depth;
     v->enc_failed = false;
     v->st->failed = false;
@@ -237,13 +261,51 @@ static bool to_8bit(struct vxc *v, const struct vframe *in, struct vframe *out)
     return true;
 }
 
+/*
+ * Is this picture of another kind than the encoder was opened for?
+ * Size, depth and where the picture lives always count. The rest is what
+ * the encoder writes into its headers: the shape of a pixel (a channel
+ * going from 4:3 to 16:9), the frame rate, the colour description, and
+ * whether the picture is two fields. A value the decoder does not know
+ * (0) is no change.
+ */
+static bool format_changed(struct vxc *v, const struct vframe *f)
+{
+    const struct vframe *e = &v->e_fmt;
+
+    if (f->width != e->width || f->height != e->height || f->depth != e->depth ||
+        f->mem != e->mem)
+        return true;
+    if (f->sar_num > 0 && f->sar_den > 0 &&
+        (int64_t)f->sar_num * e->sar_den != (int64_t)e->sar_num * f->sar_den)
+        return true;
+    if (f->fps_num > 0 && f->fps_den > 0 &&
+        (int64_t)f->fps_num * e->fps_den != (int64_t)e->fps_num * f->fps_den)
+        return true;
+    if (f->primaries != e->primaries || f->transfer != e->transfer ||
+        f->matrix != e->matrix || f->full_range != e->full_range)
+        return true;
+    /* Field or frame is a flag on every picture, and interlaced streams
+     * carry progressive pictures among the others. One interlaced
+     * picture makes the stream interlaced; only a long run of progressive
+     * ones makes it progressive again. */
+    if (f->interlaced && !e->interlaced)
+        return true;
+    if (!f->interlaced && e->interlaced) {
+        if (++v->progressive_run >= PROGRESSIVE_RUN)
+            return true;
+    } else {
+        v->progressive_run = 0;
+    }
+    return false;
+}
+
 static void picture_in(struct vxc *v, const struct vframe *in)
 {
     struct vframe f = *in, tmp;
 
     v->st->frames_in++;
-    if (v->ectx && (f.width != v->e_width || f.height != v->e_height ||
-                    f.depth != v->e_depth || f.mem != v->e_mem)) {
+    if (v->ectx && format_changed(v, &f)) {
         log_info("PID 0x%04X: the picture format changed", v->cfg.pid);
         encoder_close(v);
         v->enc_failed = false;
@@ -299,23 +361,101 @@ static void drain_decoder(struct vxc *v)
         picture_in(v, &f);
 }
 
+/* Replaces the decoder by the one for the CPU. False if there is none or
+ * it will not open; then the object stays whole but has no decoder. */
+static bool decoder_to_cpu(struct vxc *v)
+{
+    struct vdec_cfg dc = { v->cfg.in, v->cfg.gpu, false, false };
+    const struct codec_backend *b =
+        codec_find(CODEC_VIDEO, CODEC_DECODER, v->cfg.in, WHERE_CPU, 0);
+    char err[160] = "";
+
+    v->db->vdec->close(v->dctx);
+    v->dctx = b ? b->vdec->open(&dc, err, sizeof(err)) : NULL;
+    if (!v->dctx) {
+        log_err("PID 0x%04X: %s: %s; the stream is silent", v->cfg.pid,
+                b ? b->name : "no decoder for the CPU", err);
+        v->st->failed = true;
+        return false;
+    }
+    v->db = b;
+    v->cfg.decoder = WHERE_CPU;
+    v->want_cuda = false;
+    snprintf(v->st->decoder, sizeof(v->st->decoder), "%s", b->name);
+    return true;
+}
+
 void vxc_unit(struct vxc *v, const struct es_unit *u)
 {
     int off = pes_payload_offset(u->data, u->len);
+    int rc;
 
     v->st->units_in++;
-    if (off < 0)
+    if (off < 0 || !v->dctx)
         return;
-    if (v->db->vdec->push(v->dctx, u->data + off, u->len - (size_t)off, u->pts,
-                          u->dts) < 0)
+    rc = v->db->vdec->push(v->dctx, u->data + off, u->len - (size_t)off, u->pts, u->dts);
+    if (rc == VDEC_CANNOT) {
+        if (v->db->where != WHERE_CPU && v->cfg.decoder == WHERE_AUTO &&
+            codec_find(CODEC_VIDEO, CODEC_DECODER, v->cfg.in, WHERE_CPU, 0)) {
+            /* The card will not decode this stream, and nobody insisted
+             * on the card. The CPU decodes it, starting with this very
+             * unit; the encoder stays where it is if it can. */
+            log_warn("PID 0x%04X: %s cannot decode this stream; decoding on the CPU",
+                     v->cfg.pid, v->db->name);
+            if (!decoder_to_cpu(v))
+                return;
+            rc = v->db->vdec->push(v->dctx, u->data + off, u->len - (size_t)off, u->pts,
+                                   u->dts);
+        } else if (!v->dec_failed) {
+            v->dec_failed = true;
+            v->st->failed = true;
+            log_err("PID 0x%04X: %s cannot decode this stream; the stream is silent",
+                    v->cfg.pid, v->db->name);
+        }
+    } else if (v->dec_failed && rc == 0) {
+        v->dec_failed = false;              /* the stream changed to one it takes */
+        v->st->failed = v->enc_failed;
+    }
+    if (rc < 0)
         v->st->errors++;
     drain_decoder(v);
+
+    if (v->fall_back) {
+        /* The pictures are on a card whose encoder will not open (see
+         * encoder_open). The pictures in this unit are gone with the old
+         * decoder; the new one starts at the next key frame. */
+        v->fall_back = false;
+        if (!decoder_to_cpu(v))
+            return;
+        v->cfg.encoder = WHERE_CPU;
+        v->enc_failed = false;
+    }
+}
+
+int64_t vxc_last_dts(const struct vxc *v)
+{
+    return v->last_dts90;
+}
+
+void vxc_start_after(struct vxc *v, int64_t dts90)
+{
+    v->last_dts90 = dts90;
+}
+
+/* Input was thrown away: what the decoder holds refers to pictures it
+ * will never get. */
+void vxc_reset(struct vxc *v)
+{
+    if (v->dctx)
+        v->db->vdec->reset(v->dctx);
 }
 
 void vxc_finish(struct vxc *v)
 {
-    v->db->vdec->drain(v->dctx);
-    drain_decoder(v);
+    if (v->dctx) {
+        v->db->vdec->drain(v->dctx);
+        drain_decoder(v);
+    }
     encoder_close(v);
 }
 
@@ -348,7 +488,8 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
 
     /* The decoder asked for, or the best that opens. */
     for (int skip = 0; !v->dctx; skip++) {
-        struct vdec_cfg dc = { cfg->in, cfg->gpu, v->want_cuda };
+        /* H.264 goes out at 8 bits (see encoder_open). */
+        struct vdec_cfg dc = { cfg->in, cfg->gpu, v->want_cuda, cfg->out == CODEC_H264 };
         const struct codec_backend *b =
             codec_find(CODEC_VIDEO, CODEC_DECODER, cfg->in, cfg->decoder, skip);
 

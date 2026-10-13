@@ -121,14 +121,22 @@ struct vdec_cfg {
     enum codec_id codec;
     int  gpu;                   /* card index for a hardware decoder */
     bool want_cuda;             /* leave frames on the card if possible */
+    bool only_8bit;             /* the encoder takes 8 bits only: a hardware
+                                 * decoder converts 10-bit video itself (a CPU
+                                 * decoder need not: the pipeline does it) */
 };
+
+#define VDEC_CANNOT (-2)
 
 struct vdec_ops {
     void *(*open)(const struct vdec_cfg *cfg, char *err, size_t errlen);
 
     /* Elementary stream bytes as they come out of PES packets, cut
      * anywhere. pts/dts (90 kHz, NOPTS if absent) belong to the first
-     * access unit that starts in this piece. Returns 0, or -1. */
+     * access unit that starts in this piece. Returns 0; -1 if this piece
+     * could not be decoded; VDEC_CANNOT if this decoder cannot decode this
+     * stream at all (a format the hardware does not take, no memory on the
+     * card): the caller should try another. */
     int (*push)(void *ctx, const uint8_t *es, size_t len, int64_t pts90,
                 int64_t dts90);
 
@@ -179,6 +187,16 @@ struct venc_ops {
     void (*close)(void *ctx);
 };
 
+/*
+ * Threads for one CPU codec: as many as the machine has processors, up to
+ * `most`. Codecs that work on several pictures at once hold back one
+ * picture more for each thread, which is delay; the limits keep that the
+ * same on a 72-processor server as on a small one.
+ */
+#define CODEC_THREADS_DECODE    4
+#define CODEC_THREADS_X264      6
+int codec_threads(int most);
+
 /* ---- the registry --------------------------------------------------- */
 
 struct codec_backend {
@@ -203,6 +221,10 @@ struct codec_backend {
 
 const struct codec_backend *const *codec_backends(int *count);
 void codec_list(FILE *f);
+
+/* Puts made-up pictures through the NVIDIA decoder and encoder on card
+ * `gpu` and reports each step. Returns 0 if all of it worked. */
+int nv_selftest(FILE *out, int gpu);
 
 /*
  * The best usable backend for a job, or NULL. `where` narrows the choice
