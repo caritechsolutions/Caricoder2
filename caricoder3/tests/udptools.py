@@ -51,28 +51,44 @@ class Player:
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         self.seq = 0
         self.sent = 0
+        self.worst_wake = 0.0           # seconds; see play()
 
-    def play(self, path, gate=None, speed=1.0, stall=None, at=None):
+    def play(self, path, gate=None, speed=1.0, stall=None, at=None, rate=None,
+             tempo=None, stop_after=None):
         """
         stall=(when, seconds[, speed]): stop sending for that long, then
         send the backlog (data held up, nothing lost): as fast as possible,
         or at `speed` times real time if given.
         at={seconds: callable}: call back once when that point is reached.
+        tempo=(from_s, to_s, factor): send that part of the file `factor`
+        times faster than real time.
+        stop_after=seconds: stop sending at that point in the file.
         """
         with open(path, "rb") as f:
             data = f.read()
-        rate = file_bitrate(path) * speed
+        # rate: the file's true bit rate, for files whose PCRs do not span
+        # the whole of it evenly (a piece cut out, a PCR that stops).
+        rate = (rate or file_bitrate(path)) * speed
         step = 7 * TS * 8 / rate
         t0 = time.perf_counter()
         n = 0
         at = dict(at or {})
         lag = 0.0                       # how far behind schedule we are sending
         drain = 0.0                     # seconds of lag recovered per datagram
+        due = t0
         for off in range(0, len(data) - 7 * TS + 1, 7 * TS):
-            due = t0 + n * step + lag
-            delay = due - time.perf_counter()
+            if stop_after is not None and n * step >= stop_after:
+                break
+            delay = due + lag - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
+                # How late this thread woke: a measure of the test machine,
+                # not of anything under test.
+                woke_late = time.perf_counter() - (due + lag)
+                if woke_late > self.worst_wake:
+                    self.worst_wake = woke_late
+            fast = tempo and tempo[0] <= n * step < tempo[1]
+            due += step / tempo[2] if fast else step
             lag = max(0.0, lag - drain)
             if stall and n * step >= stall[0]:
                 time.sleep(stall[1])
@@ -100,6 +116,9 @@ class Player:
         self.sock.close()
 
 
+SO_TIMESTAMPNS = 35                 # Linux, <asm-generic/socket.h>
+
+
 class Capture:
     """Receives datagrams on a UDP port in a background thread."""
 
@@ -112,6 +131,15 @@ class Capture:
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
                                  socket.inet_aton(host) + socket.inet_aton(join_if))
         self.sock.settimeout(0.2)
+        # Arrival times are taken by the kernel when the datagram reaches
+        # the socket, not by this thread when it gets round to reading it.
+        # Otherwise a busy test machine shows up as jitter in the output.
+        self.kernel_times = False
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
+            self.kernel_times = True
+        except OSError:
+            pass
         self.chunks = []
         self.times = []
         self._run = True
@@ -121,12 +149,17 @@ class Capture:
     def _loop(self):
         while self._run:
             try:
-                d = self.sock.recv(65536)
+                d, anc, _, _ = self.sock.recvmsg(65536, 64)
             except socket.timeout:
                 continue
             except OSError:
                 break
-            self.times.append(time.perf_counter())
+            t = None
+            for level, kind, val in anc:
+                if level == socket.SOL_SOCKET and kind == SO_TIMESTAMPNS and len(val) >= 16:
+                    sec, nsec = struct.unpack("qq", val[:16])
+                    t = sec + nsec / 1e9
+            self.times.append(t if t is not None else time.time())
             self.chunks.append(d)
 
     def stop(self, path=None):
@@ -145,21 +178,20 @@ class Capture:
 
     def pacing_error_ms(self, bitrate):
         """
-        Worst and typical deviation of datagram arrival from an ideal
-        constant rate (line fitted through first and last arrival).
+        How far each datagram's arrival is from where a perfectly constant
+        `bitrate` would put it. The reference line is placed through the
+        median, so one late datagram at either end cannot tilt it and make
+        every other arrival look wrong.
         """
         t = self.times
         if len(t) < 10:
             return None
-        sizes = [len(c) for c in self.chunks]
         pos = 0
-        errs = []
-        total = sum(sizes[:-1])
-        span = t[-1] - t[0]
-        for ti, s in zip(t, sizes):
-            ideal = t[0] + span * pos / total if total else t[0]
-            errs.append(abs(ti - ideal) * 1000)
-            pos += s
-        errs.sort()
+        resid = []
+        for ti, c in zip(t, self.chunks):
+            resid.append(ti - pos * 8 / bitrate)
+            pos += len(c)
+        mid = sorted(resid)[len(resid) // 2]
+        errs = sorted(abs(r - mid) * 1000 for r in resid)
         return {"max": errs[-1], "p99": errs[int(len(errs) * 0.99)],
                 "median": errs[len(errs) // 2]}

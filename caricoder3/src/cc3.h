@@ -145,7 +145,9 @@ struct es_unit {
     uint16_t pid;
     uint8_t  kind;          /* enum es_kind */
     bool     rai;           /* random access indicator on the first packet */
-    bool     tentative;     /* queued while the input clock was in doubt */
+    bool     tentative;     /* stamped while the input clock was in doubt */
+    bool     wall;          /* timed from the owner's clock standing in for
+                             * a missing PCR, not from the stream's PCRs */
     int64_t  pts, dts;      /* 90 kHz unwrapped, NOPTS when absent */
     int      pts_off;       /* byte offset of the PTS field in data, or -1 */
     int      dts_off;       /* byte offset of the DTS field in data, or -1 */

@@ -24,8 +24,15 @@ struct demux_cb {
      * (went backwards, leapt forward, or the stream flagged it);
      * `expected` is then where the old time line had got to at this
      * packet, so the caller can decide how to splice.
+     *
+     * An unusual PCR is only reported once the next one has borne it out
+     * (see handle_pcr), and it is that next one which is reported. `since`
+     * is then the reading of the earlier one: content timed after `since`
+     * arrived after the clock was first seen at its new reading. For an
+     * ordinary PCR `since` equals `pcr`.
      */
-    void (*pcr)(void *opaque, stc_t pcr, stc_t expected, bool jump);
+    void (*pcr)(void *opaque, stc_t pcr, stc_t expected, bool jump,
+                stc_t since);
 };
 
 struct demux_stats {
@@ -44,6 +51,7 @@ struct demux_stats {
     uint64_t psi_errors;        /* bad CRC or malformed table */
     uint64_t pcr_count;
     uint64_t pcr_jumps;
+    uint64_t pcr_glitches;      /* single PCRs the next one contradicted: ignored */
     uint64_t pcr_missing;       /* times the PCR had to be done without */
     uint64_t ts_out_of_range;   /* PTS/DTS nowhere near the PCR: dropped */
     uint64_t program_changes;
@@ -65,8 +73,19 @@ void demux_resolve_now(struct demux *d);
 /* Stand-in for a PCR: "the packet that arrives next does so at this
  * time on the input clock". A live input whose PCR has gone silent is
  * kept timed this way, from the clock that was recovered while the PCR
- * was there. */
-void demux_time_anchor(struct demux *d, stc_t input_stc);
+ * was there. `doubt`: the caller did not believe the last PCRs it was
+ * given (they read far from its clock), so its time and theirs are not
+ * on one line; the stand-ins then replace them rather than follow on. */
+void demux_time_anchor(struct demux *d, stc_t input_stc, bool doubt);
+
+/*
+ * Order of the callbacks when an ordinary PCR arrives. Off (the default):
+ * the units it makes timeable are delivered first, then the PCR is
+ * reported. On: the PCR is reported first. A live pipeline wants it on,
+ * so that it has judged the PCR against its clock before it receives the
+ * content that arrived with it.
+ */
+void demux_set_pcr_first(struct demux *d, bool on);
 
 /* A byte that should have been a sync byte was not. */
 void demux_sync_error(struct demux *d);

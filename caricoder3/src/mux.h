@@ -27,7 +27,8 @@ struct mux_stats {
     uint64_t pcr_only;      /* adaptation-only packets carrying just a PCR */
     uint64_t data;
     uint64_t units;
-    uint64_t dropped_units; /* queue overflow or stream removed */
+    uint64_t dropped_units; /* too late or too early to send, queue full,
+                             * or their stream was removed */
     uint64_t late_units;    /* finished after their own DTS */
     uint64_t skips;         /* output clock jumped forward (process stalled) */
     int64_t  max_late;      /* worst packet lateness since last read, ticks */
@@ -53,11 +54,18 @@ bool mux_started(const struct mux *m);
  * not running for a while and the missed time cannot usefully be sent. */
 void mux_skip_to(struct mux *m, stc_t stc);
 
-/* Discards the queued units that are flagged tentative. */
-void mux_drop_tentative(struct mux *m);
+/* Units flagged tentative were stamped before it was known whether the
+ * input clock had stepped. It had: move those still waiting by `delta`
+ * (time stamps included), so they belong to the new clock like the rest. */
+void mux_restamp_tentative(struct mux *m, stc_t delta);
 
-/* The doubt is over: what was queued meanwhile is good after all. */
+/* It had not: they are right as they are. */
 void mux_clear_tentative(struct mux *m);
+
+/* Nobody will ever know: the PCR has gone, and content timed from the
+ * wall clock is about to be queued behind them. They are due at `stc`,
+ * at once, so that they neither block what follows nor are left to rot. */
+void mux_send_tentative_now(struct mux *m, stc_t stc);
 
 /* Discards everything queued (counted as dropped). */
 void mux_drop_all(struct mux *m);

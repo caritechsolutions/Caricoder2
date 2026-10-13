@@ -51,7 +51,10 @@ stc_t pll_eval(const struct pll *p, int64_t t_ns)
 
 int64_t pll_inverse(const struct pll *p, stc_t stc)
 {
-    return p->t_ref + (int64_t)(((double)(stc - p->s_ref) - p->s_frac) / p->rate);
+    /* Rounded up: at the time returned, pll_eval() has reached `stc`.
+     * Rounded down, a caller that sleeps until then would wake a
+     * nanosecond early, find nothing due and have to come round again. */
+    return p->t_ref + (int64_t)ceil(((double)(stc - p->s_ref) - p->s_frac) / p->rate);
 }
 
 void pll_update(struct pll *p, int64_t t_ns, stc_t stc)

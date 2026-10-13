@@ -135,11 +135,22 @@ random-access flag on key frames.
 - If the input stops, the output does not: tables, PCR and (in CBR) null
   packets keep flowing, and the service resumes on the same time line when
   the input returns.
-- If the source restarts on a new clock, the output clock runs on unbroken
-  and the new content is spliced onto it. PTS/DTS are shifted by one
-  constant; nothing else in the PES packets changes.
-- Input that is merely held up and then arrives in a burst is not mistaken
-  for a new clock: the time line is left alone.
+- If the source's clock steps (a restart, a stall that stays late, a skip
+  forward), the output clock runs on unbroken and the content is spliced
+  onto it. PTS/DTS are shifted by one constant; nothing else in the PES
+  packets changes. Content that arrives while the step is being confirmed
+  (a third of a second with ordinary PCR spacing) is held, then sent on
+  the new clock: with PCRs up to about a quarter of a second apart,
+  nothing is dropped but the PES packet on each stream that the step
+  itself cut in two. The cases this does not cover are under "Known
+  limits".
+- A single PCR with a wrong value (a damaged packet) does not break the
+  stream or move the time line, whether it is seconds or a few
+  milliseconds out. A PCR that does not follow on from the last one is
+  only acted on once the next PCR agrees with it.
+- Input that is merely held up and then arrives in a burst, or is caught
+  up at 1.2 times real time or faster, is not mistaken for a new clock:
+  the time line is left alone.
 - If the PCR disappears while other streams keep arriving, they are timed
   from the clock already recovered and keep flowing.
 - If the process itself is frozen for a while (a virtual machine pause, for
@@ -167,10 +178,12 @@ need more than 500 ms once decoding and encoding sit in the path.
 - `state`: `waiting_for_input`, `waiting_for_clock` or `running`
 - `input`: bit rate, age of the last packet, continuity errors on this
   service and on the rest of the multiplex, sync losses, kernel socket
-  overflows, damaged PES dropped, bad tables, PCR jumps, PCR missing
+  overflows, damaged PES dropped, bad tables, PCR jumps, single damaged
+  PCRs set aside (`pcr_glitches`), PCR missing
 - `service`: PIDs, stream types, how each stream is handled
 - `clock`: locked or not, measured drift against the source in ppm, arrival
-  jitter, time-line offset, number of discontinuities absorbed
+  jitter, time-line offset, number of discontinuities absorbed, units held
+  back at this moment because the source clock is in doubt
 - `output`: mode, bit rate, share of null packets, units dropped for lack
   of output rate, units that left after their own DTS, clock skips after a
   process freeze, queue depth, send errors
@@ -180,10 +193,14 @@ The same figures go to the log every 10 seconds (`--stats-interval`).
 ## Tests
 
 ```
-make test                         # 42 tests, about four minutes
+make test                         # 51 tests, about five minutes
 python3 tests/run_tests.py --list
 python3 tests/run_tests.py live   # only the tests with "live" in the name
-make fuzz && build/fuzz_engine -max_len=400000 build/corpus
+
+make fuzz                         # needs clang
+build/fuzz_engine -max_len=400000 build/corpus
+python3 tests/fuzz_seeds.py build/corpus-live
+build/fuzz_live -max_len=400000 build/corpus-live
 ```
 
 The checker in `tests/` is a second, independent implementation of the
@@ -192,9 +209,14 @@ agreement between the two is evidence rather than an echo. Where ffmpeg and
 TSDuck are installed, the suite also has them decode and verify the output.
 
 File tests run under AddressSanitizer and UndefinedBehaviorSanitizer. Live
-tests run in real time over UDP on the loopback interface. The fuzzer
-checks every output packet for a valid header, an unbroken continuity
-counter and a forward-moving PCR, on top of the usual memory checks.
+tests run in real time over UDP on the loopback interface.
+
+There are two fuzzers. `fuzz_engine` feeds the pipeline as a file run.
+`fuzz_live` feeds it as a live channel, with made-up arrival times, so
+that the clock handling is fuzzed too: stalls, bursts, restarts, missing
+and damaged PCRs. Both check every output packet for a valid header, an
+unbroken continuity counter and a forward-moving PCR, on top of the usual
+memory checks.
 
 To check a stream of your own, on any machine with Python 3:
 
@@ -217,6 +239,43 @@ python3 tests/ts_check.py out.ts --cbr --against in.ts
 - A burst that removes an exact multiple of 16 packets of one PID cannot be
   seen by a 4-bit continuity counter. That is a property of the transport
   stream, not of this program.
+- A clock step is only visible at a PCR. PES packets that arrive after the
+  source's clock has stepped but before its next PCR are taken for the old
+  clock's and keep timestamps that are off by the size of the step. With
+  PCRs every 40 ms or less that is one or two packets per stream per step.
+- A clock step is confirmed in about 0.3 s, or three PCRs if that takes
+  longer. If it cannot be confirmed within 0.6 s, the content that has
+  arrived by then is sent on the old clock after all. That happens when
+  PCRs are more than about 0.3 s apart, or when the source delivers
+  faster or slower than real time straight after the step. If the step is
+  then confirmed, what is still waiting to be sent is moved onto the new
+  clock: that saves it after a step forward of up to 15 s, where it
+  leaves late rather than not at all. After a step backward, or a longer
+  one forward, that content is lost, as it was before this mechanism
+  existed.
+- A backlog that is caught up slowly, at less than about 1.2 times real
+  time, cannot be told from a clock that has stepped back, and moves the
+  time line: once, or in several small steps as it drains.
+- While a clock question is open, content is held for up to 0.3 s (0.6 s
+  with sparse PCRs). If it turns out to be a backlog after all, that
+  content, late already, is that much later. Where it was more than
+  about 0.7 s late to begin with, some of it now passes the one second
+  limit and is dropped instead of being sent late.
+- A damaged PCR that reads ahead by less than 200 ms, or by less than
+  three PCR intervals on a stream whose PCRs are further apart than
+  70 ms, is acted on until the next PCR: no break and no loss, but the
+  packets just before it leave late by up to the size of the error.
+- If the PCR stops while a clock question is open and the step in
+  question was more than 5 s back or 30 s ahead, the streams that carry
+  on are discarded until the PCR returns: their timestamps are too far
+  from the only clock there is to be believed.
+- Two or more damaged PCRs in a row that agree with each other are
+  believed. The service is then disturbed for about as long as the wrong
+  value is off by, up to a few seconds.
+- If a stream is removed from the PMT while one of its PES packets is
+  half sent, that packet is finished first. Not so if its PID is in the
+  same moment given to a table or to a stream of another kind: then the
+  packet is cut off.
 - On loss of input the output keeps running. Going silent after a timeout,
   so that a downstream failover switch can react, is not built yet.
 - No PID or service-ID remapping.

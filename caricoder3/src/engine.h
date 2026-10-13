@@ -27,6 +27,7 @@ struct engine_stats {
     uint64_t in_datagrams;
     uint64_t rtp_datagrams;
     uint64_t discontinuities;   /* output time line re-based */
+    unsigned held_units;        /* waiting on a clock question right now */
     int64_t  ts_offset;         /* 27 MHz ticks added to input timestamps */
     bool     have_program;
     bool     clock_locked;

@@ -32,7 +32,8 @@
 #define RESYNC_LIMIT    (STC_HZ / 5)    /* live: PCR this far off the model ... */
 #define RESYNC_STABLE   (STC_HZ / 20)   /* ... without moving more than this   */
 #define RESYNC_HOLD_NS  300000000LL     /* ... for this long ...               */
-#define RESYNC_SAMPLES  5               /* ... over this many PCRs = new clock */
+#define RESYNC_SAMPLES  3               /* ... over this many PCRs = new clock */
+#define HOLD_MAX_NS     600000000LL     /* live: longest content is held meanwhile */
 #define PCR_QUIET_NS    500000000LL     /* live: data but no PCR for this long */
 #define ANCHOR_EVERY_NS 100000000LL
 #define FLOW_GAP_NS     400000000LL     /* live: a pause at least this long restarts the run */
@@ -66,6 +67,13 @@ struct engine {
     int64_t suspect_since;
     stc_t   suspect_err;
     int     suspect_n;
+    stc_t   suspect_pcr;        /* input PCR that raised the question */
+    bool    suspect_ahead;      /* ... and it read ahead of the clock model */
+    /* Content that arrives while that question is open waits here, not yet
+     * stamped for either clock, until the answer is known. */
+    struct es_unit *held_head, *held_tail;
+    int64_t held_since;         /* when the first of them arrived, ns */
+    unsigned held_n;
 
     /* input thread only */
     int64_t rx_ns;              /* arrival time of the datagram in hand */
@@ -167,35 +175,79 @@ static void warn_time_base(struct engine *e, stc_t moved)
     e->warn_suppressed = 0;
 }
 
+/* Moves a unit from the input time line onto the output one. */
+static void stamp(const struct engine *e, struct es_unit *u)
+{
+    int64_t off90 = e->ts_offset / STC_PER_90K;
+
+    if (!e->ts_offset)
+        return;
+    u->t0 += e->ts_offset;
+    u->t1 += e->ts_offset;
+    if (u->pts != NOPTS) {
+        u->pts += off90;
+        if (u->pts_off >= 0)
+            pes_patch_ts(u->data + u->pts_off, u->pts);
+    }
+    if (u->dts != NOPTS) {
+        u->dts += off90;
+        if (u->dts_off >= 0)
+            pes_patch_ts(u->data + u->dts_off, u->dts);
+    }
+}
+
+/*
+ * Sends on everything that was held, stamped with the offset in force now.
+ * `tentative` marks it as stamped without knowing yet whether the clock
+ * has stepped; if it turns out it has, the mux moves what is still
+ * waiting (mux_restamp_tentative). Called with the lock held.
+ */
+static void release_held(struct engine *e, bool tentative)
+{
+    struct es_unit *u = e->held_head;
+
+    e->held_head = e->held_tail = NULL;
+    e->held_n = 0;
+    while (u) {
+        struct es_unit *next = u->next;
+
+        u->next = NULL;
+        u->tentative = tentative;
+        stamp(e, u);
+        mux_push(e->mux, u);
+        u = next;
+    }
+}
+
+/* The same for units that carry their final stamps already. */
+static void release_held_stamped(struct engine *e)
+{
+    struct es_unit *u = e->held_head;
+
+    e->held_head = e->held_tail = NULL;
+    e->held_n = 0;
+    while (u) {
+        struct es_unit *next = u->next;
+
+        u->next = NULL;
+        mux_push(e->mux, u);
+        u = next;
+    }
+}
+
 static void on_unit(void *opaque, struct es_unit *u)
 {
     struct engine *e = opaque;
 
     pthread_mutex_lock(&e->lock);
-    if (e->ts_offset) {
-        int64_t off90 = e->ts_offset / STC_PER_90K;
-
-        u->t0 += e->ts_offset;
-        u->t1 += e->ts_offset;
-        if (u->pts != NOPTS) {
-            u->pts += off90;
-            if (u->pts_off >= 0)
-                pes_patch_ts(u->data + u->pts_off, u->pts);
-        }
-        if (u->dts != NOPTS) {
-            u->dts += off90;
-            if (u->dts_off >= 0)
-                pes_patch_ts(u->data + u->dts_off, u->dts);
-        }
-    }
-    u->tentative = e->suspect;
-
     if (!e->cfg.live) {
-        stc_t t1 = u->t1;
+        stc_t t1;
 
         /* A file run starts its output clock at the first thing to send,
          * and from then on the clock follows the data: normally the PCR
          * (on_pcr), but units keep it moving if the PCR has gone. */
+        stamp(e, u);
+        t1 = u->t1;
         if (!mux_started(e->mux))
             mux_start(e->mux, u->t0);
         mux_push(e->mux, u);
@@ -203,13 +255,62 @@ static void on_unit(void *opaque, struct es_unit *u)
             e->last_out_time = t1;
             mux_run(e->mux, t1 - e->delay, 0);
         }
+    } else if (!e->suspect) {
+        stamp(e, u);
+        mux_push(e->mux, u);
+    } else if (u->wall) {
+        /*
+         * The PCR has gone quiet with the question still open, and this
+         * was timed from our own clock in its place (demux_time_anchor).
+         * Its send time is therefore already on the time line we know and
+         * must never be moved. Whether its timestamps belong to a new
+         * clock cannot be known without a PCR; it goes out as it is.
+         *
+         * What is held, or queued under doubt, is older content of the
+         * same streams. Left where the doubtful clock put it, it would
+         * sit in front of this for seconds, or be long overdue. It goes
+         * out now, ahead of this, on the same terms.
+         */
+        stamp(e, u);
+        mux_send_tentative_now(e->mux, u->t0);
+        for (struct es_unit *h = e->held_head; h; h = h->next) {
+            stamp(e, h);
+            h->t0 = u->t0;
+            h->t1 = u->t0 + 1;
+        }
+        release_held_stamped(e);
+        mux_push(e->mux, u);
+    } else if (e->suspect_ahead && !e->held_head && u->t1 <= e->suspect_pcr) {
+        /* The clock may have jumped forward, but this was complete before
+         * the PCR that says so: it belongs to the clock we know. */
+        stamp(e, u);
+        mux_push(e->mux, u);
+    } else if (e->held_head ? e->rx_ns - e->held_since <= HOLD_MAX_NS
+                            : e->rx_ns - e->suspect_since <= HOLD_MAX_NS) {
+        /* Which clock this belongs to is not known yet (see on_pcr). */
+        if (!e->held_head)
+            e->held_since = e->rx_ns;
+        u->next = NULL;
+        if (e->held_tail)
+            e->held_tail->next = u;
+        else
+            e->held_head = u;
+        e->held_tail = u;
+        e->held_n++;
     } else {
+        /* The question has stayed open too long to keep content back
+         * (the PCR stopped coming, or comes too rarely). Send it on the
+         * clock we know, marked so that it can still be moved. */
+        release_held(e, true);
+        u->tentative = true;
+        stamp(e, u);
         mux_push(e->mux, u);
     }
     pthread_mutex_unlock(&e->lock);
 }
 
-static void on_pcr(void *opaque, stc_t pcr, stc_t expected, bool jump)
+static void on_pcr(void *opaque, stc_t pcr, stc_t expected, bool jump,
+                   stc_t since)
 {
     struct engine *e = opaque;
     bool first = false, moved = false;
@@ -228,35 +329,57 @@ static void on_pcr(void *opaque, stc_t pcr, stc_t expected, bool jump)
 
             if (err <= RESYNC_LIMIT && err >= -RESYNC_LIMIT) {
                 if (e->suspect) {
-                    e->suspect = false;
+                    e->suspect = false;     /* false alarm: same clock */
                     mux_clear_tentative(e->mux);
+                    release_held(e, false);
                 }
                 pll_update(&e->pll, e->rx_ns, obs);
-            } else if (!e->suspect || err - e->suspect_err > RESYNC_STABLE ||
+            } else if (!e->suspect) {
+                /* The question opens (explained just below). */
+                e->suspect = true;
+                e->suspect_since = e->rx_ns;
+                e->suspect_err = err;
+                e->suspect_n = 1;
+                /* What was complete before the clock first showed its
+                 * new reading still belongs to the clock we know. */
+                e->suspect_pcr = since;
+                e->suspect_ahead = err > 0;
+            } else if (err - e->suspect_err > RESYNC_STABLE ||
                        err - e->suspect_err < -RESYNC_STABLE) {
                 /*
                  * Far from where the source clock should be. Either data
                  * that was held up and is now being delivered faster than
                  * real time (the error shrinks as it catches up with the
-                 * wall clock), or a source that restarted on a new clock
+                 * wall clock), or a source whose clock really has stepped
                  * (the error stays put). Only time tells them apart, so
-                 * wait for the error to hold still before acting, and
-                 * keep the outliers away from the PLL meanwhile. Each time
-                 * the error moves, the wait starts again.
+                 * wait for the error to hold still before acting, keep
+                 * the outliers away from the PLL, and hold the content
+                 * that arrives meanwhile (on_unit). Each time the error
+                 * moves, the wait starts again. An error that moves is
+                 * most likely a backlog draining, so what was held goes
+                 * out on the clock we know. It is marked tentative all
+                 * the same: a real step can also begin with a moving
+                 * error, and then it is put right when the step is
+                 * confirmed.
                  */
-                e->suspect = true;
+                release_held(e, true);
                 e->suspect_since = e->rx_ns;
                 e->suspect_err = err;
                 e->suspect_n = 1;
+                e->suspect_ahead = false;
             } else if (++e->suspect_n >= RESYNC_SAMPLES &&
                        e->rx_ns - e->suspect_since >= RESYNC_HOLD_NS) {
-                /* It stayed: a new clock. Splice it onto ours so that the
-                 * output clock runs on, and discard what was queued with
-                 * the old offset while we were making sure. */
-                e->ts_offset -= round300(err);
+                /* It stayed: the clock has stepped. Splice the new one
+                 * onto ours so that the output clock runs on. Content
+                 * already queued under doubt is moved onto the new clock,
+                 * and what was held is sent stamped for it. */
+                stc_t adj = round300(err);
+
+                e->ts_offset -= adj;
                 e->discontinuities++;
                 e->suspect = false;
-                mux_drop_tentative(e->mux);
+                mux_restamp_tentative(e->mux, -adj);
+                release_held(e, false);
                 moved = true;
                 moved_by = err;
             }
@@ -371,17 +494,18 @@ void engine_push_datagram(struct engine *e, const uint8_t *buf, size_t len,
             > PCR_QUIET_NS &&
         rx_ns - e->last_anchor_rx > ANCHOR_EVERY_NS) {
         stc_t now_stc = 0;
-        bool valid;
+        bool valid, doubt;
 
         pthread_mutex_lock(&e->lock);
         valid = e->pll.valid;
+        doubt = e->suspect;
         if (valid)
             now_stc = pll_eval(&e->pll, rx_ns) - e->ts_offset;
         pthread_mutex_unlock(&e->lock);
 
         e->last_anchor_rx = rx_ns;
         if (valid)
-            demux_time_anchor(e->dmx, now_stc);
+            demux_time_anchor(e->dmx, now_stc, doubt);
         else
             demux_resolve_now(e->dmx);      /* never had a clock: discard */
     }
@@ -475,6 +599,11 @@ int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill)
         started_now = true;
     }
 
+    /* Content held over a clock question goes out after HOLD_MAX_NS even
+     * if no further input arrives to prompt it. */
+    if (e->held_head && now_ns - e->held_since > HOLD_MAX_NS)
+        release_held(e, true);
+
     stc_t target = pll_eval(&e->pll, now_ns) - e->delay;
     stc_t skipped = 0;
 
@@ -528,6 +657,7 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
     out->in_datagrams = e->in_datagrams;
     out->rtp_datagrams = e->rtp_datagrams;
     out->discontinuities = e->discontinuities;
+    out->held_units = e->held_n;
     out->ts_offset = e->ts_offset;
     out->have_program = e->have_prog;
     out->clock_locked = e->cfg.live ? e->pll.valid : e->have_pcr;
@@ -559,6 +689,7 @@ struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,
         engine_free(e);
         return NULL;
     }
+    demux_set_pcr_first(e->dmx, cfg->live);
     return e;
 }
 
@@ -566,6 +697,12 @@ void engine_free(struct engine *e)
 {
     if (!e)
         return;
+    while (e->held_head) {
+        struct es_unit *u = e->held_head;
+
+        e->held_head = u->next;
+        free(u);
+    }
     demux_free(e->dmx);
     mux_free(e->mux);
     free(e->sbuf);

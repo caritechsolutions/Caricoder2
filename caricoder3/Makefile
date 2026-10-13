@@ -4,7 +4,7 @@
 #   make            optimised build        -> ./caricoder3
 #   make debug      AddressSanitizer build -> ./caricoder3-asan
 #   make test       build both and run the test suite
-#   make fuzz       libFuzzer harness (needs clang) -> build/fuzz_engine
+#   make fuzz       libFuzzer harnesses (need clang) -> build/fuzz_engine, build/fuzz_live
 #   make install    copy the binary to $(PREFIX)/bin
 
 CC      ?= gcc
@@ -40,13 +40,13 @@ build/asan/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 $(CPPFLAGS) -O1 -g $(SAN) $(WARN) -c $< -o $@
 
-fuzz: build/fuzz_engine
+fuzz: build/fuzz_engine build/fuzz_live
 
-build/fuzz_engine: tests/fuzz_engine.c $(CORE)
+build/fuzz_%: tests/fuzz_%.c $(CORE)
 	@mkdir -p build
 	clang -std=c11 -D_GNU_SOURCE -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -O1 -g -Isrc \
 	    -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-	    -o $@ tests/fuzz_engine.c $(CORE) -lpthread -lm
+	    -o $@ $< $(CORE) -lpthread -lm
 
 test: caricoder3 caricoder3-asan
 	python3 tests/run_tests.py

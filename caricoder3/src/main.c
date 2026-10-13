@@ -318,7 +318,8 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
                "    \"pes_units\": %llu,\n    \"pes_dropped\": %llu,\n"
                "    \"pes_invalid\": %llu,\n    \"pes_length_mismatch\": %llu,\n"
                "    \"sections\": %llu,\n    \"pcr_count\": %llu,\n"
-               "    \"pcr_jumps\": %llu,\n    \"pcr_missing\": %llu,\n"
+               "    \"pcr_jumps\": %llu,\n    \"pcr_glitches\": %llu,\n"
+               "    \"pcr_missing\": %llu,\n"
                "    \"timestamps_out_of_range\": %llu,\n"
                "    \"socket_overflow\": %llu,\n    \"truncated_datagrams\": %llu\n  },\n",
             (unsigned long long)st->in.packets, (unsigned long long)st->in.sync_errors,
@@ -330,7 +331,9 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
             (unsigned long long)st->in.pes_invalid,
             (unsigned long long)st->in.pes_len_mismatch,
             (unsigned long long)st->in.sections, (unsigned long long)st->in.pcr_count,
-            (unsigned long long)st->in.pcr_jumps, (unsigned long long)st->in.pcr_missing,
+            (unsigned long long)st->in.pcr_jumps,
+            (unsigned long long)st->in.pcr_glitches,
+            (unsigned long long)st->in.pcr_missing,
             (unsigned long long)st->in.ts_out_of_range,
             (unsigned long long)r->rx_overflow, (unsigned long long)r->rx_truncated);
 
@@ -349,9 +352,10 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
 
     fprintf(f, "  \"clock\": {\n    \"locked\": %s,\n    \"drift_ppm\": %.2f,\n"
                "    \"jitter_us\": %.1f,\n    \"ts_offset_ms\": %.3f,\n"
-               "    \"discontinuities\": %llu\n  },\n",
+               "    \"discontinuities\": %llu,\n    \"held_units\": %u\n  },\n",
             st->clock_locked ? "true" : "false", st->clock_ppm, st->clock_jitter_us,
-            (double)st->ts_offset / STC_PER_MS, (unsigned long long)st->discontinuities);
+            (double)st->ts_offset / STC_PER_MS, (unsigned long long)st->discontinuities,
+            st->held_units);
 
     fprintf(f, "  \"output\": {\n    \"url\": ");
     json_str(f, o->output);

@@ -119,35 +119,158 @@ file : latest input PCR + ts_offset − delay
 
 ### Discontinuities
 
-The demux reports a PCR that does not follow on from the last one. What
-happens next depends on the mode.
+Two layers deal with a source clock that does not run on smoothly. The
+demux decides which PCRs to believe. The engine decides whether the clock
+they describe is still the one the output is locked to.
 
-**Live.** The PLL knows where the source clock should be right now. A PCR
-within 200 ms of that is normal running. One further off is not acted on
-at once, because two different things look the same at first:
+**Which PCRs are believed (demux, live and file).** A PCR is *unusual* if
+it does not follow on from the one before: it reads earlier, more than a
+second later, or the stream flags a discontinuity. It is also unusual if
+it merely comes after a gap much longer than this stream has been leaving
+between PCRs (three times the longest recent gap, and at least 200 ms).
+
+An unusual PCR is not acted on. A single damaged packet can carry any
+value, and believing it would time real content seconds from where it
+belongs. It is set aside as a candidate and the next PCR decides:
+
+- it follows on, in the usual way, from the PCR before the candidate: the
+  candidate was damage. It is forgotten and counted (`pcr_glitches`);
+- it follows on from the candidate: the candidate was true. If it was a
+  break, the break is placed at the candidate's packet. What was complete
+  before that packet is timed on the old clock, what began after it on the
+  new one, and a PES packet or section that straddles it is dropped;
+- neither: it becomes the candidate. After three in a row with no two
+  that agree, the latest is taken as it is.
+
+A damaged PCR that reads only a little ahead (under 200 ms, or under
+three PCR gaps on a stream with sparse PCRs) does not stand out when it
+arrives and is taken as ordinary. If the next PCR then reads behind it
+but follows on from the one before, that gives it away: it is taken out
+of the history again and counted. The packets timed from it in between
+leave late by up to the size of the error.
+
+Waiting for the next PCR costs one PCR interval of delay, and only for
+the content around an unusual PCR.
+
+What this cannot catch: two or more damaged PCRs in a row that agree with
+each other. They look exactly like a real change of clock.
+
+**Is it still the same clock (engine, live).** The PLL knows where the
+source clock should be right now. A believed PCR within 200 ms of that is
+normal running. One further off opens a question, because two different
+things look the same at first:
 
 - data that was held up and is now being delivered faster than real time.
-  The error shrinks as it catches up, and nothing should change;
-- a source that restarted on a new clock. The error stays where it is.
+  The error shrinks as it catches up, and nothing should change. (A
+  backlog caught up at less than about 1.2 times real time shrinks too
+  slowly to be seen as moving, and is taken for a step: a known limit);
+- a source that restarted on a new clock, stalled and stayed behind, or
+  skipped ahead. The error stays where it is.
 
-Only time tells them apart. So the outliers are kept away from the PLL, and
-only if the error has held still (within 50 ms) for 300 ms and five
-samples is it a new clock:
-`ts_offset` moves by exactly the difference, the new content lands on the
-existing output time line, and what was queued during those 300 ms with the
-old offset is discarded. The output PCR never steps.
+Only time tells them apart. While the question is open the outliers are
+kept away from the PLL, and content is handled like this:
 
-**File.** There is no wall clock, so any break is closed up at once the
-same way.
+- if the clock read *ahead*, whatever was complete before its first new
+  reading belongs to the old clock and is sent as usual;
+- everything else is held to one side, not yet stamped for either clock,
+  for at most 600 ms.
 
-Partly assembled PES packets are discarded at a break.
+The question closes in one of these ways:
+
+- the error comes back inside 200 ms: same clock. What was held is sent
+  unchanged;
+- the error holds still (within 50 ms) for 300 ms and three PCRs: the
+  clock has stepped. `ts_offset` moves by exactly the difference, and what
+  was held is sent stamped for the new clock. The new content lands on the
+  existing output time line and the output PCR never steps;
+- the error moves by more than 50 ms: probably a backlog draining. The
+  wait starts again, and what was held is sent on the clock we know, but
+  marked *tentative*;
+- 600 ms pass with content still held (PCRs very far apart, or none): the
+  same. The output thread enforces this limit too, so it holds even when
+  the input has stopped altogether.
+
+*Tentative* is a second chance for the case where that guess was wrong: a
+real step whose error moved at first, or whose PCRs are too far apart to
+confirm within 600 ms. When the step is then confirmed, every tentative
+unit that is still waiting in the mux is moved onto the new clock
+(`mux_restamp_tentative`). When the question closes the other way, the
+marks are simply cleared. Its reach is limited. A unit stamped for the
+wrong clock is only still waiting if that put it in the future, and by no
+more than the 15 s the mux will queue ahead. So it saves content after a
+step *forward* of up to 15 s. After a step backward the wrongly stamped
+units are overdue at once and are sent or discarded as late before the
+step is confirmed, which is what happened to all such content before
+this mechanism existed.
+
+In a live run the demux reports each PCR before it delivers the content
+that arrived with it (`demux_set_pcr_first`), so the judgement on a PCR is
+made before that content has to be stamped.
+
+**A step, and then the PCR goes.** If the PCR stops while the question is
+open, the stand-in clock takes over (next section). The time it gives is
+the engine's, not that of the PCRs last seen, so the engine tells the
+demux that it doubts them, and the demux drops its PCR history and
+carries on along the engine's line. Units timed that way are marked (`wall`): their send
+times are right as they are and are never moved, whatever is decided
+about the clock later. Older content of the same streams that is still
+held, or queued as tentative, is sent at once ahead of them, since it can
+no longer be placed any better and would otherwise block them.
+
+What all this costs, measured by the tests:
+
+- a step with PCRs every 30 ms (restart on a clock two hours away, a
+  stall of 2.6 s that stays late, a skip of 2 s) is confirmed in about
+  300 ms, inside the default 500 ms delay: nothing is dropped, nothing
+  leaves late, no packet carries the wrong clock's timestamps. With
+  `--delay` under about 350 ms the held content leaves slightly late;
+- the same with a PCR only every 240 ms takes about half a second to
+  confirm: nothing is dropped, and a few packets leave up to 0.1 s late;
+- a source that skips 3 s ahead and then delivers faster than real time
+  for half a second: nothing is dropped, and about a second of content
+  leaves late, by up to 0.7 s. Part of that is unavoidable: the source
+  itself sent it later than the clock it settles on says it should have;
+- a step of 3 s either way with the PCR lost 150 ms later while audio
+  continues: all the audio is delivered, with no gap longer than 0.2 s.
+  Its timestamps stay on the old clock until the PCR is back. (After a
+  step too large for the timestamp range check, 5 s back or 30 s ahead,
+  that audio is discarded instead: nothing sensible can be done with
+  timestamps that far from the only clock there is);
+- holding has a price when the question turns out to be a backlog: that
+  content was late already and is now up to 0.3 s later (0.6 s with
+  sparse PCRs). If it was more than about 0.7 s late to begin with, some
+  of it passes the one second limit and is dropped rather than sent late;
+- in all cases, a PES packet that arrives after the source's clock has
+  stepped but before its next PCR cannot be told from old-clock content.
+  It is sent with timestamps that are off by the step. That is at most one
+  PCR interval of content.
+
+This was first run against a real satellite feed for 34 hours. The source
+stepped eight times in that period, in three shapes that are now each a
+test: a stall that stays late, a skip forward, and a full restart.
+
+**File.** There is no wall clock, so a confirmed break of more than
+100 ms is closed up at once: `ts_offset` moves by the difference.
+
+### A stream that leaves the service half way through a packet
+
+When the PMT drops a stream, or the service changes, the mux may be part
+way through sending one of that stream's PES packets. Cutting it off
+would put a truncated PES packet on the wire. The stream is instead kept
+as an *orphan*: its unsent queue is dropped, the packet in flight is
+finished, and then it is gone. The exception is a PID that is handed
+straight to something else, a table or a stream of another kind. Two
+things cannot share a continuity counter mid-packet, so there the packet
+in flight is cut off.
 
 ### When the PCR goes missing
 
 If data keeps arriving on a live input but its PCR stops, the PLL is still
 running. Once data has been arriving steadily for 500 ms with no PCR, the
 engine tells the demux the time every 100 ms in the PCR's place, and the
-streams that remain keep flowing on the same time line. "Steadily" is part
+streams that remain keep flowing on the same time line. A PCR that has
+been seen but not yet believed (a candidate, above) is given five of
+these intervals to be borne out before the stand-in takes over. "Steadily" is part
 of the rule: right after an outage the first datagrams are old data whose
 own PCR is about to follow, and the wall clock says nothing true about
 them.
@@ -194,7 +317,10 @@ It cannot reach the PCR *values*, which come from slot arithmetic.
 | PMT changes | Streams that keep their PID carry on untouched; new ones are added, old ones flushed; the output PMT version moves |
 | More content than `--muxrate` | Whole units are dropped once they are a second late, never partial ones; counted in `dropped_units` |
 | Input stops | Output continues with tables, PCR and nulls |
-| Source restarts | One discontinuity absorbed, see above |
+| Source restarts, stalls and stays late, or skips ahead | One discontinuity absorbed, see above |
+| One PCR with a wrong value | Not believed; counted in `pcr_glitches` |
+| Two or more wrong PCRs in a row that agree | Believed: taken for a change of clock, and again when the true values return |
+| Stream removed from the PMT mid-packet | The PES packet in flight is finished, the rest of its queue dropped (cut off if the PID is reused at once) |
 
 The rule throughout: the output is always a well-formed transport stream,
 and anything thrown away is thrown away whole and shows up in a counter.
@@ -228,16 +354,31 @@ Planned libraries, each called directly:
 | Job | Library |
 |---|---|
 | H.264 / H.265 encode on CPU | x264, x265 |
+| H.264 / H.265 decode on CPU | libavcodec (decided, see below) |
 | H.264 / H.265 on NVIDIA | NVIDIA Video Codec SDK (NVDEC, NVENC) |
 | H.264 / H.265 on Intel | Intel VPL |
 | AAC | fdk-aac |
 | MP2 / MP3 | twolame, LAME, mpg123 |
 | AC-3 decode | liba52 |
 
-Still to be settled when stage 3 starts: the software H.264/H.265
-*decoder* for boxes with no GPU. The usual standalone choices need to be
-evaluated; this is the one place where the "no FFmpeg" rule has a real
-cost, and the decision should be made on facts at that point.
+Each stream will take `auto`, `nvidia` or `cpu` for its decoder. `auto`
+tries the GPUs in turn and then the CPU.
+
+**CPU decoding uses libavcodec** (decided 11 October 2026). No standalone
+H.264 decoder was found fit for broadcast: OpenH264's own documentation
+limits its decoder to Constrained Baseline, single-threaded. libavcodec is
+the decoder inside FFmpeg, and it is also what GStreamer's software
+decoding was all along (`gst-libav`). The terms of its use here are narrow:
+the decoder library only, called directly, as one optional backend. The
+demux, mux, clock and timestamps stay our own; nothing of FFmpeg's
+pipeline, formats or tools is used; and a build without it is still a
+complete GPU transcoder.
+
+**NVIDIA target** (facts for the first deployment box, driver 535.247.01,
+two Tesla P40): write against Video Codec SDK 12.1, which needs driver
+530.41.03 or newer; 12.2 needs 550.54.14. A P40 has two encoder engines
+and unrestricted sessions, encodes H.264 and H.265 including 10-bit, and
+has no H.265 B-frames and no AV1.
 
 The frame-level interface (packets in, frames out, and the reverse) will be
 written with the first backend that needs it. Guessing it now would mean

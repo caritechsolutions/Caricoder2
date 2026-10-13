@@ -424,6 +424,21 @@ class Analysis:
                     out.append((t - dts27) / 27000.0)
         return out
 
+    def lead_ms(self):
+        """For every PES packet with a DTS: how long before that DTS the
+        packet was complete, in ms (negative = late), on the stream's PCR."""
+        out = []
+        for lst in self.pes.values():
+            for r in lst:
+                if r["dts"] is None:
+                    continue
+                t = self.stc_at(r["last"] + 1)
+                if t is None:
+                    continue
+                dts27 = (t // 300 + mod_diff(r["dts"], int(t // 300) % PTS_MOD, PTS_MOD)) * 300
+                out.append((dts27 - t) / 27000.0)
+        return out
+
     def max_interval_ms(self, idx_list):
         """Longest gap between table repetitions, measured on the PCR clock."""
         if len(idx_list) < 2:

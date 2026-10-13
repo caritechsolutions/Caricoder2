@@ -37,6 +37,8 @@ struct mstream {
     size_t   off;               /* bytes of head already sent */
     uint32_t k, npk;            /* packets sent / expected for head */
     uint32_t q_units;
+    bool     orphan;            /* no longer in the service: only finishing
+                                 * the unit that was already part-way out */
 };
 
 struct psi_table {
@@ -217,6 +219,8 @@ static void head_pop(struct mux *m, struct mstream *s)
     m->q_bytes -= u->len + sizeof(*u);
     free(u);
     head_begin(s);
+    if (s->orphan && !s->head)
+        memset(s, 0, sizeof(*s));           /* its last unit is out: gone */
 }
 
 static void stream_clear(struct mux *m, struct mstream *s)
@@ -531,33 +535,49 @@ void mux_skip_to(struct mux *m, stc_t stc)
     m->stats.skips++;
 }
 
-void mux_drop_tentative(struct mux *m)
+void mux_restamp_tentative(struct mux *m, stc_t delta)
+{
+    int64_t d90 = delta / STC_PER_90K;
+
+    for (int i = 0; i < MAX_ES; i++) {
+        struct mstream *s = &m->st[i];
+
+        for (struct es_unit *u = s->head; u; u = u->next) {
+            if (!u->tentative)
+                continue;
+            u->tentative = false;
+            if (u == s->head && s->off > 0)
+                continue;                   /* part of it is already out */
+            u->t0 += delta;
+            u->t1 += delta;
+            if (u->pts != NOPTS) {
+                u->pts += d90;
+                if (u->pts_off >= 0)
+                    pes_patch_ts(u->data + u->pts_off, u->pts);
+            }
+            if (u->dts != NOPTS) {
+                u->dts += d90;
+                if (u->dts_off >= 0)
+                    pes_patch_ts(u->data + u->dts_off, u->dts);
+            }
+        }
+    }
+}
+
+void mux_send_tentative_now(struct mux *m, stc_t stc)
 {
     for (int i = 0; i < MAX_ES; i++) {
         struct mstream *s = &m->st[i];
-        struct es_unit **pp, *u;
 
-        if (!s->used || !s->head)
-            continue;
-        /* The head is spared if part of it is already on the wire. */
-        pp = s->off > 0 ? &s->head->next : &s->head;
-        while ((u = *pp) != NULL) {
-            if (u->tentative) {
-                *pp = u->next;
-                s->q_units--;
-                m->stats.queued_units--;
-                m->stats.dropped_units++;
-                m->q_bytes -= u->len + sizeof(*u);
-                free(u);
-            } else {
-                pp = &u->next;
-            }
+        for (struct es_unit *u = s->head; u; u = u->next) {
+            if (!u->tentative)
+                continue;
+            u->tentative = false;
+            if (u == s->head && s->off > 0)
+                continue;                   /* part of it is already out */
+            u->t0 = stc;
+            u->t1 = stc + 1;
         }
-        s->tail = NULL;
-        for (u = s->head; u; u = u->next)
-            s->tail = u;
-        if (s->off == 0)
-            head_begin(s);
     }
 }
 
@@ -625,6 +645,7 @@ void mux_set_program(struct mux *m, const struct program *p)
         for (int k = 0; k < MAX_ES; k++) {
             if (old[k].used && old[k].pid == e->pid && old[k].kind == e->kind) {
                 *s = old[k];
+                s->orphan = false;
                 old[k].used = false;
                 break;
             }
@@ -636,9 +657,42 @@ void mux_set_program(struct mux *m, const struct program *p)
         }
         m->pid_idx[e->pid] = (uint8_t)i;
     }
-    for (int k = 0; k < MAX_ES; k++)
-        if (old[k].used)
-            stream_clear(m, &old[k]);
+    /*
+     * Streams that have left the service. Whatever they had queued goes,
+     * with one exception: a unit that is already part-way out is finished
+     * first, because half a PES packet on the wire is a malformed one.
+     * The stream lingers in a spare slot just long enough for that.
+     */
+    for (int k = 0; k < MAX_ES; k++) {
+        struct mstream *o = &old[k];
+        int slot = -1;
+
+        if (!o->used)
+            continue;
+        if (o->head && o->off > 0 && m->pid_idx[o->pid] == NO_STREAM &&
+            o->pid != p->pmt_pid && o->pid != PID_PAT && o->pid != PID_SDT) {
+            for (int j = MAX_ES - 1; j >= p->n_es && slot < 0; j--)
+                if (!m->st[j].used)
+                    slot = j;
+        }
+        if (slot < 0) {
+            stream_clear(m, o);
+            continue;
+        }
+        while (o->head->next) {
+            struct es_unit *u = o->head->next;
+
+            o->head->next = u->next;
+            o->q_units--;
+            m->stats.queued_units--;
+            m->stats.dropped_units++;
+            m->q_bytes -= u->len + sizeof(*u);
+            free(u);
+        }
+        o->tail = o->head;
+        o->orphan = true;
+        m->st[slot] = *o;
+    }
 
     m->prog = *p;
     m->pcr_pid = p->pcr_pid;

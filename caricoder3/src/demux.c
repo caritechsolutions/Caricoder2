@@ -21,6 +21,10 @@
 #define PES_MAX         (8u * 1024 * 1024)
 #define PCR_HIST        512
 #define PCR_GAP_MAX     (1 * STC_HZ)        /* longer than this is a break */
+#define PCR_CAND_MAX    3                   /* odd PCRs in a row before one is taken */
+#define PCR_ODD_MIN     (STC_HZ / 5)        /* a gap is unusual from here up ... */
+#define PCR_ODD_FACTOR  3                   /* ... or from this many usual gaps */
+#define PCR_CAND_ANCHORS 5                  /* stand-in PCRs a candidate outlasts */
 #define PCR_WAIT_MIN    20000               /* packets; see hist_add() */
 #define PCR_WAIT_MAX    2000000
 #define SLOPE_MAX       (STC_HZ / 20)       /* 50 ms per packet = 30 kb/s */
@@ -86,6 +90,18 @@ struct demux {
     struct pcr_pt hist[PCR_HIST];
     int     hist_n, hist_head;  /* ring: hist_head is the oldest entry */
     bool    anchored;           /* newest history came from an anchor */
+    bool    cand;               /* an unusual PCR awaits confirmation ... */
+    bool    cand_jump;          /* ... it would be a break in the clock ... */
+    int64_t cand_raw;           /* ... this is its value ... */
+    int64_t cand_idx;           /* ... and its packet */
+    int     cand_chain;
+    int     cand_anchors;       /* anchors declined while it waited */
+    int64_t ival_peak;          /* longest recent gap between two PCRs, ticks */
+    bool    have_prev;          /* the PCR before pcr_raw is known ... */
+    int64_t prev_raw;           /* ... its value as carried ... */
+    int64_t prev_delta;         /* ... and how far pcr_raw moved on from it */
+    int64_t last_idx;           /* packet of the PCR that is pcr_raw */
+    bool    pcr_first;          /* see demux_set_pcr_first() */
     int64_t slope_num, slope_den; /* ticks per packet of the last segment */
     int64_t peak_pps;           /* highest packet rate seen between two PCRs */
     int64_t pcr_wait_pkts;
@@ -231,6 +247,7 @@ static void unit_finalize(struct demux *d, struct es_unit *u)
         t1 = t0 + 1;
     u->t0 = t0;
     u->t1 = t1;
+    u->wall = d->anchored;
 
     if (u->kind == ES_PES) {
         int64_t near = t1 / STC_PER_90K;
@@ -631,6 +648,122 @@ static void drop_partials(struct demux *d)
             pes_drop(d, &d->es[i]);
 }
 
+/* A break in the PCR: everything already received belongs to the old
+ * time line, the PCR in hand starts the new one. */
+static void pcr_break(struct demux *d, int64_t delta)
+{
+    stc_t expected = idx_to_stc(d, d->idx);
+
+    resolve_pending(d, true);
+    drop_partials(d);
+    d->anchored = false;
+    d->pcr_unw += delta;
+    hist_clear(d);
+    hist_add(d, d->idx, d->pcr_unw);
+    d->have_prev = false;
+    d->stats.pcr_jumps++;
+    d->cb.pcr(d->opaque, d->pcr_unw, expected, true, d->pcr_unw);
+}
+
+/*
+ * The same, when the break happened one PCR ago (at cand_idx) and has only
+ * now been confirmed. What was complete before that packet is old time
+ * line; what began after it is new; whatever straddles it is damaged.
+ */
+static void pcr_break_confirmed(struct demux *d, int64_t raw)
+{
+    stc_t expected = idx_to_stc(d, d->idx);
+    struct es_unit *u, *keep_head = NULL, *keep_tail = NULL;
+
+    u = d->pend_head;
+    d->pend_head = d->pend_tail = NULL;
+    while (u) {
+        struct es_unit *next = u->next;
+
+        u->next = NULL;
+        if (u->t1 + 1 <= d->cand_idx) {
+            unit_finalize(d, u);            /* old time line, old history */
+        } else if (u->t0 < d->cand_idx) {
+            d->stats.pes_dropped++;
+            free(u);
+        } else {
+            if (keep_tail)
+                keep_tail->next = u;
+            else
+                keep_head = u;
+            keep_tail = u;
+        }
+        u = next;
+    }
+    d->pend_head = keep_head;
+    d->pend_tail = keep_tail;
+    d->anchored = false;
+
+    for (int i = 0; i < MAX_ES; i++) {
+        struct es_state *es = &d->es[i];
+
+        if (!es->used)
+            continue;
+        if (es->kind == ES_PES ? es->first_idx < d->cand_idx
+                               : es->sec_start_idx < d->cand_idx)
+            pes_drop(d, es);
+    }
+
+    d->pcr_unw += mod_diff(d->cand_raw, d->pcr_raw, PCR_MOD);
+    stc_t since = d->pcr_unw;
+    hist_clear(d);
+    hist_add(d, d->cand_idx, d->pcr_unw);
+    d->pcr_unw += mod_diff(raw, d->cand_raw, PCR_MOD);
+    hist_add(d, d->idx, d->pcr_unw);
+    d->have_prev = false;
+    d->stats.pcr_jumps++;
+    d->cb.pcr(d->opaque, d->pcr_unw, expected, true, since);
+    resolve_pending(d, false);
+}
+
+/* An ordinary PCR, in packet `idx`, joins the time line. */
+static void pcr_accept(struct demux *d, int64_t idx, int64_t raw)
+{
+    int64_t delta = mod_diff(raw, d->pcr_raw, PCR_MOD);
+
+    d->have_prev = true;
+    d->prev_raw = d->pcr_raw;
+    d->prev_delta = delta;
+    d->last_idx = idx;
+    d->pcr_raw = raw;
+    d->pcr_unw += delta;
+    d->ival_peak -= d->ival_peak / 64;      /* forget old gaps slowly */
+    if (delta > d->ival_peak)
+        d->ival_peak = delta;
+    /* A real PCR outranks the stand-in anchors that covered for it
+     * (demux_time_anchor). If it does not sit after them, or sits far
+     * from where they lead, the two are on different time lines: start
+     * the interpolation afresh from it rather than run time backwards or
+     * stretch what is waiting across the difference. */
+    if (d->hist_n &&
+        (d->pcr_unw <= hist_at(d, d->hist_n - 1)->pcr ||
+         (d->anchored && d->pcr_unw - idx_to_stc(d, idx) > PCR_GAP_MAX))) {
+        resolve_pending(d, true);
+        hist_clear(d);
+        d->have_prev = false;
+    }
+    d->anchored = false;
+    hist_add(d, idx, d->pcr_unw);
+}
+
+/* Tells the owner about an ordinary PCR and delivers what it makes
+ * timeable, in the order asked for (demux_set_pcr_first). */
+static void pcr_report(struct demux *d, stc_t since)
+{
+    if (d->pcr_first) {
+        d->cb.pcr(d->opaque, d->pcr_unw, d->pcr_unw, false, since);
+        resolve_pending(d, false);
+    } else {
+        resolve_pending(d, false);
+        d->cb.pcr(d->opaque, d->pcr_unw, d->pcr_unw, false, since);
+    }
+}
+
 static void handle_pcr(struct demux *d, const uint8_t *pkt)
 {
     int64_t raw = ts_pcr(pkt);
@@ -643,7 +776,7 @@ static void handle_pcr(struct demux *d, const uint8_t *pkt)
         d->pcr_unw = raw;
         hist_clear(d);
         hist_add(d, d->idx, d->pcr_unw);
-        d->cb.pcr(d->opaque, d->pcr_unw, d->pcr_unw, false);
+        d->cb.pcr(d->opaque, d->pcr_unw, d->pcr_unw, false, d->pcr_unw);
         return;
     }
 
@@ -656,38 +789,107 @@ static void handle_pcr(struct demux *d, const uint8_t *pkt)
      * real PCR is no break at all: the other streams never stopped, and
      * what they have half assembled must not be thrown away.
      */
-    if (jump && d->anchored && !(pkt[5] & 0x80) && delta > 0) {
+    bool covered = false;
+
+    if (!d->cand && d->anchored && !(pkt[5] & 0x80) && delta > 0) {
         stc_t off = d->pcr_unw + delta - idx_to_stc(d, d->idx);
 
-        if (off > -PCR_GAP_MAX && off < PCR_GAP_MAX)
+        if (off > -PCR_GAP_MAX && off < PCR_GAP_MAX) {
             jump = false;
-    }
-    d->anchored = false;
-    d->pcr_raw = raw;
-    if (jump) {
-        stc_t expected = idx_to_stc(d, d->idx);
-
-        /* Everything already received belongs to the old time line. */
-        resolve_pending(d, true);
-        drop_partials(d);
-        d->pcr_unw += delta;
-        hist_clear(d);
-        hist_add(d, d->idx, d->pcr_unw);
-        d->stats.pcr_jumps++;
-        d->cb.pcr(d->opaque, d->pcr_unw, expected, true);
-    } else {
-        d->pcr_unw += delta;
-        /* A real PCR outranks the stand-in anchors that covered for it
-         * (demux_time_anchor): if it does not sit after them, start the
-         * interpolation afresh from it rather than run time backwards. */
-        if (d->hist_n && d->pcr_unw <= hist_at(d, d->hist_n - 1)->pcr) {
-            resolve_pending(d, true);
-            hist_clear(d);
+            covered = true;
         }
-        hist_add(d, d->idx, d->pcr_unw);
-        resolve_pending(d, false);
-        d->cb.pcr(d->opaque, d->pcr_unw, d->pcr_unw, false);
     }
+
+    /*
+     * A PCR that does not follow on in the usual way is not believed on
+     * its own: a single damaged packet can carry any value, and acting on
+     * it would time real content far from where it belongs. "Unusual" is
+     * a break (backwards, more than PCR_GAP_MAX ahead, or flagged), and
+     * also a gap much longer than this stream's PCRs have been leaving.
+     * Such a PCR is set aside as a candidate and the next one decides:
+     *   - it follows on from the PCR before the candidate: the candidate
+     *     was damage and is forgotten;
+     *   - it follows on from the candidate: the candidate was true;
+     *   - neither: it becomes the candidate, and after PCR_CAND_MAX in a
+     *     row the latest is taken as it is.
+     */
+    int64_t odd_from = PCR_ODD_FACTOR * d->ival_peak;
+
+    if (odd_from < PCR_ODD_MIN)
+        odd_from = PCR_ODD_MIN;
+
+    /*
+     * Damage too small to stand out: the last PCR read a little ahead,
+     * was taken as ordinary, and now this one is back behind it, yet
+     * follows on from the one before. The last one is taken out again.
+     */
+    if (!d->cand && delta <= 0 && !(pkt[5] & 0x80) && d->have_prev &&
+        d->hist_n >= 2 && hist_at(d, d->hist_n - 1)->idx == d->last_idx) {
+        int64_t from_prev = mod_diff(raw, d->prev_raw, PCR_MOD);
+
+        if (from_prev > 0 && from_prev <= odd_from) {
+            d->pcr_unw -= d->prev_delta;
+            d->pcr_raw = d->prev_raw;
+            d->hist_n--;
+            d->have_prev = false;
+            d->stats.pcr_glitches++;
+            delta = from_prev;
+            jump = false;
+        }
+    }
+
+    bool odd = jump || (delta > odd_from && !covered);
+
+    if (d->cand) {
+        int64_t from_cand = mod_diff(raw, d->cand_raw, PCR_MOD);
+
+        if (!odd) {
+            /* Follows on from the PCR before the candidate, which is the
+             * stronger evidence even if it could follow the candidate
+             * too: the candidate was damage. Carry on as before. */
+            d->cand = false;
+            d->stats.pcr_glitches++;
+        } else if (from_cand > 0 && from_cand <= PCR_GAP_MAX) {
+            d->cand = false;
+            if (d->cand_jump) {
+                pcr_break_confirmed(d, raw);
+                d->pcr_raw = raw;
+            } else {
+                /* A long gap and no more: both PCRs are ordinary. */
+                pcr_accept(d, d->cand_idx, d->cand_raw);
+
+                stc_t since = d->pcr_unw;
+
+                pcr_accept(d, d->idx, raw);
+                pcr_report(d, since);
+            }
+            return;
+        } else if (++d->cand_chain < PCR_CAND_MAX) {
+            d->cand_raw = raw;              /* still no two that agree */
+            d->cand_idx = d->idx;
+            d->cand_jump = jump;
+            d->cand_anchors = 0;
+            return;
+        } else {
+            d->cand = false;                /* give up waiting: take this one */
+            if (jump) {
+                d->pcr_raw = raw;
+                pcr_break(d, delta);
+                return;
+            }
+        }
+    } else if (odd) {
+        d->cand = true;
+        d->cand_jump = jump;
+        d->cand_raw = raw;
+        d->cand_idx = d->idx;
+        d->cand_chain = 1;
+        d->cand_anchors = 0;
+        return;
+    }
+
+    pcr_accept(d, d->idx, raw);
+    pcr_report(d, d->pcr_unw);
 }
 
 /* ---- per-packet entry point ----------------------------------------- */
@@ -832,16 +1034,46 @@ void demux_resolve_now(struct demux *d)
     resolve_pending(d, true);
 }
 
-void demux_time_anchor(struct demux *d, stc_t input_stc)
+void demux_time_anchor(struct demux *d, stc_t input_stc, bool doubt)
 {
     if (!d->have_pcr || d->hist_n == 0)
         return;
-    if (input_stc <= hist_at(d, d->hist_n - 1)->pcr)
+    /*
+     * A PCR has been seen but is not believed yet (handle_pcr). If the
+     * clock really did change there, timing what came after it from the
+     * old clock would be wrong, so the PCR that settles it is given a
+     * little longer to arrive. If it does not, the candidate is dropped.
+     */
+    if (d->cand) {
+        if (++d->cand_anchors <= PCR_CAND_ANCHORS)
+            return;
+        d->cand = false;                    /* true or not, it led nowhere */
+    }
+
+    /*
+     * The owner doubts the PCRs it last saw: the stream's clock appeared
+     * to step, the owner had not yet accepted that, and then the PCR
+     * went. Its clock and our PCR history are then on different time
+     * lines. Content is sent by the owner's clock, so that is the line to
+     * carry on along: the first stand-in replaces the history instead of
+     * joining it, and what is waiting is timed back from it. It arrived
+     * just now by that clock, whatever the old PCRs would say.
+     */
+    if (doubt && !d->anchored) {
+        hist_clear(d);
+        d->have_prev = false;
+    } else if (input_stc <= hist_at(d, d->hist_n - 1)->pcr) {
         return;                             /* time must move forward */
+    }
     hist_add(d, d->idx, input_stc);
     d->anchored = true;
     d->stats.pcr_missing++;
     resolve_pending(d, false);
+}
+
+void demux_set_pcr_first(struct demux *d, bool on)
+{
+    d->pcr_first = on;
 }
 
 void demux_sync_error(struct demux *d)
