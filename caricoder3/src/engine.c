@@ -28,6 +28,7 @@
 
 #include "clock.h"
 #include "log.h"
+#include "xcode.h"
 
 #define RESYNC_LIMIT    (STC_HZ / 5)    /* live: PCR this far off the model ... */
 #define RESYNC_STABLE   (STC_HZ / 20)   /* ... without moving more than this   */
@@ -83,6 +84,18 @@ struct engine {
     int64_t flow_start;         /* start of the present unbroken run of input */
     int64_t dgram_interval;     /* smoothed time between datagrams, ns */
 
+    /* Streams that are transcoded. xc_mode says what happens to a PID's
+     * units: sent to the mux as they are, or handed to xc_by_pid. Both
+     * guarded by the lock; the xcode objects themselves are created and
+     * destroyed by the input thread only. */
+    struct xcode *xc_by_pid[PID_COUNT];
+    uint8_t xc_mode[PID_COUNT];         /* enum stream_mode */
+    struct xcode *xc_list[MAX_ES];
+    struct xcode_cfg xc_cfg[MAX_ES];
+    int n_xc;
+    uint64_t xc_orphans;                /* units for a transcoder that is gone */
+    bool warned_no_backend;
+
     /* warnings about the clock: at most one line a second */
     int64_t warn_last_ns;
     unsigned warn_suppressed;
@@ -107,6 +120,194 @@ static stc_t round300(stc_t v)
     return v;
 }
 
+/* ---- transcoded streams --------------------------------------------- */
+
+/*
+ * A unit that has been given its place on the output time line goes to
+ * the mux, or to the transcoder of its stream. Called with the lock held.
+ */
+static void deliver(struct engine *e, struct es_unit *u)
+{
+    if (e->xc_mode[u->pid] == STREAM_COPY) {
+        mux_push(e->mux, u);
+    } else if (e->xc_by_pid[u->pid]) {
+        xcode_push(e->xc_by_pid[u->pid], u);
+    } else {
+        e->xc_orphans++;
+        free(u);
+    }
+}
+
+/* What a transcoder produced. Comes from its thread in a live run, and
+ * from inside deliver() (lock already held) in a file run. */
+static void on_xcode_out(void *opaque, struct es_unit *u)
+{
+    struct engine *e = opaque;
+    bool live = e->cfg.live;
+    struct xcode *x;
+    stc_t now = NOPTS;
+
+    if (live)
+        pthread_mutex_lock(&e->lock);
+    if (!live)
+        now = e->last_out_time - e->delay;
+    else if (e->pll.valid)
+        now = pll_eval(&e->pll, clock_now_ns()) - e->delay;
+    x = e->xc_by_pid[u->pid];
+    if (x && now != NOPTS)
+        xcode_note_slack(x, u->t0 - now);
+    mux_push(e->mux, u);
+    if (live)
+        pthread_mutex_unlock(&e->lock);
+}
+
+static const struct xcode_spec *spec_for(const struct xcode_spec *list, int n, int pid)
+{
+    const struct xcode_spec *all = NULL;
+
+    for (int i = 0; i < n; i++) {
+        if (list[i].pid == pid)
+            return &list[i];
+        if (list[i].pid == 0)
+            all = &list[i];
+    }
+    return all;
+}
+
+/* The transcoding wanted for stream `idx` of the input, if any. */
+static bool plan_stream(struct engine *e, const struct program *p, int idx,
+                        struct xcode_cfg *cfg)
+{
+    enum codec_id in = xcode_input_codec(p, idx);
+    const struct xcode_spec *s;
+    bool video = codec_is_video(in);
+    bool is_audio_type, is_video_type;
+    int st = p->es[idx].stream_type;
+
+    /* Which list applies is a matter of what the stream is, also when it
+     * is in a coding we cannot read. */
+    is_video_type = st == 0x01 || st == 0x02 || st == 0x10 || st == 0x1B || st == 0x24;
+    is_audio_type = st == 0x03 || st == 0x04 || st == 0x0F || st == 0x11 ||
+                    st == 0x81 || st == 0x87 ||
+                    (st == 0x06 && (program_es_has_desc(p, idx, 0x6A, NULL) ||
+                                    program_es_has_desc(p, idx, 0x7A, NULL)));
+    if (!is_video_type && !is_audio_type)
+        return false;
+    s = is_video_type ? spec_for(e->cfg.video, e->cfg.n_video, p->es[idx].pid)
+                      : spec_for(e->cfg.audio, e->cfg.n_audio, p->es[idx].pid);
+    if (!s || s->codec == CODEC_NONE)
+        return false;
+    if (in == CODEC_NONE) {
+        log_warn("PID 0x%04X: %s cannot be decoded here, the stream is copied",
+                 p->es[idx].pid, stream_type_name(st));
+        return false;
+    }
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->pid = p->es[idx].pid;
+    cfg->in = in;
+    cfg->out = s->codec;
+    cfg->bitrate = s->bitrate;
+    if (video) {
+        cfg->decoder = e->cfg.decoder;
+        cfg->encoder = e->cfg.encoder;
+        cfg->gpu = e->cfg.gpu;
+        cfg->vbv_ms = e->cfg.vbv_ms;
+        cfg->gop_ms = e->cfg.gop_ms;
+        cfg->preset = e->cfg.preset;
+    }
+    return true;
+}
+
+/* How the transcoded stream is announced in the PMT. */
+static void announce(struct program *np, int idx, enum codec_id out)
+{
+    static const uint8_t keep[] = { 0x0A, 0x52 };       /* language, stream id */
+    static const uint8_t hevc_reg[] = { 0x05, 0x04, 'H', 'E', 'V', 'C' };
+
+    switch (out) {
+    case CODEC_AAC:  program_set_es(np, idx, 0x0F, keep, 2, NULL, 0); break;
+    case CODEC_MP2:
+    case CODEC_MP3:  program_set_es(np, idx, 0x03, keep, 2, NULL, 0); break;
+    case CODEC_H264: program_set_es(np, idx, 0x1B, keep, 2, NULL, 0); break;
+    case CODEC_HEVC: program_set_es(np, idx, 0x24, keep, 2, hevc_reg, 6); break;
+    default: break;
+    }
+}
+
+/*
+ * Brings the set of transcoders in line with the service as it now is,
+ * and rewrites `np` (the description the mux will send) accordingly.
+ * Runs in the input thread, outside the lock: opening a codec takes time,
+ * and stopping one means waiting for its thread.
+ */
+static void update_xcodes(struct engine *e, const struct program *p, struct program *np)
+{
+    struct xcode *gone[MAX_ES], *keep[MAX_ES];
+    struct xcode_cfg want[MAX_ES], keep_cfg[MAX_ES];
+    bool wanted[MAX_ES] = { false };
+    int n_gone = 0, n_keep = 0;
+
+    for (int i = 0; i < p->n_es; i++)
+        wanted[i] = plan_stream(e, p, i, &want[i]);
+
+    /* Those no longer wanted, or wanted differently, come out first. */
+    pthread_mutex_lock(&e->lock);
+    for (int k = 0; k < e->n_xc; k++) {
+        bool still = false;
+
+        for (int i = 0; i < p->n_es; i++)
+            if (wanted[i] && !memcmp(&want[i], &e->xc_cfg[k], sizeof(want[i])))
+                still = true;
+        if (still) {
+            keep[n_keep] = e->xc_list[k];
+            keep_cfg[n_keep++] = e->xc_cfg[k];
+        } else {
+            gone[n_gone++] = e->xc_list[k];
+            e->xc_by_pid[e->xc_cfg[k].pid] = NULL;
+        }
+    }
+    memcpy(e->xc_list, keep, sizeof(keep[0]) * (size_t)n_keep);
+    memcpy(e->xc_cfg, keep_cfg, sizeof(keep_cfg[0]) * (size_t)n_keep);
+    e->n_xc = n_keep;
+    pthread_mutex_unlock(&e->lock);
+
+    for (int k = 0; k < n_gone; k++)
+        xcode_free(gone[k]);
+
+    for (int i = 0; i < p->n_es; i++) {
+        struct xcode *x = NULL;
+        char err[200] = "";
+        bool have = false;
+
+        if (!wanted[i])
+            continue;
+        for (int k = 0; k < e->n_xc; k++)
+            if (!memcmp(&want[i], &e->xc_cfg[k], sizeof(want[i])))
+                have = true;
+        if (!have) {
+            x = xcode_new(&want[i], e->cfg.live, on_xcode_out, e, err, sizeof(err));
+            if (!x) {
+                log_err("PID 0x%04X: cannot transcode %s to %s (%s); the stream is copied",
+                        want[i].pid, codec_name(want[i].in), codec_name(want[i].out), err);
+                wanted[i] = false;
+                continue;
+            }
+            pthread_mutex_lock(&e->lock);
+            e->xc_list[e->n_xc] = x;
+            e->xc_cfg[e->n_xc++] = want[i];
+            e->xc_by_pid[want[i].pid] = x;
+            pthread_mutex_unlock(&e->lock);
+        }
+        announce(np, i, want[i].out);
+    }
+
+    pthread_mutex_lock(&e->lock);
+    memset(e->xc_mode, STREAM_COPY, sizeof(e->xc_mode));
+    for (int k = 0; k < e->n_xc; k++)
+        e->xc_mode[e->xc_cfg[k].pid] = STREAM_TRANSCODE;
+    pthread_mutex_unlock(&e->lock);
+}
+
 /* ---- demux callbacks ------------------------------------------------ */
 
 static void on_program(void *opaque, const struct program *p)
@@ -115,6 +316,8 @@ static void on_program(void *opaque, const struct program *p)
     struct program np = *p;
 
     program_set_service(&np, e->cfg.service_provider, e->cfg.service_name);
+    if (e->cfg.n_audio || e->cfg.n_video)
+        update_xcodes(e, p, &np);
 
     bool same_streams;
 
@@ -147,9 +350,17 @@ static void on_program(void *opaque, const struct program *p)
     }
     log_info("service %u: PMT PID 0x%04X, PCR PID 0x%04X, %d stream(s)",
              np.number, np.pmt_pid, np.pcr_pid, np.n_es);
-    for (int i = 0; i < np.n_es; i++)
-        log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", np.es[i].pid,
-                 np.es[i].stream_type, stream_type_name(np.es[i].stream_type));
+    for (int i = 0; i < np.n_es; i++) {
+        bool xc = e->xc_mode[np.es[i].pid] == STREAM_TRANSCODE;
+
+        if (xc)
+            log_info("  PID 0x%04X  type 0x%02X  %s  [transcoded from %s]", np.es[i].pid,
+                     np.es[i].stream_type, stream_type_name(np.es[i].stream_type),
+                     stream_type_name(p->es[i].stream_type));
+        else
+            log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", np.es[i].pid,
+                     np.es[i].stream_type, stream_type_name(np.es[i].stream_type));
+    }
     if (np.pcr_pid == PID_NULL)
         log_warn("service has no PCR: it cannot be timed and will not be output");
 }
@@ -214,7 +425,7 @@ static void release_held(struct engine *e, bool tentative)
         u->next = NULL;
         u->tentative = tentative;
         stamp(e, u);
-        mux_push(e->mux, u);
+        deliver(e, u);
         u = next;
     }
 }
@@ -230,7 +441,7 @@ static void release_held_stamped(struct engine *e)
         struct es_unit *next = u->next;
 
         u->next = NULL;
-        mux_push(e->mux, u);
+        deliver(e, u);
         u = next;
     }
 }
@@ -250,14 +461,14 @@ static void on_unit(void *opaque, struct es_unit *u)
         t1 = u->t1;
         if (!mux_started(e->mux))
             mux_start(e->mux, u->t0);
-        mux_push(e->mux, u);
+        deliver(e, u);
         if (t1 > e->last_out_time) {
             e->last_out_time = t1;
             mux_run(e->mux, t1 - e->delay, 0);
         }
     } else if (!e->suspect) {
         stamp(e, u);
-        mux_push(e->mux, u);
+        deliver(e, u);
     } else if (u->wall) {
         /*
          * The PCR has gone quiet with the question still open, and this
@@ -279,12 +490,12 @@ static void on_unit(void *opaque, struct es_unit *u)
             h->t1 = u->t0 + 1;
         }
         release_held_stamped(e);
-        mux_push(e->mux, u);
+        deliver(e, u);
     } else if (e->suspect_ahead && !e->held_head && u->t1 <= e->suspect_pcr) {
         /* The clock may have jumped forward, but this was complete before
          * the PCR that says so: it belongs to the clock we know. */
         stamp(e, u);
-        mux_push(e->mux, u);
+        deliver(e, u);
     } else if (e->held_head ? e->rx_ns - e->held_since <= HOLD_MAX_NS
                             : e->rx_ns - e->suspect_since <= HOLD_MAX_NS) {
         /* Which clock this belongs to is not known yet (see on_pcr). */
@@ -304,7 +515,7 @@ static void on_unit(void *opaque, struct es_unit *u)
         release_held(e, true);
         u->tentative = true;
         stamp(e, u);
-        mux_push(e->mux, u);
+        deliver(e, u);
     }
     pthread_mutex_unlock(&e->lock);
 }
@@ -571,6 +782,8 @@ void engine_finish(struct engine *e)
     e->sbuf_len = 0;
 
     demux_flush(e->dmx);
+    for (int k = 0; k < e->n_xc; k++)
+        xcode_finish(e->xc_list[k]);
 
     pthread_mutex_lock(&e->lock);
     while (mux_started(e->mux) && !mux_idle(e->mux) &&
@@ -668,6 +881,10 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
     }
     if (e->have_prog)
         out->prog = e->prog;
+    out->n_xc = e->n_xc;
+    for (int k = 0; k < e->n_xc; k++)
+        xcode_get_stats(e->xc_list[k], &out->xc[k]);
+    out->xc_orphans = e->xc_orphans;
     pthread_mutex_unlock(&e->lock);
 }
 
@@ -703,6 +920,9 @@ void engine_free(struct engine *e)
         e->held_head = u->next;
         free(u);
     }
+    /* The transcoders first: their threads still hand units to the mux. */
+    for (int k = 0; k < e->n_xc; k++)
+        xcode_free(e->xc_list[k]);
     demux_free(e->dmx);
     mux_free(e->mux);
     free(e->sbuf);

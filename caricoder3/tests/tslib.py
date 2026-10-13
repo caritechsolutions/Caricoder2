@@ -384,9 +384,16 @@ class Analysis:
         return all(b[1] > a[1] for a, b in zip(p, p[1:]))
 
     def stc_at(self, idx):
-        """Clock value at packet idx, interpolated between PCRs."""
+        """
+        Clock value at packet idx, interpolated between PCRs. Past the
+        last PCR the clock can only be carried on by counting packets,
+        which is exact in a constant-rate stream (one with null packets)
+        and meaningless in a variable-rate one: there the answer is None.
+        """
         p = self.unwrapped_pcrs()
         if len(p) < 2:
+            return None
+        if idx > p[-1][0] and not self.pid_packets.get(0x1FFF):
             return None
         import bisect
         k = bisect.bisect_right(p, (idx, float("inf")))
@@ -443,7 +450,7 @@ class Analysis:
         """Longest gap between table repetitions, measured on the PCR clock."""
         if len(idx_list) < 2:
             return None
-        ts = [self.stc_at(i) for i in idx_list]
-        if any(t is None for t in ts):
+        ts = [t for t in (self.stc_at(i) for i in idx_list) if t is not None]
+        if len(ts) < 2:
             return None
         return max(b - a for a, b in zip(ts, ts[1:])) / 27000.0

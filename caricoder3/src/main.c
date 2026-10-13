@@ -36,6 +36,8 @@
 #define SINK_DGRAMS     640
 #define DGRAM_MAX       (7 * TS_SIZE)
 #define VBR_DEFAULT_RATE 40000000LL
+#define DELAY_AUDIO_MS  800             /* default --delay when audio is transcoded */
+#define DELAY_VIDEO_MS  3000            /* ... and when video is */
 
 static atomic_int g_run = 1;             /* cleared by SIGINT / SIGTERM */
 
@@ -346,7 +348,31 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
         fprintf(f, "%s\n      {\"pid\": %u, \"stream_type\": %u, \"codec\": ",
                 i ? "," : "", st->prog.es[i].pid, st->prog.es[i].stream_type);
         json_str(f, stream_type_name(st->prog.es[i].stream_type));
-        fprintf(f, ", \"mode\": \"copy\"}");
+        const struct xcode_stats *x = NULL;
+
+        for (int k = 0; k < st->n_xc; k++)
+            if (st->xc[k].pid == st->prog.es[i].pid)
+                x = &st->xc[k];
+        if (!x) {
+            fprintf(f, ", \"mode\": \"copy\"}");
+            continue;
+        }
+        fprintf(f, ", \"mode\": \"transcode\", \"from\": \"%s\", \"decoder\": \"%s\", "
+                   "\"encoder\": \"%s\",\n       \"units_in\": %llu, \"units_out\": %llu, "
+                   "\"frames_in\": %llu, \"frames_out\": %llu,\n       "
+                   "\"decode_errors\": %llu, \"input_dropped\": %llu, "
+                   "\"skipped_bytes\": %llu, \"silence_ms\": %llu, \"cut_ms\": %llu,\n       "
+                   "\"restarts\": %llu, \"queued\": %u, \"failed\": %s",
+                codec_name(x->in), x->decoder, x->encoder,
+                (unsigned long long)x->units_in, (unsigned long long)x->units_out,
+                (unsigned long long)x->frames_in, (unsigned long long)x->frames_out,
+                (unsigned long long)x->errors, (unsigned long long)x->overflow,
+                (unsigned long long)x->skipped_bytes, (unsigned long long)x->silence_ms,
+                (unsigned long long)x->cut_ms, (unsigned long long)x->restarts,
+                x->queued, x->failed ? "true" : "false");
+        if (x->slack_min != INT64_MAX)
+            fprintf(f, ", \"slack_ms\": %.1f", (double)x->slack_min / STC_PER_MS);
+        fprintf(f, "}");
     }
     fprintf(f, "\n    ]\n  },\n");
 
@@ -522,7 +548,20 @@ static void usage(FILE *f)
 "      --vbr                variable bit rate: no null packets. This is the\n"
 "                           default when --muxrate is not given; with\n"
 "                           --muxrate it sets the peak rate\n"
-"  -d, --delay MS           input-to-output buffer (default 500)\n"
+"  -d, --delay MS           input-to-output buffer. Default 500; 800 when audio\n"
+"                           is transcoded, 3000 when video is\n"
+"      --audio SPEC         transcode audio: aac, mp2 or mp3, with an optional\n"
+"                           bit rate (aac:128k). PID=SPEC for one stream only\n"
+"                           (1653=aac:96k); may be repeated. Default: copy\n"
+"      --video SPEC         transcode video: h264 or hevc with a bit rate\n"
+"                           (h264:3M). Default: copy\n"
+"      --decoder WHERE      video decoding on: auto, nvidia or cpu (default auto)\n"
+"      --encoder WHERE      video encoding on: auto, nvidia or cpu (default auto)\n"
+"      --gpu N              which NVIDIA card (default 0)\n"
+"      --preset NAME        encoder speed, in the encoder's own words\n"
+"                           (x264/x265: ultrafast ... medium; nvenc: p1 ... p7)\n"
+"      --gop MS             longest gap between key frames (default 2000)\n"
+"      --vbv MS             video decoder buffer as time (default 1000)\n"
 "      --pcr-interval MS    default 30\n"
 "      --psi-interval MS    PAT/PMT repetition (default 100)\n"
 "      --sdt-interval MS    default 500\n"
@@ -576,7 +615,22 @@ static const char *file_path(const char *s)
 enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
+    OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET,
+    OPT_GOP, OPT_VBV,
 };
+
+static bool parse_where(const char *s, enum codec_where *out)
+{
+    if (!strcmp(s, "auto"))
+        *out = WHERE_AUTO;
+    else if (!strcmp(s, "cpu"))
+        *out = WHERE_CPU;
+    else if (!strcmp(s, "nvidia") || !strcmp(s, "gpu"))
+        *out = WHERE_NVIDIA;
+    else
+        return false;
+    return true;
+}
 
 int main(int argc, char **argv)
 {
@@ -596,6 +650,14 @@ int main(int argc, char **argv)
         { "stats-interval", required_argument, 0, OPT_STATS_INT },
         { "rt-prio", required_argument, 0, OPT_RT },
         { "backends", no_argument, 0, OPT_BACKENDS },
+        { "audio", required_argument, 0, OPT_AUDIO },
+        { "video", required_argument, 0, OPT_VIDEO },
+        { "decoder", required_argument, 0, OPT_DECODER },
+        { "encoder", required_argument, 0, OPT_ENCODER },
+        { "gpu", required_argument, 0, OPT_GPU },
+        { "preset", required_argument, 0, OPT_PRESET },
+        { "gop", required_argument, 0, OPT_GOP },
+        { "vbv", required_argument, 0, OPT_VBV },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -607,7 +669,7 @@ int main(int argc, char **argv)
     struct udp_addr in_addr, out_addr;
     struct sigaction sa;
     char err[256];
-    bool vbr_flag = false;
+    bool vbr_flag = false, delay_given = false;
     FILE *in_fp = NULL;
     int opt, rc;
 
@@ -632,7 +694,7 @@ int main(int argc, char **argv)
             }
             break;
         case OPT_VBR: vbr_flag = true; break;
-        case 'd': o.eng.delay_ms = atoi(optarg); break;
+        case 'd': o.eng.delay_ms = atoi(optarg); delay_given = true; break;
         case OPT_PCR: o.eng.mux.pcr_interval_ms = atoi(optarg); break;
         case OPT_PSI: o.eng.mux.psi_interval_ms = atoi(optarg); break;
         case OPT_SDT: o.eng.mux.sdt_interval_ms = atoi(optarg); break;
@@ -642,6 +704,36 @@ int main(int argc, char **argv)
         case OPT_STATS_INT: o.stats_interval = atoi(optarg); break;
         case OPT_RT: o.rt_prio = atoi(optarg); break;
         case OPT_BACKENDS: codec_list(stdout); return 0;
+        case OPT_AUDIO:
+        case OPT_VIDEO: {
+            bool v = opt == OPT_VIDEO;
+            int max = v ? 4 : 8;
+            int *n = v ? &o.eng.n_video : &o.eng.n_audio;
+            struct xcode_spec *list = v ? o.eng.video : o.eng.audio;
+
+            if (*n >= max) {
+                fprintf(stderr, "too many --%s options\n", v ? "video" : "audio");
+                return 2;
+            }
+            if (!xcode_parse_spec(optarg, v, &list[*n], err, sizeof(err))) {
+                fprintf(stderr, "--%s %s\n", v ? "video" : "audio", err);
+                return 2;
+            }
+            (*n)++;
+            break;
+        }
+        case OPT_DECODER:
+        case OPT_ENCODER:
+            if (!parse_where(optarg, opt == OPT_DECODER ? &o.eng.decoder : &o.eng.encoder)) {
+                fprintf(stderr, "--%s must be auto, nvidia or cpu\n",
+                        opt == OPT_DECODER ? "decoder" : "encoder");
+                return 2;
+            }
+            break;
+        case OPT_GPU: o.eng.gpu = atoi(optarg); break;
+        case OPT_PRESET: o.eng.preset = optarg; break;
+        case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;
+        case OPT_VBV: o.eng.vbv_ms = atoi(optarg); break;
         case 'v': log_level = LOG_DBG; break;
         case 'q': log_level = LOG_WARN; break;
         case 'V': printf("caricoder3 %s\n", CC3_VERSION); return 0;
@@ -651,6 +743,24 @@ int main(int argc, char **argv)
     }
     if (!o.input || !o.output || optind < argc) {
         usage(stderr);
+        return 2;
+    }
+
+    /* Decoding and encoding take time, and an encoder looks ahead: what
+     * is transcoded cannot leave as soon as what is merely copied. */
+    {
+        bool xa = false, xv = false;
+
+        for (int i = 0; i < o.eng.n_audio; i++)
+            xa |= o.eng.audio[i].codec != CODEC_NONE;
+        for (int i = 0; i < o.eng.n_video; i++)
+            xv |= o.eng.video[i].codec != CODEC_NONE;
+        if (!delay_given)
+            o.eng.delay_ms = xv ? DELAY_VIDEO_MS : xa ? DELAY_AUDIO_MS : 500;
+    }
+    if (o.eng.gpu < 0 || o.eng.gpu > 63 || o.eng.gop_ms < 0 || o.eng.gop_ms > 20000 ||
+        o.eng.vbv_ms < 0 || o.eng.vbv_ms > 5000) {
+        fprintf(stderr, "option out of range (gpu 0..63, gop 0..20000 ms, vbv 0..5000 ms)\n");
         return 2;
     }
 

@@ -392,6 +392,72 @@ void program_set_service(struct program *p, const char *provider,
     p->sdt_desc_len = (uint16_t)n;
 }
 
+bool program_es_has_desc(const struct program *p, int idx, int tag,
+                         const char *reg_format)
+{
+    const struct es_info *e = &p->es[idx];
+    const uint8_t *d = p->blob + e->desc_off;
+
+    for (int pos = 0; pos + 2 <= e->desc_len; pos += 2 + d[pos + 1]) {
+        int dl = d[pos + 1];
+
+        if (pos + 2 + dl > e->desc_len)
+            break;
+        if (d[pos] != tag)
+            continue;
+        if (!reg_format)
+            return true;
+        if (dl >= 4 && memcmp(d + pos + 2, reg_format, 4) == 0)
+            return true;
+    }
+    return false;
+}
+
+void program_set_es(struct program *p, int idx, uint8_t stream_type,
+                    const uint8_t *keep, int n_keep,
+                    const uint8_t *extra, int extra_len)
+{
+    uint8_t blob[PSI_MAX];
+    int len = p->info_len;
+
+    memcpy(blob, p->blob, p->info_len);
+    for (int i = 0; i < p->n_es; i++) {
+        struct es_info *e = &p->es[i];
+        const uint8_t *d = p->blob + e->desc_off;
+        int start = len;
+
+        if (i != idx) {
+            memcpy(blob + len, d, e->desc_len);
+            len += e->desc_len;
+        } else {
+            for (int pos = 0; pos + 2 <= e->desc_len; pos += 2 + d[pos + 1]) {
+                int dl = d[pos + 1];
+                bool wanted = false;
+
+                if (pos + 2 + dl > e->desc_len)
+                    break;
+                for (int k = 0; k < n_keep; k++)
+                    if (d[pos] == keep[k])
+                        wanted = true;
+                if (wanted) {
+                    memcpy(blob + len, d + pos, (size_t)(2 + dl));
+                    len += 2 + dl;
+                }
+            }
+            if (extra_len > 0 && len + extra_len <= (int)sizeof(blob)) {
+                memcpy(blob + len, extra, (size_t)extra_len);
+                len += extra_len;
+            }
+            e->stream_type = stream_type;
+        }
+        e->desc_off = (uint16_t)start;
+        e->desc_len = (uint16_t)(len - start);
+    }
+    memset(p->blob, 0, sizeof(p->blob));
+    memcpy(p->blob, blob, (size_t)len);
+    p->blob_len = (uint16_t)len;
+}
+
 const char *stream_type_name(int st)
 {
     switch (st) {

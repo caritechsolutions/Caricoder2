@@ -89,9 +89,12 @@ def _is_subsequence(small, big):
 
 
 def compare(orig_path, out_path, program=0, subset=False, shifted=False,
-            skip_head=0):
+            skip_head=0, only=None):
     """
     Checks that `out` carries the same service content as `orig`.
+
+    only     : a set of PIDs. The comparison is limited to those streams
+               (for runs in which the others are transcoded).
 
     subset   : out may be missing whole units (after input loss) but must
                not contain anything that was not in orig, nor reorder.
@@ -110,13 +113,19 @@ def compare(orig_path, out_path, program=0, subset=False, shifted=False,
         fails.append("PCR PID differs")
     if a.pmt["info"] != b.pmt["info"]:
         fails.append("program descriptors differ")
-    if [(s["pid"], s["type"], s["desc"]) for s in a.pmt["streams"]] != \
-       [(s["pid"], s["type"], s["desc"]) for s in b.pmt["streams"]]:
+    if [s["pid"] for s in a.pmt["streams"]] != [s["pid"] for s in b.pmt["streams"]]:
+        fails.append("PMT lists different PIDs")
+    if [(s["pid"], s["type"], s["desc"]) for s in a.pmt["streams"]
+        if only is None or s["pid"] in only] != \
+       [(s["pid"], s["type"], s["desc"]) for s in b.pmt["streams"]
+        if only is None or s["pid"] in only]:
         fails.append("PMT stream list differs")
 
     key = "sha_nots" if shifted else "sha"
     for s in a.pmt["streams"]:
         pid = s["pid"]
+        if only is not None and pid not in only:
+            continue
         if pid in a.pes or pid in b.pes:
             ia = [(r[key], r["rai"]) + (() if shifted else (r["pts"], r["dts"]))
                   for r in a.pes.get(pid, [])][skip_head:]

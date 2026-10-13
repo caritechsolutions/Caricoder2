@@ -1513,6 +1513,424 @@ def live_systemd_watchdog():
 
 # ---------------------------------------------------------------- runner
 
+# ------------------------------------------------------- transcoding tests
+#
+# These need ffmpeg (to make real streams and as the reference decoder),
+# numpy, and a build with the codec libraries. Each is skipped, and says
+# so, where one of those is missing.
+
+BURSTS = "aevalsrc='if(lt(mod(t,1),0.05),random(0)*0.6-0.3,0)':s=48000"
+V_SMALL = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "600k", "-g", "25", "-bf", "2"]
+
+
+def backends(binary=None):
+    """Names of the codec backends the build under test has, e.g. {'fdk-aac', 'lame'}."""
+    p = subprocess.run([binary or BIN, "--backends"], capture_output=True, text=True)
+    return {line.split()[0] for line in p.stdout.splitlines()
+            if "available" in line and "unavailable" not in line}
+
+
+def xc_ready(*needed):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return "SKIPPED: ffmpeg not installed"
+    try:
+        import numpy                                    # noqa: F401
+    except ImportError:
+        return "SKIPPED: numpy not installed"
+    missing = set(needed) - backends()
+    if missing:
+        return "SKIPPED: built without " + ", ".join(sorted(missing))
+    return None
+
+
+def av_source(name, audio, duration=8, video=V_SMALL, muxrate="2500k", mux_extra=()):
+    """
+    A real stream made by ffmpeg: a moving test picture and, per entry of
+    `audio` (a list of ffmpeg argument lists), one audio stream carrying
+    the same thing: a 50 ms burst of noise at the start of every second.
+    """
+    path = w(name + ".ts")
+    if name in _cache and os.path.exists(path):
+        return path
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration={duration}",
+           "-f", "lavfi", "-i", f"{BURSTS}:d={duration}"]
+    if len(audio) > 1:
+        labels = "".join(f"[a{i}]" for i in range(len(audio)))
+        cmd += ["-filter_complex", f"[1:a]asplit={len(audio)}{labels}", "-map", "0:v"]
+        for i in range(len(audio)):
+            cmd += ["-map", f"[a{i}]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a"]
+    cmd += ["-pix_fmt", "yuv420p", *video]
+    for i, a in enumerate(audio):
+        cmd += [x.replace("#", str(i)) for x in a]
+    cmd += ["-f", "mpegts", "-muxrate", muxrate, *mux_extra, path]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    need(p.returncode == 0, f"ffmpeg could not make {name}: {p.stderr[-400:]}")
+    _cache[name] = True
+    return path
+
+
+def probe_audio(path):
+    """[(codec, sample rate, channels)] of the audio streams, in order."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a",
+                        "-show_entries", "stream=codec_name,sample_rate,channels",
+                        "-of", "json", path], capture_output=True, text=True)
+    return [(s["codec_name"], int(s["sample_rate"]), int(s["channels"]))
+            for s in json.loads(p.stdout or "{}").get("streams", [])]
+
+
+def decodes_clean(path, what=""):
+    p = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", path,
+                        "-f", "null", "-"], capture_output=True, text=True)
+    need(p.returncode == 0 and not p.stderr.strip(),
+         f"{what}ffmpeg reports errors decoding the output: {p.stderr[:300]}")
+
+
+def sync_ms(src, out, idx, src_idx=None):
+    import av_sync
+    ms, _, n_out = av_sync.offset_ms(src, idx if src_idx is None else src_idx, out, idx)
+    return ms, n_out
+
+
+def xstats(st, pid):
+    for s in st["service"]["streams"]:
+        if s["pid"] == pid:
+            return s
+    raise Fail(f"PID {pid} not in the statistics")
+
+
+A_MP2 = ["-c:a:#", "mp2", "-b:a:#", "192k", "-ac:a:#", "2"]
+A_AAC = ["-c:a:#", "aac", "-b:a:#", "128k", "-ac:a:#", "2"]
+A_AC3 = ["-c:a:#", "ac3", "-b:a:#", "192k", "-ac:a:#", "2"]
+OUT_CODEC = {"aac": ("aac", "fdk-aac"), "mp2": ("mp2", "twolame"), "mp3": ("mp3", "lame")}
+
+
+@test
+def xc_audio_every_pairing():
+    """MP2, AAC and AC-3 in; AAC, MP2 and MP3 out: all nine, in sync to the sample."""
+    skip = xc_ready("fdk-aac", "mpg123", "liba52", "twolame", "lame")
+    if skip:
+        return skip
+    src = av_source("xc_three", [A_MP2, A_AAC, A_AC3])
+    worst = 0.0
+    for name, (codec, _) in OUT_CODEC.items():
+        out = w(f"xc_three_{name}.ts")
+        st = run_file(src, out, "--audio", name)
+        must_pass(out)
+        must_match(src, out, only={0x100})              # the video is not touched
+        decodes_clean(out, f"to {name}: ")
+        got = probe_audio(out)
+        need(got == [(codec, 48000, 2)] * 3, f"to {name}: output audio is {got}")
+        for i, pid in enumerate((0x101, 0x102, 0x103)):
+            ms, n = sync_ms(src, out, i)
+            worst = max(worst, abs(ms))
+            need(abs(ms) < 1.0, f"{probe_audio(src)[i][0]} to {name}: audio is {ms:+.2f} ms off")
+            need(n > 48000 * 7.5, f"to {name}: only {n / 48000:.2f} s of audio came out")
+            x = xstats(st, pid)
+            need(x["mode"] == "transcode" and x["decode_errors"] == 0 and
+                 x["silence_ms"] == 0 and x["cut_ms"] == 0 and not x["failed"],
+                 f"to {name}, PID {pid}: {x}")
+        need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+             f"to {name}: late or dropped units")
+    return f"9 pairings conformant, decode clean, video untouched, worst sync error " \
+           f"{worst:.3f} ms"
+
+
+@test
+def xc_audio_formats():
+    """Mono, 44.1 and 32 kHz, 24 kHz, 5.1, LATM: each lands in sync at its own rate."""
+    skip = xc_ready("fdk-aac", "mpg123", "liba52", "twolame")
+    if skip:
+        return skip
+    cases = [
+        ("mono_mp2", ["-c:a:#", "mp2", "-b:a:#", "96k", "-ac:a:#", "1"], (48000, 1), ()),
+        ("mp2_44", ["-c:a:#", "mp2", "-b:a:#", "192k", "-ac:a:#", "2", "-ar:a:#", "44100"],
+         (44100, 2), ()),
+        ("mp2_32", ["-c:a:#", "mp2", "-b:a:#", "128k", "-ac:a:#", "2", "-ar:a:#", "32000"],
+         (32000, 2), ()),
+        ("mp2_24", ["-c:a:#", "mp2", "-b:a:#", "64k", "-ac:a:#", "2", "-ar:a:#", "24000"],
+         (24000, 2), ()),
+        ("mp3_in", ["-c:a:#", "libmp3lame", "-b:a:#", "128k", "-ac:a:#", "2"], (48000, 2), ()),
+        ("aac_51", ["-c:a:#", "aac", "-b:a:#", "320k", "-ac:a:#", "6"], (48000, 2), ()),
+        ("ac3_51", ["-c:a:#", "ac3", "-b:a:#", "448k", "-ac:a:#", "6"], (48000, 2), ()),
+        ("ac3_44", ["-c:a:#", "ac3", "-b:a:#", "192k", "-ac:a:#", "2", "-ar:a:#", "44100"],
+         (44100, 2), ()),
+        ("aac_latm", A_AAC, (48000, 2), ("-mpegts_flags", "latm")),
+        ("aac_mono_32", ["-c:a:#", "aac", "-b:a:#", "64k", "-ac:a:#", "1", "-ar:a:#", "32000"],
+         (32000, 1), ()),
+    ]
+    done = []
+    for name, a, (rate, ch), mux_extra in cases:
+        src = av_source("xc_fmt_" + name, [a], duration=6, mux_extra=mux_extra)
+        for to in ("aac", "mp2"):
+            out = w(f"xc_fmt_{name}_{to}.ts")
+            st = run_file(src, out, "--audio", to)
+            must_pass(out)
+            decodes_clean(out, f"{name} to {to}: ")
+            got = probe_audio(out)
+            need(got == [(to, rate, ch)], f"{name} to {to}: output audio is {got}, "
+                                          f"expected {rate} Hz, {ch} channel(s)")
+            ms, n = sync_ms(src, out, 0)
+            need(abs(ms) < 1.0, f"{name} to {to}: audio is {ms:+.2f} ms off")
+            need(n > 48000 * 5.5, f"{name} to {to}: only {n / 48000:.2f} s of audio")
+            x = xstats(st, 0x101)
+            need(x["decode_errors"] == 0 and not x["failed"], f"{name} to {to}: {x}")
+        done.append(name)
+    return f"{len(done)} input formats, each to AAC and MP2: rate and channels kept " \
+           f"(5.1 mixed to stereo), in sync"
+
+
+@test
+def xc_audio_one_stream_only():
+    """--audio PID=...: that stream is transcoded, the others pass byte for byte."""
+    skip = xc_ready("fdk-aac", "liba52")
+    if skip:
+        return skip
+    src = av_source("xc_three", [A_MP2, A_AAC, A_AC3])
+    out = w("xc_one.ts")
+    st = run_file(src, out, "--audio", "0x103=aac:96k")
+    must_pass(out)
+    must_match(src, out, only={0x100, 0x101, 0x102})
+    need([c for c, _, _ in probe_audio(out)] == ["mp2", "aac", "aac"], str(probe_audio(out)))
+    need(xstats(st, 0x101)["mode"] == "copy" and xstats(st, 0x103)["mode"] == "transcode",
+         "wrong streams transcoded")
+    a = Analysis(out)
+    types = {s["pid"]: (s["type"], s["desc"]) for s in a.pmt["streams"]}
+    need(types[0x103][0] == 0x0F, f"PMT says type 0x{types[0x103][0]:02X} for the AAC")
+    need(b"AC-3" not in types[0x103][1] and 0x6A not in types[0x103][1][:1],
+         "the AC-3 descriptor is still attached to what is now AAC")
+    ms, _ = sync_ms(src, out, 2)
+    need(abs(ms) < 1.0, f"audio is {ms:+.2f} ms off")
+    return "AC-3 PID became AAC (PMT type and descriptors updated), the other three " \
+           "streams identical"
+
+
+@test
+def xc_audio_packet_loss():
+    """Lost input packets: the hole is filled with silence and sync is kept."""
+    skip = xc_ready("fdk-aac", "mpg123", "liba52")
+    if skip:
+        return skip
+    src = av_source("xc_three", [A_MP2, A_AAC, A_AC3])
+    data = bytearray(read(src))
+    n = len(data) // TS
+    rng = random.Random(5)
+    gone = 0
+    # Runs of packets missing from the audio PIDs, between bursts and on them.
+    for start in sorted(rng.sample(range(n // 10, n - n // 10), 40)):
+        for i in range(start, start + rng.randint(1, 12)):
+            pid = (data[i * TS + 1] & 0x1F) << 8 | data[i * TS + 2]
+            if pid in (0x101, 0x102, 0x103):
+                data[i * TS + 1] |= 0x1F                    # becomes a null packet
+                data[i * TS + 2] = 0xFF
+                gone += 1
+    bad = write(w("xc_loss_in.ts"), bytes(data))
+    out = w("xc_loss.ts")
+    st = run_file(bad, out, "--audio", "aac")
+    must_pass(out)
+    decodes_clean(out)
+    silence = 0
+    for i, pid in enumerate((0x101, 0x102, 0x103)):
+        x = xstats(st, pid)
+        silence += x["silence_ms"]
+        need(not x["failed"], f"PID {pid}: {x}")
+        ms, n_out = sync_ms(src, out, i)
+        need(abs(ms) < 1.0, f"PID {pid}: audio is {ms:+.2f} ms off after the losses")
+        need(n_out > 48000 * 7.5, f"PID {pid}: only {n_out / 48000:.2f} s of audio")
+    need(st["input"]["cc_errors"] > 0 and silence > 0,
+         f"the losses were not noticed ({st['input']['cc_errors']} CC errors, "
+         f"{silence} ms of silence)")
+    return f"{gone} audio packets removed: {silence} ms filled with silence over three " \
+           f"streams, output continuous and in sync"
+
+
+@test
+def xc_audio_garbage():
+    """Damaged audio (bit errors that leave the transport layer intact)."""
+    skip = xc_ready("fdk-aac", "mpg123", "liba52", "twolame")
+    if skip:
+        return skip
+    src = av_source("xc_three", [A_MP2, A_AAC, A_AC3])
+    data = read(src)
+    n = len(data) // TS
+    rng = random.Random(11)
+    runs = 0
+    for trial in range(12):
+        d = bytearray(data)
+        for _ in range(rng.choice((5, 40, 400))):
+            i = rng.randrange(n)
+            pid = (d[i * TS + 1] & 0x1F) << 8 | d[i * TS + 2]
+            if pid not in (0x101, 0x102, 0x103) or (d[i * TS + 3] & 0x20):
+                continue
+            # anywhere in the payload: headers and audio data alike
+            for _ in range(rng.choice((1, 1, 8, 60))):
+                d[i * TS + rng.randrange(4, TS)] ^= 1 << rng.randrange(8)
+        bad = write(w("xc_garbage_in.ts"), bytes(d))
+        out = w("xc_garbage.ts")
+        run_file(bad, out, "--audio", rng.choice(("aac", "mp2")))
+        rep, fails = check(out, 0, False, None)
+        fails = [f for f in fails if "after their DTS" not in f]
+        need(not fails, f"trial {trial}: " + "; ".join(fails))
+        runs += 1
+    return f"{runs} damaged inputs: no crash, no sanitizer report, output still a valid stream"
+
+
+@test
+def xc_audio_undecodable_is_copied():
+    """E-AC-3 cannot be decoded by the AC-3 library: the stream is copied, and said so."""
+    skip = xc_ready("fdk-aac")
+    if skip:
+        return skip
+    src = av_source("xc_eac3", [["-c:a:#", "eac3", "-b:a:#", "192k", "-ac:a:#", "2"]], duration=4)
+    out = w("xc_eac3_out.ts")
+    binary = ASAN if os.path.exists(ASAN) else BIN
+    p = subprocess.run([binary, "-i", src, "-o", out, "--audio", "aac"],
+                       capture_output=True, text=True, timeout=120)
+    need(p.returncode == 0, p.stderr[-400:])
+    need("cannot be decoded here" in p.stderr, "no warning that the stream is copied")
+    must_pass(out)
+    must_match(src, out)
+    return "warned, copied untouched"
+
+
+def he_aac_source(aot):
+    """
+    An HE-AAC (aot 5) or HE-AAC v2 (aot 29) stream, or None. ffmpeg cannot
+    make one, so tests/he_aac_enc.c does, and that needs an fdk-aac library
+    with the HE parts in it: the one installed, or the one under the
+    directory named by CC3_FDK_FULL (a build of the original library).
+    """
+    path = w(f"xc_he{aot}.ts")
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    helper = w("he_aac_enc")
+    full = os.environ.get("CC3_FDK_FULL")
+    cmd = ["cc", "-O1", "-o", helper, os.path.join(HERE, "he_aac_enc.c")]
+    cmd += [f"-I{full}/include", f"{full}/lib/libfdk-aac.a", "-lm"] if full else ["-lfdk-aac"]
+    if subprocess.run(cmd, capture_output=True).returncode:
+        return None
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"{BURSTS}:d=6",
+                          "-ac", "2", "-f", "s16le", "-"], capture_output=True).stdout
+    enc = subprocess.run([helper, str(aot)], input=pcm, capture_output=True)
+    if enc.returncode or not enc.stdout:
+        return None                                     # library without HE-AAC
+    write(w(f"xc_he{aot}.aac"), enc.stdout)
+    p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc2=size=320x240:rate=25:duration=6", "-f", "aac", "-i",
+                        w(f"xc_he{aot}.aac"), "-map", "0:v", "-map", "1:a",
+                        "-pix_fmt", "yuv420p", *V_SMALL, "-c:a", "copy",
+                        "-f", "mpegts", "-muxrate", "1500k", path],
+                       capture_output=True, text=True)
+    return path if p.returncode == 0 else None
+
+
+@test
+def xc_audio_he_aac():
+    """HE-AAC and HE-AAC v2 in: full band and in sync if the AAC library can, a clear
+    warning and a valid half-band stream if it cannot."""
+    skip = xc_ready("fdk-aac", "twolame")
+    if skip:
+        return skip
+    # CC3_BIN_FULL: a caricoder3 built against the full library, to test that case.
+    binary = os.environ.get("CC3_BIN_FULL") or (ASAN if os.path.exists(ASAN) else BIN)
+    res = []
+    for aot, label in ((5, "HE-AAC"), (29, "HE-AAC v2")):
+        src = he_aac_source(aot)
+        if not src:
+            return "SKIPPED: no fdk-aac library with HE-AAC to make the test stream " \
+                   "(set CC3_FDK_FULL)"
+        for to in ("aac", "mp2"):
+            out = w(f"xc_he{aot}_{to}.ts")
+            p = subprocess.run([binary, "-i", src, "-o", out, "--audio", to],
+                               capture_output=True, text=True, timeout=120)
+            need(p.returncode == 0 and "AddressSanitizer" not in p.stderr and
+                 "runtime error" not in p.stderr, p.stderr[-600:])
+            must_pass(out)
+            decodes_clean(out, f"{label} to {to}: ")
+            (codec, rate, ch), = probe_audio(out)
+            if "has no SBR" in p.stderr:
+                need(rate == 24000, f"{label} to {to}: {rate} Hz from a library without SBR")
+                kind = "core only (24 kHz), warned"
+            else:
+                need((rate, ch) == (48000, 2), f"{label} to {to}: {rate} Hz, {ch} channel(s)")
+                ms, _ = sync_ms(src, out, 0)
+                need(abs(ms) < 1.0, f"{label} to {to}: audio is {ms:+.2f} ms off")
+                kind = "full band, in sync"
+        res.append(f"{label}: {kind}")
+    return "; ".join(res)
+
+
+@test
+def live_xc_audio():
+    """Live, CBR, three audio streams transcoded in their own threads."""
+    skip = xc_ready("fdk-aac", "mpg123", "liba52")
+    if skip:
+        return skip
+    src = av_source("xc_three", [A_MP2, A_AAC, A_AC3])
+    st, cap, log = live(lambda p: p.play(src, rate=2_500_000), "-r", "2500k",
+                        "--audio", "aac:96k", capture_name="live_xc_audio.ts", tail=2.0)
+    out = w("live_xc_audio.ts")
+    must_pass(out, cbr=True)
+    must_match(src, out, only={0x100}, subset=True)
+    need(probe_audio(out) == [("aac", 48000, 2)] * 3, str(probe_audio(out)))
+    slack = []
+    for i, pid in enumerate((0x101, 0x102, 0x103)):
+        x = xstats(st, pid)
+        need(x["mode"] == "transcode" and not x["failed"] and x["decode_errors"] == 0 and
+             x["input_dropped"] == 0 and x["silence_ms"] == 0, f"PID {pid}: {x}")
+        ms, n = sync_ms(src, out, i)
+        need(abs(ms) < 1.0, f"PID {pid}: audio is {ms:+.2f} ms off")
+        need(n > 48000 * 7.3, f"PID {pid}: only {n / 48000:.2f} s of audio")
+        if "slack_ms" in x:
+            slack.append(x["slack_ms"])
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+         f"late {st['output']['late_units']}, dropped {st['output']['dropped_units']}")
+    no_pause(cap)
+    return f"3 streams to AAC in real time, in sync, nothing late or dropped " \
+           f"(delay {st.get('delay_ms', 800)} ms)"
+
+
+@test
+def live_xc_audio_source_restart():
+    """Source comes back on another clock while its audio is being transcoded."""
+    skip = xc_ready("fdk-aac", "mpg123")
+    if skip:
+        return skip
+    a = av_source("xc_ra", [A_MP2], duration=5)
+    b = av_source("xc_rb", [A_MP2], duration=5, mux_extra=("-output_ts_offset", "7000"))
+
+    def feed(p):
+        p.play(a, rate=2_500_000)
+        time.sleep(1.5)
+        p.play(b, rate=2_500_000)
+
+    st, cap, _ = live(feed, "-r", "2500k", "--audio", "aac", capture_name="live_xc_restart.ts",
+                      tail=2.0)
+    out = w("live_xc_restart.ts")
+    must_pass(out, cbr=True, allow_late=True)
+    need(st["clock"]["discontinuities"] == 1,
+         f"{st['clock']['discontinuities']} discontinuities, expected 1")
+    x = xstats(st, 0x101)
+    need(not x["failed"] and x["decode_errors"] == 0 and x["input_dropped"] == 0, str(x))
+    need(x["restarts"] == 1, f"audio time line taken up afresh {x['restarts']} times, expected 1")
+    # The audio of both halves is there, on one time line that only moves forward.
+    an = Analysis(out)
+    pts = [r["pts"] for r in an.pes[0x101]]
+    back = [i for i in range(1, len(pts)) if pts[i] <= pts[i - 1]]
+    need(not back, f"audio time stamps go backwards at PES {back[:5]}")
+    import av_sync
+    n = len(av_sync.decode(out, 0))
+    need(n > 48000 * 9.3, f"only {n / 48000:.2f} s of audio out of 10")
+    late = an.lateness_ms()
+    need(len(late) <= 3, f"{len(late)} PES left after their time")
+    need(wrong_clock([a], out) == 0, "audio carries the wrong clock's timestamps")
+    no_pause(cap)
+    return f"{n / 48000:.2f} s of 10 s of audio delivered across the restart, time stamps " \
+           f"only move forward, {len(late)} late"
+
+
 def main():
     args = sys.argv[1:]
     if "--list" in args:

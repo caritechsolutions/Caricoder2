@@ -84,6 +84,20 @@ int psi_build_sdt(const struct program *p, int version, uint8_t *sec);
 void program_set_service(struct program *p, const char *provider,
                          const char *name);
 
+/* True when stream `idx` carries a descriptor with this tag. With
+ * reg_format (four characters), only a registration descriptor (tag 0x05)
+ * of that format counts. */
+bool program_es_has_desc(const struct program *p, int idx, int tag,
+                         const char *reg_format);
+
+/* Gives stream `idx` a new stream type, for a stream that is re-encoded.
+ * Of its descriptors only those whose tag is listed in `keep` survive
+ * (the language, say: what described the old coding no longer applies);
+ * `extra` is appended. */
+void program_set_es(struct program *p, int idx, uint8_t stream_type,
+                    const uint8_t *keep, int n_keep,
+                    const uint8_t *extra, int extra_len);
+
 const char *stream_type_name(int stream_type);
 
 #endif

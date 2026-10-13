@@ -8,6 +8,7 @@
 #include "cc3.h"
 #include "demux.h"
 #include "mux.h"
+#include "xcode.h"
 
 struct engine;
 
@@ -18,6 +19,14 @@ struct engine_cfg {
     struct mux_cfg mux;
     const char *service_name;       /* NULL = keep the input's */
     const char *service_provider;
+
+    /* Transcoding. Nothing listed: every stream is copied. */
+    struct xcode_spec audio[8], video[4];
+    int  n_audio, n_video;
+    enum codec_where decoder, encoder;  /* video: where it may run */
+    int  gpu;                           /* NVIDIA card to use */
+    int  vbv_ms, gop_ms;                /* 0: defaults */
+    const char *preset;
 };
 
 struct engine_stats {
@@ -35,6 +44,9 @@ struct engine_stats {
     double   clock_ppm;
     double   clock_jitter_us;
     struct program prog;
+    int      n_xc;
+    struct xcode_stats xc[MAX_ES];
+    uint64_t xc_orphans;
 };
 
 struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,
