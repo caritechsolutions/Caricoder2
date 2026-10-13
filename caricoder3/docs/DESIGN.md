@@ -428,8 +428,9 @@ waiting for a thread. The wait for the queue is limited to 0.3 s, because
 it is the input thread that waits: a codec not through by then was behind
 anyway, and what it held is given up. Emptying the encoder afterwards
 takes what it takes (tens of milliseconds at the default presets). A new transcoder taking over a PID is told the last
-decode time its predecessor gave out, so decode times on the PID only
-move forward.
+decode time its predecessor gave out and when that unit will have been
+sent, so decode times on the PID only move forward and the new stream is
+sent after the old one's end, not on top of it.
 
 ### Audio: time by counting samples
 
@@ -478,8 +479,11 @@ something else, so it is never less than 75 ms; packets are shortened
 first, down to one frame. For MP2 at 320 and 384 kb/s, 75 ms is by itself
 more than the buffer holds, and the lead is kept all the same: a packet
 that comes late is heard, a buffer over its nominal size usually is not.
-Measured in a CBR mux: 1760 to 3384 bytes across five codings and rates,
-4664 for MP2 at 384 kb/s, and never less than 75 ms early.
+Measured in a CBR mux beside new video or with room to spare: 1760 to
+3384 bytes across five codings and rates, 4664 for MP2 at 384 kb/s, and
+never less than 75 ms early. Beside a copied video stream in a mux with
+under a tenth to spare the lead is eaten into (43 ms was measured): see
+"Known limits" in the README.
 
 ### Video: pictures keep their time
 
@@ -514,25 +518,33 @@ it takes at R instead of being pushed out in one picture's time, and the
 audio beside it is not held up.
 
 The pace is not exactly R. It counts the encoder's bytes only (not the
-PES header added here), runs 1.5 % above R, and rises with the square of
-how far the schedule is behind the "not sooner than" line (a third of a
-buffer behind: 22 % more). The first version paced everything at exactly
-R, header included, and so ran a fraction slower than the encoder
-produced: over a minute of hard-to-code video the pictures slid from a
-second early to barely in time. With the feedback an encoder that keeps
-to R is sent at R, and one that runs over (x265, by 6 % in the test)
-settles a little behind the line and stays there. As a last resort a
-unit is always delivered by half a picture before its decode time.
+PES header added here) and runs 1.5 % above R. Being behind the "not
+sooner than" line is normal (a large key frame takes the schedule a good
+part of a buffer behind, and the encoder has allowed for it), so nothing
+more is done up to three tenths of a buffer behind. Past that the pace
+rises with the square of the excess: half a buffer behind, 16 % more; a
+whole buffer, three times R. The first version paced everything at exactly R,
+header included, and so ran a fraction slower than the encoder produced:
+over a minute of hard-to-code video the pictures slid from a second early
+to barely in time. Now an encoder that keeps to R is sent at R but for a
+short while after its largest pictures, and one that runs over (x265, by
+6 % in the test) settles some way behind the line and stays there. (With
+the rise starting at half a buffer, x265 was left with 0.11 s at its
+worst; starting at three tenths costs x264 a higher short-term peak and
+gives x265 three times the margin.) As a last resort a unit is always
+delivered by half a picture before its decode time.
 
 Measured on the wire at 500 kb/s with easy pictures: every picture
-complete 0.81 to 1.02 s early, the receiver never holding more than 67 kB
+complete 0.77 to 1.02 s early, the receiver never holding more than 67 kB
 (the buffer is 62.5 kB plus a picture), never more than 600 kb/s over any
-400 ms, in VBR and in CBR. With a minute of noise that keeps the encoder
-at its full rate throughout: x264 at least 0.54 s early and 0.8 s in the
-last 20 s; x265 about 0.1 s at its worst (its first pictures overrun) and
-0.34 s or more in the last 20 s. In a file run the output clock starts B earlier than
-the first unit, since the first new pictures are sent before anything in
-the input was (but not before time zero).
+400 ms, in VBR and in CBR. With four minutes of noise that keeps the
+encoder at its full rate throughout: x264 at least 0.39 s early (median
+0.88 s), the receiver holding 74 kB at most (the largest picture there is
+32 kB), 1.38 times the bit rate at most over 0.4 s and 1.24 over 1 s,
+transport packets and all; x265 at 200 kb/s, which runs over its rate, at
+least 0.36 s early (median 0.61 s). In a file run the output
+clock starts B earlier than the first unit, since the first new pictures
+are sent before anything in the input was (but not before time zero).
 
 **Delay.** An access unit can only be sent once it exists, and it exists
 only after the decoder and the encoder have had the pictures they hold
@@ -544,10 +556,12 @@ limited per stream (4 to decode, 6 for x264; x265 limits itself to 6),
 and what is held back no longer depends on the machine. The engine's
 delay has to cover that plus B. It is fixed when the program starts,
 because changing it later would be a step in the output clock; so it
-defaults to 3 s for video and 0.8 s for audio. On every unit that comes
-back from a transcoder the engine measures how long it still had before
-it was due (`slack`). At 1080p in a file run the video had 1.6 to 1.8 s
-to spare with 2 processors and 1.5 s with 64; in the live test, 1.8 s.
+defaults to 3 s for video (B above 1 s is added on top; a delay under
+B + 0.5 s is refused, since nearly all video would come too late) and
+0.8 s for audio. On every unit that comes back from a transcoder the
+engine measures how long it still had before it was due (`slack`). At
+1080p in a file run the video had 1.6 to 1.8 s to spare with 2 processors
+and 1.5 s with 64; in the live test, 1.8 s.
 
 ### NVIDIA
 

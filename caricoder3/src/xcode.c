@@ -527,6 +527,8 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
         x->slack_ever = slack;
     if (slack >= 0) {
         x->late_since = 0;
+        x->late_worst = 0;
+        x->late_now = 0;
     } else {
         int64_t now = clock_now_ns();
 
@@ -541,15 +543,15 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
     pthread_mutex_unlock(&x->st_lock);
 }
 
-int64_t xcode_last_dts(const struct xcode *x)
+bool xcode_last_out(const struct xcode *x, int64_t *dts90, stc_t *t1)
 {
-    return x->video ? vxc_last_dts(x->v) : NOPTS;
+    return x->video && vxc_last_out(x->v, dts90, t1);
 }
 
-void xcode_start_after(struct xcode *x, int64_t dts90)
+void xcode_start_after(struct xcode *x, int64_t dts90, stc_t t1)
 {
-    if (x->video && dts90 != NOPTS)
-        vxc_start_after(x->v, dts90);
+    if (x->video)
+        vxc_start_after(x->v, dts90, t1);
 }
 
 void xcode_get_stats(struct xcode *x, struct xcode_stats *st)

@@ -251,6 +251,8 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
     struct xcode *gone[MAX_ES], *keep[MAX_ES];
     int gone_pid[MAX_ES];
     int64_t gone_dts[MAX_ES];
+    stc_t gone_t1[MAX_ES];
+    bool gone_out[MAX_ES];
     struct xcode_cfg want[MAX_ES], keep_cfg[MAX_ES];
     bool wanted[MAX_ES] = { false };
     int n_gone = 0, n_keep = 0;
@@ -283,7 +285,7 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
     /* What they still hold is the end of the old stream: it goes out. */
     for (int k = 0; k < n_gone; k++) {
         xcode_finish(gone[k]);
-        gone_dts[k] = xcode_last_dts(gone[k]);
+        gone_out[k] = xcode_last_out(gone[k], &gone_dts[k], &gone_t1[k]);
         xcode_free(gone[k]);
     }
 
@@ -306,8 +308,8 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
                 continue;
             }
             for (int k = 0; k < n_gone; k++)
-                if (gone_pid[k] == want[i].pid)
-                    xcode_start_after(x, gone_dts[k]);
+                if (gone_pid[k] == want[i].pid && gone_out[k])
+                    xcode_start_after(x, gone_dts[k], gone_t1[k]);
             pthread_mutex_lock(&e->lock);
             e->xc_list[e->n_xc] = x;
             e->xc_cfg[e->n_xc++] = want[i];

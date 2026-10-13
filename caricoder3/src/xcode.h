@@ -79,13 +79,15 @@ void xcode_finish(struct xcode *x);
 
 /*
  * When one transcoder takes over a PID from another (the source changed
- * its coding): the decode time of the last unit the old one gave out,
- * asked after its xcode_finish(), is handed to the new one before its
- * first unit, so that decode times on the PID still only move forward.
- * NOPTS if there is none (audio has no decode times of its own).
+ * its coding): the decode time of the last unit the old one gave out and
+ * the time that unit has all been sent, asked after its xcode_finish(),
+ * are handed to the new one before its first unit. Decode times on the
+ * PID then still only move forward, and the new stream is sent after the
+ * end of the old one, not on top of it. False if there is nothing to
+ * hand on (audio; a transcoder that gave nothing out).
  */
-int64_t xcode_last_dts(const struct xcode *x);
-void xcode_start_after(struct xcode *x, int64_t dts90);
+bool xcode_last_out(const struct xcode *x, int64_t *dts90, stc_t *t1);
+void xcode_start_after(struct xcode *x, int64_t dts90, stc_t t1);
 
 void xcode_get_stats(struct xcode *x, struct xcode_stats *st);
 
@@ -131,7 +133,7 @@ void vxc_free(struct vxc *v);
 void vxc_unit(struct vxc *v, const struct es_unit *u);
 void vxc_finish(struct vxc *v);
 void vxc_reset(struct vxc *v);
-int64_t vxc_last_dts(const struct vxc *v);
-void vxc_start_after(struct vxc *v, int64_t dts90);
+bool vxc_last_out(const struct vxc *v, int64_t *dts90, stc_t *t1);
+void vxc_start_after(struct vxc *v, int64_t dts90, stc_t t1);
 
 #endif

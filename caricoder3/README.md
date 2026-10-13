@@ -182,15 +182,20 @@ Every picture comes out at the time stamp it came in with.
 New video is sent at its own bit rate: a large key frame is spread over
 the time it takes at that rate instead of being pushed out at once, and a
 receiver never has to hold more than the encoder's buffer (`--vbv`, 1 s by
-default). The pace rises above the bit rate only when the encoder itself
-runs over it (x265 does, by a few per cent). New audio is packed and timed
+default). The pace is the bit rate plus 1.5 %. It rises further only when
+the schedule is well behind: for a short while after the largest pictures
+(1.4 times the bit rate over 0.4 s was the most measured, transport
+packets and all), and when the encoder itself runs over its rate (x265
+does, by a few per cent). New audio is packed and timed
 to stay inside the 3584 bytes a standard decoder has for audio, and is
 kept at least 75 ms ahead of its time; only MP2 at 320 and 384 kb/s needs
 more than the buffer for that, and there being ahead wins.
 
 **Delay.** Decoding and encoding take time, and an encoder holds pictures
 back to look ahead. `--delay` defaults to 800 ms when audio is transcoded
-and 3000 ms when video is. The statistics show, per transcoded stream, the
+and 3000 ms when video is (more with a `--vbv` above 1000: the two grow
+together, and a `--delay` shorter than `--vbv` plus half a second is
+refused). The statistics show, per transcoded stream, the
 least time a unit had to spare when it reached the multiplexer
 (`slack_min_ms`). If that is large, `--delay` can come down by about that
 much. If it is negative, units reached the multiplexer after their send
@@ -442,6 +447,13 @@ Transcoding:
 - libx265 3.5 does not give back 1 to 5 kB each time an encoder is opened
   (a fault in the library: a bare open and close shows it). That happens
   once per stream, and again only if the picture format changes.
+- Not explained: with one particular damaged input, about 2 runs in 100
+  end with the memory of one picture (1 MB at 640x360) not freed inside
+  libx264. Runs that show it and runs that do not have identical counts
+  and no errors, and it is one picture whatever the length of the run,
+  which points at the moment the encoder is closed (when a stream ends or
+  changes format), not at something that grows while running. Whether the
+  fault is in the library or in how it is used here is not known.
 
 Remultiplexing:
 

@@ -2167,6 +2167,17 @@ def xc_video_send_times():
     need(gaps and max(gaps) <= 12, f"--gop 500: key frames {max(gaps, default=0)} pictures apart")
     res.append(f"--vbv 300: at most {max(lead):.0f} ms early and {peak / 1000:.0f} kB held; "
                f"--gop 500 a key frame every {max(gaps)} pictures at most")
+    # a long buffer needs a long delay: the default follows, a short one is refused
+    out = w("xc_v_lead_big.ts")
+    st = run_file(src, out, "--video", "h264:500k", "--vbv", "4000")
+    must_pass(out)
+    need(xstats(st, 0x100)["frames_out"] >= 198 and st["output"]["dropped_units"] == 0,
+         f"--vbv 4000 at the default delay: {st['output']}")
+    p = subprocess.run([BIN, "-q", "-i", src, "-o", out, "--video", "h264:500k", "--vbv", "4000",
+                        "--delay", "3000"], capture_output=True, text=True)
+    need(p.returncode == 2 and "too short" in p.stderr,
+         f"--vbv 4000 with --delay 3000 was accepted (exit {p.returncode})")
+    res.append("--vbv 4000: the default delay grows with it, --delay 3000 is refused")
     return "; ".join(res)
 
 
@@ -2314,6 +2325,10 @@ def xc_video_codec_change():
     need(types[0x100] == 0x1B, f"PMT says type 0x{types[0x100]:02X} at the end")
     d = [r["dts"] for r in o.pes[0x100]]
     need(all(y > x for x, y in zip(d, d[1:])), "decode times go backwards at a change")
+    # the new stream is sent after the end of the old one, not on top of it
+    peak = o.buffer_peak(0x100)
+    need(peak < 500000 / 8 * 1.04 * 1.1 + 6000, f"a receiver would hold {peak:.0f} bytes of "
+         f"video around a change; the buffer is 62500")
     # (the copied audio of the joined test stream overlaps itself at the joins,
     # so ffmpeg's complaints about the whole file prove nothing: count pictures)
     got = video_pts(out)
@@ -2535,13 +2550,16 @@ def live_xc_delay_too_short():
     if skip:
         return skip
     src = v_source("xc_v_h264", "h264")
+    # (an encoder setting that looks further ahead than the default, and a delay
+    # that would do for the default)
     st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "--video", "h264:500k",
-                        "--delay", "600", capture_name="live_xc_shortdelay.ts", tail=2.0)
+                        "--preset", "medium", "--delay", "1600",
+                        capture_name="live_xc_shortdelay.ts", tail=3.0)
     x = xstats(st, 0x100)
     need("--delay is too short" in log, "nothing said about the delay:\n" + log[-600:])
     need("slower than the stream" not in log and x["input_dropped"] == 0,
          f"input was thrown away though the codec keeps up: {x}")
-    need(x["frames_out"] >= 150, f"the transcoder stopped working: {x}")
+    need(x["frames_out"] >= 120, f"the transcoder stopped working: {x}")
     must_match(src, w("live_xc_shortdelay.ts"), only={0x101}, subset=True)
     return f"reported ({x['slack_min_ms']:.0f} ms to spare), no input discarded, audio untouched"
 

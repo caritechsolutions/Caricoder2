@@ -17,8 +17,7 @@
  * when behind: see packet_out), one follows the other, and none starts
  * earlier than (its decode time - B - one picture). A large key frame is
  * therefore spread over the time it takes at R, not pushed out in one
- * picture's time: the video never asks the mux for more than R, and the
- * audio beside it is not held up.
+ * picture's time, and the audio beside it is not held up.
  *
  * The cost is delay: an access unit can only be sent once it exists, and
  * it exists only after the decoder and the encoder have had the pictures
@@ -102,14 +101,17 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
         u->t0 = v->last_t1;
     /*
      * The pace. The encoder counts its own bytes, not the PES header put
-     * in front of them here. It is a little above R (1.5 %), and rises
-     * with the square of how far the schedule is behind the "not sooner
-     * than" line: a tenth of a buffer behind adds 2 %, a third adds 22 %,
-     * a whole buffer triples it. An encoder that keeps to R sits near the
-     * line and is sent at R; one that runs over its rate (x265 does, and
-     * by a lot when the rate is too low for the pictures) settles a
-     * little behind the line instead of sliding until its pictures come
-     * too late.
+     * in front of them here. It is a little above R (1.5 %). Being
+     * behind the "not sooner than" line is normal: a large key frame
+     * takes the schedule a good part of a buffer behind, and the encoder
+     * has allowed for that. Only past three tenths of a buffer behind
+     * does the pace rise, with the square of the excess (half a buffer
+     * behind: 16 % more; a whole buffer: three times R). An encoder that
+     * keeps to R is thus sent at R but for a short while after its
+     * largest pictures; one that runs over its rate (x265 does, by a few
+     * per cent, more when the rate is too low for the pictures) settles
+     * some way behind the line instead of sliding until its pictures
+     * come too late.
      */
     lag = u->t0 - floor;
     if (lag < 0)
@@ -117,9 +119,11 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
     if (lag > vbv)
         lag = vbv;
     {
-        double behind = (double)lag / (double)vbv;
+        double over = (double)lag / (double)vbv - 0.3;
 
-        pace = v->rate + v->rate / 64 + 1 + (int64_t)((double)v->rate * 2.0 * behind * behind);
+        pace = v->rate + v->rate / 64 + 1;
+        if (over > 0)
+            pace += (int64_t)((double)v->rate * 4.0 * over * over);
     }
     u->t1 = u->t0 + (stc_t)((int64_t)p->len * 8 * STC_HZ / pace);
     /* An encoder that overran its buffer, or one just opened while the
@@ -469,14 +473,19 @@ void vxc_unit(struct vxc *v, const struct es_unit *u)
     }
 }
 
-int64_t vxc_last_dts(const struct vxc *v)
+bool vxc_last_out(const struct vxc *v, int64_t *dts90, stc_t *t1)
 {
-    return v->last_dts90;
+    if (v->last_dts90 == NOPTS)
+        return false;
+    *dts90 = v->last_dts90;
+    *t1 = v->last_t1;
+    return true;
 }
 
-void vxc_start_after(struct vxc *v, int64_t dts90)
+void vxc_start_after(struct vxc *v, int64_t dts90, stc_t t1)
 {
     v->last_dts90 = dts90;
+    v->last_t1 = t1;
 }
 
 /* Input was thrown away: what the decoder holds refers to pictures it

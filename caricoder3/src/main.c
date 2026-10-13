@@ -763,13 +763,27 @@ int main(int argc, char **argv)
             xa |= o.eng.audio[i].codec != CODEC_NONE;
         for (int i = 0; i < o.eng.n_video; i++)
             xv |= o.eng.video[i].codec != CODEC_NONE;
-        if (!delay_given)
+        if (o.eng.gpu < 0 || o.eng.gpu > 63 || o.eng.gop_ms < 0 || o.eng.gop_ms > 20000 ||
+            o.eng.vbv_ms < 0 || o.eng.vbv_ms > 5000) {
+            fprintf(stderr, "option out of range (gpu 0..63, gop 0..20000 ms, vbv 0..5000 ms)\n");
+            return 2;
+        }
+        /* New video is sent one encoder buffer (--vbv) before it is due,
+         * and exists only after the codecs have held it back: the delay
+         * has to cover both. */
+        if (!delay_given) {
             o.eng.delay_ms = xv ? DELAY_VIDEO_MS : xa ? DELAY_AUDIO_MS : 500;
-    }
-    if (o.eng.gpu < 0 || o.eng.gpu > 63 || o.eng.gop_ms < 0 || o.eng.gop_ms > 20000 ||
-        o.eng.vbv_ms < 0 || o.eng.vbv_ms > 5000) {
-        fprintf(stderr, "option out of range (gpu 0..63, gop 0..20000 ms, vbv 0..5000 ms)\n");
-        return 2;
+            if (xv && o.eng.vbv_ms > 1000)
+                o.eng.delay_ms += o.eng.vbv_ms - 1000;
+        } else if (xv && o.eng.delay_ms < (o.eng.vbv_ms ? o.eng.vbv_ms : 1000) + 500) {
+            fprintf(stderr, "--delay %lld is too short for a video buffer (--vbv) of %d ms: "
+                    "new video is sent that long before it is due. Use --delay %d or more, "
+                    "or leave it out (%d).\n", (long long)o.eng.delay_ms,
+                    o.eng.vbv_ms ? o.eng.vbv_ms : 1000,
+                    (o.eng.vbv_ms ? o.eng.vbv_ms : 1000) + 500,
+                    DELAY_VIDEO_MS + (o.eng.vbv_ms > 1000 ? o.eng.vbv_ms - 1000 : 0));
+            return 2;
+        }
     }
 
     if (o.eng.mux.muxrate == 0) {
