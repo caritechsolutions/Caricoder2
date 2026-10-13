@@ -1591,9 +1591,14 @@ def decodes_clean(path, what=""):
          f"{what}ffmpeg reports errors decoding the output: {p.stderr[:300]}")
 
 
-def sync_ms(src, out, idx, src_idx=None):
+def sync_ms(src, out, idx, src_idx=None, check_likeness=True):
     import av_sync
     ms, _, n_out = av_sync.offset_ms(src, idx if src_idx is None else src_idx, out, idx)
+    # In place is not enough: it must also be the same audio (not at the wrong
+    # speed, not garbled). Lossy coding of the test signal leaves this near 0.8-0.9.
+    need(av_sync.last_likeness > 0.5 or not check_likeness,
+         f"audio stream {idx} of {os.path.basename(out)} is in place but is not the audio "
+         f"of the source (likeness {av_sync.last_likeness:.2f})")
     return ms, n_out
 
 
@@ -1644,7 +1649,7 @@ def xc_audio_every_pairing():
 @test
 def xc_audio_formats():
     """Mono, 44.1 and 32 kHz, 24 kHz, 5.1, LATM: each lands in sync at its own rate."""
-    skip = xc_ready("fdk-aac", "mpg123", "liba52", "twolame")
+    skip = xc_ready("fdk-aac", "mpg123", "liba52", "twolame", "lame")
     if skip:
         return skip
     cases = [
@@ -1667,7 +1672,7 @@ def xc_audio_formats():
     done = []
     for name, a, (rate, ch), mux_extra in cases:
         src = av_source("xc_fmt_" + name, [a], duration=6, mux_extra=mux_extra)
-        for to in ("aac", "mp2"):
+        for to in ("aac", "mp2", "mp3"):
             out = w(f"xc_fmt_{name}_{to}.ts")
             st = run_file(src, out, "--audio", to)
             must_pass(out)
@@ -1681,7 +1686,7 @@ def xc_audio_formats():
             x = xstats(st, 0x101)
             need(x["decode_errors"] == 0 and not x["failed"], f"{name} to {to}: {x}")
         done.append(name)
-    return f"{len(done)} input formats, each to AAC and MP2: rate and channels kept " \
+    return f"{len(done)} input formats, each to AAC, MP2 and MP3: rate and channels kept " \
            f"(5.1 mixed to stereo), in sync"
 
 
@@ -2165,6 +2170,49 @@ def xc_video_send_times():
     return "; ".join(res)
 
 
+@test
+def xc_video_lead_holds():
+    """A minute of video that is hard to code, so the encoder uses all of its bit rate
+    all of the time: pictures keep arriving well before they are due, with x264 and
+    with x265 (which runs a little over its rate), in VBR and in a CBR mux."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    src = w("xc_v_noisy2.ts")
+    if "xc_v_noisy2" not in _cache or not os.path.exists(src):
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                            "-i", "testsrc2=size=320x240:rate=25:duration=60,noise=alls=40:allf=t",
+                            "-f", "lavfi", "-i", f"{BURSTS}:d=60", "-pix_fmt", "yuv420p",
+                            "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1500k",
+                            "-maxrate", "1500k", "-bufsize", "1500k", "-g", "50",
+                            "-c:a", "mp2", "-b:a", "128k", "-output_ts_offset", "30",
+                            "-f", "mpegts", "-muxrate", "4000k", src],
+                           capture_output=True, text=True)
+        need(p.returncode == 0, f"ffmpeg could not make the noisy stream: {p.stderr[-400:]}")
+        must_pass(src, cbr=True)            # the judge of "late" must not be late itself
+        _cache["xc_v_noisy2"] = True
+    res = []
+    for what, args, cbr in (("x264", ("--video", "h264:150k"), False),
+                            ("x264 in CBR", ("--video", "h264:150k", "-r", "400k"), True),
+                            ("x265", ("--video", "hevc:200k"), False)):
+        out = w("xc_v_noisy_out.ts")
+        st = run_file(src, out, *args, binary=BIN)
+        must_pass(out, cbr=cbr)
+        a = Analysis(out)
+        lead = _leads(a, 0x100)
+        tail = lead[len(lead) * 2 // 3:]
+        need(len(lead) >= 1450, f"{what}: {len(lead)} pictures")
+        # (x265 overruns its buffer on its first pictures; what matters is that the
+        # schedule does not slide afterwards)
+        need(min(lead) > 20 and min(tail) > 250,
+             f"{what}: pictures complete as little as {min(lead):.0f} ms before they are due "
+             f"({min(tail):.0f} ms in the last 20 s): the schedule is sliding")
+        got = video_bitrate(out, 0x100)
+        res.append(f"{what}: {got / 1000:.0f} kb/s, complete {min(lead):.0f} ms early at "
+                   f"least, {min(tail):.0f} in the last 20 s")
+    return "; ".join(res)
+
+
 def _leads(a, pid):
     out = []
     for r in a.pes[pid]:
@@ -2323,8 +2371,9 @@ def xc_video_many_processors():
 
 @test
 def xc_audio_decoder_buffer():
-    """New audio never fills a standard decoder's audio buffer (3584 bytes) and is never
-    late, at low and high bit rates, also beside new video in a tight CBR mux."""
+    """New audio stays inside a standard decoder's audio buffer (3584 bytes) and well
+    ahead of its time, at low and high bit rates, also beside new video in a tight CBR
+    mux. (MP2 at 384 kb/s goes over the buffer rather than lose its lead.)"""
     skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123", "twolame", "lame")
     if skip:
         return skip
@@ -2343,11 +2392,14 @@ def xc_audio_decoder_buffer():
         must_pass(out, cbr=True)
         a = Analysis(out)
         peak = a.buffer_peak(0x101, frame_ms)
-        need(peak <= 3584, f"{spec}{' beside video in CBR' if cbr else ''}: a decoder would "
-                           f"hold {peak:.0f} bytes of audio; its buffer is 3584")
+        # (MP2 at 384 kb/s is the stated exception: there the 75 ms the audio is
+        # kept ahead by is more than the buffer holds, and being ahead wins)
+        limit = 5000 if spec == "mp2:384k" else 3584
+        need(peak <= limit, f"{spec}{' beside video in CBR' if cbr else ''}: a decoder would "
+                            f"hold {peak:.0f} bytes of audio; the limit here is {limit}")
         lead = [(r["dts"] * 300 - a.stc_at(r["last"] + 1)) / 27000.0 for r in a.pes[0x101]
                 if a.stc_at(r["last"] + 1) is not None]
-        need(min(lead) > 10, f"{spec}: an audio packet was complete only {min(lead):.0f} ms "
+        need(min(lead) > 50, f"{spec}: an audio packet was complete only {min(lead):.0f} ms "
                              f"before it was due")
         res.append(f"{spec}{' + video, CBR' if cbr else ''}: {peak:.0f} bytes, "
                    f"{min(lead):.0f} ms early at least")
@@ -2692,6 +2744,18 @@ def xc_nvidia_standin():
     need(log.count("cannot decode this stream") == 1, "the decoder's failure was not "
          "reported exactly once:\n" + log[-500:])
     need(xstats(st, 0x100)["failed"], "decoder failure not in the statistics")
+
+    # the card decodes at first and refuses the stream later (a change of format in
+    # mid-run), with its encoder open on the decoder's context: the CPU decoder takes
+    # over, the encoder is reopened, and nothing touches a context that is gone
+    out = w("xc_nv_refuse_later.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", env_extra={"NVMOCK_BAD_AFTER": "60"})
+    must_pass(out)
+    x = xstats(st, 0x100)
+    need("decoding on the CPU" in log, "no change of decoder announced")
+    need((x["decoder"], x["encoder"]) == ("libavcodec", "nvenc") and not x["failed"], str(x))
+    need(x["frames_out"] >= 150, f"refused in mid-run: {x['frames_out']} of 200 pictures out")
+    res.append(f"card refuses the stream in mid-run -> CPU decode, {x['frames_out']}/200 pictures")
 
     # interlaced video: the card's encoder is put in field mode ...
     out = w("xc_nv_fields.ts")

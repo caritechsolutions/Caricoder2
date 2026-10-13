@@ -13,7 +13,8 @@
  * promises this: if its output is delivered at R, starting B before the
  * first picture is due, every picture is complete in the receiver before
  * it is needed. So that is how the output is delivered: each access unit
- * takes (its size / R) to send, one follows the other, and none starts
+ * takes (its size / R) to send (a little faster in fact, and faster still
+ * when behind: see packet_out), one follows the other, and none starts
  * earlier than (its decode time - B - one picture). A large key frame is
  * therefore spread over the time it takes at R, not pushed out in one
  * picture's time: the video never asks the mux for more than R, and the
@@ -36,6 +37,8 @@
 #define RESTART_BACK    (2 * STC_HZ)    /* time going back further than this: a new start */
 #define PROGRESSIVE_RUN 500             /* pictures in a row before an interlaced
                                          * encoder is given up for a progressive one */
+#define SOFT_RUN        10              /* pictures in a row before a new colour
+                                         * description or field order is believed */
 
 struct vxc {
     struct xcode_cfg cfg;
@@ -51,6 +54,7 @@ struct vxc {
     bool dec_failed;                    /* the decoder cannot do this stream; said once */
     struct vframe e_fmt;                /* the picture the encoder was opened for */
     int progressive_run;
+    int soft_run;
     int out_depth;
     int64_t rate;                       /* bits per second the encoder holds to */
 
@@ -73,7 +77,8 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
     int64_t dts90 = (p->dts + STC_PER_90K / 2) / STC_PER_90K;
     struct es_unit *u;
     size_t off;
-    stc_t dts;
+    stc_t dts, floor, lag, vbv = (stc_t)v->vbv_ms * STC_PER_MS;
+    int64_t pace;
 
     if (dts90 > pts90)
         dts90 = pts90;
@@ -91,11 +96,32 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
     /* Sent at the encoder's own bit rate, one after the other, and not
      * sooner than the buffer allows (see the top of this file). */
     dts = dts90 * STC_PER_90K;
-    u->t0 = dts - (stc_t)v->vbv_ms * STC_PER_MS - v->frame_dur;
-    if (u->t0 < v->last_t1 &&
-        v->last_t1 - u->t0 < (stc_t)v->vbv_ms * STC_PER_MS + RESTART_BACK)
+    floor = dts - vbv - v->frame_dur;
+    u->t0 = floor;
+    if (u->t0 < v->last_t1 && v->last_t1 - u->t0 < vbv + RESTART_BACK)
         u->t0 = v->last_t1;
-    u->t1 = u->t0 + (stc_t)((int64_t)u->len * 8 * STC_HZ / (v->rate > 0 ? v->rate : 1));
+    /*
+     * The pace. The encoder counts its own bytes, not the PES header put
+     * in front of them here. It is a little above R (1.5 %), and rises
+     * with the square of how far the schedule is behind the "not sooner
+     * than" line: a tenth of a buffer behind adds 2 %, a third adds 22 %,
+     * a whole buffer triples it. An encoder that keeps to R sits near the
+     * line and is sent at R; one that runs over its rate (x265 does, and
+     * by a lot when the rate is too low for the pictures) settles a
+     * little behind the line instead of sliding until its pictures come
+     * too late.
+     */
+    lag = u->t0 - floor;
+    if (lag < 0)
+        lag = 0;
+    if (lag > vbv)
+        lag = vbv;
+    {
+        double behind = (double)lag / (double)vbv;
+
+        pace = v->rate + v->rate / 64 + 1 + (int64_t)((double)v->rate * 2.0 * behind * behind);
+    }
+    u->t1 = u->t0 + (stc_t)((int64_t)p->len * 8 * STC_HZ / pace);
     /* An encoder that overran its buffer, or one just opened while the
      * last one's output is still going out: the unit must be there in
      * good time for its decode time all the same. */
@@ -210,6 +236,7 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
     }
     v->e_fmt = *f;
     v->progressive_run = 0;
+    v->soft_run = 0;
     v->out_depth = c.depth;
     v->enc_failed = false;
     v->st->failed = false;
@@ -282,9 +309,19 @@ static bool format_changed(struct vxc *v, const struct vframe *f)
     if (f->fps_num > 0 && f->fps_den > 0 &&
         (int64_t)f->fps_num * e->fps_den != (int64_t)e->fps_num * f->fps_den)
         return true;
+    /* The colour description and the field order can differ from one
+     * picture to the next without the stream having changed (a decoder
+     * that works on several pictures at once reports an SEI's colour on
+     * some and the sequence's on others; film material alternates field
+     * order). They count once they have stayed. */
     if (f->primaries != e->primaries || f->transfer != e->transfer ||
-        f->matrix != e->matrix || f->full_range != e->full_range)
-        return true;
+        f->matrix != e->matrix || f->full_range != e->full_range ||
+        (f->interlaced && e->interlaced && f->tff != e->tff)) {
+        if (++v->soft_run >= SOFT_RUN)
+            return true;
+    } else {
+        v->soft_run = 0;
+    }
     /* Field or frame is a flag on every picture, and interlaced streams
      * carry progressive pictures among the others. One interlaced
      * picture makes the stream interlaced; only a long run of progressive

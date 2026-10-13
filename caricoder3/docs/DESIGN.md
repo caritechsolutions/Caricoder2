@@ -399,27 +399,35 @@ nor the output thread ever waits on a codec; the rest of the service is
 never held up by one. In a file run the work is done in the caller's
 thread, with no queue.
 
-**Falling behind.** What comes out of a transcoder after its send time is
-dropped by the mux, so a codec that is behind produces nothing of use
-while still doing all the work. The thread watches for that (`check_late`
-in `xcode.c`). Output late for 3 s on end with more than half a second of
-input piled up means the codec is slower than the stream and will never
-catch up by itself: the queue is thrown away (counted as
-`input_dropped`), a video decoder is reset and its input skipped up to
-the next key frame, and a warning says so. A codec fast enough catches up
-on a start-up backlog well inside the 3 s and is left alone. Output late
-with nothing piled up is a different fault, `--delay` shorter than what
-the codecs hold back; that is reported every 10 s and nothing is thrown
-away, since it would not help. A 48 MB cap on the queue remains as a
-guard on memory.
+**Falling behind.** What comes out of a transcoder after its send time
+goes out late, and is dropped by the mux once it is later than the mux
+allows; so a codec that is behind does all the work for little or
+nothing. The thread watches for that (`check_late` in `xcode.c`). Every
+3 s that the output has been late without a break, it compares how late
+the output is now with the worst since it last looked:
+
+- less, by 0.3 s or more: the codec is working off a backlog (from its
+  start, or a stall) and is left to it;
+- not less, with more than half a second of input piled up: the codec is
+  slower than the stream and will never catch up by itself. The queue is
+  thrown away (counted as `input_dropped`), a video decoder is reset and
+  its input skipped up to the next key frame (for 5 s at most: a stream
+  whose key frames are not recognised is better decoded with errors than
+  not at all), and a warning says so;
+- not less, with nothing piled up: the codec keeps up, but `--delay` is
+  shorter than what the codecs hold back. That is reported every 10 s and
+  nothing is thrown away, since it would not help.
+
+A 48 MB cap on the queue remains as a guard on memory.
 
 When the PMT changes, the set of transcoders is brought in line: one whose
 stream and settings are unchanged is kept running; the others are
 finished (the queue worked off, the codecs emptied, so the end of the old
 stream goes out), stopped and replaced, outside the lock, since that means
-waiting for a thread. The wait is limited to 0.3 s, because it is the
-input thread that waits: a codec not through by then was behind anyway,
-and what it held is given up. A new transcoder taking over a PID is told the last
+waiting for a thread. The wait for the queue is limited to 0.3 s, because
+it is the input thread that waits: a codec not through by then was behind
+anyway, and what it held is given up. Emptying the encoder afterwards
+takes what it takes (tens of milliseconds at the default presets). A new transcoder taking over a PID is told the last
 decode time its predecessor gave out, so decode times on the PID only
 move forward.
 
@@ -464,9 +472,14 @@ arrived" and "is played". A PES packet is sent over as long as it plays
 and has all arrived a lead before its first sample is due, so the buffer
 holds (packet + lead) of audio at the bit rate. Both are sized per
 encoder to keep that under 3000 bytes, and under 200 ms at low bit rates:
-AAC at 128 kb/s gets four frames to a packet and about 100 ms of lead, MP2
-at 384 kb/s one frame and about 40 ms. Measured in a CBR mux: 1760 to
-3384 bytes across six codings and rates, and never less than 39 ms early.
+AAC at 128 kb/s gets four frames to a packet and about 100 ms of lead.
+The lead is also what the audio has in hand when a CBR mux is busy with
+something else, so it is never less than 75 ms; packets are shortened
+first, down to one frame. For MP2 at 320 and 384 kb/s, 75 ms is by itself
+more than the buffer holds, and the lead is kept all the same: a packet
+that comes late is heard, a buffer over its nominal size usually is not.
+Measured in a CBR mux: 1760 to 3384 bytes across five codings and rates,
+4664 for MP2 at 384 kb/s, and never less than 75 ms early.
 
 ### Video: pictures keep their time
 
@@ -474,11 +487,15 @@ Pictures go from decoder to encoder with their time stamps untouched, and
 the encoder is told to use them (variable frame rate input), so a source
 that skips or stutters is coded for the time it really takes. Size, frame
 rate, pixel shape, field order and colour description are passed on.
-They are compared on every picture, and a change reopens the encoder at
-that picture. Field or frame is a flag on each picture and interlaced
-streams carry progressive pictures among the others, so one interlaced
-picture makes the stream interlaced at once, and only 500 progressive
-pictures in a row make it progressive again.
+They are compared on every picture, and a change of size, pixel shape or
+frame rate reopens the encoder at that picture. Field or frame is a flag
+on each picture and interlaced streams carry progressive pictures among
+the others, so one interlaced picture makes the stream interlaced at
+once, and only 500 progressive pictures in a row make it progressive
+again. Colour description and field order must stay changed for 10
+pictures: libavcodec, working on several pictures at once, reports an
+SEI's transfer function on some pictures and the sequence's on others,
+which reopened the encoder 14 times in a second before this rule.
 H.264 is encoded at 8 bits whatever comes in (10-bit pictures are
 converted, rounded); H.265 keeps the depth of the source.
 
@@ -493,15 +510,29 @@ the receiver before it is needed. So that is how the output is delivered.
 Each access unit takes (its size / R) to send, one follows the other, and
 none starts earlier than (its decode time - B - one picture). B is
 `--vbv`, 1 s by default. A large key frame is thus spread over the time
-it takes at R instead of being pushed out in one picture's time, so the
-video never asks the mux for more than R and the audio beside it is not
-held up. An encoder that overruns its buffer is still delivered by half a
-picture before its decode time. Measured on the wire at 500 kb/s: every
-picture complete 0.68 to 1.02 s early, the receiver never holding more
-than 65 kB (the buffer is 62.5 kB plus a picture), never more than 560
-kb/s over any 400 ms, in VBR and in CBR. In a file run the output clock
-starts B earlier than the first unit, since the first new pictures are
-sent before anything in the input was.
+it takes at R instead of being pushed out in one picture's time, and the
+audio beside it is not held up.
+
+The pace is not exactly R. It counts the encoder's bytes only (not the
+PES header added here), runs 1.5 % above R, and rises with the square of
+how far the schedule is behind the "not sooner than" line (a third of a
+buffer behind: 22 % more). The first version paced everything at exactly
+R, header included, and so ran a fraction slower than the encoder
+produced: over a minute of hard-to-code video the pictures slid from a
+second early to barely in time. With the feedback an encoder that keeps
+to R is sent at R, and one that runs over (x265, by 6 % in the test)
+settles a little behind the line and stays there. As a last resort a
+unit is always delivered by half a picture before its decode time.
+
+Measured on the wire at 500 kb/s with easy pictures: every picture
+complete 0.81 to 1.02 s early, the receiver never holding more than 67 kB
+(the buffer is 62.5 kB plus a picture), never more than 600 kb/s over any
+400 ms, in VBR and in CBR. With a minute of noise that keeps the encoder
+at its full rate throughout: x264 at least 0.54 s early and 0.8 s in the
+last 20 s; x265 about 0.1 s at its worst (its first pictures overrun) and
+0.34 s or more in the last 20 s. In a file run the output clock starts B earlier than
+the first unit, since the first new pictures are sent before anything in
+the input was (but not before time zero).
 
 **Delay.** An access unit can only be sent once it exists, and it exists
 only after the decoder and the encoder have had the pictures they hold
@@ -540,7 +571,9 @@ Not yet run on a card: see the README. What the code does:
 - If the card will not decode a stream (a format it does not take, no
   decoder to be had) and nobody insisted on the card, the CPU decoder
   takes over from the very unit that failed; the encoder stays on the
-  card and gets its pictures by upload.
+  card and gets its pictures by upload. The encoder holds the CUDA
+  context in its own right, so that the decoder going first does not
+  take the context from under it.
 - If the encoder will not open and nobody insisted on the card, the
   stream's decoder is replaced by the CPU one and encoding goes to the
   CPU too. One group of pictures is lost at the switch.

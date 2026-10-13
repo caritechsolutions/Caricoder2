@@ -13,6 +13,8 @@ hears each sound at the moment the original would have played it.
 import subprocess, sys, json
 import numpy as np
 
+last_likeness = 0.0
+
 def start_pts(path, idx):
     out = subprocess.run(["ffprobe","-v","error","-select_streams",f"a:{idx}","-show_entries","packet=pts_time","-read_intervals","%+#1","-of","csv=p=0",path],capture_output=True,text=True).stdout.split()
     return float(out[0].strip(','))
@@ -28,6 +30,10 @@ def offset_ms(src, si, out, oi, rate=48000):
     fa = np.fft.rfft(a, n); fb = np.fft.rfft(b, n)
     cc = np.fft.irfft(fb * np.conj(fa), n)
     lag = int(np.argmax(cc))
+    # How alike the two are once lined up: 1 = the same waveform, near 0 = unrelated.
+    # A lossy codec leaves this high; wrong speed, swapped or garbled audio does not.
+    global last_likeness
+    last_likeness = float(cc[lag] / (np.sqrt(np.sum(a * a) * np.sum(b * b)) + 1e-9))
     if lag > n // 2: lag -= n
     # b[i + lag] ~ a[i]  -> content in out appears lag samples later in its own array
     return ((tb + lag / rate) - ta) * 1000.0, len(a), len(b)
@@ -37,4 +43,4 @@ if __name__ == "__main__":
     n = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     for i in range(n):
         ms, la, lb = offset_ms(src, i, out, i)
-        print(f"audio {i}: content is {ms:+.2f} ms off  (decoded {la} vs {lb} samples)")
+        print(f"audio {i}: content is {ms:+.2f} ms off, likeness {last_likeness:.2f}  (decoded {la} vs {lb} samples)")

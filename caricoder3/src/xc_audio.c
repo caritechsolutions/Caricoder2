@@ -36,10 +36,18 @@
  * rate. Both are sized, per encoder, to stay inside TSTD_BUDGET bytes
  * (the buffer less room for packet headers and a late transport packet),
  * and never more than LEAD_TOTAL_MAX however low the bit rate.
+ *
+ * The lead is also what the audio has in hand when a CBR mux is busy
+ * with something else (a copied video stream sends its key frames in
+ * bursts), so it is never made shorter than LEAD_MIN; packets are made
+ * shorter first, down to one frame. At the highest bit rates (MP2 at 320
+ * and 384 kb/s) the lead alone takes the buffer past its size, by up to a
+ * half: a packet that comes late is heard, a buffer over its nominal
+ * size is, with most receivers, not.
  */
 #define TSTD_BUDGET     3000
 #define LEAD_TOTAL_MAX  (STC_HZ / 5)
-#define LEAD_MIN        (STC_HZ / 50)
+#define LEAD_MIN        (STC_HZ * 75 / 1000)
 #define ENC_OUT_MAX     16384
 #define SEGMENTS        4
 
@@ -277,7 +285,11 @@ static bool encoder_open(struct axc *a, int rate, int ch)
 
         if (total > LEAD_TOTAL_MAX)
             total = LEAD_TOTAL_MAX;
-        a->pes_frames = (int)(total / 2 / (frame_dur > 0 ? frame_dur : 1));
+        if (frame_dur < 1)
+            frame_dur = 1;
+        a->pes_frames = (int)(total / 2 / frame_dur);
+        if (total - a->pes_frames * frame_dur < LEAD_MIN)
+            a->pes_frames = (int)((total - LEAD_MIN) / frame_dur);
         if (a->pes_frames < 1)
             a->pes_frames = 1;
         a->lead = total - a->pes_frames * frame_dur;

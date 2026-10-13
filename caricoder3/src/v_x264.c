@@ -168,14 +168,20 @@ static int x4_pull(void *ctx, struct vpacket *p)
 {
     struct x4_enc *e = ctx;
 
-    if (!e->have && e->flushing && x264_encoder_delayed_frames(e->h) > 0) {
+    /* Emptying the encoder: a call may come back with nothing while
+     * pictures are still inside (its threads have not finished one), so
+     * it is asked until it has none left. Stopping at the first empty
+     * answer would lose the last pictures, and the library does not free
+     * what is still in it when closed. */
+    while (!e->have && e->flushing && x264_encoder_delayed_frames(e->h) > 0) {
         x264_picture_t out;
         x264_nal_t *nal = NULL;
         int n_nal = 0;
         int bytes = x264_encoder_encode(e->h, &nal, &n_nal, NULL, &out);
 
-        if (bytes > 0)
-            take(e, nal, n_nal, bytes, &out);
+        if (bytes < 0)
+            break;
+        take(e, nal, n_nal, bytes, &out);
     }
     if (!e->have)
         return 0;

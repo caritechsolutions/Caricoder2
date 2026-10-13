@@ -13,6 +13,7 @@
 struct lame_enc {
     lame_global_flags *g;
     int frame;
+    int channels;
 };
 
 static void *lm_open(enum codec_id codec, int rate, int channels, int *bitrate,
@@ -46,6 +47,7 @@ static void *lm_open(enum codec_id codec, int rate, int channels, int *bitrate,
         return NULL;
     }
     *bitrate = lame_get_brate(e->g) * 1000;    /* it settles on the nearest allowed */
+    e->channels = channels;
     e->frame = lame_get_framesize(e->g);
     *frame = e->frame;
     /* The encoder's own delay plus what a standard decoder adds.
@@ -57,7 +59,15 @@ static void *lm_open(enum codec_id codec, int rate, int channels, int *bitrate,
 static int lm_encode(void *ctx, const int16_t *pcm, uint8_t *out, size_t max)
 {
     struct lame_enc *e = ctx;
-    int n = lame_encode_buffer_interleaved(e->g, (short *)(uintptr_t)pcm, e->frame,
+    int n;
+
+    /* The interleaved call reads two samples per frame whatever the
+     * number of channels: given mono it would take every other sample and
+     * read past the end. (The fuzzer found this.) */
+    if (e->channels == 1)
+        n = lame_encode_buffer(e->g, pcm, pcm, e->frame, out, (int)max);
+    else
+        n = lame_encode_buffer_interleaved(e->g, (short *)(uintptr_t)pcm, e->frame,
                                            out, (int)max);
 
     return n < 0 ? -1 : n;

@@ -246,7 +246,12 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     e->fmt = cfg->depth > 8 ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT : NV_ENC_BUFFER_FORMAT_NV12;
     e->pic_struct = NV_ENC_PIC_STRUCT_FRAME;
     if (cfg->cuda_ctx) {
-        e->ctx = cfg->cuda_ctx;             /* where the decoder leaves its pictures */
+        /* Where the decoder leaves its pictures. The decoder may go before
+         * this encoder does (it is replaced when the card will not decode
+         * a stream any more), so the context is held here too. */
+        e->ctx = cfg->cuda_ctx;
+        nv_ctx_ref(e->ctx);
+        e->own_ctx = true;
     } else {
         e->ctx = nv_ctx_get(cfg->gpu, err, errlen);
         if (!e->ctx) {

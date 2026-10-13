@@ -45,7 +45,10 @@ static int live_ctx, live_mem;
 /* NVMOCK_FAIL=session or NVMOCK_FAIL=decoder makes that step fail the way
  * a real card does when it has no session or no decoder to give;
  * NVMOCK_FAIL=field makes the encoder refuse interlaced (field) encoding
- * when it is initialised, though it claimed the capability. */
+ * when it is initialised, though it claimed the capability.
+ * NVMOCK_BAD_AFTER=n: from the n-th packet on, the decoder's parser
+ * announces a format the code must refuse (4:2:2), as a real stream might
+ * change to in mid-run. */
 static int fails(const char *what)
 {
     const char *env = getenv("NVMOCK_FAIL");
@@ -75,6 +78,21 @@ CUresult cuDeviceGetName(char *name, int len, CUdevice dev)
     return CUDA_SUCCESS;
 }
 
+/* Contexts that were destroyed. Their addresses are kept (and the memory
+ * not given back, so no later context gets the same address): using one
+ * again is the fault this is here to catch. */
+#define MAX_DEAD 256
+static void *dead_ctx[MAX_DEAD];
+static int n_dead;
+
+static int is_dead(void *ctx)
+{
+    for (int i = 0; i < n_dead; i++)
+        if (dead_ctx[i] == ctx)
+            return 1;
+    return 0;
+}
+
 CUresult cuCtxCreate_v2(CUcontext *pctx, unsigned int flags, CUdevice dev)
 {
     (void)flags; (void)dev;
@@ -87,6 +105,7 @@ CUresult cuCtxCreate_v2(CUcontext *pctx, unsigned int flags, CUdevice dev)
 CUresult cuCtxPushCurrent_v2(CUcontext ctx)
 {
     CHECK(ctx != NULL, "cuCtxPushCurrent with a null context");
+    CHECK(!is_dead(ctx), "cuCtxPushCurrent with a context that was destroyed");
     ctx_depth++;
     return CUDA_SUCCESS;
 }
@@ -102,7 +121,11 @@ CUresult cuCtxPopCurrent_v2(CUcontext *pctx)
 
 CUresult cuCtxDestroy_v2(CUcontext ctx)
 {
-    free(ctx);
+    CHECK(!is_dead(ctx), "a context destroyed twice");
+    if (n_dead < MAX_DEAD)
+        dead_ctx[n_dead++] = ctx;
+    else
+        free(ctx);
     __sync_fetch_and_sub(&live_ctx, 1);
     return CUDA_SUCCESS;
 }
@@ -482,7 +505,7 @@ struct m_dec {
 
 struct m_parser {
     CUVIDPARSERPARAMS pp;
-    int started, surfaces, next_idx;
+    int started, surfaces, next_idx, packets;
     unsigned w, h, depth;
     CUVIDPARSERDISPINFO held[DELAY];
     int n_held;
@@ -525,6 +548,7 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
     const unsigned char *d = pkt->payload;
     unsigned w = 320, h = 240, depth = 8;
     char il = 'p';                          /* NVMOCK_FORMAT=WxH:depth:i = interlaced */
+    int bad = 0;
     const char *env = getenv("NVMOCK_FORMAT");
     CUVIDPARSERDISPINFO di;
     CUVIDPICPARAMS pic;
@@ -557,6 +581,10 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
         h = (unsigned)d[11] << 8 | d[12];
         depth = d[13];
     }
+    if (getenv("NVMOCK_BAD_AFTER") && ++p->packets >= atoi(getenv("NVMOCK_BAD_AFTER"))) {
+        bad = 1;
+        p->started = 0;
+    }
     if (!p->started || w != p->w || h != p->h || depth != p->depth) {
         CUVIDEOFORMAT f;
         int n;
@@ -572,7 +600,7 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
         f.coded_height = (h + 15) & ~15u;
         f.display_area.right = (int)w;
         f.display_area.bottom = (int)h;
-        f.chroma_format = cudaVideoChromaFormat_420;
+        f.chroma_format = bad ? cudaVideoChromaFormat_422 : cudaVideoChromaFormat_420;
         f.display_aspect_ratio.x = (int)w;
         f.display_aspect_ratio.y = (int)h;
         f.video_signal_description.color_primaries = 1;

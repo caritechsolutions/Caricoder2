@@ -43,6 +43,9 @@ int nv_device_count(void);
  */
 CUcontext nv_ctx_get(int gpu, char *why, size_t len);
 void nv_ctx_put(CUcontext ctx);
+/* One more user of a context somebody else got: it lives until every user
+ * has put it back, whoever goes first. */
+void nv_ctx_ref(CUcontext ctx);
 
 const char *nv_cu_err(CUresult r);
 

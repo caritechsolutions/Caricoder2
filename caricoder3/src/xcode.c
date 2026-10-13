@@ -19,17 +19,30 @@
 #define QUEUE_BYTES_MAX (48u * 1024 * 1024) /* input waiting for the codec */
 #define IDLE_NS         200000000LL         /* no input this long: flush what is half built */
 /*
- * Falling behind. Output that reaches the mux after its send time is of
- * no use to anyone. If that goes on for LATE_NS and input is piling up
- * (BEHIND of it waiting), the codec is slower than the stream and will
- * never catch up by itself: what is waiting is thrown away, so that it
- * works on current input again. If output is late with nothing piled up,
- * the codec is fast enough but --delay is too short for the pictures it
- * holds back: that is only reported.
+ * Falling behind. Output that reaches the mux after its send time goes
+ * out late, and is dropped once it is later than the mux allows. Every
+ * LATE_NS that the output has been late without a break, the thread
+ * looks at how late it is now against the worst since it last looked:
+ *
+ * - getting less (by CATCHING_UP or more): the codec is working off a
+ *   backlog, from its start or from a stall. It is left to it.
+ * - not getting less, with input piled up (BEHIND of it waiting): the
+ *   codec is slower than the stream and will never catch up by itself.
+ *   What is waiting is thrown away, so that it works on current input.
+ * - not getting less, with nothing piled up: the codec is fast enough,
+ *   but --delay is too short for the pictures it holds back. That is
+ *   reported (every LATE_WARN_NS) and nothing is thrown away.
+ *
+ * After input was thrown away a video decoder needs a key frame to start
+ * from. Input is skipped until one is seen, but not for longer than
+ * SKIP_MAX: a stream whose key frames are not recognised here is better
+ * decoded with errors than not at all.
  */
 #define LATE_NS         3000000000LL
+#define CATCHING_UP     (STC_HZ * 3 / 10)
 #define BEHIND          (STC_HZ / 2)
 #define LATE_WARN_NS    10000000000LL
+#define SKIP_MAX        (5 * STC_HZ)
 #define FINISH_WAIT_NS   300000000L          /* longest a finish may hold up its caller */
 
 struct xcode {
@@ -46,7 +59,9 @@ struct xcode {
     int64_t slack_min, slack_ever;
     int64_t late_since;         /* ns; 0: the last unit out was on time */
     int64_t late_last;          /* ns; when the last late unit came out */
-    int64_t late_worst;         /* most a unit was late since the last report */
+    int64_t late_worst;         /* most a unit was late since the last look */
+    int64_t late_now;           /* how late the last unit was */
+    stc_t skip_from;            /* worker only: send time of the first unit skipped */
     int64_t late_warned;        /* worker only */
     bool skip_to_key;           /* worker only: video input was thrown away */
 
@@ -271,7 +286,13 @@ static void process(struct xcode *x, struct es_unit *u)
     if (x->skip_to_key) {
         int off = pes_payload_offset(u->data, u->len);
 
-        if (off < 0 || !starts_at_key(x->cfg.in, u->data + off, u->len - (size_t)off)) {
+        if (x->skip_from == NOPTS)
+            x->skip_from = u->t0;
+        if (u->t0 - x->skip_from > SKIP_MAX || u->t0 < x->skip_from) {
+            log_warn("PID 0x%04X: no key frame recognised in %d s of video; decoding "
+                     "from where it is", x->cfg.pid, (int)(SKIP_MAX / STC_HZ));
+        } else if (off < 0 ||
+                   !starts_at_key(x->cfg.in, u->data + off, u->len - (size_t)off)) {
             pthread_mutex_lock(&x->q_lock);
             x->overflow++;
             pthread_mutex_unlock(&x->q_lock);
@@ -291,19 +312,28 @@ static void process(struct xcode *x, struct es_unit *u)
 /* Worker, after each unit: is the output late, and what is to be done? */
 static void check_late(struct xcode *x)
 {
-    int64_t now, since, worst;
+    int64_t now, since, worst, late;
     struct es_unit *drop = NULL;
     unsigned n = 0;
 
     pthread_mutex_lock(&x->st_lock);
     since = x->late_since;
     worst = x->late_worst;
+    late = x->late_now;
     pthread_mutex_unlock(&x->st_lock);
     if (!since)
         return;
     now = clock_now_ns();
     if (now - since < LATE_NS)
         return;
+    if (worst - late >= CATCHING_UP) {
+        /* Catching up. Look again in a while, from where it is now. */
+        pthread_mutex_lock(&x->st_lock);
+        x->late_since = now;
+        x->late_worst = late;
+        pthread_mutex_unlock(&x->st_lock);
+        return;
+    }
 
     pthread_mutex_lock(&x->q_lock);
     if (x->q_head && x->q_tail->t0 - x->q_head->t0 > BEHIND) {
@@ -326,6 +356,7 @@ static void check_late(struct xcode *x)
         if (x->video) {
             vxc_reset(x->v);
             x->skip_to_key = true;
+            x->skip_from = NOPTS;
         }
         pthread_mutex_lock(&x->st_lock);
         x->late_since = 0;
@@ -335,14 +366,19 @@ static void check_late(struct xcode *x)
         log_warn("PID 0x%04X: the %s transcoder is slower than the stream (output %lld ms "
                  "late); %u packets of input skipped to catch up", x->cfg.pid,
                  x->video ? "video" : "audio", (long long)(worst / STC_PER_MS), n);
-    } else if (now - x->late_warned > LATE_WARN_NS) {
+    } else {
+        /* Late, steadily, with the codec keeping up. */
         pthread_mutex_lock(&x->st_lock);
-        x->late_worst = 0;
+        x->late_since = now;
+        x->late_worst = late;
         pthread_mutex_unlock(&x->st_lock);
-        x->late_warned = now;
-        log_warn("PID 0x%04X: transcoded %s reaches the output up to %lld ms too late and "
-                 "is dropped: --delay is too short for what this codec holds back",
-                 x->cfg.pid, x->video ? "video" : "audio", (long long)(worst / STC_PER_MS));
+        if (now - x->late_warned > LATE_WARN_NS) {
+            x->late_warned = now;
+            log_warn("PID 0x%04X: transcoded %s reaches the output up to %lld ms after "
+                     "its send time: --delay is too short for what this codec holds back",
+                     x->cfg.pid, x->video ? "video" : "audio",
+                     (long long)(worst / STC_PER_MS));
+        }
     }
 }
 
@@ -498,6 +534,7 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
         if (!x->late_since || now - x->late_last > 1000000000LL)
             x->late_since = now;
         x->late_last = now;
+        x->late_now = -slack;
         if (-slack > x->late_worst)
             x->late_worst = -slack;
     }

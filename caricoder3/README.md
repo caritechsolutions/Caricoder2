@@ -180,25 +180,31 @@ when the source changes them while running (a channel going from 4:3 to
 Every picture comes out at the time stamp it came in with.
 
 New video is sent at its own bit rate: a large key frame is spread over
-the time it takes at that rate, so the video never asks the multiplexer
-for more than it was coded at, and a receiver never has to hold more than
-the encoder's buffer (`--vbv`, 1 s by default). New audio is packed and
-timed to stay inside the 3584 bytes a standard decoder has for audio.
+the time it takes at that rate instead of being pushed out at once, and a
+receiver never has to hold more than the encoder's buffer (`--vbv`, 1 s by
+default). The pace rises above the bit rate only when the encoder itself
+runs over it (x265 does, by a few per cent). New audio is packed and timed
+to stay inside the 3584 bytes a standard decoder has for audio, and is
+kept at least 75 ms ahead of its time; only MP2 at 320 and 384 kb/s needs
+more than the buffer for that, and there being ahead wins.
 
 **Delay.** Decoding and encoding take time, and an encoder holds pictures
 back to look ahead. `--delay` defaults to 800 ms when audio is transcoded
 and 3000 ms when video is. The statistics show, per transcoded stream, the
 least time a unit had to spare when it reached the multiplexer
 (`slack_min_ms`). If that is large, `--delay` can come down by about that
-much. If it is negative the units came too late and were dropped; the log
-then says which of two things is wrong:
+much. If it is negative, units reached the multiplexer after their send
+time: they go out late, and are dropped if later than the multiplexer
+allows. When that lasts, the log says which of two things is wrong:
 
 - "`--delay is too short`": the codec keeps up, but holds back more
   pictures than the delay allows for. Raise `--delay`.
 - "`slower than the stream`": the codec cannot keep up at all (too slow a
   `--preset` for the machine). Input that could never be caught up on is
   thrown away and counted (`input_dropped`), so that what does come out is
-  current; the other streams of the service are not affected.
+  current; the other streams of the service are not affected. A codec
+  that is behind but gaining (after its start, or after a stall) is left
+  to catch up.
 
 The CPU codecs are held to a few threads per stream (4 to decode, 6 for
 x264), because every extra thread is one more picture held back. The
@@ -341,7 +347,7 @@ The same figures go to the log every 10 seconds (`--stats-interval`).
 ## Tests
 
 ```
-make test                         # 74 tests, about eight minutes
+make test                         # 75 tests, about nine minutes
 python3 tests/run_tests.py --list
 python3 tests/run_tests.py live   # only the tests with "live" in the name
 python3 tests/run_tests.py xc_    # only the transcoding tests
@@ -404,7 +410,21 @@ Transcoding:
 - A change of picture format restarts the encoder with a key frame. An
   interlaced stream that turns progressive is only followed after 500
   progressive pictures in a row, because interlaced streams carry
-  progressive pictures among the others.
+  progressive pictures among the others; a new colour description or
+  field order after 10 in a row.
+- In a CBR output with little room to spare, beside a copied video stream
+  (which sends its key frames in bursts, as the source did), new audio
+  has 75 ms in hand, where a copied audio stream has whatever the source
+  gave it. If `late_units` counts up in such a set-up, give the mux more
+  room (`-r`). A VBR output has no such contention.
+- When the source changes the coding of a stream (new PMT), the input
+  waits for the old transcoder to finish: at most 0.3 s for its queue,
+  plus the time the encoder takes to give out what it holds (tens of
+  milliseconds at the default presets).
+- File runs only: with `--video`, a file whose clock starts within about a
+  second of zero (files made by ffmpeg do) and a tight CBR rate, the first
+  new pictures are due before the output begins and are sent in a bunch;
+  copied audio can be up to 0.7 s late for the first second or two.
 - When the source's clock steps, units that were already on their way to
   a transcoder with the old clock's time are not moved (a copied stream's
   are): up to 2 s of video or 1 s of audio around the step can be lost.

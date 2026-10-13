@@ -141,6 +141,19 @@ CUcontext nv_ctx_get(int gpu, char *why, size_t len)
     return ctx;
 }
 
+void nv_ctx_ref(CUcontext ctx)
+{
+    if (!ctx)
+        return;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < MAX_GPU; i++)
+        if (g_dev[i].refs > 0 && g_dev[i].ctx == ctx) {
+            g_dev[i].refs++;
+            break;
+        }
+    pthread_mutex_unlock(&g_lock);
+}
+
 void nv_ctx_put(CUcontext ctx)
 {
     if (!ctx)
