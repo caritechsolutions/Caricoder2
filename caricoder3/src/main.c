@@ -372,6 +372,8 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
                 x->queued, x->failed ? "true" : "false");
         if (x->slack_min != INT64_MAX)
             fprintf(f, ", \"slack_ms\": %.1f", (double)x->slack_min / STC_PER_MS);
+        if (x->slack_ever != INT64_MAX)
+            fprintf(f, ", \"slack_min_ms\": %.1f", (double)x->slack_ever / STC_PER_MS);
         fprintf(f, "}");
     }
     fprintf(f, "\n    ]\n  },\n");

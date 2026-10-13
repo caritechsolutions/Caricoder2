@@ -36,6 +36,9 @@ ASAN = os.path.join(ROOT, "caricoder3-asan")
 WORK = os.path.join(ROOT, "build", "test-work")
 HZ = 27_000_000
 TESTS = []
+# Leaks that belong to a codec library, not to us, are listed in lsan.supp.
+SAN_ENV = dict(os.environ, LSAN_OPTIONS="suppressions=" + os.path.join(HERE, "lsan.supp")
+               + ":print_suppressions=0")
 
 
 def test(fn):
@@ -79,7 +82,7 @@ def run_file(src, dst, *args, expect=0, binary=None):
     if os.path.exists(sf):
         os.remove(sf)
     p = subprocess.run([binary, "-q", "-i", src, "-o", dst, "--stats-file", sf,
-                        *args], capture_output=True, text=True, timeout=300)
+                        *args], capture_output=True, text=True, timeout=300, env=SAN_ENV)
     if "AddressSanitizer" in p.stderr or "runtime error" in p.stderr:
         raise Fail("sanitizer error:\n" + p.stderr[-2000:])
     if p.returncode != expect:
@@ -1929,6 +1932,359 @@ def live_xc_audio_source_restart():
     no_pause(cap)
     return f"{n / 48000:.2f} s of 10 s of audio delivered across the restart, time stamps " \
            f"only move forward, {len(late)} late"
+
+
+# ---- video
+
+def video_pts(path):
+    """Presentation times (90 kHz) of the decoded pictures, in display order."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "frame=pts", "-of", "csv=p=0", path],
+                       capture_output=True, text=True)
+    return [int(x.strip(",")) for x in p.stdout.split() if x.strip(",").lstrip("-").isdigit()]
+
+
+def probe_video(path):
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries",
+                        "stream=codec_name,width,height,pix_fmt,field_order,r_frame_rate,"
+                        "sample_aspect_ratio", "-of", "json", path],
+                       capture_output=True, text=True)
+    s = json.loads(p.stdout or "{}").get("streams", [{}])
+    return s[0] if s else {}
+
+
+def psnr(out, src):
+    """
+    Average PSNR of `out` against `src`, pictures paired by time stamp. A
+    picture that is in the wrong place in time is compared with the wrong
+    original, and on a moving test picture that shows at once.
+    """
+    p = subprocess.run(["ffmpeg", "-v", "info", "-i", out, "-i", src, "-lavfi",
+                        "[0:v]format=yuv420p[a];[1:v]format=yuv420p[b];"
+                        "[a][b]psnr=shortest=1:repeatlast=0",
+                        "-an", "-f", "null", "-"], capture_output=True, text=True)
+    for line in p.stderr.splitlines():
+        if "PSNR" in line and "average:" in line:
+            v = line.split("average:")[1].split()[0]
+            return float("99" if v == "inf" else v)
+    raise Fail("ffmpeg gave no PSNR figure: " + p.stderr[-300:])
+
+
+def video_bitrate(path, pid):
+    """Bit rate of the elementary stream on `pid`, from PES sizes and time stamps."""
+    a = Analysis(path)
+    lst = [r for r in a.pes[pid] if r["dts"] is not None]
+    span = (lst[-1]["dts"] - lst[0]["dts"]) / 90000.0
+    return sum(r["len"] for r in lst[:-1]) * 8 / span
+
+
+def v_source(name, codec, extra=(), size="320x240", duration=8, pix="yuv420p"):
+    args = {"h264": ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "900k", "-g", "25",
+                     "-bf", "2"],
+            "hevc": ["-c:v", "libx265", "-preset", "ultrafast", "-b:v", "900k",
+                     "-x265-params", "log-level=error:keyint=25"]}[codec]
+    path = w(name + ".ts")
+    if name in _cache and os.path.exists(path):
+        return path
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration={duration}",
+                        "-f", "lavfi", "-i", f"{BURSTS}:d={duration}",
+                        "-pix_fmt", pix, *args, *extra, "-c:a", "mp2", "-b:a", "128k",
+                        "-f", "mpegts", "-muxrate", "2000k", path],
+                       capture_output=True, text=True)
+    need(p.returncode == 0, f"ffmpeg could not make {name}: {p.stderr[-400:]}")
+    _cache[name] = True
+    return path
+
+
+def check_video(src, out, st, what, codec, rate, pix="yuv420p", min_psnr=27.0):
+    must_pass(out)
+    decodes_clean(out, what + ": ")
+    v = probe_video(out)
+    sv = probe_video(src)
+    need(v.get("codec_name") == codec, f"{what}: output video is {v.get('codec_name')}")
+    need((v["width"], v["height"]) == (sv["width"], sv["height"]),
+         f"{what}: picture is {v['width']}x{v['height']}")
+    need(v["pix_fmt"] == pix, f"{what}: pixel format {v['pix_fmt']}, expected {pix}")
+    need(v["r_frame_rate"] == sv["r_frame_rate"], f"{what}: frame rate {v['r_frame_rate']}")
+    # Every picture that comes out sits at a time the source had a picture at,
+    # and all but the first few (before the decoder's first key frame) are there.
+    a, b = video_pts(src), video_pts(out)
+    need(b == sorted(b) and len(set(b)) == len(b), f"{what}: picture times not in order")
+    need(set(b) <= set(a), f"{what}: {len(set(b) - set(a))} pictures at times the source "
+                           f"had none")
+    need(len(b) >= len(a) - 3, f"{what}: {len(b)} of {len(a)} pictures came out")
+    q = psnr(out, src)
+    need(q >= min_psnr, f"{what}: PSNR {q:.1f} dB against the source (pictures in the "
+                        f"wrong place, or badly coded)")
+    got = video_bitrate(out, 0x100)
+    need(0.7 * rate < got < 1.2 * rate, f"{what}: {got / 1000:.0f} kb/s, asked for "
+                                        f"{rate / 1000:.0f}")
+    x = xstats(st, 0x100)
+    need(x["mode"] == "transcode" and not x["failed"] and x["decode_errors"] == 0, f"{what}: {x}")
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+         f"{what}: {st['output']['late_units']} late, {st['output']['dropped_units']} dropped")
+    # the audio went through untouched and still lines up
+    must_match(src, out, only={0x101})
+    return q, got, len(b), len(a)
+
+
+@test
+def xc_video_cpu_all_four():
+    """H.264 and H.265 in, H.264 and H.265 out, on the CPU: every picture, in place."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    res = []
+    for src_codec in ("h264", "hevc"):
+        src = v_source("xc_v_" + src_codec, src_codec)
+        for to in ("h264", "hevc"):
+            out = w(f"xc_v_{src_codec}_to_{to}.ts")
+            st = run_file(src, out, "--video", f"{to}:500k")
+            q, got, n, total = check_video(src, out, st, f"{src_codec} to {to}", to, 500_000)
+            res.append(f"{src_codec}>{to} {n}/{total} pictures, {q:.0f} dB, {got / 1000:.0f} kb/s")
+    return "; ".join(res)
+
+
+@test
+def xc_video_and_audio_together():
+    """Video and audio transcoded in one run stay in sync with each other."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    out = w("xc_va.ts")
+    st = run_file(src, out, "--video", "h264:500k", "--audio", "aac:96k")
+    must_pass(out)
+    decodes_clean(out)
+    a, b = video_pts(src), video_pts(out)
+    need(set(b) <= set(a) and len(b) >= len(a) - 3, f"{len(b)} of {len(a)} pictures")
+    q = psnr(out, src)
+    need(q >= 27, f"PSNR {q:.1f} dB")
+    ms, n = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0, f"audio is {ms:+.2f} ms off")
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0, "late or dropped")
+    return f"pictures at their original times ({q:.0f} dB), audio {ms:+.3f} ms off"
+
+
+@test
+def xc_video_formats():
+    """10-bit, interlaced, anamorphic and HD sources keep their shape through the encoder."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    res = []
+
+    # 10-bit H.265: stays 10-bit as H.265, becomes 8-bit as H.264
+    src = v_source("xc_v_hevc10", "hevc", pix="yuv420p10le")
+    need(probe_video(src)["pix_fmt"] == "yuv420p10le", "test source is not 10-bit")
+    out = w("xc_v_hevc10_hevc.ts")
+    st = run_file(src, out, "--video", "hevc:500k")
+    check_video(src, out, st, "10-bit hevc to hevc", "hevc", 500_000, pix="yuv420p10le")
+    out = w("xc_v_hevc10_h264.ts")
+    st = run_file(src, out, "--video", "h264:500k")
+    q, _, _, _ = check_video(src, out, st, "10-bit hevc to h264", "h264", 500_000)
+    res.append(f"10-bit kept in H.265, 8-bit in H.264 ({q:.0f} dB)")
+
+    # interlaced, top field first, 720x576 with non-square pixels
+    src = v_source("xc_v_il", "h264", size="720x576",
+                   extra=("-flags", "+ildct+ilme", "-top", "1", "-aspect", "16:9"))
+    sv = probe_video(src)
+    need(sv["field_order"] in ("tt", "tb"), f"test source is {sv['field_order']}")
+    out = w("xc_v_il_h264.ts")
+    st = run_file(src, out, "--video", "h264:1500k")
+    check_video(src, out, st, "interlaced h264 to h264", "h264", 1_500_000, min_psnr=30)
+    v = probe_video(out)
+    need(v["field_order"] in ("tt", "tb"), f"interlaced came out as {v['field_order']}")
+    need(v["sample_aspect_ratio"] == sv["sample_aspect_ratio"],
+         f"pixel shape {v['sample_aspect_ratio']}, source {sv['sample_aspect_ratio']}")
+    res.append(f"interlaced top-first 720x576 stays interlaced, pixel shape "
+               f"{v['sample_aspect_ratio']} kept")
+
+    # 1280x720
+    src = v_source("xc_v_hd", "h264", size="1280x720", duration=4)
+    out = w("xc_v_hd_hevc.ts")
+    st = run_file(src, out, "--video", "hevc:1500k", "--preset", "ultrafast")
+    check_video(src, out, st, "720p h264 to hevc", "hevc", 1_500_000, min_psnr=30)
+    res.append("1280x720 through")
+    return "; ".join(res)
+
+
+@test
+def xc_video_send_times():
+    """Each new access unit is complete at the receiver about one buffer (1 s) before
+    it is due, in VBR and in CBR; --vbv and --gop do what they say."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    res = []
+    for name, args, cbr in (("vbr", (), False), ("cbr", ("-r", "1200k"), True)):
+        out = w(f"xc_v_lead_{name}.ts")
+        st = run_file(src, out, "--video", "h264:500k", *args)
+        must_pass(out, cbr=cbr)
+        a = Analysis(out)
+        lead = [x for x in _leads(a, 0x100)]
+        need(min(lead) > 150, f"{name}: a picture was complete only {min(lead):.0f} ms "
+                              f"before its decode time")
+        need(800 < sorted(lead)[len(lead) // 2] < 1150,
+             f"{name}: typical lead {sorted(lead)[len(lead) // 2]:.0f} ms, expected about 1000")
+        res.append(f"{name}: lead {min(lead):.0f} to {max(lead):.0f} ms")
+    out = w("xc_v_lead_small.ts")
+    st = run_file(src, out, "--video", "h264:500k", "--vbv", "300", "--gop", "500")
+    must_pass(out)
+    lead = _leads(Analysis(out), 0x100)
+    need(250 < sorted(lead)[len(lead) // 2] < 400, f"--vbv 300: typical lead "
+         f"{sorted(lead)[len(lead) // 2]:.0f} ms")
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "frame=key_frame", "-of", "csv=p=0", out], capture_output=True, text=True)
+    keys = [i for i, x in enumerate(p.stdout.split()) if x.strip(",") == "1"]
+    gaps = [b - a for a, b in zip(keys, keys[1:])]
+    need(gaps and max(gaps) <= 12, f"--gop 500: key frames {max(gaps, default=0)} pictures apart")
+    res.append(f"--vbv 300 gives {sorted(lead)[len(lead) // 2]:.0f} ms, --gop 500 a key frame "
+               f"every {max(gaps)} pictures at most")
+    return "; ".join(res)
+
+
+def _leads(a, pid):
+    out = []
+    for r in a.pes[pid]:
+        t = a.stc_at(r["last"] + 1)
+        if t is not None and r["dts"] is not None:
+            out.append((r["dts"] * 300 - t) / 27000.0)
+    return out
+
+
+@test
+def xc_video_damaged_input():
+    """Lost and damaged video packets: no crash, a valid stream, and the picture recovers."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    data = read(src)
+    n = len(data) // TS
+    rng = random.Random(21)
+    worst = 99.0
+    for trial in range(8):
+        d = bytearray(data)
+        for _ in range(rng.choice((3, 10, 30))):
+            i = rng.randrange(n // 6, n * 6 // 10)       # all damage in the first 60%
+            pid = (d[i * TS + 1] & 0x1F) << 8 | d[i * TS + 2]
+            if pid != 0x100:
+                continue
+            if rng.random() < 0.5:                      # a run of packets lost
+                for k in range(i, min(n, i + rng.randint(1, 20))):
+                    if ((d[k * TS + 1] & 0x1F) << 8 | d[k * TS + 2]) == 0x100:
+                        d[k * TS + 1] |= 0x1F
+                        d[k * TS + 2] = 0xFF
+            elif not (d[i * TS + 3] & 0x20):            # bits flipped in the payload
+                for _ in range(rng.choice((1, 8, 40))):
+                    d[i * TS + rng.randrange(4, TS)] ^= 1 << rng.randrange(8)
+        bad = write(w("xc_v_bad_in.ts"), bytes(d))
+        out = w("xc_v_bad.ts")
+        st = run_file(bad, out, "--video", "h264:500k")
+        rep, fails = check(out, 0, False, None)
+        fails = [f for f in fails if "after their DTS" not in f]
+        need(not fails, f"trial {trial}: " + "; ".join(fails))
+        p = subprocess.run(["ffmpeg", "-v", "error", "-i", out, "-f", "null", "-"],
+                           capture_output=True, text=True)
+        need(p.returncode == 0 and not p.stderr.strip(),
+             f"trial {trial}: our output does not decode cleanly: {p.stderr[:200]}")
+        b = video_pts(out)
+        need(len(b) > 150, f"trial {trial}: only {len(b)} pictures came out")
+        need(b == sorted(b), f"trial {trial}: picture times out of order")
+        # The last two seconds are past all the damage and at least one key
+        # frame of the source: there it must look like the source again.
+        tail = psnr_tail(out, src, video_pts(src)[-50])
+        worst = min(worst, tail)
+        need(tail > 25, f"trial {trial}: picture did not recover (last second {tail:.1f} dB)")
+    return f"8 damaged inputs: output always valid and decodable; picture back to " \
+           f"{worst:.0f} dB or better after the damage"
+
+
+def psnr_tail(out, src, from_pts):
+    p = subprocess.run(["ffmpeg", "-v", "info", "-i", out, "-i", src, "-lavfi",
+                        f"[0:v]format=yuv420p,trim=start_pts={from_pts},setpts=PTS[a];"
+                        f"[1:v]format=yuv420p,trim=start_pts={from_pts},setpts=PTS[b];[a][b]psnr",
+                        "-an", "-f", "null", "-"], capture_output=True, text=True)
+    for line in p.stderr.splitlines():
+        if "PSNR" in line and "average:" in line:
+            v = line.split("average:")[1].split()[0]
+            return float("99" if v == "inf" else v)
+    raise Fail("ffmpeg gave no PSNR figure: " + p.stderr[-300:])
+
+
+@test
+def live_xc_video():
+    """Live: video and audio transcoded in real time, CBR out."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "-r", "1200k",
+                        "--video", "h264:500k", "--audio", "aac:96k",
+                        capture_name="live_xc_video.ts", tail=4.5)
+    out = w("live_xc_video.ts")
+    must_pass(out, cbr=True)
+    decodes_clean(out)
+    a, b = video_pts(src), video_pts(out)
+    need(set(b) <= set(a), "pictures at times the source had none")
+    need(len(b) >= len(a) - 30, f"{len(b)} of {len(a)} pictures came out")
+    q = psnr(out, src)
+    need(q >= 27, f"PSNR {q:.1f} dB")
+    ms, n = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0, f"audio is {ms:+.2f} ms off")
+    xv, xa = xstats(st, 0x100), xstats(st, 0x101)
+    for x in (xv, xa):
+        need(not x["failed"] and x["decode_errors"] == 0 and x["input_dropped"] == 0, str(x))
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+         f"late {st['output']['late_units']}, dropped {st['output']['dropped_units']}")
+    need(xv.get("slack_min_ms", -1) > 0 and xa.get("slack_min_ms", -1) > 0,
+         f"units reached the mux with no time to spare: video {xv.get('slack_min_ms')} ms, "
+         f"audio {xa.get('slack_min_ms')} ms")
+    no_pause(cap)
+    return f"{len(b)}/{len(a)} pictures in place ({q:.0f} dB), audio {ms:+.3f} ms off, " \
+           f"nothing late or dropped; of the default 3 s delay the video had " \
+           f"{xv['slack_min_ms']:.0f} ms to spare at worst, the audio {xa['slack_min_ms']:.0f} ms"
+
+
+@test
+def live_xc_video_source_restart():
+    """Source comes back on another clock while video and audio are being transcoded."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    a = v_source("xc_v_ra", "h264", duration=5)
+    b = v_source("xc_v_rb", "h264", duration=5, extra=("-output_ts_offset", "7000"))
+
+    def feed(p):
+        p.play(a, rate=2_000_000)
+        time.sleep(1.5)
+        p.play(b, rate=2_000_000)
+
+    st, cap, _ = live(feed, "-r", "1200k", "--video", "h264:500k", "--audio", "aac:96k",
+                      capture_name="live_xc_v_restart.ts", tail=4.5)
+    out = w("live_xc_v_restart.ts")
+    must_pass(out, cbr=True, allow_late=True)
+    decodes_clean(out)
+    need(st["clock"]["discontinuities"] == 1,
+         f"{st['clock']['discontinuities']} discontinuities, expected 1")
+    pts = video_pts(out)
+    need(pts == sorted(pts) and len(set(pts)) == len(pts), "picture times not in order")
+    need(len(pts) >= 2 * 125 - 40, f"only {len(pts)} of 250 pictures came out")
+    an = Analysis(out)
+    for pid in (0x100, 0x101):
+        d = [r["dts"] for r in an.pes[pid] if r["dts"] is not None]
+        need(all(y > x for x, y in zip(d, d[1:])), f"PID {pid}: decode times go backwards")
+    late = an.lateness_ms()
+    need(len(late) <= 5, f"{len(late)} PES left after their time")
+    xv = xstats(st, 0x100)
+    need(not xv["failed"] and xv["input_dropped"] == 0, str(xv))
+    no_pause(cap)
+    return f"{len(pts)} of 250 pictures across the restart, times only move forward, " \
+           f"{len(late)} late"
 
 
 def main():

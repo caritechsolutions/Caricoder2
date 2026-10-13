@@ -50,8 +50,9 @@ struct xcode_stats {
     uint64_t silence_ms, cut_ms;        /* audio: holes filled, overlaps removed */
     uint64_t restarts;                  /* time line taken up afresh */
     unsigned queued;                    /* input units waiting right now */
-    int64_t  slack_min;                 /* least time to spare on leaving for the
-                                         * mux since last read, ticks; INT64_MAX: none */
+    int64_t  slack_min;                 /* least time to spare on reaching the mux
+                                         * since last read, ticks; INT64_MAX: none */
+    int64_t  slack_ever;                /* the same since the transcoder started */
     bool     failed;                    /* could not be set up: stream is silent */
 };
 

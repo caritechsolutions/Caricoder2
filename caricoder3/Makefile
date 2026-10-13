@@ -50,6 +50,18 @@ ifeq ($(call have_hdr,a52dec/a52.h),yes)
 CODEC_DEFS += -DHAVE_A52
 CODEC_LIBS += -la52
 endif
+ifeq ($(call have_pkg,libavcodec libavutil),yes)
+CODEC_DEFS += -DHAVE_AVCODEC $(shell $(PKG_CONFIG) --cflags libavcodec libavutil)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs libavcodec libavutil)
+endif
+ifeq ($(call have_pkg,x264),yes)
+CODEC_DEFS += -DHAVE_X264 $(shell $(PKG_CONFIG) --cflags x264)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs x264)
+endif
+ifeq ($(call have_pkg,x265),yes)
+CODEC_DEFS += -DHAVE_X265 $(shell $(PKG_CONFIG) --cflags x265)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs x265)
+endif
 endif
 CPPFLAGS += $(CODEC_DEFS)
 LDLIBS   += $(CODEC_LIBS)
@@ -57,7 +69,7 @@ LDLIBS   += $(CODEC_LIBS)
 CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/engine.c src/codec.c src/xcode.c src/xc_audio.c src/xc_video.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
-       src/a_a52.c
+       src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c
 SRC  = $(CORE) src/udp.c src/main.c
 
 OBJ      = $(SRC:src/%.c=build/rel/%.o)
@@ -74,17 +86,27 @@ debug: caricoder3-asan
 caricoder3-asan: $(OBJ_ASAN)
 	$(CC) -O1 -g $(SAN) $(LDFLAGS) -o $@ $(OBJ_ASAN) $(LDLIBS)
 
-build/rel/%.o: src/%.c
+# Which libraries were found is written to a file that every object
+# depends on, so installing or removing one rebuilds what it affects
+# instead of leaving objects from two different configurations side by
+# side.
+build/config: FORCE
+	@mkdir -p build
+	@echo '$(CC) $(CFLAGS) $(CODEC_DEFS)' | cmp -s - $@ || echo '$(CC) $(CFLAGS) $(CODEC_DEFS)' > $@
+
+FORCE:
+
+build/rel/%.o: src/%.c build/config
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 $(CPPFLAGS) $(CFLAGS) $(WARN) -c $< -o $@
 
-build/asan/%.o: src/%.c
+build/asan/%.o: src/%.c build/config
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 $(CPPFLAGS) -O1 -g $(SAN) $(WARN) -c $< -o $@
 
 fuzz: build/fuzz_engine build/fuzz_live
 
-build/fuzz_%: tests/fuzz_%.c $(CORE)
+build/fuzz_%: tests/fuzz_%.c $(CORE) build/config
 	@mkdir -p build
 	clang -std=c11 -D_GNU_SOURCE -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -O1 -g -Isrc \
 	    $(CODEC_DEFS) -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
@@ -100,5 +122,5 @@ install: caricoder3
 clean:
 	rm -rf build caricoder3 caricoder3-asan
 
-.PHONY: all debug fuzz test install clean
+.PHONY: all debug fuzz test install clean FORCE
 -include $(OBJ:.o=.d) $(OBJ_ASAN:.o=.d)

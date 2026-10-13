@@ -29,7 +29,7 @@ struct xcode {
     pthread_mutex_t st_lock;
     struct xcode_stats pub;
     uint64_t overflow;
-    int64_t slack_min;
+    int64_t slack_min, slack_ever;
 
     bool threaded;
     pthread_t th;
@@ -331,6 +331,8 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
     pthread_mutex_lock(&x->st_lock);
     if (slack < x->slack_min)
         x->slack_min = slack;
+    if (slack < x->slack_ever)
+        x->slack_ever = slack;
     pthread_mutex_unlock(&x->st_lock);
 }
 
@@ -339,6 +341,7 @@ void xcode_get_stats(struct xcode *x, struct xcode_stats *st)
     pthread_mutex_lock(&x->st_lock);
     *st = x->pub;
     st->slack_min = x->slack_min;
+    st->slack_ever = x->slack_ever;
     x->slack_min = INT64_MAX;
     pthread_mutex_unlock(&x->st_lock);
 
@@ -363,7 +366,7 @@ struct xcode *xcode_new(const struct xcode_cfg *cfg, bool threaded,
         return NULL;
     x->cfg = *cfg;
     x->video = codec_is_video(cfg->in);
-    x->slack_min = INT64_MAX;
+    x->slack_min = x->slack_ever = INT64_MAX;
     pthread_mutex_init(&x->st_lock, NULL);
     pthread_mutex_init(&x->q_lock, NULL);
     {

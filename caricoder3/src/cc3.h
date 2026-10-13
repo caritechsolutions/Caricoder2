@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CC3_VERSION "3.0.0-stage2"
+#define CC3_VERSION "3.0.0-stage3"
 
 typedef int64_t stc_t;              /* 27 MHz ticks, unwrapped */
 
