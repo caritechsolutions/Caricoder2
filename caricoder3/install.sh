@@ -41,7 +41,7 @@ LIBS_DIR="${CARICODER3_LIBS:-/opt/caricoder3-libs}"
 # The original fdk-aac. Ubuntu's package is "fdk-aac-free", with the
 # HE-AAC parts removed, and the feeds this is for carry HE-AAC.
 FDK_VERSION="2.0.3"
-FDK_URL="https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v$FDK_VERSION"
+FDK_URL="${CARICODER3_FDK_URL:-https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v$FDK_VERSION}"
 RUN_TESTS=0
 WITH_CODECS=1
 WORK=""
@@ -179,6 +179,9 @@ install_fdk_aac() {
         die "fdk-aac did not build; nothing on this machine was changed"
     fi
     [ -f "$WORK/fdkinst/lib/pkgconfig/fdk-aac.pc" ] || die "fdk-aac built but left no library"
+    # The library is moved to its final place below: its pkg-config file
+    # must name that place, not the scratch folder.
+    sed -i "s|^prefix=.*|prefix=$LIBS_DIR|" "$WORK/fdkinst/lib/pkgconfig/fdk-aac.pc"
     printf '%s\n' "$FDK_VERSION" > "$WORK/fdkinst/fdk-aac.version"
     rm -rf "$LIBS_DIR.old"
     [ -e "$LIBS_DIR" ] && mv "$LIBS_DIR" "$LIBS_DIR.old"
@@ -259,6 +262,10 @@ main() {
     version="$("$WORK/tree/caricoder3" --version)" ||
         die "the new binary does not run; nothing on this machine was changed"
     note "$version"
+    if [ "$WITH_CODECS" -eq 1 ] &&
+       ! "$WORK/tree/caricoder3" --backends 2>/dev/null | grep -q "incl. HE-AAC"; then
+        die "the build did not pick up the fdk-aac in $LIBS_DIR (no HE-AAC); nothing on this machine was changed"
+    fi
 
     if [ "$RUN_TESTS" -eq 1 ]; then
         say "Self-tests (file tests only: no network ports are used)"

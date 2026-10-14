@@ -1591,12 +1591,13 @@ def decodes_clean(path, what=""):
          f"{what}ffmpeg reports errors decoding the output: {p.stderr[:300]}")
 
 
-def sync_ms(src, out, idx, src_idx=None, check_likeness=True):
+def sync_ms(src, out, idx, src_idx=None, min_likeness=0.5):
     import av_sync
     ms, _, n_out = av_sync.offset_ms(src, idx if src_idx is None else src_idx, out, idx)
     # In place is not enough: it must also be the same audio (not at the wrong
-    # speed, not garbled). Lossy coding of the test signal leaves this near 0.8-0.9.
-    need(av_sync.last_likeness > 0.5 or not check_likeness,
+    # speed, not garbled). Lossy coding of the test signal leaves this near 0.8-0.9;
+    # HE-AAC, whose upper band is regenerated rather than transmitted, near 0.4.
+    need(av_sync.last_likeness > min_likeness,
          f"audio stream {idx} of {os.path.basename(out)} is in place but is not the audio "
          f"of the source (likeness {av_sync.last_likeness:.2f})")
     return ms, n_out
@@ -1863,7 +1864,7 @@ def xc_audio_he_aac():
                 kind = "core only (24 kHz), warned"
             else:
                 need((rate, ch) == (48000, 2), f"{label} to {to}: {rate} Hz, {ch} channel(s)")
-                ms, _ = sync_ms(src, out, 0)
+                ms, _ = sync_ms(src, out, 0, min_likeness=0.25)
                 need(abs(ms) < 1.0, f"{label} to {to}: audio is {ms:+.2f} ms off")
                 kind = "full band, in sync"
         res.append(f"{label}: {kind}")
