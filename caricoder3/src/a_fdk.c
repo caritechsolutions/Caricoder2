@@ -7,8 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The original library's headers define helper functions they do not use. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include <fdk-aac/aacdecoder_lib.h>
 #include <fdk-aac/aacenc_lib.h>
+#pragma GCC diagnostic pop
 
 #include "codec.h"
 #include "log.h"
@@ -133,8 +137,13 @@ static const struct adec_ops fdk_dec_ops = {
     fdk_dec_open, fdk_dec_decode, fdk_dec_reset, fdk_dec_close,
 };
 
+static const char *fdk_dec_detail(void)
+{
+    return lib_has_sbr() ? " incl. HE-AAC" : " NO HE-AAC";
+}
+
 const struct codec_backend backend_fdk_dec = {
-    .name = "fdk-aac", .codecs = "aac (ADTS, LATM)",
+    .name = "fdk-aac", .codecs = "aac (ADTS, LATM)", .detail = fdk_dec_detail,
     .media = CODEC_AUDIO, .role = CODEC_DECODER, .where = WHERE_CPU,
     .priority = 10, .handles = fdk_dec_handles, .adec = &fdk_dec_ops,
 };

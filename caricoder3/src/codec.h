@@ -211,6 +211,7 @@ bool codec_es_has_key(enum codec_id codec, const uint8_t *d, size_t len, bool or
 struct codec_backend {
     const char *name;           /* "x264", "nvenc", "fdk-aac", ... */
     const char *codecs;         /* for the listing: "h264", "aac", ... */
+    const char *(*detail)(void); /* NULL, or something to add to that at run time */
     enum codec_media media;
     enum codec_role role;
     enum codec_where where;     /* WHERE_CPU or WHERE_NVIDIA */

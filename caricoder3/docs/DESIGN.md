@@ -616,12 +616,12 @@ no H.265 B-frames and no AV1.
 
 ### Decisions still open
 
-**HE-AAC.** Ubuntu ships fdk-aac with the HE-AAC parts removed. With it
-an HE-AAC source is transcoded from its half-rate core. The two ways out:
-build the original fdk-aac from source in the installer (full band, and
-HE-AAC output becomes possible; its licence and the AAC patent situation
-are for the owner to weigh), or let libavcodec, already present for
-video, decode AAC as well (full band in; no HE-AAC out). Neither is done.
+**HE-AAC** (decided 2026-10-14). Ubuntu ships fdk-aac with the HE-AAC
+parts removed, and a look at the live multiplex showed nearly every
+service's audio to be HE-AAC at 48 kHz. The installer now builds the
+original fdk-aac from source (full band in; HE-AAC output possible later).
+The alternative, decoding AAC through libavcodec, was not taken: it meant
+a new backend to write and verify, and no HE-AAC output.
 
 **B-frames on NVENC.** Left out to keep the first hardware bring-up
 simple. They are worth roughly a tenth of the bit rate on H.264.

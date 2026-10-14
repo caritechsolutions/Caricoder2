@@ -36,6 +36,12 @@ REPO="caritechsolutions/Caricoder2"
 BRANCH="${CARICODER3_BRANCH:-claude/caricoder3-stage2}"
 SRC_DIR="${CARICODER3_SRC:-/opt/caricoder3}"
 PREFIX="${PREFIX:-/usr/local}"
+# Libraries built from source go here (the Makefile looks for them).
+LIBS_DIR="${CARICODER3_LIBS:-/opt/caricoder3-libs}"
+# The original fdk-aac. Ubuntu's package is "fdk-aac-free", with the
+# HE-AAC parts removed, and the feeds this is for carry HE-AAC.
+FDK_VERSION="2.0.3"
+FDK_URL="https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v$FDK_VERSION"
 RUN_TESTS=0
 WITH_CODECS=1
 WORK=""
@@ -43,7 +49,6 @@ WORK=""
 # package : what it is for
 CODEC_PKGS="
 pkg-config:finding the libraries below
-libfdk-aac-dev:AAC decode and encode
 libmpg123-dev:MP2 / MP3 decode
 liba52-0.7.4-dev:AC-3 decode
 libtwolame-dev:MP2 encode
@@ -141,6 +146,48 @@ install_codec_libs() {
     fi
 }
 
+# Builds the original fdk-aac into $LIBS_DIR (static, so the binary
+# carries it). Done once; again only when the version here changes.
+install_fdk_aac() {
+    local stamp="$LIBS_DIR/fdk-aac.version" tarball="$WORK/fdk.tar.gz"
+
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$FDK_VERSION" ] &&
+       [ -f "$LIBS_DIR/lib/pkgconfig/fdk-aac.pc" ]; then
+        note "fdk-aac $FDK_VERSION (with HE-AAC) is already built in $LIBS_DIR"
+        return 0
+    fi
+    if ! command -v cmake >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+        command -v apt-get >/dev/null 2>&1 ||
+            die "cmake and a C++ compiler are needed to build fdk-aac; install them and run again"
+        note "installing cmake and g++"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            cmake g++ </dev/null >/dev/null || die "could not install cmake and g++"
+    fi
+    note "building fdk-aac $FDK_VERSION from source (the Ubuntu package has no HE-AAC)"
+    curl -fsSL --retry 3 -o "$tarball" "$FDK_URL" </dev/null ||
+        die "could not download fdk-aac $FDK_VERSION"
+    mkdir -p "$WORK/fdk"
+    tar -xzf "$tarball" -C "$WORK/fdk" --strip-components=1 --no-same-owner ||
+        die "the fdk-aac download is not a tar archive"
+    if ! (cd "$WORK/fdk" &&
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+                -DBUILD_PROGRAMS=OFF -DCMAKE_INSTALL_PREFIX="$WORK/fdkinst" \
+                -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON &&
+          cmake --build build -j "$(nproc)" &&
+          cmake --install build) >"$WORK/fdk-build.log" 2>&1 </dev/null; then
+        tail -n 20 "$WORK/fdk-build.log" >&2
+        die "fdk-aac did not build; nothing on this machine was changed"
+    fi
+    [ -f "$WORK/fdkinst/lib/pkgconfig/fdk-aac.pc" ] || die "fdk-aac built but left no library"
+    printf '%s\n' "$FDK_VERSION" > "$WORK/fdkinst/fdk-aac.version"
+    rm -rf "$LIBS_DIR.old"
+    [ -e "$LIBS_DIR" ] && mv "$LIBS_DIR" "$LIBS_DIR.old"
+    mkdir -p "$(dirname "$LIBS_DIR")"
+    mv "$WORK/fdkinst" "$LIBS_DIR"
+    rm -rf "$LIBS_DIR.old"
+    note "fdk-aac $FDK_VERSION built into $LIBS_DIR"
+}
+
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -167,16 +214,17 @@ main() {
     say "Build tools"
     install_build_tools
 
-    if [ "$WITH_CODECS" -eq 1 ]; then
-        say "Codec libraries"
-        install_codec_libs
-    fi
-
     # Scratch space next to the destination: same disk, so the finished
     # tree can be moved into place in one step, and never a noexec /tmp.
     mkdir -p "$(dirname "$SRC_DIR")"
     WORK="$(mktemp -d "$(dirname "$SRC_DIR")/.caricoder3-install.XXXXXX")"
     trap cleanup EXIT
+
+    if [ "$WITH_CODECS" -eq 1 ]; then
+        say "Codec libraries"
+        install_codec_libs
+        install_fdk_aac
+    fi
 
     say "Downloading the source"
     local tarball="$WORK/src.tar.gz"
@@ -200,7 +248,7 @@ main() {
     printf '%s\n' "${commit:-unknown}" > "$WORK/tree/COMMIT"
 
     say "Building"
-    local make_args=()
+    local make_args=("LIBS_PREFIX=$LIBS_DIR")
     [ "$WITH_CODECS" -eq 1 ] || make_args+=(CODECS=none)
     make -C "$WORK/tree" clean >/dev/null 2>&1 || true
     if ! make -C "$WORK/tree" ${make_args[@]+"${make_args[@]}"} >"$WORK/build.log" 2>&1 </dev/null; then
@@ -216,7 +264,7 @@ main() {
         say "Self-tests (file tests only: no network ports are used)"
         note "the transcoding tests need ffmpeg and python3-numpy and skip themselves without"
         if command -v python3 >/dev/null 2>&1; then
-            if ! (cd "$WORK/tree" && python3 tests/run_tests.py file xc_ </dev/null); then
+            if ! (cd "$WORK/tree" && CC3_FDK_FULL="$LIBS_DIR" python3 tests/run_tests.py file xc_ </dev/null); then
                 die "self-tests failed; nothing on this machine was changed"
             fi
             rm -rf "$WORK/tree/build/test-work"

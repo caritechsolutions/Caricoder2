@@ -176,11 +176,15 @@ void codec_list(FILE *f)
         char why[160] = "";
         bool ok = list[i]->probe ? list[i]->probe(why, sizeof(why)) : true;
 
-        fprintf(f, "%-10s %-6s %-7s %-7s %-22s %s%s%s\n", list[i]->name,
+        char codecs[80];
+
+        snprintf(codecs, sizeof(codecs), "%s%s", list[i]->codecs,
+                 list[i]->detail ? list[i]->detail() : "");
+        fprintf(f, "%-10s %-6s %-7s %-7s %-28s %s%s%s\n", list[i]->name,
                 list[i]->media == CODEC_VIDEO ? "video" : "audio",
                 list[i]->role == CODEC_DECODER ? "decode" : "encode",
                 list[i]->where == WHERE_NVIDIA ? "nvidia" : "cpu",
-                list[i]->codecs, ok ? "available" : "unavailable",
+                codecs, ok ? "available" : "unavailable",
                 why[0] ? ": " : "", why);
     }
 }

@@ -20,10 +20,17 @@ LDLIBS   = -lpthread -lm
 # got. `make CODECS=none` builds the plain remultiplexer whatever is
 # installed.
 #
-#   Ubuntu: apt install libfdk-aac-dev libtwolame-dev libmp3lame-dev \
+#   Ubuntu: apt install libtwolame-dev libmp3lame-dev (fdk-aac: see install.sh) \
 #           libmpg123-dev liba52-0.7.4-dev libx264-dev libx265-dev \
 #           libavcodec-dev libavutil-dev pkg-config
+#
+# Libraries built from source by install.sh (the full fdk-aac, with HE-AAC)
+# live under LIBS_PREFIX and take precedence over the distribution's.
+LIBS_PREFIX ?= /opt/caricoder3-libs
 PKG_CONFIG ?= pkg-config
+ifneq ($(wildcard $(LIBS_PREFIX)/lib/pkgconfig),)
+PKG_CONFIG := PKG_CONFIG_PATH=$(LIBS_PREFIX)/lib/pkgconfig:$$PKG_CONFIG_PATH $(PKG_CONFIG)
+endif
 have_pkg = $(shell $(PKG_CONFIG) --exists $(1) 2>/dev/null && echo yes)
 have_hdr = $(shell echo '\#include <$(1)>' | $(CC) -E -x c - >/dev/null 2>&1 && echo yes)
 

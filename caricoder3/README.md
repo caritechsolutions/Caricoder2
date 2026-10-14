@@ -54,7 +54,7 @@ installed and left out if it is not:
 
 | For | Library | Ubuntu package |
 |---|---|---|
-| AAC decode and encode | fdk-aac | `libfdk-aac-dev` |
+| AAC decode and encode | fdk-aac 2.0.3 | built from source by the installer (see "HE-AAC") |
 | MP2 / MP3 decode | mpg123 | `libmpg123-dev` |
 | AC-3 decode | liba52 | `liba52-0.7.4-dev` |
 | MP2 encode | twolame | `libtwolame-dev` |
@@ -221,14 +221,17 @@ MPEG-2 video, anything else.
 
 ### HE-AAC
 
-Ubuntu's `libfdk-aac` package is a build with the HE-AAC parts removed
-("fdk-aac-free"). With it, plain AAC (AAC-LC) works fully in both
-directions, but an HE-AAC input is decoded from its half-rate core only:
-nothing above 12 kHz comes through, HE-AAC v2 comes out mono, and the
-audio sits 20 ms early. The program says so in the log when it meets such
-a stream. Built against the original fdk-aac library the same streams
-come out full band and in sync (tested). Which way to go is a decision,
-not a defect: see the end of `docs/DESIGN.md`.
+The feeds this is built for carry HE-AAC, and Ubuntu's `libfdk-aac`
+package is a build with the HE-AAC parts removed ("fdk-aac-free"): with it
+an HE-AAC input is decoded from its half-rate core only, nothing above
+12 kHz comes through, and HE-AAC v2 comes out mono. So the installer
+builds the original fdk-aac (2.0.3) from source into
+`/opt/caricoder3-libs`, statically, and the Makefile prefers it. With it
+HE-AAC v1 and v2 come out full band and in sync (tested to 0.02 ms).
+`caricoder3 --backends` says which it got: "incl. HE-AAC" or "NO HE-AAC",
+and the log warns on a 24 kHz AAC stream when the library cannot. The
+licence is Fraunhofer's own, not GPL; running it on your own servers is
+not distribution (see the end of `docs/DESIGN.md`).
 
 ### NVIDIA
 
@@ -404,7 +407,8 @@ Transcoding:
 - No scaling, no change of frame rate, no deinterlacing (stage 4). The
   audio sample rate is not changed either.
 - No AC-3 or HE-AAC output. No E-AC-3 input.
-- HE-AAC input is half band with Ubuntu's library (see "HE-AAC").
+- HE-AAC input needs the full fdk-aac, which the installer builds; a build
+  against Ubuntu's package is half band (see "HE-AAC").
 - The NVIDIA path has not run on a card yet (see "NVIDIA"). It encodes
   without B-frames. Decoding on the card for an encoder on the CPU is not
   built. Read against the SDK but untested, because the stand-in
