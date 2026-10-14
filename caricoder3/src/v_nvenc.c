@@ -64,6 +64,7 @@ struct nve {
     int pend_head, pend_n;
     int ready;                          /* how many of them can be collected */
     bool flushing, eos_sent;
+    bool init_done;                     /* nvEncInitializeEncoder succeeded */
     int bframes;                        /* pictures the card holds back */
     int64_t in_pts[PTS_RING];           /* presentation times, in the order given */
     uint64_t n_in, n_out;
@@ -144,10 +145,47 @@ static NVENCSTATUS session_open(struct nve *e)
     return st;
 }
 
+/* Pictures the card still holds (B-frames waiting for their reference)
+ * must be brought out before anything is torn down: the driver crashed
+ * inside nvEncDestroyEncoder on a Tesla P40 when they were not. Called
+ * with the context current. */
+static void drain_all(struct nve *e)
+{
+    if (!e->eos_sent) {
+        NV_ENC_PIC_PARAMS pp;
+
+        memset(&pp, 0, sizeof(pp));
+        pp.version = NV_ENC_PIC_PARAMS_VER;
+        pp.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+        e->fn.nvEncEncodePicture(e->enc, &pp);
+        e->eos_sent = true;
+    }
+    while (e->pend_n > 0) {
+        struct slot *s = &e->slot[e->pend[e->pend_head]];
+        NV_ENC_LOCK_BITSTREAM lb;
+
+        e->pend_head = (e->pend_head + 1) % POOL;
+        e->pend_n--;
+        memset(&lb, 0, sizeof(lb));
+        lb.version = NV_ENC_LOCK_BITSTREAM_VER;
+        lb.outputBitstream = s->bs;
+        if (e->fn.nvEncLockBitstream(e->enc, &lb) == NV_ENC_SUCCESS)
+            e->fn.nvEncUnlockBitstream(e->enc, s->bs);
+        if (s->mapped) {
+            e->fn.nvEncUnmapInputResource(e->enc, s->mapped);
+            s->mapped = NULL;
+        }
+        s->busy = false;
+    }
+    e->ready = 0;
+}
+
 static void destroy(struct nve *e)
 {
     if (e->enc) {
         push_ctx(e);
+        if (e->init_done)
+            drain_all(e);
         for (int i = 0; i < POOL; i++) {
             struct slot *s = &e->slot[i];
 
@@ -432,6 +470,7 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
         goto fail;
     }
 
+    e->init_done = true;
     for (int i = 0; i < POOL; i++) {
         struct slot *s = &e->slot[i];
         NV_ENC_CREATE_BITSTREAM_BUFFER bb;

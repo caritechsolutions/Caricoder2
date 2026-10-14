@@ -389,8 +389,14 @@ static NVENCSTATUS NVENCAPI m_create_bs(void *enc, NV_ENC_CREATE_BITSTREAM_BUFFE
 static NVENCSTATUS NVENCAPI m_destroy_bs(void *enc, NV_ENC_OUTPUT_PTR bs)
 {
     struct m_enc *e = enc;
+    struct m_bs *x = bs;
 
     NEED_CTX("nvEncDestroyBitstreamBuffer");
+    /* The real driver crashed (Tesla P40, 535) when torn down with
+     * pictures still held back: insist that they were brought out. */
+    CHECK(e->n_held == 0, "destroying a bitstream buffer while the encoder still holds "
+          "%d picture(s): send EOS and collect them first", e->n_held);
+    CHECK(x && !x->full, "destroying a bitstream buffer whose output was not collected");
     for (int i = 0; i < e->n_bs; i++)
         if (e->bs[i] == bs) {
             e->bs[i] = e->bs[--e->n_bs];
@@ -522,6 +528,7 @@ static NVENCSTATUS NVENCAPI m_destroy(void *enc)
     struct m_enc *e = enc;
 
     NEED_CTX("nvEncDestroyEncoder");
+    CHECK(e->n_held == 0, "encoder destroyed while it still holds %d picture(s)", e->n_held);
     CHECK(e->n_res == 0, "encoder destroyed with %d resources still registered", e->n_res);
     CHECK(e->n_bs == 0, "encoder destroyed with %d bitstream buffers left", e->n_bs);
     free(e);

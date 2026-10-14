@@ -748,7 +748,7 @@ def file_real_codecs():
 _port = [39000 + (os.getpid() % 500) * 2]
 
 
-def live(feed, *args, tail=1.2, capture_name="live.ts", with_proc=False):
+def live(feed, *args, tail=1.2, capture_name="live.ts", with_proc=False, env=None):
     """
     Starts caricoder3 UDP -> UDP on loopback, calls feed(player), then
     collects the capture and the statistics. Returns (stats, capture, log).
@@ -762,7 +762,7 @@ def live(feed, *args, tail=1.2, capture_name="live.ts", with_proc=False):
     proc = subprocess.Popen(
         [BIN, "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://127.0.0.1:{pout}",
          "--stats-file", sf, "--stats-interval", "0", *args],
-        stderr=subprocess.PIPE, text=True)
+        stderr=subprocess.PIPE, text=True, env=env)
     try:
         time.sleep(0.3)
         player = Player("127.0.0.1", pin)
@@ -1224,8 +1224,8 @@ def live_input_ends_mid_question():
     tail_b = write(w("midq_b.ts"), data[n * 2 // 5 // 7 * 7 * TS:(n * 2 // 5 // 7 * 7 + 133 * 7) * TS])
 
     def feed(p):
-        p.play(a, stop_after=3.0)
-        p.play(tail_b, rate=4_000_000, stop_after=0.2)
+        p.play(a, stop_after=4.5)
+        p.play(tail_b, rate=4_000_000, stop_after=4.5)
 
     st, cap, _ = live(feed, "-r", "4M", capture_name="live_midq.ts", tail=2.5)
     must_pass(w("live_midq.ts"), cbr=True, allow_late=True)
@@ -2563,6 +2563,36 @@ def live_xc_delay_too_short():
     need(x["frames_out"] >= 120, f"the transcoder stopped working: {x}")
     must_match(src, w("live_xc_shortdelay.ts"), only={0x101}, subset=True)
     return f"reported ({x['slack_min_ms']:.0f} ms to spare), no input discarded, audio untouched"
+
+
+@test
+def live_xc_nvidia_standin():
+    """Live against the NVIDIA stand-ins, stopped with SIGTERM while the card holds
+    pictures back (B-frames): the tear-down brings them out first. (The real driver
+    crashed on a Tesla P40 when it did not; file runs flush before closing and so
+    never showed it.)"""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    d = nvmock_dir()
+    if not d:
+        return "SKIPPED: could not build the stand-in libraries"
+    src = v_source("xc_v_h264", "h264")
+    env = dict(os.environ, LD_LIBRARY_PATH=d, NVMOCK_CHECK_LEAKS="1")
+    # (stopped part-way through the source: at 4.5 s the card is holding one or
+    # two pictures back; at some other points the group count comes out even and
+    # nothing is in flight, so the point matters)
+    st, cap, log = live(lambda p: p.play(src, rate=2_000_000, stop_after=4.5),
+                        "--video", "h264:500k", capture_name="live_xc_nv.ts", tail=0.2, env=env)
+    need("NVMOCK VIOLATION" not in log, "the NVIDIA code broke a rule of the API: " +
+         log[log.find("NVMOCK VIOLATION"):][:300])
+    x = xstats(st, 0x100)
+    need((x["decoder"], x["encoder"]) == ("nvdec", "nvenc") and x["frames_out"] > 50, str(x))
+    return f"{x['frames_out']} pictures through the stand-in card, stopped with pictures " \
+           f"in flight, clean tear-down"
 
 
 @test
