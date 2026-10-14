@@ -62,7 +62,8 @@ struct mux {
     int64_t slot_q, slot_r;
 
     bool    have_prog;
-    struct program prog;
+    struct program prog[MAX_PROGRAMS];
+    int     n_prog;
     struct mstream st[MAX_ES];
     uint8_t pid_idx[PID_COUNT];
     /* Continuity counter of the next packet, per output PID. Kept by PID
@@ -76,7 +77,7 @@ struct mux {
     stc_t   pcr_interval, psi_interval, sdt_interval, max_late;
     stc_t   next_pcr, next_psi, next_sdt;
 
-    struct psi_table pat, pmt, sdt;
+    struct psi_table pat, pmt[MAX_PROGRAMS], sdt;
     bool    sdt_active;         /* the service currently has an SDT entry */
     uint8_t psiq[PSIQ_MAX][TS_SIZE];
     int     psiq_head, psiq_n;
@@ -97,7 +98,13 @@ static void emit(struct mux *m, const uint8_t *pkt)
 
 /* ---- PSI ------------------------------------------------------------ */
 
-typedef int (*psi_build_fn)(const struct program *p, int version, uint8_t *sec);
+typedef int (*psi_build_fn)(const struct program *list, int n, int version, uint8_t *sec);
+
+static int build_pmt_one(const struct program *list, int n, int version, uint8_t *sec)
+{
+    (void)n;
+    return psi_build_pmt(list, version, sec);
+}
 
 /*
  * Rebuilds a table. The version number only moves when the content
@@ -106,10 +113,10 @@ typedef int (*psi_build_fn)(const struct program *p, int version, uint8_t *sec);
  * number. Returns true when the table changed.
  */
 static bool table_update(struct psi_table *t, psi_build_fn build,
-                         const struct program *p, uint16_t pid, int in_version)
+                         const struct program *p, int n, uint16_t pid, int in_version)
 {
     uint8_t ref[PSI_MAX];
-    int ref_len = build(p, 0, ref);
+    int ref_len = build(p, n, 0, ref);
 
     if (ref_len < 0) {
         log_err("mux: table on PID 0x%04X does not fit in one section", pid);
@@ -130,7 +137,7 @@ static bool table_update(struct psi_table *t, psi_build_fn build,
     t->pid = pid;
     t->ref_len = ref_len;
     memcpy(t->ref, ref, (size_t)ref_len);
-    t->len = build(p, t->version, t->sec);
+    t->len = build(p, n, t->version, t->sec);
     return true;
 }
 
@@ -375,7 +382,8 @@ static void slot(struct mux *m)
     if (m->have_prog) {
         if (now >= m->next_psi) {
             psi_enqueue(m, &m->pat);
-            psi_enqueue(m, &m->pmt);
+            for (int i = 0; i < m->n_prog; i++)
+                psi_enqueue(m, &m->pmt[i]);
             m->next_psi = now - m->next_psi > m->psi_interval
                         ? now + m->psi_interval
                         : m->next_psi + m->psi_interval;
@@ -622,31 +630,51 @@ void mux_push(struct mux *m, struct es_unit *u)
 
 void mux_set_program(struct mux *m, const struct program *p)
 {
-    struct mstream old[MAX_ES];
-    bool changed;
+    mux_set_programs(m, p, 1);
+}
 
+void mux_set_programs(struct mux *m, const struct program *list, int n)
+{
+    struct mstream old[MAX_ES];
+    bool changed, any_sdt = false;
+    const struct program *p = &list[0];     /* the first: PCR, ts id, versions */
+    int n_st = 0;
+
+    if (n < 1)
+        return;
+    if (n > MAX_PROGRAMS)
+        n = MAX_PROGRAMS;
     memcpy(old, m->st, sizeof(old));
     memset(m->st, 0, sizeof(m->st));
     memset(m->pid_idx, NO_STREAM, sizeof(m->pid_idx));
 
-    for (int i = 0; i < p->n_es; i++) {
-        const struct es_info *e = &p->es[i];
-        struct mstream *s = &m->st[i];
+    for (int k = 0; k < n; k++)
+    for (int i = 0; i < list[k].n_es; i++) {
+        const struct es_info *e = &list[k].es[i];
+        struct mstream *s;
+        bool own_pmt = false;
 
+        for (int j = 0; j < n; j++)
+            own_pmt |= e->pid == list[j].pmt_pid;
+        /* The same PID in two programs is one stream, carried once. */
+        if (m->pid_idx[e->pid] != NO_STREAM && k > 0 &&
+            m->st[m->pid_idx[e->pid]].kind == e->kind)
+            continue;
         /* A stream may not sit on a PID the mux uses for its own tables. */
         if (e->pid == PID_NULL || e->pid == PID_PAT || e->pid == PID_SDT ||
-            e->pid == p->pmt_pid || m->pid_idx[e->pid] != NO_STREAM) {
+            own_pmt || m->pid_idx[e->pid] != NO_STREAM || n_st == MAX_ES) {
             if (!(m->warned[e->pid >> 3] & (1 << (e->pid & 7)))) {
                 m->warned[e->pid >> 3] |= (uint8_t)(1 << (e->pid & 7));
                 log_warn("mux: stream on PID 0x%04X cannot be carried", e->pid);
             }
             continue;
         }
-        for (int k = 0; k < MAX_ES; k++) {
-            if (old[k].used && old[k].pid == e->pid && old[k].kind == e->kind) {
-                *s = old[k];
+        s = &m->st[n_st];
+        for (int j = 0; j < MAX_ES; j++) {
+            if (old[j].used && old[j].pid == e->pid && old[j].kind == e->kind) {
+                *s = old[j];
                 s->orphan = false;
-                old[k].used = false;
+                old[j].used = false;
                 break;
             }
         }
@@ -655,7 +683,7 @@ void mux_set_program(struct mux *m, const struct program *p)
             s->pid = e->pid;
             s->kind = e->kind;
         }
-        m->pid_idx[e->pid] = (uint8_t)i;
+        m->pid_idx[e->pid] = (uint8_t)n_st++;
     }
     /*
      * Streams that have left the service. Whatever they had queued goes,
@@ -670,8 +698,12 @@ void mux_set_program(struct mux *m, const struct program *p)
         if (!o->used)
             continue;
         if (o->head && o->off > 0 && m->pid_idx[o->pid] == NO_STREAM &&
-            o->pid != p->pmt_pid && o->pid != PID_PAT && o->pid != PID_SDT) {
-            for (int j = MAX_ES - 1; j >= p->n_es && slot < 0; j--)
+            o->pid != PID_PAT && o->pid != PID_SDT) {
+            bool own_pmt = false;
+
+            for (int j = 0; j < n; j++)
+                own_pmt |= o->pid == list[j].pmt_pid;
+            for (int j = MAX_ES - 1; j >= n_st && slot < 0 && !own_pmt; j--)
                 if (!m->st[j].used)
                     slot = j;
         }
@@ -694,18 +726,23 @@ void mux_set_program(struct mux *m, const struct program *p)
         m->st[slot] = *o;
     }
 
-    m->prog = *p;
+    memcpy(m->prog, list, sizeof(list[0]) * (size_t)n);
+    m->n_prog = n;
     m->pcr_pid = p->pcr_pid;
     m->pcr_stream = m->pid_idx[p->pcr_pid & 0x1FFF] == NO_STREAM
                   ? -1 : m->pid_idx[p->pcr_pid & 0x1FFF];
 
-    changed = table_update(&m->pat, psi_build_pat, p, PID_PAT, p->pat_version);
-    changed |= table_update(&m->pmt, psi_build_pmt, p, p->pmt_pid, p->pmt_version);
+    changed = table_update(&m->pat, psi_build_pat, list, n, PID_PAT, p->pat_version);
+    for (int k = 0; k < n; k++)
+        changed |= table_update(&m->pmt[k], build_pmt_one, &list[k], 1, list[k].pmt_pid,
+                                list[k].pmt_version);
+    for (int k = 0; k < n; k++)
+        any_sdt |= list[k].have_sdt;
     /* When the service has no SDT entry the table stops being sent, but
      * its last version number is remembered (sdt.present stays set), so
      * that whatever comes next is never mistaken for the old content. */
-    if (p->have_sdt) {
-        if (table_update(&m->sdt, psi_build_sdt, p, PID_SDT, p->sdt_version) ||
+    if (any_sdt) {
+        if (table_update(&m->sdt, psi_build_sdt, list, n, PID_SDT, p->sdt_version) ||
             !m->sdt_active)
             m->next_sdt = m->stc;
         m->sdt_active = true;

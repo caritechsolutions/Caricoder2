@@ -625,7 +625,9 @@ no H.265 B-frames and no AV1.
 
 ### Stage 4: several renditions from one channel (adaptive bit rate)
 
-Written 2026-10-14, before the code. What it is for: IPTV/OTT, where a
+Written 2026-10-14 before the code, then brought in line with it the
+same day (what differs from the first draft is marked). What it is for:
+IPTV/OTT, where a
 player switches between versions of the same channel at different sizes
 and bit rates. The packager that turns this into HLS/DASH is a later
 stage of its own; stage 4 produces what any packager needs.
@@ -651,16 +653,19 @@ video stream. One `--audio`, one `-o`.
 
 **Numbers and PIDs.** Rendition k (k = 0 for the first) is program
 (source number + k), PMT PID (source PMT PID + k) and video PID (source
-video PID + k); a PID already in use moves to the next free one. The
-first rendition therefore keeps the source's numbers, so a receiver tuned
-to the channel today sees no change. The SDT lists each as the service
-name with the size appended ("Channel 720p"); `--service-name` sets the
-base.
+video PID + k); a PID already in use moves to the next free one (so with
+the audio on the PID after the video, the second rendition's video is two
+PIDs up). The first rendition therefore keeps the source's numbers, so a
+receiver tuned to the channel today sees no change. The SDT lists each as
+the service name with the size appended ("Channel 1280x720");
+`--service-name` sets the base.
 
 **Each rendition is its own transcoder.** The engine already runs one
 `xcode` per transcoded input PID in its own thread; now several may hang
-off the same input PID, each with its own output PID. `deliver()` hands
-every unit of that PID to each of them (copied for all but the last).
+off the same input PID, each with its own output PID (`xcode_cfg.out_pid`;
+the table of transcoders is searched by input PID on the way in and by
+output PID on the way back). `deliver()` hands every unit of that PID to
+each of them (copied for all but the last).
 Each has its own decoder: on the card, NVDEC decodes and scales in one
 step (`ulTargetWidth/Height` in the decoder it creates: the card's own
 scaler, no new GPU code); on the CPU, libavcodec decodes and a scaler in
@@ -686,10 +691,15 @@ Segment boundaries for the packager are then every `--gop`, exactly.
 
 **Interlaced sources.** OTT renditions are progressive. On the card the
 decoder deinterlaces (adaptive mode) when scaling to a progressive
-output; on the CPU a plain deinterlacer (field blend, later a better
-one) runs before the scaler. One output frame per source frame (25p from
-25i), not one per field: the usual choice for OTT, half the encoding.
-A rendition at the source size with no scaling keeps fields as today.
+output; on the CPU the scaler reads each source line as the mean of
+itself and the next (a field blend: plain, soft on motion, no comb), and
+a better deinterlacer can replace it later. One output frame per source
+frame (25p from 25i), not one per field: the usual choice for OTT, half
+the encoding. A rendition at the source size with no scaling keeps fields
+as today. The scaler itself is area averaging (every source sample counts
+once, with fractional weights at the edges), separable, 8 and 10 bit; the
+pixel shape is recomputed so the display shape stays (a 16:9 picture at
+720x576 scaled to 640x360 has square pixels).
 
 **Mux.** `mux_set_program()` becomes `mux_set_programs(list)`: one PAT
 listing all, one PMT table per program (each on its own PID with its own
@@ -700,13 +710,22 @@ from the first rendition's video PID. The checker (`ts_check.py`) gets a
 
 **Not in stage 4.** Frame-rate change; the packager; sharing one decode.
 
-**Tests.** Three renditions from one source in file mode: each program
-decodes with ffmpeg, pictures at the source's times, key frames at the
-same PTS in all three (and every 2 s), bit rates in range, audio one PID
-listed thrice and identical; the copy path still bit-identical to
-5ac4b53; the single-rendition output byte-identical to stage 3; a live
-run with the stand-in card; and ffmpeg's HLS packager producing aligned
-segments from the output as the reference for the later packager stage.
+**What the tests show** (file mode unless said): three renditions from
+one 640x360 source, each program decodes at its size at 41 to 46 dB
+against the scaled source, key frames on the same pictures in all three
+and 2 s apart, one audio PID in every PMT and sent once, and ffmpeg's HLS
+packager cuts all three into segments of the same length (the reference
+for the later packager stage); the copy path is byte-identical to the
+previous build (588 comparisons); the same three renditions on the
+stand-in card, each scaled by the decoder; an interlaced 720x576 source
+kept as fields at full size and progressive with square pixels at
+640x360; three renditions plus audio live in real time, nothing late.
+What changed from the first draft: single-rendition video output is no
+longer byte-identical to stage 3, because key frames now sit on the
+clock marks (a 500 ms interval at 25 fps gives 12 and 13 pictures in
+turn) and the encoders' own interval became a backstop three pictures
+longer; the first picture of a stream is a key frame as before, so a
+stream starts with two key frames close together.
 
 ### Decisions still open
 

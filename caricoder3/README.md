@@ -19,7 +19,7 @@ rest of this repository.
 | 3a | Video transcode on the CPU: H.264, H.265 in and out | done, tested |
 | 3b | Video transcode on NVIDIA cards (NVDEC, NVENC) | done; first run on a Tesla P40 2026-10-14, B-frames since then only against stand-ins (see "NVIDIA") |
 | 3c | Video on Intel (VPL) | not started |
-| 4 | Scaling, deinterlace, several outputs from one decode | not started |
+| 4 | Several renditions of a channel in one stream (scaling, deinterlace, aligned key frames) | done on the CPU and against the stand-in card; not yet run on a real card |
 | 5 | Supervision, API, GUI, side-by-side run against Flussonic | not started |
 
 MPEG-2 video is parked by decision: it is copied, not transcoded.
@@ -171,6 +171,27 @@ does not allow at that sample rate is moved to the nearest it does. Lost
 input is filled with silence so that the output keeps its rhythm.
 Measured with ffmpeg as the reference decoder, audio lands within 0.02 ms
 of where the original sat, for every pairing.
+
+**Several renditions of one channel** (for IPTV/OTT): `--video` may be
+repeated with a size in front, and each becomes a program of its own in
+one output transport stream, with the audio and the PCR shared:
+
+```
+caricoder3 -i udp://... -o udp://... --audio aac:128k \
+    --video h264:4M --video 1280x720:h264:2M --video 854x480:h264:900k
+```
+
+Program 1 is the full-size version with the source's numbers and PIDs,
+program 2 the 720p one (program number, PMT PID and video PID one up, or
+the next free), and so on; the SDT names them "Channel 1280x720" and so
+forth. Key frames fall on the same pictures in every rendition, every
+`--gop` (2 s), so a packager cuts aligned segments. Each rendition is a
+transcoder of its own with its own decoder (the card's decoder scales as
+it decodes; on the CPU an area-averaging scaler follows libavcodec), so
+three renditions decode the source three times. Interlaced sources come
+out progressive in a scaled rendition, at one frame per source frame.
+The packager (HLS/DASH) is a later stage; ffmpeg's packager on the output
+is the reference meanwhile.
 
 **Video.** In: H.264, H.265. Out: H.264, H.265. Picture size, frame rate,
 pixel shape, field order and colour description are kept, and followed
@@ -360,7 +381,7 @@ The same figures go to the log every 10 seconds (`--stats-interval`).
 ## Tests
 
 ```
-make test                         # 75 tests, about nine minutes
+make test                         # 79 tests, about ten minutes
 python3 tests/run_tests.py --list
 python3 tests/run_tests.py live   # only the tests with "live" in the name
 python3 tests/run_tests.py xc_    # only the transcoding tests
@@ -409,8 +430,9 @@ python3 tests/ts_check.py out.ts --cbr --against in.ts
 
 Transcoding:
 
-- No scaling, no change of frame rate, no deinterlacing (stage 4). The
-  audio sample rate is not changed either.
+- No change of frame rate. The audio sample rate is not changed either.
+  Deinterlacing happens only on the way to a scaled rendition, and on the
+  CPU it is a plain field blend (soft on motion).
 - No AC-3 or HE-AAC output. No E-AC-3 input.
 - HE-AAC input needs the full fdk-aac, which the installer builds; a build
   against Ubuntu's package is half band (see "HE-AAC").

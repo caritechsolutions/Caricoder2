@@ -44,6 +44,11 @@ void mux_free(struct mux *m);
 /* Sets or replaces the service description. Streams that keep their PID
  * keep their continuity counter and queue. */
 void mux_set_program(struct mux *m, const struct program *p);
+/* Several programs in one output (one per rendition of a channel): one
+ * PAT and SDT for all, a PMT each. Elementary streams are shared by PID:
+ * an audio PID listed in every PMT is carried once. The PCR is that of
+ * the first program. */
+void mux_set_programs(struct mux *m, const struct program *list, int n);
 
 /* Fixes the STC of the first packet slot. */
 void mux_start(struct mux *m, stc_t stc0);

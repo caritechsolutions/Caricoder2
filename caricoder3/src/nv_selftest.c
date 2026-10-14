@@ -141,7 +141,7 @@ static bool round_trip(FILE *out, int gpu, enum codec_id codec, int depth,
 {
     const struct codec_backend *eb = codec_find(CODEC_VIDEO, CODEC_ENCODER, codec, WHERE_NVIDIA, 0);
     const struct codec_backend *db = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_NVIDIA, 0);
-    struct vdec_cfg dc = { codec, gpu, true, false };
+    struct vdec_cfg dc = { codec, 0, 0, gpu, true, false };
     struct venc_cfg ec;
     struct blob first = { 0 }, second = { 0 };
     struct vframe f;

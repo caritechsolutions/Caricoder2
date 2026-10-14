@@ -33,6 +33,8 @@ struct nvd {
     CUvideodecoder dec;
     enum codec_id codec;
     bool only_8bit;
+    int want_w, want_h;             /* pictures asked for at this size (0: as coded) */
+    bool scaled;                    /* the card scales (and deinterlaces) */
 
     CUVIDEOFORMAT fmt;
     unsigned coded_w, coded_h;
@@ -97,6 +99,14 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
         snprintf(d->err, sizeof(d->err), "the stream announces a %dx%d picture", w, h);
         return 0;
     }
+    /* Another size wanted: the card's own scaler makes it, and an
+     * interlaced source is deinterlaced on the way (a scaled picture is a
+     * progressive one: a rendition for OTT). */
+    d->scaled = d->want_w > 0 && d->want_h > 0 && (d->want_w != w || d->want_h != h);
+    if (d->scaled) {
+        w = d->want_w;
+        h = d->want_h;
+    }
 
     /* The same format again (parameter sets are repeated with every key
      * frame): nothing to do. */
@@ -125,7 +135,9 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
     /* Asked for 8-bit pictures from 10-bit video, the card converts. */
     ci.OutputFormat = depth > 8 ? cudaVideoSurfaceFormat_P016 : cudaVideoSurfaceFormat_NV12;
     /* Fields stay woven together in the frame, as they came. */
-    ci.DeinterlaceMode = cudaVideoDeinterlaceMode_Weave;
+    ci.DeinterlaceMode = d->scaled && !f->progressive_sequence
+                             ? cudaVideoDeinterlaceMode_Adaptive
+                             : cudaVideoDeinterlaceMode_Weave;
     ci.ulCreationFlags = cudaVideoCreate_PreferCUVID;
     ci.ulNumDecodeSurfaces = (tcu_ulong)surfaces;
     ci.ulNumOutputSurfaces = 2;
@@ -135,8 +147,8 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
     ci.ulMaxHeight = f->coded_height;
     ci.display_area.left = (short)f->display_area.left;
     ci.display_area.top = (short)f->display_area.top;
-    ci.display_area.right = (short)(f->display_area.left + w);
-    ci.display_area.bottom = (short)(f->display_area.top + h);
+    ci.display_area.right = (short)(f->display_area.right & ~1);
+    ci.display_area.bottom = (short)(f->display_area.bottom & ~1);
     ci.ulTargetWidth = (tcu_ulong)w;
     ci.ulTargetHeight = (tcu_ulong)h;
 
@@ -213,6 +225,8 @@ static void *nvd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
         return NULL;
     d->codec = cfg->codec;
     d->only_8bit = cfg->only_8bit;
+    d->want_w = cfg->width;
+    d->want_h = cfg->height;
     d->ctx = nv_ctx_get(cfg->gpu, err, errlen);
     if (!d->ctx) {
         free(d);
@@ -316,7 +330,7 @@ static int nvd_pull(void *ctx, struct vframe *f)
     f->stride[0] = (int)pitch;
     /* A picture whose access unit came without a time stamp reports 0. */
     f->pts = (di.timestamp == 0 && d->seen_ts) ? NOPTS : (stc_t)di.timestamp * STC_PER_90K;
-    f->interlaced = !di.progressive_frame;
+    f->interlaced = !di.progressive_frame && !d->scaled;
     f->tff = di.top_field_first != 0;
     f->fps_num = (int)d->fmt.frame_rate.numerator;
     f->fps_den = (int)d->fmt.frame_rate.denominator;

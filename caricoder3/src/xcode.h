@@ -25,13 +25,17 @@ struct xcode_spec {
     int  pid;                   /* 0: every stream of this kind */
     enum codec_id codec;        /* CODEC_NONE: copy */
     int  bitrate;               /* bits per second, 0: a sensible default */
+    int  width, height;         /* video: picture size, 0: as the source */
 };
 
 struct xcode_cfg {
-    uint16_t pid;
+    uint16_t pid;               /* input stream */
+    uint16_t out_pid;           /* output stream: the same, or another for a
+                                 * further rendition of the same input */
     enum codec_id in, out;
     int  bitrate;
     /* video only */
+    int  width, height;         /* 0: as the source */
     enum codec_where decoder, encoder;
     int  gpu;
     int  vbv_ms, gop_ms;
@@ -39,7 +43,8 @@ struct xcode_cfg {
 };
 
 struct xcode_stats {
-    uint16_t pid;
+    uint16_t pid, out_pid;
+    int      width, height;             /* video out; 0 until the first picture */
     enum codec_id in, out;
     char     decoder[16], encoder[16];
     uint64_t units_in, units_out;
@@ -96,6 +101,7 @@ void xcode_note_slack(struct xcode *x, int64_t slack);
 
 /* "[PID=]codec[:bitrate]", e.g. "aac", "mp2:192k", "1653=aac:128k", "copy".
  * Returns false with a message in err. */
+/* "[PID=][WxH:]codec[:bitrate]"; WxH only for video. */
 bool xcode_parse_spec(const char *s, bool video, struct xcode_spec *out,
                       char *err, size_t errlen);
 

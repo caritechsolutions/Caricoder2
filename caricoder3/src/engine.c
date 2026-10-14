@@ -57,7 +57,8 @@ struct engine {
     stc_t   last_out_time;      /* newest PCR or unit time, output time line */
     bool    have_pcr;
     bool    have_prog;
-    struct program prog;
+    struct program prog;        /* the first program of the output */
+    int     n_prog;             /* programs in the output (renditions) */
     uint64_t discontinuities;
     struct demux_stats in_snap;
     uint64_t in_bytes, in_datagrams, rtp_datagrams;
@@ -85,10 +86,10 @@ struct engine {
     int64_t dgram_interval;     /* smoothed time between datagrams, ns */
 
     /* Streams that are transcoded. xc_mode says what happens to a PID's
-     * units: sent to the mux as they are, or handed to xc_by_pid. Both
+     * units: sent to the mux as they are, or handed to every transcoder
+     * of that PID (xc_list, by xc_cfg[].pid). Both
      * guarded by the lock; the xcode objects themselves are created and
      * destroyed by the input thread only. */
-    struct xcode *xc_by_pid[PID_COUNT];
     uint8_t xc_mode[PID_COUNT];         /* enum stream_mode */
     struct xcode *xc_list[MAX_ES];
     struct xcode_cfg xc_cfg[MAX_ES];
@@ -128,14 +129,33 @@ static stc_t round300(stc_t v)
  */
 static void deliver(struct engine *e, struct es_unit *u)
 {
+    struct xcode *to[MAX_ES];
+    int n = 0;
+
     if (e->xc_mode[u->pid] == STREAM_COPY) {
         mux_push(e->mux, u);
-    } else if (e->xc_by_pid[u->pid]) {
-        xcode_push(e->xc_by_pid[u->pid], u);
-    } else {
+        return;
+    }
+    for (int k = 0; k < e->n_xc; k++)
+        if (e->xc_cfg[k].pid == u->pid)
+            to[n++] = e->xc_list[k];
+    if (n == 0) {
         e->xc_orphans++;
         free(u);
+        return;
     }
+    /* Several renditions of one stream: each gets its own copy, the last
+     * the original. */
+    for (int k = 0; k + 1 < n; k++) {
+        size_t size = sizeof(*u) + u->len;
+        struct es_unit *c = malloc(size);
+
+        if (!c)
+            continue;
+        memcpy(c, u, size);
+        xcode_push(to[k], c);
+    }
+    xcode_push(to[n - 1], u);
 }
 
 /* What a transcoder produced. Comes from its thread in a live run, and
@@ -153,7 +173,10 @@ static void on_xcode_out(void *opaque, struct es_unit *u)
         now = e->last_out_time - e->delay;
     else if (e->pll.valid)
         now = pll_eval(&e->pll, clock_now_ns()) - e->delay;
-    x = e->xc_by_pid[u->pid];
+    x = NULL;
+    for (int k = 0; k < e->n_xc; k++)
+        if (e->xc_cfg[k].out_pid == u->pid)
+            x = e->xc_list[k];
     if (x && now != NOPTS)
         xcode_note_slack(x, u->t0 - now);
     mux_push(e->mux, u);
@@ -161,28 +184,72 @@ static void on_xcode_out(void *opaque, struct es_unit *u)
         pthread_mutex_unlock(&e->lock);
 }
 
-static const struct xcode_spec *spec_for(const struct xcode_spec *list, int n, int pid)
+/* The specs that apply to this stream: those naming its PID; if none do,
+ * those naming no PID. For video each is a rendition of its own. */
+static int specs_for(const struct xcode_spec *list, int n, int pid,
+                     const struct xcode_spec **out, int max)
 {
-    const struct xcode_spec *all = NULL;
+    int k = 0;
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && k < max; i++)
         if (list[i].pid == pid)
-            return &list[i];
-        if (list[i].pid == 0)
-            all = &list[i];
-    }
-    return all;
+            out[k++] = &list[i];
+    if (k == 0)
+        for (int i = 0; i < n && k < max; i++)
+            if (list[i].pid == 0)
+                out[k++] = &list[i];
+    return k;
 }
 
-/* The transcoding wanted for stream `idx` of the input, if any. */
-static bool plan_stream(struct engine *e, const struct program *p, int idx,
-                        struct xcode_cfg *cfg)
+/* Is this PID already in use in any of the output programs (streams,
+ * PMTs, PCR), or claimed by an earlier rendition? */
+static bool pid_in_use(const struct program *list, int n, const uint16_t *claimed,
+                       int n_claimed, uint16_t pid)
+{
+    if (pid == PID_PAT || pid == PID_SDT || pid == PID_NULL || pid < 0x10)
+        return true;
+    for (int k = 0; k < n; k++) {
+        if (list[k].pmt_pid == pid || list[k].pcr_pid == pid)
+            return true;
+        for (int i = 0; i < list[k].n_es; i++)
+            if (list[k].es[i].pid == pid)
+                return true;
+    }
+    for (int i = 0; i < n_claimed; i++)
+        if (claimed[i] == pid)
+            return true;
+    return false;
+}
+
+static uint16_t free_pid_after(const struct program *list, int n, uint16_t *claimed,
+                               int *n_claimed, uint16_t base)
+{
+    uint16_t pid = base;
+
+    do {
+        pid = (uint16_t)(pid + 1);
+        if (pid >= 0x1FFF)
+            pid = 0x20;
+    } while (pid_in_use(list, n, claimed, *n_claimed, pid) && pid != base);
+    claimed[(*n_claimed)++] = pid;
+    return pid;
+}
+
+/*
+ * The transcoding wanted for stream `idx` of the input: none, one, or
+ * (video) one per rendition. Fills up to `max` configurations; the k-th
+ * is rendition k. Output PIDs for k > 0 are chosen here (the source's
+ * PID + k, or the next free one).
+ */
+static int plan_stream(struct engine *e, const struct program *p, int idx,
+                       struct xcode_cfg *cfg, int max, const struct program *progs,
+                       int n_progs, uint16_t *claimed, int *n_claimed)
 {
     enum codec_id in = xcode_input_codec(p, idx);
-    const struct xcode_spec *s;
+    const struct xcode_spec *specs[MAX_PROGRAMS];
     bool video = codec_is_video(in);
     bool is_audio_type, is_video_type;
-    int st = p->es[idx].stream_type;
+    int st = p->es[idx].stream_type, n = 0, out = 0;
 
     /* Which list applies is a matter of what the stream is, also when it
      * is in a coding we cannot read. */
@@ -192,30 +259,43 @@ static bool plan_stream(struct engine *e, const struct program *p, int idx,
                     (st == 0x06 && (program_es_has_desc(p, idx, 0x6A, NULL) ||
                                     program_es_has_desc(p, idx, 0x7A, NULL)));
     if (!is_video_type && !is_audio_type)
-        return false;
-    s = is_video_type ? spec_for(e->cfg.video, e->cfg.n_video, p->es[idx].pid)
-                      : spec_for(e->cfg.audio, e->cfg.n_audio, p->es[idx].pid);
-    if (!s || s->codec == CODEC_NONE)
-        return false;
-    if (in == CODEC_NONE) {
-        log_warn("PID 0x%04X: %s cannot be decoded here, the stream is copied",
-                 p->es[idx].pid, stream_type_name(st));
-        return false;
+        return 0;
+    n = is_video_type ? specs_for(e->cfg.video, e->cfg.n_video, p->es[idx].pid, specs,
+                                  max < MAX_PROGRAMS ? max : MAX_PROGRAMS)
+                      : specs_for(e->cfg.audio, e->cfg.n_audio, p->es[idx].pid, specs, 1);
+    for (int k = 0; k < n; k++) {
+        const struct xcode_spec *s = specs[k];
+        struct xcode_cfg *c = &cfg[out];
+
+        if (s->codec == CODEC_NONE)
+            continue;
+        if (in == CODEC_NONE) {
+            if (k == 0)
+                log_warn("PID 0x%04X: %s cannot be decoded here, the stream is copied",
+                         p->es[idx].pid, stream_type_name(st));
+            continue;
+        }
+        memset(c, 0, sizeof(*c));
+        c->pid = p->es[idx].pid;
+        c->out_pid = out == 0 ? c->pid
+                              : free_pid_after(progs, n_progs, claimed, n_claimed,
+                                               (uint16_t)(c->pid + out - 1));
+        c->in = in;
+        c->out = s->codec;
+        c->bitrate = s->bitrate;
+        if (video) {
+            c->width = s->width;
+            c->height = s->height;
+            c->decoder = e->cfg.decoder;
+            c->encoder = e->cfg.encoder;
+            c->gpu = e->cfg.gpu;
+            c->vbv_ms = e->cfg.vbv_ms;
+            c->gop_ms = e->cfg.gop_ms;
+            c->preset = e->cfg.preset;
+        }
+        out++;
     }
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->pid = p->es[idx].pid;
-    cfg->in = in;
-    cfg->out = s->codec;
-    cfg->bitrate = s->bitrate;
-    if (video) {
-        cfg->decoder = e->cfg.decoder;
-        cfg->encoder = e->cfg.encoder;
-        cfg->gpu = e->cfg.gpu;
-        cfg->vbv_ms = e->cfg.vbv_ms;
-        cfg->gop_ms = e->cfg.gop_ms;
-        cfg->preset = e->cfg.preset;
-    }
-    return true;
+    return out;
 }
 
 /* How the transcoded stream is announced in the PMT. */
@@ -242,11 +322,14 @@ static void announce(struct program *np, int idx, enum codec_id out)
 
 /*
  * Brings the set of transcoders in line with the service as it now is,
- * and rewrites `np` (the description the mux will send) accordingly.
- * Runs in the input thread, outside the lock: opening a codec takes time,
- * and stopping one means waiting for its thread.
+ * and writes the programs the mux will send into `np[]` (one per
+ * rendition; np[0] is the source's program with its streams re-announced,
+ * np[k] a copy with program number, PMT PID and video PID of its own, the
+ * other streams shared). Returns how many. Runs in the input thread,
+ * outside the lock: opening a codec takes time, and stopping one means
+ * waiting for its thread.
  */
-static void update_xcodes(struct engine *e, const struct program *p, struct program *np)
+static int update_xcodes(struct engine *e, const struct program *p, struct program *np)
 {
     struct xcode *gone[MAX_ES], *keep[MAX_ES];
     int gone_pid[MAX_ES];
@@ -254,27 +337,40 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
     stc_t gone_t1[MAX_ES];
     bool gone_out[MAX_ES];
     struct xcode_cfg want[MAX_ES], keep_cfg[MAX_ES];
-    bool wanted[MAX_ES] = { false };
-    int n_gone = 0, n_keep = 0;
+    int want_idx[MAX_ES], want_k[MAX_ES];
+    uint16_t claimed[MAX_ES];
+    int n_want = 0, n_claimed = 0, n_gone = 0, n_keep = 0, n_prog = 1;
+    char name[SERVICE_TEXT_MAX + 16], base[SERVICE_TEXT_MAX + 1];
 
-    for (int i = 0; i < p->n_es; i++)
-        wanted[i] = plan_stream(e, p, i, &want[i]);
+    np[0] = *p;
+    for (int i = 0; i < p->n_es && n_want < MAX_ES; i++) {
+        struct xcode_cfg cfgs[MAX_PROGRAMS];
+        int n = plan_stream(e, p, i, cfgs, MAX_ES - n_want, np, 1, claimed, &n_claimed);
+
+        for (int k = 0; k < n && n_want < MAX_ES; k++) {
+            want[n_want] = cfgs[k];
+            want_idx[n_want] = i;
+            want_k[n_want] = k;
+            n_want++;
+            if (k + 1 > n_prog)
+                n_prog = k + 1;
+        }
+    }
 
     /* Those no longer wanted, or wanted differently, come out first. */
     pthread_mutex_lock(&e->lock);
     for (int k = 0; k < e->n_xc; k++) {
         bool still = false;
 
-        for (int i = 0; i < p->n_es; i++)
-            if (wanted[i] && !memcmp(&want[i], &e->xc_cfg[k], sizeof(want[i])))
+        for (int i = 0; i < n_want; i++)
+            if (!memcmp(&want[i], &e->xc_cfg[k], sizeof(want[i])))
                 still = true;
         if (still) {
             keep[n_keep] = e->xc_list[k];
             keep_cfg[n_keep++] = e->xc_cfg[k];
         } else {
-            gone_pid[n_gone] = e->xc_cfg[k].pid;
+            gone_pid[n_gone] = e->xc_cfg[k].out_pid;
             gone[n_gone++] = e->xc_list[k];
-            e->xc_by_pid[e->xc_cfg[k].pid] = NULL;
         }
     }
     memcpy(e->xc_list, keep, sizeof(keep[0]) * (size_t)n_keep);
@@ -289,41 +385,69 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
         xcode_free(gone[k]);
     }
 
-    for (int i = 0; i < p->n_es; i++) {
+    /* The further programs: copies of the first, each with a number, a
+     * PMT PID and a service name of its own. The video PID of rendition
+     * k is set below; everything else is shared. */
+    if (n_prog > MAX_PROGRAMS)
+        n_prog = MAX_PROGRAMS;
+    program_service_name(p, base, sizeof(base));
+    for (int k = 1; k < n_prog; k++) {
+        np[k] = np[0];
+        np[k].number = (uint16_t)(p->number + k);
+        np[k].pmt_pid = free_pid_after(np, k, claimed, &n_claimed, (uint16_t)(p->pmt_pid + k - 1));
+    }
+
+    for (int i = 0; i < n_want; i++) {
         struct xcode *x = NULL;
         char err[200] = "";
         bool have = false;
+        int k = want_k[i], idx = want_idx[i];
 
-        if (!wanted[i])
-            continue;
-        for (int k = 0; k < e->n_xc; k++)
-            if (!memcmp(&want[i], &e->xc_cfg[k], sizeof(want[i])))
+        for (int j = 0; j < e->n_xc; j++)
+            if (!memcmp(&want[i], &e->xc_cfg[j], sizeof(want[i])))
                 have = true;
         if (!have) {
             x = xcode_new(&want[i], e->cfg.live, on_xcode_out, e, err, sizeof(err));
             if (!x) {
-                log_err("PID 0x%04X: cannot transcode %s to %s (%s); the stream is copied",
-                        want[i].pid, codec_name(want[i].in), codec_name(want[i].out), err);
-                wanted[i] = false;
+                log_err("PID 0x%04X: cannot transcode %s to %s (%s); the stream is %s",
+                        want[i].pid, codec_name(want[i].in), codec_name(want[i].out), err,
+                        k == 0 ? "copied" : "left out of that rendition");
                 continue;
             }
-            for (int k = 0; k < n_gone; k++)
-                if (gone_pid[k] == want[i].pid && gone_out[k])
-                    xcode_start_after(x, gone_dts[k], gone_t1[k]);
+            for (int j = 0; j < n_gone; j++)
+                if (gone_pid[j] == want[i].out_pid && gone_out[j])
+                    xcode_start_after(x, gone_dts[j], gone_t1[j]);
             pthread_mutex_lock(&e->lock);
             e->xc_list[e->n_xc] = x;
             e->xc_cfg[e->n_xc++] = want[i];
-            e->xc_by_pid[want[i].pid] = x;
             pthread_mutex_unlock(&e->lock);
         }
-        announce(np, i, want[i].out);
+        if (k == 0) {
+            /* The first rendition, and every stream that has only one
+             * (audio): the same in every program. */
+            for (int j = 0; j < n_prog; j++) {
+                announce(&np[j], idx, want[i].out);
+                np[j].es[idx].pid = want[i].out_pid;
+            }
+        } else if (k < n_prog) {
+            announce(&np[k], idx, want[i].out);
+            np[k].es[idx].pid = want[i].out_pid;
+            if (want[i].width > 0) {
+                snprintf(name, sizeof(name), "%s %dx%d", base, want[i].width, want[i].height);
+                program_set_service(&np[k], NULL, name);
+            }
+        }
     }
+    /* A rendition whose video could not be made is still announced with
+     * the first rendition's video: better a duplicate than a program with
+     * no video. (Its PMT then equals the first's but for number and PID.) */
 
     pthread_mutex_lock(&e->lock);
     memset(e->xc_mode, STREAM_COPY, sizeof(e->xc_mode));
     for (int k = 0; k < e->n_xc; k++)
         e->xc_mode[e->xc_cfg[k].pid] = STREAM_TRANSCODE;
     pthread_mutex_unlock(&e->lock);
+    return n_prog;
 }
 
 /* ---- demux callbacks ------------------------------------------------ */
@@ -331,20 +455,26 @@ static void update_xcodes(struct engine *e, const struct program *p, struct prog
 static void on_program(void *opaque, const struct program *p)
 {
     struct engine *e = opaque;
-    struct program np = *p;
+    struct program named = *p;
+    static struct program np[MAX_PROGRAMS];     /* input thread only; large */
+    int n_prog = 1;
 
-    program_set_service(&np, e->cfg.service_provider, e->cfg.service_name);
+    program_set_service(&named, e->cfg.service_provider, e->cfg.service_name);
     if (e->cfg.n_audio || e->cfg.n_video)
-        update_xcodes(e, p, &np);
+        n_prog = update_xcodes(e, &named, np);
+    else
+        np[0] = named;
 
     bool same_streams;
 
     pthread_mutex_lock(&e->lock);
-    same_streams = e->have_prog && e->prog.pmt_pid == np.pmt_pid &&
-                   e->prog.pcr_pid == np.pcr_pid && e->prog.n_es == np.n_es &&
-                   memcmp(e->prog.es, np.es, sizeof(np.es)) == 0;
-    mux_set_program(e->mux, &np);
-    e->prog = np;
+    same_streams = e->have_prog && e->prog.pmt_pid == np[0].pmt_pid &&
+                   e->prog.pcr_pid == np[0].pcr_pid && e->prog.n_es == np[0].n_es &&
+                   memcmp(e->prog.es, np[0].es, sizeof(np[0].es)) == 0 &&
+                   e->n_prog == n_prog;
+    mux_set_programs(e->mux, np, n_prog);
+    e->prog = np[0];
+    e->n_prog = n_prog;
     e->have_prog = true;
     pthread_mutex_unlock(&e->lock);
 
@@ -362,24 +492,28 @@ static void on_program(void *opaque, const struct program *p)
         e->prog_log_suppressed = 0;
     }
     if (same_streams) {
-        log_info("service %u: tables updated (%s)", np.number,
-                 np.have_sdt ? "SDT present" : "no SDT");
+        log_info("service %u: tables updated (%s)", np[0].number,
+                 np[0].have_sdt ? "SDT present" : "no SDT");
         return;
     }
-    log_info("service %u: PMT PID 0x%04X, PCR PID 0x%04X, %d stream(s)",
-             np.number, np.pmt_pid, np.pcr_pid, np.n_es);
-    for (int i = 0; i < np.n_es; i++) {
-        bool xc = e->xc_mode[np.es[i].pid] == STREAM_TRANSCODE;
+    for (int k = 0; k < n_prog; k++) {
+        log_info("service %u: PMT PID 0x%04X, PCR PID 0x%04X, %d stream(s)%s",
+                 np[k].number, np[k].pmt_pid, np[k].pcr_pid, np[k].n_es,
+                 k ? " (further rendition)" : "");
+        for (int i = 0; i < np[k].n_es; i++) {
+            bool xc = e->xc_mode[p->es[i].pid] == STREAM_TRANSCODE;
 
-        if (xc)
-            log_info("  PID 0x%04X  type 0x%02X  %s  [transcoded from %s]", np.es[i].pid,
-                     np.es[i].stream_type, stream_type_name(np.es[i].stream_type),
-                     stream_type_name(p->es[i].stream_type));
-        else
-            log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", np.es[i].pid,
-                     np.es[i].stream_type, stream_type_name(np.es[i].stream_type));
+            if (xc)
+                log_info("  PID 0x%04X  type 0x%02X  %s  [transcoded from %s on PID 0x%04X]",
+                         np[k].es[i].pid, np[k].es[i].stream_type,
+                         stream_type_name(np[k].es[i].stream_type),
+                         stream_type_name(p->es[i].stream_type), p->es[i].pid);
+            else
+                log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", np[k].es[i].pid,
+                         np[k].es[i].stream_type, stream_type_name(np[k].es[i].stream_type));
+        }
     }
-    if (np.pcr_pid == PID_NULL)
+    if (np[0].pcr_pid == PID_NULL)
         log_warn("service has no PCR: it cannot be timed and will not be output");
 }
 
@@ -910,6 +1044,7 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
     }
     if (e->have_prog)
         out->prog = e->prog;
+    out->n_prog = e->n_prog;
     out->n_xc = e->n_xc;
     for (int k = 0; k < e->n_xc; k++)
         xcode_get_stats(e->xc_list[k], &out->xc[k]);

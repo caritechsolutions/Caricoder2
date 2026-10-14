@@ -463,7 +463,9 @@ static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
             sum += mem[(size_t)r * x->pitch + i];
 
     memset(&pic, 0, sizeof(pic));
-    pic.idr = (e->n % e->gop) == 0;
+    pic.idr = (e->n % e->gop) == 0 || (p->encodePicFlags & NV_ENC_PIC_FLAG_FORCEIDR) != 0;
+    if (pic.idr)
+        e->n = 0;                           /* a forced key frame restarts the count */
     pic.ts = p->inputTimeStamp;
     memcpy(pic.data, "\0\0\0\1\x09NVMK", 9);
     pic.data[9] = (uint8_t)(e->w >> 8);
@@ -581,7 +583,7 @@ struct m_parser {
     int n_held;
 };
 
-static struct m_dec *the_decoder;           /* one stream at a time is enough here */
+static int live_decoders;                   /* a card has several decoders at once */
 
 CUresult cuvidCreateVideoParser(CUvideoparser *obj, CUVIDPARSERPARAMS *pp)
 {
@@ -719,7 +721,7 @@ CUresult cuvidCreateDecoder(CUvideodecoder *dec, CUVIDDECODECREATEINFO *ci)
     NEED_CTX("cuvidCreateDecoder");
     if (fails("decoder"))
         return CUDA_ERROR_UNKNOWN;
-    CHECK(!the_decoder, "a second decoder while the first exists (stand-in limit)");
+    CHECK(live_decoders < 32, "%d decoders at once: something is not closing them", live_decoders);
     CHECK(ci->ulWidth && ci->ulHeight && ci->ulTargetWidth && ci->ulTargetHeight &&
           !(ci->ulTargetWidth & 1) && !(ci->ulTargetHeight & 1), "decoder size");
     CHECK(ci->ulNumDecodeSurfaces >= 6, "fewer decode surfaces than the stream needs");
@@ -730,7 +732,7 @@ CUresult cuvidCreateDecoder(CUvideodecoder *dec, CUVIDDECODECREATEINFO *ci)
           "16-bit output asked for 8-bit video");
     d = calloc(1, sizeof(*d));
     d->ci = *ci;
-    the_decoder = d;
+    live_decoders++;
     *dec = (CUvideodecoder)d;
     return CUDA_SUCCESS;
 }
@@ -741,8 +743,7 @@ CUresult cuvidDestroyDecoder(CUvideodecoder dec)
 
     NEED_CTX("cuvidDestroyDecoder");
     CHECK(d->mapped == 0, "decoder destroyed with %d pictures still mapped", d->mapped);
-    if (the_decoder == d)
-        the_decoder = NULL;
+    live_decoders--;
     free(d);
     return CUDA_SUCCESS;
 }
@@ -794,8 +795,9 @@ CUresult cuvidUnmapVideoFrame64(CUvideodecoder dec, unsigned long long ptr)
 /* At unload: nothing of ours may be left behind by the caller. */
 __attribute__((destructor)) static void at_exit(void)
 {
-    if (getenv("NVMOCK_CHECK_LEAKS") && (live_ctx || live_mem))
-        VIOLATION("%d contexts and %d card allocations were never released", live_ctx, live_mem);
+    if (getenv("NVMOCK_CHECK_LEAKS") && (live_ctx || live_mem || live_decoders))
+        VIOLATION("%d contexts, %d card allocations and %d decoders were never released",
+                  live_ctx, live_mem, live_decoders);
 }
 
 /* Everything else the loader insists on finding, never called by us. */

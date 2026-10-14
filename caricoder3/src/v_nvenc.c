@@ -353,7 +353,9 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     conf = pc.presetCfg;
     conf.version = NV_ENC_CONFIG_VER;
 
-    gop = (int)(fps * cfg->gop_ms / 1000.0);
+    /* Key frames are asked for picture by picture (vframe.force_key); the
+     * card's own interval is only a backstop, a little longer. */
+    gop = (int)(fps * cfg->gop_ms / 1000.0) + 3;
     if (gop < 1)
         gop = 1;
     conf.gopLength = (uint32_t)gop;
@@ -659,6 +661,8 @@ static int nve_push(void *ctx, const struct vframe *f)
     pp.bufferFmt = mp.mappedBufferFmt;
     pp.pictureStruct = e->pic_struct;
     pp.inputTimeStamp = (uint64_t)(f->pts / STC_PER_90K);
+    if (f->force_key)
+        pp.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
     st = e->fn.nvEncEncodePicture(e->enc, &pp);
     if (st != NV_ENC_SUCCESS && st != NV_ENC_ERR_NEED_MORE_INPUT) {
         e->fn.nvEncUnmapInputResource(e->enc, s->mapped);

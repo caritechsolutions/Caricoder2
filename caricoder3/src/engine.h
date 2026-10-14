@@ -44,6 +44,7 @@ struct engine_stats {
     double   clock_ppm;
     double   clock_jitter_us;
     struct program prog;
+    int      n_prog;            /* programs in the output: renditions */
     int      n_xc;
     struct xcode_stats xc[MAX_ES];
     uint64_t xc_orphans;

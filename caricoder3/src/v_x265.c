@@ -64,7 +64,9 @@ static void *x5_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     p->rc.bitrate = kbps;
     p->rc.vbvMaxBitrate = kbps;
     p->rc.vbvBufferSize = (int)((int64_t)kbps * cfg->vbv_ms / 1000);
-    p->keyframeMax = (int)(fps * cfg->gop_ms / 1000.0);       /* never further apart than asked */
+    /* Key frames are asked for picture by picture (vframe.force_key); the
+     * encoder's own interval is only a backstop, a little longer. */
+    p->keyframeMax = (int)(fps * cfg->gop_ms / 1000.0) + 3;
     if (p->keyframeMax < 1)
         p->keyframeMax = 1;
     p->bOpenGOP = 0;
@@ -166,6 +168,7 @@ static int x5_push(void *ctx, const struct vframe *f)
         e->pic->stride[i] = f->stride[i];
     }
     e->pic->pts = f->pts / STC_PER_90K;
+    e->pic->sliceType = f->force_key ? X265_TYPE_IDR : X265_TYPE_AUTO;
     rc = e->api->encoder_encode(e->h, &nal, &n_nal, e->pic, &out);
     if (rc < 0)
         return -1;

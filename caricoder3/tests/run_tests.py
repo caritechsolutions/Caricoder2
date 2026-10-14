@@ -1968,8 +1968,15 @@ def psnr(out, src):
     """
     # -copyts: pair pictures by the time stamps they carry, not by how far
     # each is from the start of its own file.
+    return psnr_stream(out, src, "0:v:0")
+
+
+def psnr_stream(out, src, out_stream, scale=None):
+    """PSNR of one video stream of `out` (an ffmpeg stream specifier such as
+    "0:v:1" or "0:p:2:v") against `src`, scaled to `scale` ("WxH") if given."""
+    sc = f",scale={scale}:flags=area" if scale else ""
     p = subprocess.run(["ffmpeg", "-v", "info", "-copyts", "-i", out, "-i", src, "-lavfi",
-                        "[0:v]format=yuv420p[a];[1:v]format=yuv420p[b];"
+                        f"[{out_stream}]format=yuv420p[a];[1:v]format=yuv420p{sc}[b];"
                         "[a][b]psnr=shortest=1:repeatlast=0",
                         "-an", "-f", "null", "-"], capture_output=True, text=True)
     for line in p.stderr.splitlines():
@@ -2161,11 +2168,16 @@ def xc_video_send_times():
          f"--vbv 300: complete {min(lead):.0f} to {max(lead):.0f} ms early")
     peak = a.buffer_peak(0x100)
     need(peak < rate / 8 * 0.34 * 1.1 + 4000, f"--vbv 300: the receiver would hold {peak:.0f} bytes")
-    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                        "frame=key_frame", "-of", "csv=p=0", out], capture_output=True, text=True)
-    keys = [i for i, x in enumerate(p.stdout.split()) if x.strip(",") == "1"]
+    keys = key_frame_times(out)[1:]      # (the first picture is a key frame anyway)
     gaps = [b - a for a, b in zip(keys, keys[1:])]
-    need(gaps and max(gaps) <= 12, f"--gop 500: key frames {max(gaps, default=0)} pictures apart")
+    # key frames sit on the first picture at or after each 500 ms mark of the
+    # stream's own clock (so renditions of one channel agree): at 25 fps that is
+    # 12 or 13 pictures apart, never more, and never more than a picture past a mark
+    need(gaps and max(gaps) <= 0.52 + 0.001 and min(gaps) >= 0.48 - 0.001,
+         f"--gop 500: key frames {min(gaps, default=0):.2f} to {max(gaps, default=0):.2f} s apart")
+    past = [t - (t // 0.5) * 0.5 for t in keys]
+    need(max(past) < 0.04 + 0.001, f"--gop 500: a key frame {max(past) * 1000:.0f} ms past a 500 ms mark")
+    gaps = [round(g * 25) for g in gaps]
     res.append(f"--vbv 300: at most {max(lead):.0f} ms early and {peak / 1000:.0f} kB held; "
                f"--gop 500 a key frame every {max(gaps)} pictures at most")
     # a long buffer needs a long delay: the default follows, a short one is refused
@@ -2223,6 +2235,19 @@ def xc_video_lead_holds():
         res.append(f"{what}: {got / 1000:.0f} kb/s, complete {min(lead):.0f} ms early at "
                    f"least, {min(tail):.0f} in the last 20 s")
     return "; ".join(res)
+
+
+def key_frame_times(path, stream="v:0"):
+    """Presentation times (s) of the key frames of a video stream, in order."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries",
+                        "frame=key_frame,pts_time", "-of", "csv=p=0", path],
+                       capture_output=True, text=True)
+    out = []
+    for line in p.stdout.split():
+        k, t = line.strip(",").split(",")[:2]
+        if k == "1":
+            out.append(float(t))
+    return out
 
 
 def _leads(a, pid):
@@ -2423,6 +2448,113 @@ def xc_audio_decoder_buffer():
 
 
 @test
+def xc_video_renditions():
+    """Three renditions of one channel in one transport stream: a program each,
+    audio shared, key frames on the same pictures, every program playable."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_640", "h264", size="640x360", duration=8,
+                   extra=("-output_ts_offset", "100"))
+    out = w("xc_v_renditions.ts")
+    st = run_file(src, out, "--video", "h264:900k", "--video", "426x240:h264:400k",
+                  "--video", "320x180:h264:200k", "--audio", "aac:96k")
+    need(st["service"]["programs"] == 3, f"{st['service']['programs']} programs")
+    o = Analysis(out)
+    progs = o.pat["programs"]
+    need(sorted(progs) == [1, 2, 3], f"PAT lists programs {sorted(progs)}")
+    need(o.sync_errors == 0 and not o.cc_errors, "output damaged")
+    # one PMT per program, the audio PID and the PCR PID in all three
+    pmts, vpid = {}, {}
+    for n in (1, 2, 3):
+        an = Analysis(out, program=n)
+        pmts[n] = an.pmt
+        need(an.pmt["pcr_pid"] == 0x100, f"program {n}: PCR PID 0x{an.pmt['pcr_pid']:04X}")
+        pids = {s_["pid"]: s_["type"] for s_ in an.pmt["streams"]}
+        need(pids.get(0x101) == 0x0F, f"program {n}: audio {pids}")
+        vids = [p_ for p_, t in pids.items() if t == 0x1B]
+        need(len(vids) == 1, f"program {n}: video PIDs {vids}")
+        vpid[n] = vids[0]
+    # the first keeps the source's PID; the others take the next free ones
+    # (0x101 is the audio, so 0x102 and 0x103)
+    need(vpid == {1: 0x100, 2: 0x102, 3: 0x103}, f"video PIDs {vpid}")
+    need(len({r["sha"] for r in o.pes[0x101]}) == len(o.pes[0x101]), "audio PES repeated")
+    # every program decodes, at its size, close to the (scaled) source
+    res = []
+    sizes = {1: (640, 360), 2: (426, 240), 3: (320, 180)}
+    for n in (1, 2, 3):
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", f"p:{n}:v",
+                            "-show_entries", "stream=width,height", "-of", "csv=p=0", out],
+                           capture_output=True, text=True)
+        got = tuple(int(x) for x in p.stdout.split()[0].split(",")[:2])
+        need(got == sizes[n], f"program {n} is {got}, expected {sizes[n]}")
+        q = psnr_stream(out, src, f"0:p:{n}:v", scale=f"{sizes[n][0]}:{sizes[n][1]}")
+        need(q >= 30, f"program {n}: PSNR {q:.1f} dB against the scaled source")
+        res.append(f"{sizes[n][0]}x{sizes[n][1]} {q:.0f} dB")
+    # key frames on the same pictures, every 2 s
+    keys = {n: key_frame_times(out, f"p:{n}:v")[1:] for n in (1, 2, 3)}
+    need(keys[1] == keys[2] == keys[3], f"key frames differ between renditions: "
+         f"{keys[1][:4]} / {keys[2][:4]} / {keys[3][:4]}")
+    gaps = [b - a for a, b in zip(keys[1], keys[1][1:])]
+    need(gaps and 1.95 < min(gaps) and max(gaps) < 2.05, f"key frames {gaps} s apart")
+    need(len(video_pts(out)) >= 195, "pictures missing from the first rendition")
+    ms, _ = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0, f"audio {ms:+.2f} ms off")
+    # ffmpeg's HLS packager, the reference for the later packager stage: every
+    # rendition cuts into segments at the same times
+    seg_dir = w("hls_out")
+    shutil.rmtree(seg_dir, ignore_errors=True)
+    os.makedirs(seg_dir)
+    p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", out,
+                        "-map", "0:p:1:v", "-map", "0:p:2:v", "-map", "0:p:3:v", "-map", "0:a:0",
+                        "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "0",
+                        "-var_stream_map",
+                        "v:0,agroup:a v:1,agroup:a v:2,agroup:a a:0,agroup:a",
+                        "-master_pl_name", "master.m3u8",
+                        os.path.join(seg_dir, "r%v.m3u8")], capture_output=True, text=True)
+    need(p.returncode == 0, "ffmpeg could not package the output as HLS: " + p.stderr[-300:])
+    durs = []
+    for v in (0, 1, 2):
+        pl = open(os.path.join(seg_dir, f"r{v}.m3u8")).read()
+        durs.append([float(l.split(":")[1].rstrip(",")) for l in pl.splitlines()
+                     if l.startswith("#EXTINF")])
+    need(all(len(d) >= 3 for d in durs), f"too few segments: {[len(d) for d in durs]}")
+    need(all(abs(a - b) < 0.05 for d in durs[1:] for a, b in zip(durs[0], d)),
+         f"segment lengths differ between renditions: {durs}")
+    return f"3 programs ({', '.join(res)}), one audio PID in all, key frames on the same " \
+           f"pictures every 2 s, HLS segments aligned ({len(durs[0])} per rendition)"
+
+
+@test
+def xc_video_renditions_interlaced():
+    """An interlaced source made into a smaller rendition comes out progressive
+    (deinterlaced on the way), the full-size one still as fields."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_il_src", "h264", size="720x576",
+                   extra=("-flags", "+ildct+ilme", "-top", "1", "-aspect", "16:9"))
+    out = w("xc_v_il_renditions.ts")
+    st = run_file(src, out, "--video", "h264:1500k", "--video", "640x360:h264:600k")
+    must_pass(out)
+    decodes_clean(out)
+    full = probe_video(out)
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "p:2:v", "-show_entries",
+                        "stream=width,height,field_order,sample_aspect_ratio",
+                        "-of", "json", out], capture_output=True, text=True)
+    small = json.loads(p.stdout)["streams"][0]
+    need(full["field_order"] in ("tt", "tb"), f"full size came out {full['field_order']}")
+    need((small["width"], small["height"]) == (640, 360), f"small is {small}")
+    need(small.get("field_order", "progressive") == "progressive",
+         f"the small rendition is {small.get('field_order')}, not progressive")
+    need(small["sample_aspect_ratio"] == "1:1", f"small pixel shape {small['sample_aspect_ratio']}: "
+         "a 16:9 picture at 640x360 has square pixels")
+    q = psnr_stream(out, src, "0:p:2:v", scale="640:360")
+    need(q >= 28, f"small rendition: {q:.1f} dB against the scaled source")
+    return f"720x576 interlaced kept as fields; 640x360 rendition progressive, square pixels, {q:.0f} dB"
+
+
+@test
 def xc_video_damaged_input():
     """Lost and damaged video packets: no crash, a valid stream, and the picture recovers."""
     skip = xc_ready("libavcodec", "x264")
@@ -2593,6 +2725,36 @@ def live_xc_nvidia_standin():
     need((x["decoder"], x["encoder"]) == ("nvdec", "nvenc") and x["frames_out"] > 50, str(x))
     return f"{x['frames_out']} pictures through the stand-in card, stopped with pictures " \
            f"in flight, clean tear-down"
+
+
+@test
+def live_xc_renditions():
+    """Live: three renditions in real time, each its own thread, one output."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_640", "h264", size="640x360", duration=8,
+                   extra=("-output_ts_offset", "100"))
+    st, cap, log = live(lambda p: p.play(src, rate=2_500_000), "-r", "3000k",
+                        "--video", "h264:900k", "--video", "426x240:h264:400k",
+                        "--video", "320x180:h264:200k", "--audio", "aac:96k",
+                        capture_name="live_xc_renditions.ts", tail=4.5)
+    out = w("live_xc_renditions.ts")
+    must_pass(out, cbr=True)
+    need(st["service"]["programs"] == 3, f"{st['service']['programs']} programs")
+    xs = [x for x in st["service"]["streams"] if x["mode"] == "transcode"]
+    need(len(xs) == 4, f"{len(xs)} transcoders")
+    for x in xs:
+        need(not x["failed"] and x["decode_errors"] == 0 and x["input_dropped"] == 0, str(x))
+        need(x["frames_out"] >= 150, f"{x['pid']}: {x['frames_out']} out")
+        need(x.get("slack_min_ms", -1) > 0, f"{x['pid']}: {x.get('slack_min_ms')} ms to spare")
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+         f"late {st['output']['late_units']}, dropped {st['output']['dropped_units']}")
+    keys = {n: key_frame_times(out, f"p:{n}:v")[1:] for n in (1, 2, 3)}
+    need(keys[1] == keys[2] == keys[3], "key frames differ between renditions")
+    no_pause(cap)
+    return f"3 renditions + audio in real time, nothing late or dropped, key frames aligned " \
+           f"({len(keys[1])} each), least slack {min(x['slack_min_ms'] for x in xs):.0f} ms"
 
 
 @test
@@ -2819,6 +2981,20 @@ def xc_nvidia_standin():
     need((x["decoder"], x["encoder"]) == ("libavcodec", "nvenc") and not x["failed"], str(x))
     need(x["frames_out"] >= 150, f"refused in mid-run: {x['frames_out']} of 200 pictures out")
     res.append(f"card refuses the stream in mid-run -> CPU decode, {x['frames_out']}/200 pictures")
+
+    # three renditions on the card: the decoder scales to each size itself
+    out = w("xc_nv_renditions.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k", "--video", "160x120:h264:150k",
+                       "--video", "240x180:h264:250k")
+    must_pass(out)
+    need(st["service"]["programs"] == 3, f"{st['service']['programs']} programs on the card")
+    sizes = {s_["pid"]: s_.get("size") for s_ in st["service"]["streams"] if s_["mode"] == "transcode"}
+    need(sizes == {0x100: "320x240", 0x102: "160x120", 0x103: "240x180"}, str(sizes))
+    for s_ in st["service"]["streams"]:
+        if s_["mode"] == "transcode":
+            need((s_["decoder"], s_["encoder"]) == ("nvdec", "nvenc") and s_["frames_out"] >= 195,
+                 str(s_))
+    res.append("three renditions, each scaled by the card's decoder")
 
     # interlaced video: the card's encoder is put in field mode ...
     out = w("xc_nv_fields.ts")

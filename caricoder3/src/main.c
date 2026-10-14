@@ -341,22 +341,39 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
 
     fprintf(f, "  \"service\": {\n    \"number\": %u,\n    \"ts_id\": %u,\n"
                "    \"pmt_pid\": %u,\n    \"pcr_pid\": %u,\n    \"changes\": %llu,\n"
+               "    \"programs\": %d,\n"
                "    \"streams\": [",
             st->prog.number, st->prog.ts_id, st->prog.pmt_pid, st->prog.pcr_pid,
-            (unsigned long long)st->in.program_changes);
-    for (int i = 0; st->have_program && i < st->prog.n_es; i++) {
-        fprintf(f, "%s\n      {\"pid\": %u, \"stream_type\": %u, \"codec\": ",
-                i ? "," : "", st->prog.es[i].pid, st->prog.es[i].stream_type);
-        json_str(f, stream_type_name(st->prog.es[i].stream_type));
-        const struct xcode_stats *x = NULL;
+            (unsigned long long)st->in.program_changes, st->n_prog);
+    /* One entry per input stream, and after it one per further rendition
+     * of that stream (its own output PID). */
+    int n_out = 0;
 
-        for (int k = 0; k < st->n_xc; k++)
-            if (st->xc[k].pid == st->prog.es[i].pid)
-                x = &st->xc[k];
+    for (int i = 0; st->have_program && i < st->prog.n_es; i++)
+    for (int k = -1; k < st->n_xc; k++) {
+        const struct xcode_stats *x = NULL;
+        uint16_t in_pid = st->prog.es[i].pid;
+
+        if (k >= 0) {
+            if (st->xc[k].pid != in_pid || st->xc[k].out_pid == in_pid)
+                continue;                   /* not this stream, or its first rendition */
+            x = &st->xc[k];
+        } else {
+            for (int j = 0; j < st->n_xc; j++)
+                if (st->xc[j].pid == in_pid && st->xc[j].out_pid == in_pid)
+                    x = &st->xc[j];
+        }
+        fprintf(f, "%s\n      {\"pid\": %u, \"stream_type\": %u, \"codec\": ",
+                n_out++ ? "," : "", x ? x->out_pid : in_pid, st->prog.es[i].stream_type);
+        json_str(f, stream_type_name(st->prog.es[i].stream_type));
         if (!x) {
             fprintf(f, ", \"mode\": \"copy\"}");
             continue;
         }
+        if (x->out_pid != in_pid)
+            fprintf(f, ", \"from_pid\": %u", in_pid);
+        if (x->width > 0)
+            fprintf(f, ", \"size\": \"%dx%d\"", x->width, x->height);
         fprintf(f, ", \"mode\": \"transcode\", \"from\": \"%s\", \"decoder\": \"%s\", "
                    "\"encoder\": \"%s\",\n       \"units_in\": %llu, \"units_out\": %llu, "
                    "\"frames_in\": %llu, \"frames_out\": %llu,\n       "
@@ -556,7 +573,9 @@ static void usage(FILE *f)
 "                           bit rate (aac:128k). PID=SPEC for one stream only\n"
 "                           (1653=aac:96k); may be repeated. Default: copy\n"
 "      --video SPEC         transcode video: h264 or hevc with a bit rate\n"
-"                           (h264:3M). Default: copy\n"
+"                           (h264:3M); WxH in front makes a rendition at that\n"
+"                           size (1280x720:h264:2M); may be repeated: each is\n"
+"                           a program of the output. Default: copy\n"
 "      --decoder WHERE      video decoding on: auto, nvidia or cpu (default auto)\n"
 "      --encoder WHERE      video encoding on: auto, nvidia or cpu (default auto)\n"
 "      --gpu N              which NVIDIA card (default 0)\n"

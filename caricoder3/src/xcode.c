@@ -186,6 +186,23 @@ bool xcode_parse_spec(const char *s, bool video, struct xcode_spec *out,
     }
     if ((rate = strchr(codec, ':')) != NULL)
         *rate++ = 0;
+    /* A size in front of the codec: WxH. */
+    if (video && strchr(codec, 'x') && rate) {
+        char *x = NULL;
+        long w = strtol(codec, &x, 10), h = 0;
+
+        if (x && *x == 'x')
+            h = strtol(x + 1, &x, 10);
+        if (!x || *x || w < 64 || w > 8192 || h < 64 || h > 8192 || (w & 1) || (h & 1)) {
+            snprintf(err, errlen, "'%s': the size must be WxH, even, 64 to 8192", s);
+            return false;
+        }
+        out->width = (int)w;
+        out->height = (int)h;
+        codec = rate;
+        if ((rate = strchr(codec, ':')) != NULL)
+            *rate++ = 0;
+    }
 
     if (!strcmp(codec, "copy"))
         out->codec = CODEC_NONE;
@@ -540,6 +557,7 @@ void xcode_get_stats(struct xcode *x, struct xcode_stats *st)
     pthread_mutex_unlock(&x->st_lock);
 
     st->pid = x->cfg.pid;
+    st->out_pid = x->cfg.out_pid;
     st->in = x->cfg.in;
     st->out = x->cfg.out;
     if (x->threaded) {

@@ -110,6 +110,7 @@ struct vframe {
     int      stride[3];
     stc_t    pts;
     bool     key;               /* decoder: it was a random access point */
+    bool     force_key;         /* encoder: make this picture a key frame */
     bool     interlaced, tff;
     int      sar_num, sar_den;  /* 0 = unknown */
     int      fps_num, fps_den;  /* 0 = unknown */
@@ -119,6 +120,10 @@ struct vframe {
 
 struct vdec_cfg {
     enum codec_id codec;
+    int  width, height;         /* pictures wanted at this size (0: as coded).
+                                 * A hardware decoder scales (and deinterlaces)
+                                 * itself; a CPU decoder may ignore it, the
+                                 * pipeline scales then. */
     int  gpu;                   /* card index for a hardware decoder */
     bool want_cuda;             /* leave frames on the card if possible */
     bool only_8bit;             /* the encoder takes 8 bits only: a hardware

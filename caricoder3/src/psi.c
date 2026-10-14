@@ -230,20 +230,26 @@ static int section_finish(uint8_t *sec, int n)
     return total;
 }
 
-int psi_build_pat(const struct program *p, int version, uint8_t *sec)
+int psi_build_pat(const struct program *list, int n, int version, uint8_t *sec)
 {
+    int o = 8;
+
+    if (n < 1 || n > MAX_PROGRAMS)
+        return -1;
     sec[0] = 0x00;
     sec[1] = 0xB0;
-    sec[3] = (uint8_t)(p->ts_id >> 8);
-    sec[4] = (uint8_t)p->ts_id;
+    sec[3] = (uint8_t)(list[0].ts_id >> 8);
+    sec[4] = (uint8_t)list[0].ts_id;
     sec[5] = (uint8_t)(0xC1 | ((version & 0x1F) << 1));
     sec[6] = 0;
     sec[7] = 0;
-    sec[8] = (uint8_t)(p->number >> 8);
-    sec[9] = (uint8_t)p->number;
-    sec[10] = (uint8_t)(0xE0 | (p->pmt_pid >> 8));
-    sec[11] = (uint8_t)p->pmt_pid;
-    return section_finish(sec, 12);
+    for (int i = 0; i < n; i++) {
+        sec[o++] = (uint8_t)(list[i].number >> 8);
+        sec[o++] = (uint8_t)list[i].number;
+        sec[o++] = (uint8_t)(0xE0 | (list[i].pmt_pid >> 8));
+        sec[o++] = (uint8_t)list[i].pmt_pid;
+    }
+    return section_finish(sec, o);
 }
 
 int psi_build_pmt(const struct program *p, int version, uint8_t *sec)
@@ -282,35 +288,77 @@ int psi_build_pmt(const struct program *p, int version, uint8_t *sec)
     return section_finish(sec, n);
 }
 
-int psi_build_sdt(const struct program *p, int version, uint8_t *sec)
+int psi_build_sdt(const struct program *list, int n, int version, uint8_t *sec)
 {
-    int n = 16;
+    int o = 11;
 
-    if (16 + p->sdt_desc_len + 4 > PSI_MAX)
+    if (n < 1 || n > MAX_PROGRAMS)
+        return -1;
+    for (int i = 0; i < n; i++)
+        o += 5 + list[i].sdt_desc_len;
+    if (o + 4 > PSI_MAX)
         return -1;
 
     sec[0] = 0x42;                          /* SDT, actual transport stream */
     sec[1] = 0xF0;
-    sec[3] = (uint8_t)(p->ts_id >> 8);
-    sec[4] = (uint8_t)p->ts_id;
+    sec[3] = (uint8_t)(list[0].ts_id >> 8);
+    sec[4] = (uint8_t)list[0].ts_id;
     sec[5] = (uint8_t)(0xC1 | ((version & 0x1F) << 1));
     sec[6] = 0;
     sec[7] = 0;
-    sec[8] = (uint8_t)(p->onid >> 8);
-    sec[9] = (uint8_t)p->onid;
+    sec[8] = (uint8_t)(list[0].onid >> 8);
+    sec[9] = (uint8_t)list[0].onid;
     sec[10] = 0xFF;
-    sec[11] = (uint8_t)(p->number >> 8);
-    sec[12] = (uint8_t)p->number;
-    sec[13] = 0xFC;                         /* no EIT is carried on the output */
-    sec[14] = (uint8_t)((p->running_status << 5) | (p->free_ca ? 0x10 : 0) |
-                        (p->sdt_desc_len >> 8));
-    sec[15] = (uint8_t)p->sdt_desc_len;
-    memcpy(sec + n, p->sdt_desc, p->sdt_desc_len);
-    n += p->sdt_desc_len;
-    return section_finish(sec, n);
+    o = 11;
+    for (int i = 0; i < n; i++) {
+        const struct program *p = &list[i];
+
+        if (!p->have_sdt)
+            continue;
+        sec[o++] = (uint8_t)(p->number >> 8);
+        sec[o++] = (uint8_t)p->number;
+        sec[o++] = 0xFC;                    /* no EIT is carried on the output */
+        sec[o++] = (uint8_t)((p->running_status << 5) | (p->free_ca ? 0x10 : 0) |
+                             (p->sdt_desc_len >> 8));
+        sec[o++] = (uint8_t)p->sdt_desc_len;
+        memcpy(sec + o, p->sdt_desc, p->sdt_desc_len);
+        o += p->sdt_desc_len;
+    }
+    return section_finish(sec, o);
 }
 
-#define SERVICE_TEXT_MAX 100
+void program_service_name(const struct program *p, char *name, size_t len)
+{
+    const uint8_t *d = p->sdt_desc;
+    int n = p->sdt_desc_len, pos = 0;
+
+    name[0] = 0;
+    while (pos + 2 <= n) {
+        int tag = d[pos], dl = d[pos + 1];
+        const uint8_t *body = d + pos + 2;
+
+        if (pos + 2 + dl > n)
+            break;
+        if (tag == 0x48 && dl >= 3) {
+            /* service_type, provider_name_length, provider, name_length, name */
+            int pl = body[1];
+
+            if (2 + pl < dl) {
+                int nl = body[2 + pl];
+
+                if (3 + pl + nl > dl)
+                    nl = dl - 3 - pl;
+                if (nl > (int)len - 1)
+                    nl = (int)len - 1;
+                if (nl > 0)
+                    memcpy(name, body + 3 + pl, (size_t)nl);
+                name[nl > 0 ? nl : 0] = 0;
+            }
+            return;
+        }
+        pos += 2 + dl;
+    }
+}
 
 void program_set_service(struct program *p, const char *provider,
                          const char *name)

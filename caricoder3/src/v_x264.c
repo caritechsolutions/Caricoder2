@@ -76,7 +76,10 @@ static void *x4_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     p.rc.i_bitrate = kbps;
     p.rc.i_vbv_max_bitrate = kbps;
     p.rc.i_vbv_buffer_size = (int)((int64_t)kbps * cfg->vbv_ms / 1000);
-    p.i_keyint_max = (int)(fps * cfg->gop_ms / 1000.0);       /* never further apart than asked */
+    /* Key frames are asked for picture by picture (vframe.force_key), at
+     * the same instants in every rendition of a channel; the encoder's
+     * own interval is only a backstop, a little longer. */
+    p.i_keyint_max = (int)(fps * cfg->gop_ms / 1000.0) + 3;
     if (p.i_keyint_max < 1)
         p.i_keyint_max = 1;
     p.b_open_gop = 0;
@@ -157,6 +160,8 @@ static int x4_push(void *ctx, const struct vframe *f)
         pic.img.i_stride[i] = f->stride[i];
     }
     pic.i_pts = f->pts / STC_PER_90K;
+    if (f->force_key)
+        pic.i_type = X264_TYPE_IDR;
     bytes = x264_encoder_encode(e->h, &nal, &n_nal, &pic, &out);
     if (bytes < 0)
         return -1;

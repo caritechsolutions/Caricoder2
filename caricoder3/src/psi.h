@@ -75,12 +75,20 @@ bool psi_parse_pmt(const uint8_t *sec, int len, struct program *p);
 bool psi_parse_sdt(const uint8_t *sec, int len, struct program *p);
 
 /* Builders return the section length, or -1 if it would not fit. */
-int psi_build_pat(const struct program *p, int version, uint8_t *sec);
+/* The output may carry several programs (one per rendition of a
+ * channel): the PAT and SDT list them all, each program has a PMT of its
+ * own. With one program the bytes are exactly those of a single-program
+ * stream. */
+#define MAX_PROGRAMS 8
+int psi_build_pat(const struct program *list, int n, int version, uint8_t *sec);
 int psi_build_pmt(const struct program *p, int version, uint8_t *sec);
-int psi_build_sdt(const struct program *p, int version, uint8_t *sec);
+int psi_build_sdt(const struct program *list, int n, int version, uint8_t *sec);
 
 /* Replaces (or creates) the DVB service_descriptor. NULL keeps the
  * existing provider / name. */
+/* The service name from the SDT descriptors ("" if none). */
+void program_service_name(const struct program *p, char *name, size_t len);
+#define SERVICE_TEXT_MAX 100
 void program_set_service(struct program *p, const char *provider,
                          const char *name);
 

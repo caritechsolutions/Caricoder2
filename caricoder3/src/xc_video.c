@@ -59,6 +59,12 @@ struct vxc {
 
     stc_t frame_dur;
     stc_t last_in;                      /* time of the last picture encoded */
+    stc_t gop;                          /* key frames at multiples of this */
+    int64_t last_gop_n;                 /* the multiple the last picture fell in */
+
+    /* pictures scaled (and deinterlaced) on the CPU live here */
+    uint8_t *scaled;
+    size_t scaled_size;
     stc_t last_t1;
     int64_t last_dts90;
     int vbv_ms;
@@ -86,7 +92,7 @@ static void packet_out(struct vxc *v, const struct vpacket *p)
         dts90 = v->last_dts90 + 1;          /* decode times only move forward */
     v->last_dts90 = dts90;
 
-    u = pes_unit_new(v->cfg.pid, 0xE0, p->len, pts90, dts90, &off);
+    u = pes_unit_new(v->cfg.out_pid, 0xE0, p->len, pts90, dts90, &off);
     if (!u)
         return;
     memcpy(u->data + off, p->data, p->len);
@@ -239,6 +245,8 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
         return false;
     }
     v->e_fmt = *f;
+    v->st->width = f->width;
+    v->st->height = f->height;
     v->progressive_run = 0;
     v->soft_run = 0;
     v->out_depth = c.depth;
@@ -341,11 +349,160 @@ static bool format_changed(struct vxc *v, const struct vframe *f)
     return false;
 }
 
+/*
+ * Resampling one plane by area averaging: each output sample is the mean
+ * of the input samples its footprint covers, with fractional weights at
+ * the edges. Good for scaling down (every input sample counts once, no
+ * aliasing); for scaling up it is a soft bilinear. Separable: rows first
+ * into a line buffer, then columns. Samples are 8-bit, or 16-bit words
+ * holding 10 bits.
+ */
+struct span { int from, n; float w[4]; };   /* up to 4 inputs per output */
+
+static void spans(int in_n, int out_n, struct span *sp)
+{
+    double step = (double)in_n / out_n;
+
+    for (int o = 0; o < out_n; o++) {
+        double a = o * step, b = a + step;
+        int i0 = (int)a, i1 = (int)(b - 1e-9);
+        float sum = 0;
+
+        if (i1 >= in_n)
+            i1 = in_n - 1;
+        if (i1 - i0 > 3)
+            i1 = i0 + 3;                    /* more than 4:1 is capped: good enough */
+        sp[o].from = i0;
+        sp[o].n = i1 - i0 + 1;
+        for (int i = i0; i <= i1; i++) {
+            double lo = i > a ? i : a, hi = i + 1 < b ? i + 1 : b;
+
+            sp[o].w[i - i0] = (float)(hi - lo);
+            sum += sp[o].w[i - i0];
+        }
+        for (int k = 0; k < sp[o].n; k++)
+            sp[o].w[k] /= sum;
+    }
+}
+
+static void scale_plane(const uint8_t *src, int sstride, int sw, int sh, bool wide,
+                        uint8_t *dst, int dstride, int dw, int dh,
+                        struct span *sx, struct span *sy, float *line, bool blend)
+{
+    spans(sw, dw, sx);
+    spans(sh, dh, sy);
+    for (int y = 0; y < dh; y++) {
+        memset(line, 0, sizeof(float) * (size_t)dw);
+        for (int k = 0; k < sy[y].n; k++) {
+            int yy = sy[y].from + k;
+            float wy = sy[y].w[k];
+            /* field blend: an interlaced source is read as the mean of
+             * each line and the next, which removes the comb */
+            for (int half = 0; half < (blend ? 2 : 1); half++) {
+                int ys = yy + half < sh ? yy + half : sh - 1;
+                const uint8_t *row = src + (size_t)ys * sstride;
+                float wr = blend ? wy * 0.5f : wy;
+
+                for (int x = 0; x < dw; x++) {
+                    float acc = 0;
+
+                    for (int j = 0; j < sx[x].n; j++) {
+                        int xs = sx[x].from + j;
+                        float sv = wide ? (float)(row[2 * xs] | (row[2 * xs + 1] << 8))
+                                        : (float)row[xs];
+
+                        acc += sv * sx[x].w[j];
+                    }
+                    line[x] += acc * wr;
+                }
+            }
+        }
+        if (wide) {
+            uint8_t *d = dst + (size_t)y * dstride;
+
+            for (int x = 0; x < dw; x++) {
+                unsigned val = (unsigned)(line[x] + 0.5f);
+
+                d[2 * x] = (uint8_t)val;
+                d[2 * x + 1] = (uint8_t)(val >> 8);
+            }
+        } else {
+            uint8_t *d = dst + (size_t)y * dstride;
+
+            for (int x = 0; x < dw; x++)
+                d[x] = (uint8_t)(line[x] + 0.5f);
+        }
+    }
+}
+
+/* The picture at the rendition's size, deinterlaced if it was two fields. */
+static bool scale_picture(struct vxc *v, const struct vframe *in, struct vframe *out)
+{
+    int dw = v->cfg.width, dh = v->cfg.height;
+    int cw = (dw + 1) / 2, ch = (dh + 1) / 2;
+    int bps = in->depth > 8 ? 2 : 1;
+    size_t need = ((size_t)dw * dh + 2 * (size_t)cw * ch) * (size_t)bps;
+    size_t extra = sizeof(struct span) * ((size_t)dw + dh) + sizeof(float) * (size_t)dw;
+    struct span *sx, *sy;
+    float *line;
+    uint8_t *dst;
+
+    if (need + extra > v->scaled_size) {
+        uint8_t *n = realloc(v->scaled, need + extra);
+
+        if (!n)
+            return false;
+        v->scaled = n;
+        v->scaled_size = need + extra;
+    }
+    dst = v->scaled;
+    sx = (struct span *)(v->scaled + need);
+    sy = sx + dw;
+    line = (float *)(sy + dh);
+    *out = *in;
+    out->width = dw;
+    out->height = dh;
+    out->interlaced = false;
+    /* The shape of a pixel follows the picture: the display shape stays. */
+    if (in->sar_num > 0 && in->sar_den > 0) {
+        int64_t n = (int64_t)in->sar_num * in->width * dh;
+        int64_t d = (int64_t)in->sar_den * in->height * dw;
+        int64_t g;
+
+        for (g = n < d ? n : d; g > 1; g--)
+            if (n % g == 0 && d % g == 0)
+                break;
+        if (n / g < 65536 && d / g < 65536) {
+            out->sar_num = (int)(n / g);
+            out->sar_den = (int)(d / g);
+        }
+    }
+    for (int pl = 0; pl < 3; pl++) {
+        int sw = pl ? (in->width + 1) / 2 : in->width;
+        int sh = pl ? (in->height + 1) / 2 : in->height;
+        int w = pl ? cw : dw, h = pl ? ch : dh;
+
+        out->plane[pl] = dst;
+        out->stride[pl] = w * bps;
+        scale_plane(in->plane[pl], in->stride[pl], sw, sh, bps == 2, dst, w * bps, w, h,
+                    sx, sy, line, in->interlaced);
+        dst += (size_t)w * h * bps;
+    }
+    return true;
+}
+
 static void picture_in(struct vxc *v, const struct vframe *in)
 {
     struct vframe f = *in, tmp;
 
     v->st->frames_in++;
+    /* Another size wanted and the decoder did not make it: scaled here. */
+    if (f.mem == VMEM_CPU && v->cfg.width > 0 && v->cfg.height > 0 &&
+        (f.width != v->cfg.width || f.height != v->cfg.height)) {
+        if (!scale_picture(v, &f, &tmp))
+            return;
+        f = tmp;
+    }
     if (v->ectx && format_changed(v, &f)) {
         log_info("PID 0x%04X: the picture format changed", v->cfg.pid);
         encoder_close(v);
@@ -387,6 +544,19 @@ static void picture_in(struct vxc *v, const struct vframe *in)
             return;
         f = tmp;
     }
+    /* A key frame wherever the picture's own time crosses a multiple of
+     * the key-frame interval: every rendition of the channel, on any
+     * machine, keys on the same picture (see docs/DESIGN.md, stage 4). */
+    {
+        int64_t n = f.pts / v->gop;
+
+        if (f.pts < 0)
+            n--;
+        if (n != v->last_gop_n) {
+            f.force_key = true;
+            v->last_gop_n = n;
+        }
+    }
     if (v->eb->venc->push(v->ectx, &f) < 0)
         v->st->errors++;
     drain_encoder(v);
@@ -406,7 +576,7 @@ static void drain_decoder(struct vxc *v)
  * it will not open; then the object stays whole but has no decoder. */
 static bool decoder_to_cpu(struct vxc *v)
 {
-    struct vdec_cfg dc = { v->cfg.in, v->cfg.gpu, false, false };
+    struct vdec_cfg dc = { v->cfg.in, v->cfg.width, v->cfg.height, v->cfg.gpu, false, false };
     const struct codec_backend *b =
         codec_find(CODEC_VIDEO, CODEC_DECODER, v->cfg.in, WHERE_CPU, 0);
     char err[160] = "";
@@ -530,12 +700,15 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
     v->last_dts90 = NOPTS;
     v->frame_dur = STC_HZ / 25;
     v->vbv_ms = cfg->vbv_ms > 0 ? cfg->vbv_ms : DEFAULT_VBV_MS;
+    v->gop = (stc_t)(cfg->gop_ms > 0 ? cfg->gop_ms : DEFAULT_GOP_MS) * STC_PER_MS;
+    v->last_gop_n = INT64_MIN;
     v->want_cuda = eb->where == WHERE_NVIDIA;
 
     /* The decoder asked for, or the best that opens. */
     for (int skip = 0; !v->dctx; skip++) {
         /* H.264 goes out at 8 bits (see encoder_open). */
-        struct vdec_cfg dc = { cfg->in, cfg->gpu, v->want_cuda, cfg->out == CODEC_H264 };
+        struct vdec_cfg dc = { cfg->in, cfg->width, cfg->height, cfg->gpu, v->want_cuda,
+                               cfg->out == CODEC_H264 };
         const struct codec_backend *b =
             codec_find(CODEC_VIDEO, CODEC_DECODER, cfg->in, cfg->decoder, skip);
 
@@ -569,5 +742,6 @@ void vxc_free(struct vxc *v)
     if (v->dctx)
         v->db->vdec->close(v->dctx);
     free(v->conv);
+    free(v->scaled);
     free(v);
 }
