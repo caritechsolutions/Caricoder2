@@ -10,6 +10,7 @@
 #define SECTION_MAX   4098      /* 3 header bytes + 12-bit length */
 #define PSI_MAX       1024      /* PAT/PMT/SDT sections never exceed this */
 #define MAX_ES        48
+#define MAX_OTHER_PROGRAMS 64
 
 /* ---- section reassembly from TS payloads ---------------------------- */
 
@@ -52,6 +53,12 @@ struct program {
     uint16_t blob_len;
     uint8_t  blob[PSI_MAX];     /* program_info followed by each ES_info loop */
 
+    /* The other programs the input's PAT lists (numbers and PMT PIDs), so
+     * that renditions made here take numbers and PIDs clear of them. */
+    int      n_other;
+    uint16_t other_number[MAX_OTHER_PROGRAMS];
+    uint16_t other_pmt_pid[MAX_OTHER_PROGRAMS];
+
     bool     have_sdt;
     uint16_t onid;
     uint8_t  running_status;
@@ -67,6 +74,10 @@ bool psi_section_ok(const uint8_t *sec, int len, int table_id);
  * program. Returns true and fills the outputs when found. */
 bool psi_pat_find(const uint8_t *sec, int len, int want, uint16_t *ts_id,
                   uint8_t *version, uint16_t *number, uint16_t *pmt_pid);
+/* Every program in a PAT section but `except`: numbers and PMT PIDs, up
+ * to `max`. Returns how many. */
+int psi_pat_others(const uint8_t *sec, int len, int except, uint16_t *numbers,
+                   uint16_t *pmt_pids, int max);
 
 /* Fills number, pmt_version, pcr_pid, descriptors and the ES list. */
 bool psi_parse_pmt(const uint8_t *sec, int len, struct program *p);

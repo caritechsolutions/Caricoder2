@@ -59,6 +59,7 @@ struct engine {
     bool    have_prog;
     struct program prog;        /* the first program of the output */
     int     n_prog;             /* programs in the output (renditions) */
+    uint16_t prog_pmt_pid[MAX_PROGRAMS];    /* their PMT PIDs (input thread) */
     uint64_t discontinuities;
     struct demux_stats in_snap;
     uint64_t in_bytes, in_datagrams, rtp_datagrams;
@@ -201,12 +202,14 @@ static int specs_for(const struct xcode_spec *list, int n, int pid,
     return k;
 }
 
-/* Is this PID already in use in any of the output programs (streams,
- * PMTs, PCR), or claimed by an earlier rendition? */
+/* Is this PID already in use: in the input (our program's streams, PMT
+ * and PCR, and the PMTs of the input's other programs), in the output
+ * programs built so far, or claimed by an earlier rendition? Below 0x20
+ * is reserved for tables. */
 static bool pid_in_use(const struct program *list, int n, const uint16_t *claimed,
                        int n_claimed, uint16_t pid)
 {
-    if (pid == PID_PAT || pid == PID_SDT || pid == PID_NULL || pid < 0x10)
+    if (pid < 0x20 || pid >= PID_NULL)
         return true;
     for (int k = 0; k < n; k++) {
         if (list[k].pmt_pid == pid || list[k].pcr_pid == pid)
@@ -214,11 +217,30 @@ static bool pid_in_use(const struct program *list, int n, const uint16_t *claime
         for (int i = 0; i < list[k].n_es; i++)
             if (list[k].es[i].pid == pid)
                 return true;
+        for (int i = 0; i < list[k].n_other; i++)
+            if (list[k].other_pmt_pid[i] == pid)
+                return true;
     }
     for (int i = 0; i < n_claimed; i++)
         if (claimed[i] == pid)
             return true;
     return false;
+}
+
+/* The highest PID the input is known to use: new PIDs go above it, so a
+ * stream the source adds later (an audio after the video, say) does not
+ * land on a rendition's PID. */
+static uint16_t highest_pid(const struct program *p)
+{
+    uint16_t top = p->pmt_pid > p->pcr_pid ? p->pmt_pid : p->pcr_pid;
+
+    for (int i = 0; i < p->n_es; i++)
+        if (p->es[i].pid > top && p->es[i].pid < PID_NULL)
+            top = p->es[i].pid;
+    for (int i = 0; i < p->n_other; i++)
+        if (p->other_pmt_pid[i] > top && p->other_pmt_pid[i] < PID_NULL)
+            top = p->other_pmt_pid[i];
+    return top;
 }
 
 static uint16_t free_pid_after(const struct program *list, int n, uint16_t *claimed,
@@ -233,6 +255,30 @@ static uint16_t free_pid_after(const struct program *list, int n, uint16_t *clai
     } while (pid_in_use(list, n, claimed, *n_claimed, pid) && pid != base);
     claimed[(*n_claimed)++] = pid;
     return pid;
+}
+
+/* The output PID a running transcoder already has for this input PID and
+ * rendition, if it may keep it: a rendition keeps its PID across a change
+ * of the source's tables unless that PID is now really taken. */
+static uint16_t kept_pid(const struct engine *e, uint16_t in_pid, int k,
+                         const struct program *list, int n, uint16_t *claimed, int *n_claimed)
+{
+    int seen = 0;
+
+    for (int j = 0; j < e->n_xc; j++) {
+        if (e->xc_cfg[j].pid != in_pid || e->xc_cfg[j].out_pid == in_pid)
+            continue;
+        if (++seen == k) {
+            uint16_t pid = e->xc_cfg[j].out_pid;
+
+            if (!pid_in_use(list, n, claimed, *n_claimed, pid)) {
+                claimed[(*n_claimed)++] = pid;
+                return pid;
+            }
+            return 0;
+        }
+    }
+    return 0;
 }
 
 /*
@@ -277,9 +323,14 @@ static int plan_stream(struct engine *e, const struct program *p, int idx,
         }
         memset(c, 0, sizeof(*c));
         c->pid = p->es[idx].pid;
-        c->out_pid = out == 0 ? c->pid
-                              : free_pid_after(progs, n_progs, claimed, n_claimed,
-                                               (uint16_t)(c->pid + out - 1));
+        if (out == 0) {
+            c->out_pid = c->pid;
+        } else {
+            c->out_pid = kept_pid(e, c->pid, out, progs, n_progs, claimed, n_claimed);
+            if (c->out_pid == 0)
+                c->out_pid = free_pid_after(progs, n_progs, claimed, n_claimed,
+                                            (uint16_t)(highest_pid(p) + out - 1));
+        }
         c->in = in;
         c->out = s->codec;
         c->bitrate = s->bitrate;
@@ -391,10 +442,32 @@ static int update_xcodes(struct engine *e, const struct program *p, struct progr
     if (n_prog > MAX_PROGRAMS)
         n_prog = MAX_PROGRAMS;
     program_service_name(p, base, sizeof(base));
-    for (int k = 1; k < n_prog; k++) {
+    for (int k = 1, number = p->number; k < n_prog; k++) {
+        bool taken;
+
         np[k] = np[0];
-        np[k].number = (uint16_t)(p->number + k);
-        np[k].pmt_pid = free_pid_after(np, k, claimed, &n_claimed, (uint16_t)(p->pmt_pid + k - 1));
+        /* The next number that no program of the input has. */
+        do {
+            number = (number + 1) & 0xFFFF;
+            if (number == 0)
+                number = 1;
+            taken = false;
+            for (int i = 0; i < p->n_other; i++)
+                taken |= p->other_number[i] == number;
+            for (int j = 0; j < k; j++)
+                taken |= np[j].number == number;
+        } while (taken);
+        np[k].number = (uint16_t)number;
+        /* The PMT PID likewise above everything in use. A running
+         * rendition's program keeps its PMT PID when it is still free. */
+        np[k].pmt_pid = 0;
+        if (k < e->n_prog && !pid_in_use(np, k, claimed, n_claimed, e->prog_pmt_pid[k])) {
+            np[k].pmt_pid = e->prog_pmt_pid[k];
+            claimed[n_claimed++] = np[k].pmt_pid;
+        }
+        if (np[k].pmt_pid == 0)
+            np[k].pmt_pid = free_pid_after(np, k, claimed, &n_claimed,
+                                           (uint16_t)(highest_pid(p) + MAX_PROGRAMS + k - 1));
     }
 
     for (int i = 0; i < n_want; i++) {
@@ -475,6 +548,8 @@ static void on_program(void *opaque, const struct program *p)
     mux_set_programs(e->mux, np, n_prog);
     e->prog = np[0];
     e->n_prog = n_prog;
+    for (int k = 0; k < n_prog; k++)
+        e->prog_pmt_pid[k] = np[k].pmt_pid;
     e->have_prog = true;
     pthread_mutex_unlock(&e->lock);
 

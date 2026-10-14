@@ -594,6 +594,8 @@ static void pat_section(void *opaque, const uint8_t *sec, int len)
     d->next.number = number;
     d->next.pmt_pid = pmt_pid;
     d->next.pat_version = version;
+    d->next.n_other = psi_pat_others(sec, len, number, d->next.other_number,
+                                     d->next.other_pmt_pid, MAX_OTHER_PROGRAMS);
     publish(d);
 }
 

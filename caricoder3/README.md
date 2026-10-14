@@ -181,10 +181,11 @@ caricoder3 -i udp://... -o udp://... --audio aac:128k \
     --video h264:4M --video 1280x720:h264:2M --video 854x480:h264:900k
 ```
 
-Program 1 is the full-size version with the source's numbers and PIDs,
-program 2 the 720p one (program number, PMT PID and video PID one up, or
-the next free), and so on; the SDT names them "Channel 1280x720" and so
-forth. Key frames fall on the same pictures in every rendition, every
+Program 1 is the full-size version with the source's numbers and PIDs;
+the others take the next program numbers that no service of the input
+has, and PIDs above everything the input uses, so a stream the source
+adds later cannot land on them; the SDT names them "Channel 1280x720"
+and so forth. Key frames fall on the same pictures in every rendition, every
 `--gop` (2 s), so a packager cuts aligned segments. Each rendition is a
 transcoder of its own with its own decoder (the card's decoder scales as
 it decodes; on the CPU an area-averaging scaler follows libavcodec), so

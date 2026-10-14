@@ -651,14 +651,26 @@ so the DTH case is untouched.
 no size means the source's. `PID=` in front still picks which input
 video stream. One `--audio`, one `-o`.
 
-**Numbers and PIDs.** Rendition k (k = 0 for the first) is program
-(source number + k), PMT PID (source PMT PID + k) and video PID (source
-video PID + k); a PID already in use moves to the next free one (so with
-the audio on the PID after the video, the second rendition's video is two
-PIDs up). The first rendition therefore keeps the source's numbers, so a
-receiver tuned to the channel today sees no change. The SDT lists each as
-the service name with the size appended ("Channel 1280x720");
-`--service-name` sets the base.
+**Numbers and PIDs.** The first rendition keeps the source's program
+number, PMT PID and video PID, so a receiver tuned to the channel today
+sees no change. Each further rendition takes the next program number that
+no program of the input has (the demux keeps the input PAT's list, so
+with services 1840 and 1841 in the source the second rendition of 1840 is
+1842, not 1841, which is another service on that network), and PIDs
+above everything the input uses: video PIDs from (highest PID in use + 1)
+up, PMT PIDs eight further up. The first draft put them next to the
+source's PIDs (video + 1, PMT + 1), and the review showed why not: a
+stream the source adds later lands on the rendition's PID (an audio on
+the PID after the video is the ordinary layout), and the rendition had to
+move, leaving one PID that changed from video to audio mid-stream. A
+running rendition keeps its PIDs across a change of the source's tables
+unless one is now really taken. The SDT lists each as the service name
+with the size appended ("Channel 1280x720"); `--service-name` sets the
+base. The PCR of every program is the first rendition's video PID: legal,
+and ffmpeg's packager does not mind, but a receiver that filters one
+program by its PMT carries that PID along with it (2 Mb/s of 720p video
+beside a 300 kb/s rendition); a PCR of its own per program is a possible
+later refinement.
 
 **Each rendition is its own transcoder.** The engine already runs one
 `xcode` per transcoded input PID in its own thread; now several may hang
@@ -685,7 +697,10 @@ rendition sees the same pictures with the same time stamps, so they all
 key on the same picture, with no shared state between the threads, and
 the result is the same after a restart or on another machine. The
 encoders' own key-frame interval is set a little longer than `--gop` so
-they never key on their own in between. x264: `i_type = X264_TYPE_IDR`;
+they never key on their own in between, and their scene-cut detection is
+off (x264 and x265 would otherwise put a key frame at every cut, each at
+its own judgement, which the review found differing between renditions).
+x264: `i_type = X264_TYPE_IDR`;
 x265: `sliceType = X265_TYPE_IDR`; NVENC: `NV_ENC_PIC_FLAG_FORCEIDR`.
 Segment boundaries for the packager are then every `--gop`, exactly.
 

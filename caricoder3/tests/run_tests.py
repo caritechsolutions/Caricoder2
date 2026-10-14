@@ -2475,9 +2475,11 @@ def xc_video_renditions():
         vids = [p_ for p_, t in pids.items() if t == 0x1B]
         need(len(vids) == 1, f"program {n}: video PIDs {vids}")
         vpid[n] = vids[0]
-    # the first keeps the source's PID; the others take the next free ones
-    # (0x101 is the audio, so 0x102 and 0x103)
-    need(vpid == {1: 0x100, 2: 0x102, 3: 0x103}, f"video PIDs {vpid}")
+    # the first keeps the source's PID; the others go above everything the
+    # input uses (its PMT is on 0x1000), so that a stream the source adds later
+    # (an audio on 0x102, say) does not land on a rendition
+    need(vpid == {1: 0x100, 2: 0x1001, 3: 0x1002}, f"video PIDs {vpid}")
+    need({progs[n] for n in (2, 3)} == {0x1009, 0x100A}, f"PMT PIDs of the further programs: {progs}")
     need(len({r["sha"] for r in o.pes[0x101]}) == len(o.pes[0x101]), "audio PES repeated")
     # every program decodes, at its size, close to the (scaled) source
     res = []
@@ -2989,7 +2991,7 @@ def xc_nvidia_standin():
     must_pass(out)
     need(st["service"]["programs"] == 3, f"{st['service']['programs']} programs on the card")
     sizes = {s_["pid"]: s_.get("size") for s_ in st["service"]["streams"] if s_["mode"] == "transcode"}
-    need(sizes == {0x100: "320x240", 0x102: "160x120", 0x103: "240x180"}, str(sizes))
+    need(sizes == {0x100: "320x240", 0x1001: "160x120", 0x1002: "240x180"}, str(sizes))
     for s_ in st["service"]["streams"]:
         if s_["mode"] == "transcode":
             need((s_["decoder"], s_["encoder"]) == ("nvdec", "nvenc") and s_["frames_out"] >= 195,

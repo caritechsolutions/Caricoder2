@@ -121,6 +121,23 @@ bool psi_pat_find(const uint8_t *sec, int len, int want, uint16_t *ts_id,
     return false;
 }
 
+int psi_pat_others(const uint8_t *sec, int len, int except, uint16_t *numbers,
+                   uint16_t *pmt_pids, int max)
+{
+    int n = 0;
+
+    for (int pos = 8; pos + 4 <= len - 4 && n < max; pos += 4) {
+        int num = (sec[pos] << 8) | sec[pos + 1];
+        int pid = ((sec[pos + 2] & 0x1F) << 8) | sec[pos + 3];
+
+        if (num == 0 || num == except)
+            continue;
+        numbers[n] = (uint16_t)num;
+        pmt_pids[n++] = (uint16_t)pid;
+    }
+    return n;
+}
+
 /* Section-carried stream types; everything else is treated as PES. */
 static uint8_t kind_for_stream_type(int st)
 {

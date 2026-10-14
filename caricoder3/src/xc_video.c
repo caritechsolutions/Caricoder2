@@ -467,11 +467,16 @@ static bool scale_picture(struct vxc *v, const struct vframe *in, struct vframe 
     if (in->sar_num > 0 && in->sar_den > 0) {
         int64_t n = (int64_t)in->sar_num * in->width * dh;
         int64_t d = (int64_t)in->sar_den * in->height * dw;
-        int64_t g;
+        int64_t g = n, t = d;
 
-        for (g = n < d ? n : d; g > 1; g--)
-            if (n % g == 0 && d % g == 0)
-                break;
+        while (t) {                         /* Euclid */
+            int64_t r = g % t;
+
+            g = t;
+            t = r;
+        }
+        if (g < 1)
+            g = 1;
         if (n / g < 65536 && d / g < 65536) {
             out->sar_num = (int)(n / g);
             out->sar_den = (int)(d / g);

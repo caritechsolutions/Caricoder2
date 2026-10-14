@@ -82,6 +82,7 @@ static void *x4_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     p.i_keyint_max = (int)(fps * cfg->gop_ms / 1000.0) + 3;
     if (p.i_keyint_max < 1)
         p.i_keyint_max = 1;
+    p.i_scenecut_threshold = 0;             /* no key frames of its own at scene cuts */
     p.b_open_gop = 0;
 
     /* What a transport stream needs: start codes, parameter sets with

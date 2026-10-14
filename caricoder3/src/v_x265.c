@@ -69,6 +69,7 @@ static void *x5_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     p->keyframeMax = (int)(fps * cfg->gop_ms / 1000.0) + 3;
     if (p->keyframeMax < 1)
         p->keyframeMax = 1;
+    p->scenecutThreshold = 0;               /* no key frames of its own at scene cuts */
     p->bOpenGOP = 0;
 
     /* What a transport stream needs. */

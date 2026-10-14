@@ -731,7 +731,7 @@ int main(int argc, char **argv)
         case OPT_AUDIO:
         case OPT_VIDEO: {
             bool v = opt == OPT_VIDEO;
-            int max = v ? 4 : 8;
+            int max = v ? MAX_PROGRAMS : 8;
             int *n = v ? &o.eng.n_video : &o.eng.n_audio;
             struct xcode_spec *list = v ? o.eng.video : o.eng.audio;
 
