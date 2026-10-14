@@ -43,6 +43,7 @@ struct nve {
     void *enc;
     CUcontext ctx;
     bool own_ctx;
+    bool types_logged;
 
     enum codec_id codec;
     int width, height, depth, bps;      /* bps: bytes per sample */
@@ -650,7 +651,17 @@ static int nve_pull(void *ctx, struct vpacket *p)
             p->len = lb.bitstreamSizeInBytes;
             p->pts = (stc_t)lb.outputTimeStamp * STC_PER_90K;
             p->dts = p->pts;                /* no B-frames: decode order is display order */
-            p->key = lb.pictureType == NV_ENC_PIC_TYPE_IDR;
+            /* The driver's label is not relied on: on a Tesla P40 in
+             * field mode it did not say IDR for any picture. The bytes
+             * say what the picture is. */
+            p->key = lb.pictureType == NV_ENC_PIC_TYPE_IDR ||
+                     codec_es_has_key(e->codec, p->data, p->len, false);
+            if (!e->types_logged && lb.pictureType != NV_ENC_PIC_TYPE_P &&
+                lb.pictureType != NV_ENC_PIC_TYPE_IDR) {
+                e->types_logged = true;
+                log_dbg("nvenc: the driver labels a picture type %d (key by its bytes: %s)",
+                        (int)lb.pictureType, p->key ? "yes" : "no");
+            }
         } else {
             st = NV_ENC_ERR_OUT_OF_MEMORY;
         }

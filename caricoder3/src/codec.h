@@ -197,6 +197,15 @@ struct venc_ops {
 #define CODEC_THREADS_X264      6
 int codec_threads(int most);
 
+/*
+ * Does this piece of Annex B elementary stream hold the start of a key
+ * frame (H.264: an IDR picture; H.265: an IRAP picture)? With
+ * `or_params`, a parameter set counts too: a decoder can start there.
+ * Read from the bytes, which is what a receiver goes by, whatever an
+ * encoder says about its picture.
+ */
+bool codec_es_has_key(enum codec_id codec, const uint8_t *d, size_t len, bool or_params);
+
 /* ---- the registry --------------------------------------------------- */
 
 struct codec_backend {

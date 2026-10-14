@@ -84,6 +84,27 @@ int codec_threads(int most)
     return n < most ? n : most;
 }
 
+bool codec_es_has_key(enum codec_id codec, const uint8_t *d, size_t len, bool or_params)
+{
+    for (size_t i = 0; i + 4 < len; i++) {
+        unsigned type;
+
+        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1)
+            continue;
+        if (codec == CODEC_H264) {
+            type = d[i + 3] & 0x1F;
+            if (type == 5 || (or_params && type == 7))
+                return true;
+        } else {
+            type = (d[i + 3] >> 1) & 0x3F;
+            if ((type >= 16 && type <= 21) || (or_params && (type == 32 || type == 33)))
+                return true;
+        }
+        i += 2;
+    }
+    return false;
+}
+
 const char *codec_name(enum codec_id id)
 {
     switch (id) {

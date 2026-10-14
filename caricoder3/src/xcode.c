@@ -257,30 +257,6 @@ static void publish(struct xcode *x)
     pthread_mutex_unlock(&x->st_lock);
 }
 
-/* Does this PES packet hold the start of a picture a decoder can begin
- * with? Looked for by its NAL unit types: an IDR picture or a sequence
- * parameter set in H.264; an IRAP picture or a parameter set in H.265. */
-static bool starts_at_key(enum codec_id codec, const uint8_t *d, size_t len)
-{
-    for (size_t i = 0; i + 4 < len; i++) {
-        unsigned type;
-
-        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1)
-            continue;
-        if (codec == CODEC_H264) {
-            type = d[i + 3] & 0x1F;
-            if (type == 5 || type == 7)
-                return true;
-        } else {
-            type = (d[i + 3] >> 1) & 0x3F;
-            if ((type >= 16 && type <= 21) || type == 32 || type == 33)
-                return true;
-        }
-        i += 2;
-    }
-    return false;
-}
-
 static void process(struct xcode *x, struct es_unit *u)
 {
     if (x->skip_to_key) {
@@ -292,7 +268,7 @@ static void process(struct xcode *x, struct es_unit *u)
             log_warn("PID 0x%04X: no key frame recognised in %d s of video; decoding "
                      "from where it is", x->cfg.pid, (int)(SKIP_MAX / STC_HZ));
         } else if (off < 0 ||
-                   !starts_at_key(x->cfg.in, u->data + off, u->len - (size_t)off)) {
+                   !codec_es_has_key(x->cfg.in, u->data + off, u->len - (size_t)off, true)) {
             pthread_mutex_lock(&x->q_lock);
             x->overflow++;
             pthread_mutex_unlock(&x->q_lock);
