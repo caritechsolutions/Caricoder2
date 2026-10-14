@@ -623,6 +623,91 @@ newer; 12.2 needs 550.54.14. A P40 has two encoder engines and
 unrestricted sessions, encodes H.264 and H.265 including 10-bit, and has
 no H.265 B-frames and no AV1.
 
+### Stage 4: several renditions from one channel (adaptive bit rate)
+
+Written 2026-10-14, before the code. What it is for: IPTV/OTT, where a
+player switches between versions of the same channel at different sizes
+and bit rates. The packager that turns this into HLS/DASH is a later
+stage of its own; stage 4 produces what any packager needs.
+
+**What comes out.** One transport stream on one UDP group, with one
+program per rendition: program 1 is the 1080p version, program 2 the
+720p, and so on. Each program is a complete service a receiver can play
+on its own. The audio and the PCR are not repeated: the same audio PID
+is listed in every PMT, and every PMT names the same PCR PID. That is
+ordinary MPEG-TS (a PID may belong to any number of programs) and is what
+packagers expect, where several video PIDs inside one program is not: a
+receiver takes the first video of a program and ignores the rest. A
+channel with one rendition is a single-program stream exactly as today,
+so the DTH case is untouched.
+
+**Command line.**
+
+    --video 1920x1080:h264:4M --video 1280x720:h264:2M --video 640x360:h264:800k
+
+`--video` may be repeated; a size prefix makes a rendition at that size,
+no size means the source's. `PID=` in front still picks which input
+video stream. One `--audio`, one `-o`.
+
+**Numbers and PIDs.** Rendition k (k = 0 for the first) is program
+(source number + k), PMT PID (source PMT PID + k) and video PID (source
+video PID + k); a PID already in use moves to the next free one. The
+first rendition therefore keeps the source's numbers, so a receiver tuned
+to the channel today sees no change. The SDT lists each as the service
+name with the size appended ("Channel 720p"); `--service-name` sets the
+base.
+
+**Each rendition is its own transcoder.** The engine already runs one
+`xcode` per transcoded input PID in its own thread; now several may hang
+off the same input PID, each with its own output PID. `deliver()` hands
+every unit of that PID to each of them (copied for all but the last).
+Each has its own decoder: on the card, NVDEC decodes and scales in one
+step (`ulTargetWidth/Height` in the decoder it creates: the card's own
+scaler, no new GPU code); on the CPU, libavcodec decodes and a scaler in
+`xc_video.c` resizes. So three renditions decode the source three
+times. On a P40 that is about a third of one card's decoder for three
+1080p renditions (measured 10x real time for decode plus encode of one);
+on the CPU, three 1080p decodes at four threads each. Sharing one decode
+between encoders is an optimisation for when that becomes the limit, not
+a requirement, and it is deferred until measured.
+
+**Key frames line up without any coordination.** A player can only switch
+renditions at a key frame, so every rendition must have one at the same
+instant. Each encoder gets a flag on the picture: "make this a key
+frame", set whenever the picture's presentation time crosses a multiple
+of `--gop` (2 s by default) on the stream's own time line. Every
+rendition sees the same pictures with the same time stamps, so they all
+key on the same picture, with no shared state between the threads, and
+the result is the same after a restart or on another machine. The
+encoders' own key-frame interval is set a little longer than `--gop` so
+they never key on their own in between. x264: `i_type = X264_TYPE_IDR`;
+x265: `sliceType = X265_TYPE_IDR`; NVENC: `NV_ENC_PIC_FLAG_FORCEIDR`.
+Segment boundaries for the packager are then every `--gop`, exactly.
+
+**Interlaced sources.** OTT renditions are progressive. On the card the
+decoder deinterlaces (adaptive mode) when scaling to a progressive
+output; on the CPU a plain deinterlacer (field blend, later a better
+one) runs before the scaler. One output frame per source frame (25p from
+25i), not one per field: the usual choice for OTT, half the encoding.
+A rendition at the source size with no scaling keeps fields as today.
+
+**Mux.** `mux_set_program()` becomes `mux_set_programs(list)`: one PAT
+listing all, one PMT table per program (each on its own PID with its own
+version), one SDT with all services. Streams are keyed by PID as now, so
+a shared audio PID is one stream whichever PMTs list it. The PCR comes
+from the first rendition's video PID. The checker (`ts_check.py`) gets a
+`--program N` for each.
+
+**Not in stage 4.** Frame-rate change; the packager; sharing one decode.
+
+**Tests.** Three renditions from one source in file mode: each program
+decodes with ffmpeg, pictures at the source's times, key frames at the
+same PTS in all three (and every 2 s), bit rates in range, audio one PID
+listed thrice and identical; the copy path still bit-identical to
+5ac4b53; the single-rendition output byte-identical to stage 3; a live
+run with the stand-in card; and ffmpeg's HLS packager producing aligned
+segments from the output as the reference for the later packager stage.
+
 ### Decisions still open
 
 **HE-AAC** (decided 2026-10-14). Ubuntu ships fdk-aac with the HE-AAC
