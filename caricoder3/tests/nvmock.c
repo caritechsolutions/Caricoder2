@@ -185,12 +185,24 @@ CUresult cuGetErrorString(CUresult error, const char **pstr)
 struct m_res { void *mem; uint32_t pitch, width, height; NV_ENC_BUFFER_FORMAT fmt; int mapped; };
 struct m_bs  { uint8_t data[64]; uint32_t len; uint64_t ts; int idr; int full; };
 
+/* A coded picture waiting to be handed out in decode order. */
+struct m_pic {
+    uint8_t data[64];
+    uint32_t len;
+    uint64_t ts;
+    int idr;
+};
+
 struct m_enc {
     int init, field;
     GUID codec;
     uint32_t w, h, gop;
     NV_ENC_BUFFER_FORMAT fmt;
     uint64_t n;
+    int bframes;                            /* frameIntervalP - 1 */
+    struct m_pic held[8];                   /* pictures given, not yet coded */
+    struct m_bs *held_bs[8];                /* their bitstream buffers, in order given */
+    int n_held;
     struct m_res *res[MAX_RES];
     struct m_bs *bs[MAX_RES];
     int n_res, n_bs, pending;
@@ -220,6 +232,8 @@ static NVENCSTATUS NVENCAPI m_caps(void *enc, GUID codec, NV_ENC_CAPS_PARAM *p, 
     case NV_ENC_CAPS_HEIGHT_MAX: *val = 4096; break;
     case NV_ENC_CAPS_SUPPORT_10BIT_ENCODE: *val = is_guid(&codec, &NV_ENC_CODEC_HEVC_GUID); break;
     case NV_ENC_CAPS_SUPPORT_FIELD_ENCODING: *val = is_guid(&codec, &NV_ENC_CODEC_H264_GUID); break;
+    /* Like a Pascal card: B-frames for H.264 only. */
+    case NV_ENC_CAPS_NUM_MAX_BFRAMES: *val = is_guid(&codec, &NV_ENC_CODEC_H264_GUID) ? 4 : 0; break;
     default: *val = 0; break;
     }
     return NV_ENC_SUCCESS;
@@ -252,7 +266,11 @@ static NVENCSTATUS NVENCAPI m_init(void *enc, NV_ENC_INITIALIZE_PARAMS *p)
     CHECK(p->darWidth && p->darHeight, "display aspect ratio %u:%u", p->darWidth, p->darHeight);
     CHECK(p->enablePTD == 1 && p->enableEncodeAsync == 0, "expected PTD on, async off");
     CHECK(p->tuningInfo != NV_ENC_TUNING_INFO_UNDEFINED, "tuning info not set");
-    CHECK(p->encodeConfig->frameIntervalP == 1, "this stand-in only does frameIntervalP 1");
+    CHECK(p->encodeConfig->frameIntervalP >= 1 && p->encodeConfig->frameIntervalP <= 5,
+          "frameIntervalP %d", (int)p->encodeConfig->frameIntervalP);
+    CHECK(p->encodeConfig->frameIntervalP == 1 || is_guid(&p->encodeGUID, &NV_ENC_CODEC_H264_GUID),
+          "B-frames asked for where this card has none");
+    e->bframes = (int)p->encodeConfig->frameIntervalP - 1;
     CHECK(p->encodeConfig->rcParams.enableLookahead == 0, "this stand-in has no look-ahead");
     CHECK(p->encodeConfig->rcParams.averageBitRate > 0 &&
           p->encodeConfig->rcParams.vbvBufferSize > 0, "rate control not set");
@@ -382,18 +400,45 @@ static NVENCSTATUS NVENCAPI m_destroy_bs(void *enc, NV_ENC_OUTPUT_PTR bs)
     VIOLATION("destroying a bitstream buffer that does not exist");
 }
 
+/* Codes what is held: the last picture as the reference, first, then the
+ * B pictures before it in the order given. Each goes into the bitstream
+ * buffer that came with the k-th picture, as the real encoder does. */
+static void put_pic(struct m_bs *b, const struct m_pic *pic)
+{
+    b->idr = pic->idr;
+    b->ts = pic->ts;
+    b->len = pic->len;
+    memcpy(b->data, pic->data, pic->len);
+    b->full = 1;
+}
+
+static void emit_held(struct m_enc *e)
+{
+    int n = e->n_held;
+
+    if (n == 0)
+        return;
+    put_pic(e->held_bs[0], &e->held[n - 1]);
+    for (int i = 0; i < n - 1; i++)
+        put_pic(e->held_bs[i + 1], &e->held[i]);
+    e->n_held = 0;
+}
+
 static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
 {
     struct m_enc *e = enc;
     struct m_res *x = p->inputBuffer;
     struct m_bs *b = p->outputBitstream;
+    struct m_pic pic;
     uint32_t bps, sum = 0;
     const uint8_t *mem;
 
     NEED_CTX("nvEncEncodePicture");
     CHECK(p->version == NV_ENC_PIC_PARAMS_VER, "pic params version");
-    if (p->encodePicFlags & NV_ENC_PIC_FLAG_EOS)
+    if (p->encodePicFlags & NV_ENC_PIC_FLAG_EOS) {
+        emit_held(e);
         return NV_ENC_SUCCESS;
+    }
     CHECK(x && x->mapped, "encoding from a surface that is not mapped");
     CHECK(b && !b->full, "encoding into a bitstream buffer whose last output was not collected");
     CHECK(p->inputWidth == e->w && p->inputHeight == e->h && p->inputPitch == x->pitch,
@@ -411,21 +456,39 @@ static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
         for (uint32_t i = 0; i < e->w * bps; i += 97)
             sum += mem[(size_t)r * x->pitch + i];
 
-    b->idr = (e->n % e->gop) == 0;
-    b->ts = p->inputTimeStamp;
-    memcpy(b->data, "\0\0\0\1\x09NVMK", 9);
-    b->data[9] = (uint8_t)(e->w >> 8);
-    b->data[10] = (uint8_t)e->w;
-    b->data[11] = (uint8_t)(e->h >> 8);
-    b->data[12] = (uint8_t)e->h;
-    b->data[13] = (uint8_t)(bps == 2 ? 10 : 8);
-    b->data[14] = (uint8_t)b->idr;
-    b->data[15] = is_guid(&e->codec, &NV_ENC_CODEC_HEVC_GUID);
-    memcpy(b->data + 16, &sum, 4);
-    b->len = 20 + (b->idr ? 30 : 4);
-    b->full = 1;
+    memset(&pic, 0, sizeof(pic));
+    pic.idr = (e->n % e->gop) == 0;
+    pic.ts = p->inputTimeStamp;
+    memcpy(pic.data, "\0\0\0\1\x09NVMK", 9);
+    pic.data[9] = (uint8_t)(e->w >> 8);
+    pic.data[10] = (uint8_t)e->w;
+    pic.data[11] = (uint8_t)(e->h >> 8);
+    pic.data[12] = (uint8_t)e->h;
+    pic.data[13] = (uint8_t)(bps == 2 ? 10 : 8);
+    pic.data[14] = (uint8_t)pic.idr;
+    pic.data[15] = is_guid(&e->codec, &NV_ENC_CODEC_HEVC_GUID);
+    memcpy(pic.data + 16, &sum, 4);
+    pic.len = 20 + (pic.idr ? 30 : 4);
     e->n++;
-    return NV_ENC_SUCCESS;
+
+    if (e->bframes == 0) {
+        put_pic(b, &pic);
+        return NV_ENC_SUCCESS;
+    }
+    /* An IDR picture is a group of its own: what is held is coded first,
+     * with its last picture as the reference. */
+    if (pic.idr) {
+        emit_held(e);
+        put_pic(b, &pic);
+        return NV_ENC_SUCCESS;
+    }
+    e->held[e->n_held] = pic;
+    e->held_bs[e->n_held++] = b;
+    if (e->n_held == e->bframes + 1) {
+        emit_held(e);
+        return NV_ENC_SUCCESS;
+    }
+    return NV_ENC_ERR_NEED_MORE_INPUT;
 }
 
 static NVENCSTATUS NVENCAPI m_lock(void *enc, NV_ENC_LOCK_BITSTREAM *l)

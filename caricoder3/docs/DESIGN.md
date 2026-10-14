@@ -565,7 +565,9 @@ and 1.5 s with 64; in the live test, 1.8 s.
 
 ### NVIDIA
 
-Not yet run on a card: see the README. What the code does:
+First run on a card on 2026-10-14 (see the README); the key-frame label
+in field mode was the one thing the card did differently from the
+headers (see `v_nvenc.c`). What the code does:
 
 - `nv_common.c` opens the driver's three libraries at run time and keeps
   one CUDA context per card for the whole process. Everything on a card
@@ -578,10 +580,17 @@ Not yet run on a card: see the README. What the code does:
   Asked for 8-bit pictures from 10-bit video, the card converts.
 - `v_nvenc.c` keeps a pool of eight surfaces registered with the encoder.
   A picture from the card is copied into one, card to card; a picture
-  from the CPU decoder is interleaved and uploaded. No B-frames and no
-  look-ahead: every picture comes back coded at once, and decode time
-  equals presentation time. Rate control is VBR capped at the bit rate,
-  with the same buffer as on the CPU.
+  from the CPU decoder is interleaved and uploaded. H.264 is coded with
+  two B-frames between references (frameIntervalP 3), H.265 without
+  (none on Pascal). With B-frames the card answers "need more input"
+  until a reference is coded, then the group comes out at once in decode
+  order, each picture in the bitstream buffer handed in with the k-th
+  picture; the decode time of the k-th picture out is two pictures before
+  the time of the k-th picture given (the rule ffmpeg uses: at a steady
+  frame rate the time of the picture given two earlier, but it does not
+  reach back across a gap in the input), never after its own time. No
+  look-ahead. Rate control is VBR capped at the bit rate, with the same
+  buffer as on the CPU.
 - If the card will not decode a stream (a format it does not take, no
   decoder to be had) and nobody insisted on the card, the CPU decoder
   takes over from the very unit that failed; the encoder stays on the
@@ -623,8 +632,8 @@ original fdk-aac from source (full band in; HE-AAC output possible later).
 The alternative, decoding AAC through libavcodec, was not taken: it meant
 a new backend to write and verify, and no HE-AAC output.
 
-**B-frames on NVENC.** Left out to keep the first hardware bring-up
-simple. They are worth roughly a tenth of the bit rate on H.264.
+**B-frames on NVENC** (done 2026-10-14, after the first hardware run):
+two for H.264, none for H.265 on this card generation.
 
 ### Licensing, to check before anything is distributed
 

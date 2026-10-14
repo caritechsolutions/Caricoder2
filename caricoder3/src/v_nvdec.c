@@ -8,8 +8,9 @@
  * to decode, and when one is ready to show. Shown pictures are queued
  * here and handed out one at a time, still on the card.
  *
- * NOT YET RUN ON REAL HARDWARE when this was written: the machine it was
- * written on has no NVIDIA card. `caricoder3 --gpu-test` exercises it.
+ * Written on a machine without a card; first run on a Tesla P40 (driver
+ * 535) on 2026-10-14, where it decoded H.264, H.265, 10-bit and fields as
+ * expected. `caricoder3 --gpu-test` exercises it.
  */
 #ifdef HAVE_NVIDIA
 

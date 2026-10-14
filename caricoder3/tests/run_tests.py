@@ -2712,7 +2712,21 @@ def xc_nvidia_standin():
     x = xstats(st, 0x100)
     need((x["decoder"], x["encoder"]) == ("libavcodec", "nvenc"), str(x))
     need(x["frames_out"] >= 198, f"{x['frames_out']} pictures out")
-    res.append("CPU decode + card encode")
+    # H.264 on the card is coded with B-frames: pictures come out in decode
+    # order, so most have a decode time before their presentation time, decode
+    # times only move forward, and every picture is still at its original time
+    o = Analysis(out)
+    v = o.pes[0x100]
+    d = [r["dts"] for r in v]
+    need(all(y > x for x, y in zip(d, d[1:])), "decode times do not move forward with B-frames")
+    need(all(r["dts"] <= r["pts"] for r in v), "a decode time after its presentation time")
+    reordered = sum(1 for r in v if r["dts"] < r["pts"])
+    need(reordered > len(v) // 2, f"only {reordered} of {len(v)} pictures show a B-frame delay: "
+                                  f"the card was not asked for B-frames")
+    need({r["pts"] for r in v} <= in_pts, "video time stamps that the input did not have")
+    need(sorted(r["pts"] for r in v) != [r["pts"] for r in v], "pictures came out in display "
+         "order: no reordering happened")
+    res.append(f"CPU decode + card encode with B-frames ({reordered}/{len(v)} pictures reordered)")
 
     # 10-bit video that must come out as 8-bit H.264: the card converts
     src10 = v_source("xc_v_hevc10", "hevc", pix="yuv420p10le")

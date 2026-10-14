@@ -8,12 +8,19 @@
  * about: card to card for the first kind, which never touches the CPU,
  * and an upload for the second.
  *
- * No B-frames and no look-ahead for now: every picture given comes back
- * coded at once, decode time equals presentation time, and the encoder
- * adds no delay. (The Tesla P40 has no H.265 B-frames in any case.)
+ * B-frames: H.264 is coded with two B-frames between references
+ * (frameIntervalP 3) when the card offers them, which takes about a tenth
+ * off the bit rate for the same quality. The card then holds pictures
+ * back: a picture is given, the call says "need more input", and once a
+ * reference has been coded the whole group comes out at once, in decode
+ * order, each in the bitstream buffer that was handed in with the k-th
+ * picture, not the one of its own picture. The decode time of each is
+ * worked out here (the presentation time of the picture given two
+ * earlier: the usual rule for a delay of two). H.265 has no B-frames on
+ * the Tesla P40 (Pascal) and is coded without. No look-ahead.
  *
- * NOT YET RUN ON REAL HARDWARE when this was written: the machine it was
- * written on has no NVIDIA card. `caricoder3 --gpu-test` exercises it.
+ * First run on real hardware (Tesla P40, driver 535) on 2026-10-14 for
+ * the part without B-frames; `caricoder3 --gpu-test` exercises it.
  */
 #ifdef HAVE_NVIDIA
 
@@ -27,6 +34,8 @@
 #include "nv_common.h"
 
 #define POOL 8
+#define BFRAMES_H264 2                  /* between references; 0 turns them off */
+#define PTS_RING 64                     /* input time stamps kept for decode times */
 
 struct slot {
     CUdeviceptr mem;
@@ -55,6 +64,10 @@ struct nve {
     int pend_head, pend_n;
     int ready;                          /* how many of them can be collected */
     bool flushing, eos_sent;
+    int bframes;                        /* pictures the card holds back */
+    int64_t in_pts[PTS_RING];           /* presentation times, in the order given */
+    uint64_t n_in, n_out;
+    int64_t frame90;                    /* one picture, 90 kHz */
 
     uint8_t *host;                      /* staging for pictures from the CPU */
     size_t host_cap;
@@ -306,7 +319,15 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     if (gop < 1)
         gop = 1;
     conf.gopLength = (uint32_t)gop;
-    conf.frameIntervalP = 1;                /* no B-frames: see the top of this file */
+    /* B-frames (H.264 only on this generation): see the top of this file. */
+    e->bframes = 0;
+    if (cfg->codec == CODEC_H264 && BFRAMES_H264 > 0) {
+        int most = cap(e, codec, NV_ENC_CAPS_NUM_MAX_BFRAMES);
+
+        e->bframes = most < BFRAMES_H264 ? most : BFRAMES_H264;
+    }
+    conf.frameIntervalP = (int32_t)(e->bframes + 1);
+    e->frame90 = (int64_t)(90000.0 / fps + 0.5);
     conf.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
     conf.rcParams.averageBitRate = (uint32_t)cfg->bitrate;
     conf.rcParams.maxBitRate = (uint32_t)cfg->bitrate;
@@ -376,10 +397,24 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     ip.enablePTD = 1;                       /* the card decides picture types */
     ip.encodeConfig = &conf;
     st = e->fn.nvEncInitializeEncoder(e->enc, &ip);
+    /* The card said it encodes fields and then would not. Rather than
+     * lose the card for this stream: first fields without B-frames (the
+     * combination has not been tried on a card), then the two fields
+     * together as a frame. Each try in a session that has not seen the
+     * failure. */
+    if (st != NV_ENC_SUCCESS && conf.frameFieldMode == NV_ENC_PARAMS_FRAME_FIELD_MODE_FIELD &&
+        e->bframes > 0) {
+        log_warn("nvenc: interlaced encoding with B-frames was refused (%s); trying "
+                 "without B-frames", nv_status(e, st));
+        e->fn.nvEncDestroyEncoder(e->enc);
+        st = session_open(e);
+        if (st == NV_ENC_SUCCESS) {
+            e->bframes = 0;
+            conf.frameIntervalP = 1;
+            st = e->fn.nvEncInitializeEncoder(e->enc, &ip);
+        }
+    }
     if (st != NV_ENC_SUCCESS && conf.frameFieldMode == NV_ENC_PARAMS_FRAME_FIELD_MODE_FIELD) {
-        /* The card said it encodes fields and then would not. Rather than
-         * lose the card for this stream, encode the two fields together
-         * as a frame, in a session that has not seen the failure. */
         log_warn("nvenc: interlaced encoding was refused (%s); the fields are encoded "
                  "together as frames", nv_status(e, st));
         e->fn.nvEncDestroyEncoder(e->enc);
@@ -598,6 +633,10 @@ static int nve_push(void *ctx, const struct vframe *f)
     s->busy = true;
     e->pend[(e->pend_head + e->pend_n) % POOL] = idx;
     e->pend_n++;
+    /* (counted only once the card has taken it: a refused picture must
+     * not put the decode times of all that follow one picture off) */
+    e->in_pts[e->n_in % PTS_RING] = f->pts / STC_PER_90K;
+    e->n_in++;
     if (st == NV_ENC_SUCCESS)
         e->ready = e->pend_n;               /* everything submitted so far is done */
     return 0;
@@ -650,7 +689,20 @@ static int nve_pull(void *ctx, struct vpacket *p)
             p->data = e->out;
             p->len = lb.bitstreamSizeInBytes;
             p->pts = (stc_t)lb.outputTimeStamp * STC_PER_90K;
-            p->dts = p->pts;                /* no B-frames: decode order is display order */
+            /* Decode time: the k-th picture out is decoded B pictures
+             * before the k-th picture given is shown (the rule ffmpeg
+             * uses). At a steady frame rate that is the time of the
+             * picture given B earlier; after a gap in the input it does
+             * not reach back across the gap, as that would. Never after
+             * its own presentation time. Without B-frames: its own time. */
+            {
+                int64_t dts = e->in_pts[e->n_out % PTS_RING] - e->bframes * e->frame90;
+
+                if (dts > (int64_t)lb.outputTimeStamp)
+                    dts = (int64_t)lb.outputTimeStamp;
+                p->dts = (stc_t)dts * STC_PER_90K;
+                e->n_out++;
+            }
             /* The driver's label is not relied on: on a Tesla P40 in
              * field mode it did not say IDR for any picture. The bytes
              * say what the picture is. */
@@ -680,8 +732,9 @@ static int nve_pull(void *ctx, struct vpacket *p)
 
 static int nve_delay(void *ctx)
 {
-    (void)ctx;
-    return 0;
+    struct nve *e = ctx;
+
+    return e->bframes;
 }
 
 static void nve_close(void *ctx)

@@ -17,7 +17,7 @@ rest of this repository.
 | 1 | TS in → demux → remux → TS out, every stream copied | done; ran 34 hours on a live satellite feed |
 | 2 | Audio transcode: MP2, MP3, AAC, AC-3 in; AAC, MP2, MP3 out | done, tested |
 | 3a | Video transcode on the CPU: H.264, H.265 in and out | done, tested |
-| 3b | Video transcode on NVIDIA cards (NVDEC, NVENC) | **written, not yet run on a card** (see "NVIDIA") |
+| 3b | Video transcode on NVIDIA cards (NVDEC, NVENC) | done; first run on a Tesla P40 2026-10-14, B-frames since then only against stand-ins (see "NVIDIA") |
 | 3c | Video on Intel (VPL) | not started |
 | 4 | Scaling, deinterlace, several outputs from one decode | not started |
 | 5 | Supervision, API, GUI, side-by-side run against Flussonic | not started |
@@ -235,8 +235,11 @@ not distribution (see the end of `docs/DESIGN.md`).
 
 ### NVIDIA
 
-**The NVIDIA code has not yet run on an NVIDIA card.** It was written on a
-machine without one. What has been done instead: it compiles against the
+**The NVIDIA code first ran on a card (Tesla P40, driver 535) on
+2026-10-14**: the self-test passed all five rounds, and a live channel
+(HEVC in, H.264 out on the card, HE-AAC to AAC) ran clean; the B-frame
+part (interlaced with B-frames in particular) came after that run. It was written
+on a machine without a card. What was done before that: it compiles against the
 headers of NVIDIA's Video Codec SDK 12.1 (needs driver 530.41.03 or
 newer), and it runs against stand-in libraries (`tests/nvmock.c`) that
 hold it to the rules of the API as the headers state them: structure
@@ -258,8 +261,10 @@ interlaced H.264, and says after each step whether it worked and what the
 driver answered.
 
 How it is built: pictures decoded on the card stay on it and are copied,
-card to card, into the encoder's input. No B-frames and no look-ahead
-for now, so the encoder adds no delay. When the card lets a stream down
+card to card, into the encoder's input. H.264 is coded with two B-frames
+between references (about a tenth off the bit rate for the same quality;
+the card holds back two pictures for it); H.265 without, as the Tesla P40
+has no H.265 B-frames. No look-ahead. When the card lets a stream down
 and nobody insisted on the card (`--decoder nvidia`, `--encoder nvidia`),
 the CPU takes over and the log says so: if the card will not decode the
 stream (a format it does not take, no decoder free), the CPU decodes and
@@ -409,9 +414,10 @@ Transcoding:
 - No AC-3 or HE-AAC output. No E-AC-3 input.
 - HE-AAC input needs the full fdk-aac, which the installer builds; a build
   against Ubuntu's package is half band (see "HE-AAC").
-- The NVIDIA path has not run on a card yet (see "NVIDIA"). It encodes
-  without B-frames. Decoding on the card for an encoder on the CPU is not
-  built. Read against the SDK but untested, because the stand-in
+- The NVIDIA path: first run on a Tesla P40 on 2026-10-14 (self-test and a
+  live HEVC to H.264 channel); the B-frame part came after that run and
+  has passed only the stand-in libraries so far. Decoding on the card for
+  an encoder on the CPU is not built. Read against the SDK but untested, because the stand-in
   libraries cannot show them: PES packets that hold several pictures (a
   picture waiting to be fetched could be overwritten), the pictures in
   flight at a change of picture size (dropped), and streams that carry no
