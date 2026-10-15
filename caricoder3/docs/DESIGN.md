@@ -742,6 +742,87 @@ turn) and the encoders' own interval became a backstop three pictures
 longer; the first picture of a stream is a key frame as before, so a
 stream starts with two key frames close together.
 
+### Stage 5: outputs that come and go while the channel runs
+
+Written 2026-10-15, before the code. Decided with the owner the same day:
+SRT and RIST through libsrt and librist (protocol libraries, like
+libx264); RTMP as H.264/AAC push only; the GUI later, in plain HTML/JS
+served by a supervisor written in C; order: this stage, then the
+packager as one more output, then the GUI.
+
+**The one structural change: a ring between the mux and the outputs.**
+Today the mux hands each packet straight to one UDP sender in the output
+thread. Now it writes into a ring of packets (16k packets, 3 MB, one
+writer), and every output is a *sink*: its own thread with its own read
+cursor, woken when packets land, sending what is new. Adding a sink is
+giving it a cursor; removing one is stopping its thread. No sink can
+slow another or the pipeline: a sink that falls a whole ring behind has
+its cursor moved up and the packets it missed counted against it alone
+(`overrun`). The UDP output that exists today becomes the first sink
+with no change in what it sends: packets reach it microseconds after the
+mux paced them, and it still packs seven to a datagram with `sendmmsg`.
+
+**Sink interface** (`sink.h`): `open(url, options)`, `write(packets,
+n)`, `stats()`, `close()`, plus a name and the URL schemes it takes.
+Types: `udp`/`rtp` (exists; file output is the same sink writing to a
+file), `srt` caller and listener, `rist` caller and listener, `rtmp`
+push, later `hls`. A sink that connects (SRT caller, RIST caller, RTMP)
+reconnects by itself with a back-off, and says so in its statistics; a
+listener accepts one or more receivers as the library allows.
+
+**Control.** Each process has a control socket (`--control PATH`, a
+Unix socket; `--name NAME` puts it at `/run/caricoder3/NAME.sock`).
+Requests and replies are one JSON object per line: `list-outputs`,
+`add-output {url, id, options}`, `remove-output {id}`, `stats`, and
+later the transcoder settings. The same binary is the client:
+`caricoder3 ctl PATH add-output URL`. A per-channel config file
+(`--config FILE`, JSON) holds the outputs and is re-read on `SIGHUP`;
+outputs added over the socket are written back to it when it was given,
+so a restart brings them back. The supervisor and the GUI of stage 7 use
+nothing but this socket.
+
+**Statistics** per output in the JSON: type, URL, state (connecting,
+connected, listening, n receivers), packets and bytes sent, send errors,
+overruns (packets the sink was too slow for), and what the library
+offers (SRT/RIST: RTT, retransmissions, loss).
+
+**RTMP** carries only H.264 and AAC; a channel pushed to RTMP must have a
+program with those, and the sink says so and stays idle otherwise. The
+remux from transport stream to FLV is written here: SPS/PPS into the AVC
+sequence header, the AAC configuration from the ADTS header, timestamps
+from PTS/DTS.
+
+**Not in this stage.** Input types other than UDP/RTP (SRT/RIST input
+later, with the same libraries); the packager; the GUI.
+
+**As built (5a, 2026-10-15).** `ring.c`, `sink.c`, `sink_udp.c`,
+`control.c`, `json.c`; `main.c` lost its embedded sender. Two details
+that the design above did not settle:
+
+- *When a part-built datagram goes out.* The old sender flushed a short
+  datagram only in VBR, and only when the next packet was more than
+  300 µs away; a CBR output never sent a short one. A sink thread cannot
+  know when the next packet is due, so the output thread tells it: the
+  ring carries a flush mark (`ring_publish(r, flush)`), set under the
+  same rule as before, and a sink sends its part-built datagram when it
+  has read everything up to the mark. So the datagrams on the wire are
+  the ones the old code sent, and a CBR output still sends whole ones.
+  The output thread's wake-up is aimed at a datagram of seven packets
+  (`engine_run(..., 7, head % 7)`) whatever each output's `?pkt=`; an
+  output with another size fills its datagrams a little less evenly in
+  time, which the receiver's buffer absorbs.
+- *A file run has no threads.* With a file input there is no clock and
+  no reason for a ring: the mux writes straight into the one sink
+  (`sinks_write_sync`), so the output file is still bit-identical to
+  what stage 4 produced (checked: 36 file runs against the previous
+  binary, byte for byte), and the tests stay deterministic.
+
+The config file lists only *saved* outputs: those it already had and
+those added with `"save": true`. Outputs from `-o` are not written to it,
+so a service file's `-o` and a GUI's saved outputs do not fight over the
+file. On `SIGHUP` saved outputs the file no longer lists are removed,
+new ones added, running ones left running; `-o` outputs are untouched.
+
 ### Decisions still open
 
 **HE-AAC** (decided 2026-10-14). Ubuntu ships fdk-aac with the HE-AAC

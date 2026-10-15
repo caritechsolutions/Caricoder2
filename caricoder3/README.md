@@ -20,7 +20,11 @@ rest of this repository.
 | 3b | Video transcode on NVIDIA cards (NVDEC, NVENC) | done; first run on a Tesla P40 2026-10-14, B-frames since then only against stand-ins (see "NVIDIA") |
 | 3c | Video on Intel (VPL) | not started |
 | 4 | Several renditions of a channel in one stream (scaling, deinterlace, aligned key frames) | done on the CPU and against the stand-in card; not yet run on a real card |
-| 5 | Supervision, API, GUI, side-by-side run against Flussonic | not started |
+| 5a | Outputs added and removed while the channel runs; several outputs per channel; control socket; config file | done, tested (UDP, RTP, file) |
+| 5b | SRT and RIST outputs (caller and listener) | not started |
+| 5c | RTMP push | not started |
+| 6 | HLS packager as an output | not started |
+| 7 | Supervisor, GUI, side-by-side run against Flussonic | not started |
 
 MPEG-2 video is parked by decision: it is copied, not transcoded.
 
@@ -99,6 +103,12 @@ caricoder3 -i ... -o ... --video h264:3M --audio mp2:192k --muxrate 4M
 
 # The same, video on NVIDIA card 1
 caricoder3 -i ... -o ... --video h264:3M --audio mp2:192k --muxrate 4M --gpu 1
+
+# Two outputs, and a control socket to add or remove outputs later
+caricoder3 -i ... -o udp://239.6.6.6:6000 -o udp://10.0.0.9:6000 --name vacation
+caricoder3 ctl vacation add-output udp://239.6.6.7:6000
+caricoder3 ctl vacation list-outputs
+caricoder3 ctl vacation remove-output out3
 ```
 
 `caricoder3 --help` lists every option. The ones that matter most:
@@ -116,6 +126,8 @@ caricoder3 -i ... -o ... --video h264:3M --audio mp2:192k --muxrate 4M --gpu 1
 | `--preset NAME` | Encoder speed, in the encoder's own words: x264/x265 `ultrafast` … `medium` (default `veryfast`), NVENC `p1` … `p7` (default `p4`) |
 | `--gop MS` | Longest distance between key frames. Default 2000 |
 | `--vbv MS` | Video decoder buffer, as time at the bit rate. Default 1000 |
+| `--control PATH`, `--name NAME` | A Unix socket for adding and removing outputs while the channel runs; `--name` puts it at `/run/caricoder3/NAME.sock`. See "Outputs" |
+| `--config FILE` | JSON file of outputs, read at start and on `SIGHUP`; outputs added with `--save` are written to it |
 | `--stats-file PATH` | JSON status, rewritten atomically once a second |
 | `--rt-prio N` | Real-time priority for the output thread (needs `CAP_SYS_NICE`) |
 
@@ -128,6 +140,42 @@ share a port number do not get mixed.
 Output URLs accept `?ttl=` (default 8), `?iface=`, `?buf=`, and `?pkt=`
 (TS packets per datagram, default 7).
 
+### Outputs
+
+`-o` may be given more than once. Every output runs in a thread of its
+own, reading the muxed stream from a shared ring of packets, so a slow
+or dead output (a unicast port nobody listens on, a full socket buffer)
+loses its own packets and nothing else: the others, and the pipeline,
+do not notice. Packets missed that way are counted as `overruns` for
+that output.
+
+Outputs can be added and removed while the channel runs, over a Unix
+socket (`--control PATH`, or `--name NAME` for `/run/caricoder3/NAME.sock`),
+with the same binary as the client:
+
+```
+caricoder3 ctl NAME list-outputs
+caricoder3 ctl NAME add-output udp://239.6.6.7:6000 [ID] [--save]
+caricoder3 ctl NAME remove-output ID
+caricoder3 ctl NAME stats
+caricoder3 ctl NAME reload
+```
+
+The socket speaks one JSON object per line and answers with one:
+`{"cmd": "add-output", "url": "udp://...", "id": "cdn", "save": true}`
+→ `{"ok": true, "id": "cdn"}`; `{"cmd": "list-outputs"}` → the same
+array as `outputs` in the statistics. An output added with `--save` is
+written to the `--config` file (`{"outputs": [{"id", "url"}, ...]}`),
+which is read at start and again on `SIGHUP` or `reload`, so outputs
+survive a restart and can be edited by hand; outputs given with `-o` or
+added without `--save` are not in the file. A new output starts with
+the next packet the mux produces (it is not sent what was already
+sent), and the moment it is removed its last datagram goes out and its
+thread ends; the other outputs see nothing of either.
+
+Output types in this version: `udp://`, `rtp://`, a file. SRT, RIST and
+RTMP are the next stages.
+
 ### Under systemd
 
 ```ini
@@ -139,7 +187,8 @@ After=network-online.target
 Type=notify
 ExecStart=/usr/local/bin/caricoder3 -i udp://239.5.5.5:5000 \
           -o udp://239.6.6.6:6000?ttl=8 --muxrate 5M \
-          --stats-file /run/caricoder3/%i.json
+          --stats-file /run/caricoder3/%i.json \
+          --name %i --config /etc/caricoder3/%i.outputs.json
 RuntimeDirectory=caricoder3
 RuntimeDirectoryPreserve=yes
 Restart=always
@@ -373,9 +422,12 @@ needs more: see "Transcoding" above.
 - `clock`: locked or not, measured drift against the source in ppm, arrival
   jitter, time-line offset, number of discontinuities absorbed, units held
   back at this moment because the source clock is in doubt
+- `outputs`: one entry per output: id, type, URL, state, packets and
+  bytes handed to the transport, send errors, overruns (packets missed
+  for being too slow), whether it is saved in the config file
 - `output`: mode, bit rate, share of null packets, units dropped for lack
   of output rate, units that left after their own DTS, clock skips after a
-  process freeze, queue depth, send errors
+  process freeze, queue depth, send errors (all outputs together)
 
 The same figures go to the log every 10 seconds (`--stats-interval`).
 

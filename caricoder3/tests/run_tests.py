@@ -1476,6 +1476,184 @@ def live_multicast():
     return "joined, received and sent on the loopback interface; other group kept out"
 
 
+def ctl(sock, *args):
+    """caricoder3 ctl: returns (exit status, parsed reply)."""
+    p = subprocess.run([BIN, "ctl", sock, *args], capture_output=True, text=True)
+    try:
+        reply = json.loads(p.stdout) if p.stdout.strip() else None
+    except ValueError:
+        raise Fail(f"ctl {' '.join(args)}: reply is not JSON: {p.stdout[:200]}")
+    return p.returncode, reply
+
+
+@test
+def live_outputs_add_remove():
+    """Outputs added and removed over the control socket while the channel runs."""
+    src = synth("live_src", duration=10.0)
+    pin = _port[0]
+    _port[0] += 4
+    sock = w("ctl.sock")
+    cfg = w("outputs.json")
+    for f in (sock, cfg):
+        if os.path.exists(f):
+            os.remove(f)
+    cap_a, cap_b, cap_c = Capture(pin + 1), Capture(pin + 2), Capture(pin + 3)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://127.0.0.1:{pin + 1}",
+         "-r", "4M", "--control", sock, "--config", cfg,
+         "--stats-file", w("outputs.stats.json"), "--stats-interval", "0"],
+        stderr=subprocess.PIPE, text=True)
+    events = {}
+    try:
+        time.sleep(0.3)
+        rc, rep = ctl(sock, "list-outputs")
+        need(rc == 0 and rep["ok"] and len(rep["outputs"]) == 1 and
+             rep["outputs"][0]["id"] == "out1", f"list-outputs at start: {rep}")
+        rc, rep = ctl(sock, "remove-output", "nothing")
+        need(rc == 1 and not rep["ok"], f"removing an unknown output: {rc} {rep}")
+        rc, rep = ctl(sock, "add-output", "bogus://x")
+        need(rc == 1 and not rep["ok"], f"adding an unknown scheme: {rc} {rep}")
+        rc, rep = ctl(sock, "nonsense")
+        need(rc == 1 and not rep["ok"], f"unknown command: {rc} {rep}")
+        p = Player("127.0.0.1", pin)
+        plan = [
+            # at second, what
+            (3.0, lambda: ctl(sock, "add-output", f"udp://127.0.0.1:{pin + 2}", "b", "--save")),
+            (4.0, lambda: ctl(sock, "add-output", f"udp://127.0.0.1:{pin + 3}")),
+            (6.0, lambda: ctl(sock, "remove-output", "out1")),
+            (7.0, lambda: ctl(sock, "remove-output", "b")),
+        ]
+        t0 = time.time()
+
+        def gate(elapsed):
+            while plan and elapsed >= plan[0][0]:
+                at, fn = plan.pop(0)
+                events[at] = fn()
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(1.2)
+        st = json.load(open(w("outputs.stats.json")))
+        rc, listing = ctl(sock, "list-outputs")
+        rc2, stats = ctl(sock, "stats")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=5)
+        cap_a.stop(w("out_a.ts"))
+        cap_b.stop(w("out_b.ts"))
+        cap_c.stop(w("out_c.ts"))
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    for at, (rc, rep) in events.items():
+        need(rc == 0 and rep["ok"], f"command at {at} s failed: {rep}")
+    need(events[3.0][1]["id"] == "b" and events[4.0][1]["id"] == "out2",
+         f"ids given: {events[3.0][1]} {events[4.0][1]}")
+    need(len(listing["outputs"]) == 1 and listing["outputs"][0]["id"] == "out2",
+         f"outputs left at the end: {listing}")
+    need(rc2 == 0 and stats["ok"] and "outputs" in stats["stats"] and
+         stats["stats"]["outputs"][0]["id"] == "out2", "stats over the socket")
+    need(len(st["outputs"]) == 1 and st["outputs"][0]["packets"] > 0 and
+         st["outputs"][0]["overruns"] == 0, f"outputs in the statistics file: {st['outputs']}")
+    saved = json.load(open(cfg))
+    need(saved["outputs"] == [], f"config after the saved output was removed: {saved}")
+    a, b, c = (open(w(n), "rb").read() for n in ("out_a.ts", "out_b.ts", "out_c.ts"))
+    # Each output must be a clean stream on its own, and the later ones
+    # must carry exactly what the first one carried from the moment they
+    # joined: the same packets, in the same order, nothing missing.
+    # (a was cut off in mid-stream when removed: whole packets, but the
+    # last PES is as unfinished as it was at that moment)
+    need(len(a) % TS == 0, "the removed output did not end on a packet boundary")
+    must_pass(w("out_c.ts"), cbr=True)
+    must_match(src, w("out_c.ts"), subset=True)
+    need(len(b) > 2 * 4_000_000 // 8 and len(c) > 5 * 4_000_000 // 8,
+         f"later outputs too short: b {len(b)} c {len(c)} bytes")
+    # b ran 3..7 s, c from 4 s on: c's first second is inside b, b's last
+    # second inside c; a stopped at 6 s, so its last second is in c as well.
+    sec = 4_000_000 // 8 // TS * TS
+    need(c[:sec] in b, "output c's first packets are not in output b")
+    need(b[len(b) - sec:] in c, "output b's last packets are not in output c")
+    need(a[len(a) - sec:] in c, "the first output's last packets are not in the one that followed")
+    return f"a {len(a) // TS} packets until removed, b {len(b) // TS} (saved then removed), " \
+           f"c {len(c) // TS}; later outputs carry the same packets as the first"
+
+
+@test
+def live_outputs_config_reload():
+    """The config file: outputs at start, SIGHUP adds and removes."""
+    src = synth("live_src", duration=8.0)
+    pin = _port[0]
+    _port[0] += 4
+    sock = w("ctl2.sock")
+    cfg = w("outputs2.json")
+    json.dump({"outputs": [{"id": "main", "url": f"udp://127.0.0.1:{pin + 1}"}]}, open(cfg, "w"))
+    cap_a, cap_b = Capture(pin + 1), Capture(pin + 2)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-r", "4M",
+         "--control", sock, "--config", cfg, "--stats-interval", "0"],
+        stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.3)
+        rc, rep = ctl(sock, "list-outputs")
+        need(rc == 0 and [o["id"] for o in rep["outputs"]] == ["main"] and
+             rep["outputs"][0]["saved"], f"outputs from the config: {rep}")
+        p = Player("127.0.0.1", pin)
+        done = []
+
+        def gate(elapsed):
+            if elapsed >= 3.0 and "swap" not in done:
+                done.append("swap")
+                json.dump({"outputs": [{"id": "second", "url": f"udp://127.0.0.1:{pin + 2}"}]},
+                          open(cfg, "w"))
+                proc.send_signal(signal.SIGHUP)
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(1.2)
+        rc, rep = ctl(sock, "list-outputs")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=5)
+        cap_a.stop(w("cfg_a.ts"))
+        cap_b.stop(w("cfg_b.ts"))
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    need([o["id"] for o in rep["outputs"]] == ["second"], f"outputs after SIGHUP: {rep}")
+    a, b = open(w("cfg_a.ts"), "rb").read(), open(w("cfg_b.ts"), "rb").read()
+    need(len(a) > 2 * 500_000 and len(b) > 3 * 500_000, f"captures: a {len(a)} b {len(b)}")
+    must_pass(w("cfg_b.ts"), cbr=True)
+    return f"main {len(a) // TS} packets, then second {len(b) // TS} after SIGHUP"
+
+
+@test
+def live_output_dead_port_isolated():
+    """An output nobody listens to loses its datagrams; the other output is untouched."""
+    src = synth("live_src", duration=6.0)
+    pin = _port[0]
+    _port[0] += 4
+    cap = Capture(pin + 1)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://127.0.0.1:{pin + 1}",
+         "-o", f"udp://127.0.0.1:{pin + 3}", "-r", "4M",
+         "--stats-file", w("dead.json"), "--stats-interval", "0"],
+        stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.3)
+        p = Player("127.0.0.1", pin)
+        p.play(src)
+        p.close()
+        time.sleep(1.2)
+        st = json.load(open(w("dead.json")))
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=5)
+        cap.stop(w("dead_out.ts"))
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    must_pass(w("dead_out.ts"), cbr=True)
+    must_match(src, w("dead_out.ts"), subset=True)
+    good, dead = st["outputs"]
+    need(good["errors"] == 0 and good["overruns"] == 0, f"the good output: {good}")
+    need(dead["packets"] == good["packets"], f"both outputs were offered the same packets: {st['outputs']}")
+    return f"good output {good['packets']} packets, 0 errors; dead one {dead['errors']} send errors"
+
+
 @test
 def live_systemd_watchdog():
     """Reports READY and keeps petting the systemd watchdog while healthy."""

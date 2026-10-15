@@ -2,11 +2,13 @@
  * caricoder3 - command line, threads, statistics
  * Copyright (c) 2026 CariTech Solutions
  *
- * One process handles one channel. Three threads in live running:
+ * One process handles one channel. Threads in live running:
  *
- *   input   blocks in recvmmsg(), feeds the demux
- *   output  paces the mux onto the wire
- *   main    once a second: statistics file, log line, systemd watchdog
+ *   input    blocks in recvmmsg(), feeds the demux
+ *   output   paces the mux into the packet ring
+ *   one per  output (sink.c): from the ring to UDP, a file, SRT ...
+ *   control  the Unix socket (control.c): outputs come and go here
+ *   main     once a second: statistics file, log line, systemd watchdog
  */
 #include <errno.h>
 #include <getopt.h>
@@ -20,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -27,102 +30,47 @@
 #include "cc3.h"
 #include "clock.h"
 #include "codec.h"
+#include "control.h"
 #include "engine.h"
+#include "json.h"
 #include "log.h"
+#include "ring.h"
+#include "sink.h"
 #include "udp.h"
 
 #define RX_BATCH        64
 #define RX_SIZE         16384
-#define SINK_DGRAMS     640
-#define DGRAM_MAX       (7 * TS_SIZE)
+#define OUTPUTS_MAX     SINKS_MAX
+#define SOCK_DIR        "/run/caricoder3"
 #define VBR_DEFAULT_RATE 40000000LL
 #define DELAY_AUDIO_MS  800             /* default --delay when audio is transcoded */
 #define DELAY_VIDEO_MS  3000            /* ... and when video is */
 
 static atomic_int g_run = 1;             /* cleared by SIGINT / SIGTERM */
+static atomic_int g_hup = 0;             /* SIGHUP: re-read the config file */
 
 struct options {
-    const char *input, *output;
+    const char *input;
+    const char *output[OUTPUTS_MAX];
+    int n_output;
+    const char *control, *name, *config;
     const char *stats_file;
     int stats_interval;
     int rt_prio;
     struct engine_cfg eng;
 };
 
-/* ---- output sink ---------------------------------------------------- */
+/* ---- the mux's packets go into the ring ------------------------------ */
 
-struct sink {
-    FILE *fp;                   /* file output, else NULL */
-    int fd;                     /* UDP output */
-    int pkt;                    /* TS packets per datagram */
-    uint8_t (*dg)[DGRAM_MAX];
-    struct mmsghdr *mm;
-    struct iovec *iov;
-    int n_full, fill;
-    _Atomic uint64_t datagrams;
-    _Atomic uint64_t errors;
-};
-
-static void sink_flush(struct sink *s, bool partial)
+static void ring_out(void *opaque, const uint8_t *pkt)
 {
-    int total = s->n_full + ((partial && s->fill) ? 1 : 0);
-    int i = 0;
-
-    if (s->fp || total == 0)
-        return;
-
-    for (int k = 0; k < total; k++) {
-        s->iov[k].iov_base = s->dg[k];
-        s->iov[k].iov_len = (size_t)(k < s->n_full ? s->pkt : s->fill) * TS_SIZE;
-        memset(&s->mm[k], 0, sizeof(s->mm[k]));
-        s->mm[k].msg_hdr.msg_iov = &s->iov[k];
-        s->mm[k].msg_hdr.msg_iovlen = 1;
-    }
-    while (i < total) {
-        int rc = sendmmsg(s->fd, s->mm + i, (unsigned)(total - i), 0);
-
-        if (rc > 0) {
-            atomic_fetch_add(&s->datagrams, (uint64_t)rc);
-            i += rc;
-        } else if (errno != EINTR) {
-            /* Full socket buffer, or nobody listening on a unicast port:
-             * that datagram is lost, the rest still go. */
-            atomic_fetch_add(&s->errors, 1);
-            i++;
-        }
-    }
-
-    /* A part-built datagram that was not sent moves to the front. */
-    if (partial)
-        s->fill = 0;
-    else if (s->fill && s->n_full)
-        memcpy(s->dg[0], s->dg[s->n_full], (size_t)s->fill * TS_SIZE);
-    s->n_full = 0;
+    ring_push(opaque, pkt);
 }
 
-static void sink_out(void *opaque, const uint8_t *pkt)
+/* A file run has no output threads: the sinks are written as the mux goes. */
+static void sync_out(void *opaque, const uint8_t *pkt)
 {
-    struct sink *s = opaque;
-
-    if (s->fp) {
-        if (fwrite(pkt, 1, TS_SIZE, s->fp) != TS_SIZE)
-            atomic_fetch_add(&s->errors, 1);
-        return;
-    }
-    memcpy(s->dg[s->n_full] + (size_t)s->fill * TS_SIZE, pkt, TS_SIZE);
-    if (++s->fill == s->pkt) {
-        s->fill = 0;
-        if (++s->n_full == SINK_DGRAMS - 1)
-            sink_flush(s, false);
-    }
-}
-
-static bool sink_init(struct sink *s)
-{
-    s->dg = malloc((size_t)SINK_DGRAMS * DGRAM_MAX);
-    s->mm = calloc(SINK_DGRAMS, sizeof(*s->mm));
-    s->iov = calloc(SINK_DGRAMS, sizeof(*s->iov));
-    return s->dg && s->mm && s->iov;
+    sinks_write_sync(opaque, pkt);
 }
 
 /* ---- threads -------------------------------------------------------- */
@@ -130,8 +78,13 @@ static bool sink_init(struct sink *s)
 struct ctx {
     struct options *opt;
     struct engine *eng;
-    struct sink sink;
+    struct ring ring;
+    struct sinks sinks;
+    struct control *ctl;
     int rx_fd;
+    pthread_mutex_t stats_lock;             /* the last statistics as JSON, for the control socket */
+    char *stats_json;
+    size_t stats_len;
     _Atomic int64_t beat_in, beat_out;      /* thread heartbeats, ns */
     _Atomic int64_t last_rx;                /* last datagram received, ns */
     _Atomic uint64_t rx_overflow;           /* kernel socket buffer drops */
@@ -198,7 +151,6 @@ static void *input_thread(void *arg)
 static void *output_thread(void *arg)
 {
     struct ctx *c = arg;
-    struct sink *s = &c->sink;
     bool vbr = c->opt->eng.mux.vbr;
 
     /* Wake up when asked, not up to 50 us later (the default slack). */
@@ -213,14 +165,12 @@ static void *output_thread(void *arg)
 
     while (atomic_load(&g_run)) {
         int64_t now = clock_now_ns();
-        int64_t wake = engine_run(c->eng, now, s->pkt, s->fill);
+        /* The wake-up aims at the packet that completes a datagram of
+         * seven (what every UDP output sends unless its URL says otherwise). */
+        int64_t wake = engine_run(c->eng, now, 7, (int)(ring_now(&c->ring) % 7));
 
-        if (s->fp) {
-            fflush(s->fp);
-        } else {
-            /* VBR: do not sit on a part-filled datagram until more turns up. */
-            sink_flush(s, vbr && wake > now + 300000);
-        }
+        /* VBR: outputs must not sit on a part-filled datagram until more turns up. */
+        ring_publish(&c->ring, vbr && wake > now + 300000);
         atomic_store(&c->beat_out, now);
 
         now = clock_now_ns();
@@ -289,19 +239,11 @@ struct rates {
     uint64_t rx_overflow, rx_truncated, send_errors;
 };
 
-static void write_stats(const struct options *o, const struct engine_stats *st,
-                        const struct rates *r)
+static void stats_json(struct ctx *c, const struct engine_stats *st,
+                       const struct rates *r, FILE *f)
 {
-    char tmp[1024];
-    FILE *f;
-
-    if (!o->stats_file)
-        return;
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", o->stats_file) >= (int)sizeof(tmp))
-        return;
-    f = fopen(tmp, "w");
-    if (!f)
-        return;
+    const struct options *o = c->opt;
+    char url[SINK_URL_MAX];
 
     fprintf(f, "{\n  \"version\": \"%s\",\n  \"uptime_s\": %.1f,\n", CC3_VERSION, r->uptime);
     fprintf(f, "  \"state\": \"%s\",\n",
@@ -402,8 +344,10 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
             (double)st->ts_offset / STC_PER_MS, (unsigned long long)st->discontinuities,
             st->held_units);
 
-    fprintf(f, "  \"output\": {\n    \"url\": ");
-    json_str(f, o->output);
+    fprintf(f, "  \"outputs\": ");
+    sinks_json(&c->sinks, f, 4);
+    fprintf(f, ",\n  \"output\": {\n    \"url\": ");
+    json_str(f, sinks_first_url(&c->sinks, url, sizeof(url)));
     fprintf(f, ",\n    \"mode\": \"%s\",\n    \"muxrate\": %lld,\n    \"bitrate\": %.0f,\n"
                "    \"null_percent\": %.2f,\n    \"packets\": %llu,\n    \"nulls\": %llu,\n"
                "    \"psi\": %llu,\n    \"pcr_only\": %llu,\n    \"units\": %llu,\n"
@@ -420,17 +364,265 @@ static void write_stats(const struct options *o, const struct engine_stats *st,
             (unsigned long long)st->out.skips,
             (double)st->out.max_late / STC_PER_MS, st->out.queued_units,
             (unsigned long long)st->out.queued_bytes, (unsigned long long)r->send_errors);
+}
 
-    if (fclose(f) == 0)
-        rename(tmp, o->stats_file);         /* readers never see half a file */
+/* The statistics: kept for the control socket, written to --stats-file. */
+static void write_stats(struct ctx *c, const struct engine_stats *st, const struct rates *r)
+{
+    const struct options *o = c->opt;
+    char *text = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&text, &len);
+
+    if (!f)
+        return;
+    stats_json(c, st, r, f);
+    fclose(f);
+    if (o->stats_file) {
+        char tmp[1024];
+
+        if (snprintf(tmp, sizeof(tmp), "%s.tmp", o->stats_file) < (int)sizeof(tmp) &&
+            (f = fopen(tmp, "w")) != NULL) {
+            fwrite(text, 1, len, f);
+            if (fclose(f) == 0)
+                rename(tmp, o->stats_file); /* readers never see half a file */
+        }
+    }
+    pthread_mutex_lock(&c->stats_lock);
+    free(c->stats_json);
+    c->stats_json = text;
+    c->stats_len = len;
+    pthread_mutex_unlock(&c->stats_lock);
 }
 
 /* ---- running -------------------------------------------------------- */
 
 static void on_signal(int sig)
 {
-    (void)sig;
-    atomic_store(&g_run, 0);
+    if (sig == SIGHUP)
+        atomic_store(&g_hup, 1);
+    else
+        atomic_store(&g_run, 0);
+}
+
+/* ---- the config file: the outputs that survive a restart -------------- */
+
+/* Reads --config and makes the outputs match it: ones not yet running
+ * are added, saved ones no longer listed are removed. Outputs added at
+ * run time without "save" are left alone. */
+static bool config_load(struct ctx *c, char *err, size_t errlen)
+{
+    static struct json_doc doc;
+    static char text[JSON_TEXT_MAX];
+    FILE *f = fopen(c->opt->config, "r");
+    size_t n;
+    int root, outs, i;
+    bool ok = true;
+    const char *keep[OUTPUTS_MAX];
+    int n_keep = 0;
+    char id[SINK_ID_MAX], e[200];
+
+    if (!f) {
+        if (errno == ENOENT) {
+            log_info("config %s: not there yet", c->opt->config);
+            return true;
+        }
+        snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
+        return false;
+    }
+    n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = 0;
+    root = json_parse(&doc, text, err, errlen);
+    if (root < 0)
+        return false;
+    outs = json_get(&doc, root, "outputs");
+    if (outs < 0 || doc.node[outs].type != JSON_ARRAY) {
+        snprintf(err, errlen, "%s: no \"outputs\" array", c->opt->config);
+        return false;
+    }
+    for (i = doc.node[outs].first_child; i >= 0; i = doc.node[i].next) {
+        const char *oid = json_get_str(&doc, i, "id", NULL);
+        const char *url = json_get_str(&doc, i, "url", NULL);
+
+        if (!oid || !url) {
+            log_warn("config: an output without \"id\" or \"url\" is skipped");
+            ok = false;
+            continue;
+        }
+        if (n_keep < OUTPUTS_MAX)
+            keep[n_keep++] = oid;
+        if (sinks_has(&c->sinks, oid))
+            continue;                       /* already running */
+        if (!sinks_add(&c->sinks, oid, url, true, e, sizeof(e))) {
+            log_err("config: output %s: %s", oid, e);
+            ok = false;
+        }
+    }
+    /* Saved outputs that the file no longer lists go away. */
+    while (sinks_saved_not_in(&c->sinks, keep, n_keep, id, sizeof(id)))
+        sinks_remove(&c->sinks, id, e, sizeof(e));
+    if (!ok)
+        snprintf(err, errlen, "some outputs in %s could not be started", c->opt->config);
+    return ok;
+}
+
+/* Writes the saved outputs back, atomically. */
+static bool config_save(struct ctx *c, char *err, size_t errlen)
+{
+    char tmp[1024];
+    FILE *f;
+
+    if (!c->opt->config) {
+        snprintf(err, errlen, "no --config file to save to");
+        return false;
+    }
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", c->opt->config) >= (int)sizeof(tmp) ||
+        !(f = fopen(tmp, "w"))) {
+        snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
+        return false;
+    }
+    fprintf(f, "{\n  \"outputs\": ");
+    sinks_json_saved(&c->sinks, f, 4);
+    fprintf(f, "\n}\n");
+    if (fclose(f) != 0 || rename(tmp, c->opt->config) != 0) {
+        snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
+        unlink(tmp);
+        return false;
+    }
+    return true;
+}
+
+/* ---- the control socket ------------------------------------------------ */
+
+static void reply_error(FILE *f, const char *msg)
+{
+    char q[600];
+
+    fprintf(f, "{\"ok\": false, \"error\": %s}", json_quote(msg, q, sizeof(q)));
+}
+
+static void on_control(void *opaque, const struct json_doc *req, FILE *f)
+{
+    struct ctx *c = opaque;
+    const char *cmd = json_get_str(req, 0, "cmd", "");
+    char err[300];
+
+    if (!strcmp(cmd, "list-outputs")) {
+        fprintf(f, "{\"ok\": true, \"outputs\": ");
+        sinks_json(&c->sinks, f, 2);
+        fprintf(f, "}");
+    } else if (!strcmp(cmd, "add-output")) {
+        const char *url = json_get_str(req, 0, "url", NULL);
+        const char *id = json_get_str(req, 0, "id", "");
+        bool save = json_get_bool(req, 0, "save", false);
+        char made[SINK_ID_MAX], q[SINK_ID_MAX * 2 + 2];
+
+        if (!url) {
+            reply_error(f, "add-output needs \"url\"");
+            return;
+        }
+        if (save && !c->opt->config) {
+            reply_error(f, "cannot save: the channel runs without --config");
+            return;
+        }
+        if (!sinks_add(&c->sinks, id, url, save, err, sizeof(err))) {
+            reply_error(f, err);
+            return;
+        }
+        sinks_last_id(&c->sinks, made, sizeof(made));
+        if (save && !config_save(c, err, sizeof(err)))
+            log_err("config: %s", err);
+        fprintf(f, "{\"ok\": true, \"id\": %s}", json_quote(made, q, sizeof(q)));
+    } else if (!strcmp(cmd, "remove-output")) {
+        const char *id = json_get_str(req, 0, "id", NULL);
+        bool saved;
+
+        if (!id) {
+            reply_error(f, "remove-output needs \"id\"");
+            return;
+        }
+        saved = sinks_is_saved(&c->sinks, id);
+        if (!sinks_remove(&c->sinks, id, err, sizeof(err))) {
+            reply_error(f, err);
+            return;
+        }
+        if (saved && c->opt->config && !config_save(c, err, sizeof(err)))
+            log_err("config: %s", err);
+        fprintf(f, "{\"ok\": true}");
+    } else if (!strcmp(cmd, "stats")) {
+        pthread_mutex_lock(&c->stats_lock);
+        if (c->stats_json) {
+            fprintf(f, "{\"ok\": true, \"stats\": ");
+            fwrite(c->stats_json, 1, c->stats_len, f);
+            fprintf(f, "}");
+        } else {
+            reply_error(f, "no statistics yet");
+        }
+        pthread_mutex_unlock(&c->stats_lock);
+    } else if (!strcmp(cmd, "reload")) {
+        if (c->opt->config && !config_load(c, err, sizeof(err)))
+            reply_error(f, err);
+        else
+            fprintf(f, "{\"ok\": true}");
+    } else {
+        reply_error(f, "unknown cmd (list-outputs, add-output, remove-output, stats, reload)");
+    }
+}
+
+/* `caricoder3 ctl SOCKET|NAME cmd [args]`: the command-line client. */
+static int ctl_main(int argc, char **argv)
+{
+    char path[256], req[2048], q[1200];
+    const char *where = argc > 2 ? argv[2] : NULL;
+    const char *cmd = argc > 3 ? argv[3] : NULL;
+
+    if (!where || !cmd || !strcmp(where, "-h") || !strcmp(where, "--help")) {
+        fprintf(stderr,
+"Usage: caricoder3 ctl SOCKET|NAME COMMAND\n"
+"  list-outputs\n"
+"  add-output URL [ID] [--save]    (--save: into the channel's config file)\n"
+"  remove-output ID\n"
+"  stats\n"
+"  reload                          (re-read the config file)\n"
+"NAME stands for " SOCK_DIR "/NAME.sock\n");
+        return 2;
+    }
+    if (strchr(where, '/'))
+        snprintf(path, sizeof(path), "%s", where);
+    else
+        snprintf(path, sizeof(path), SOCK_DIR "/%s.sock", where);
+    if (!strcmp(cmd, "add-output")) {
+        const char *id = "";
+        bool save = false;
+        size_t at;
+
+        if (argc < 5) {
+            fprintf(stderr, "add-output needs a URL\n");
+            return 2;
+        }
+        for (int i = 5; i < argc; i++) {
+            if (!strcmp(argv[i], "--save"))
+                save = true;
+            else
+                id = argv[i];
+        }
+        snprintf(req, sizeof(req), "{\"cmd\": \"add-output\", \"url\": %s, ",
+                 json_quote(argv[4], q, sizeof(q)));
+        at = strlen(req);
+        snprintf(req + at, sizeof(req) - at, "\"id\": %s, \"save\": %s}",
+                 json_quote(id, q, sizeof(q)), save ? "true" : "false");
+    } else if (!strcmp(cmd, "remove-output")) {
+        if (argc < 5) {
+            fprintf(stderr, "remove-output needs an ID\n");
+            return 2;
+        }
+        snprintf(req, sizeof(req), "{\"cmd\": \"remove-output\", \"id\": %s}",
+                 json_quote(argv[4], q, sizeof(q)));
+    } else {
+        snprintf(req, sizeof(req), "{\"cmd\": %s}", json_quote(cmd, q, sizeof(q)));
+    }
+    return control_client(path, req, stdout);
 }
 
 static int run_live(struct options *o, struct ctx *c)
@@ -476,8 +668,16 @@ static int run_live(struct options *o, struct ctx *c)
         r.input_age_ms = last_rx ? (now - last_rx) / 1000000 : -1;
         r.rx_overflow = atomic_load(&c->rx_overflow);
         r.rx_truncated = atomic_load(&c->rx_truncated);
-        r.send_errors = atomic_load(&c->sink.errors);
-        write_stats(o, &st, &r);
+        r.send_errors = sinks_errors(&c->sinks);
+        write_stats(c, &st, &r);
+
+        if (atomic_exchange(&g_hup, 0) && o->config) {
+            char e[300];
+
+            log_info("config: re-reading %s", o->config);
+            if (!config_load(c, e, sizeof(e)))
+                log_err("config: %s", e);
+        }
 
         if (o->stats_interval > 0 && ++since_log >= o->stats_interval) {
             since_log = 0;
@@ -504,6 +704,7 @@ static int run_live(struct options *o, struct ctx *c)
     sd_notify_msg("STOPPING=1");
     pthread_join(tin, NULL);
     pthread_join(tout, NULL);
+    sinks_finish(&c->sinks);                /* what is still in the ring goes out */
     return atomic_load(&c->fatal) ? 1 : 0;
 }
 
@@ -517,16 +718,16 @@ static int run_file(struct options *o, struct ctx *c, FILE *in)
     while (atomic_load(&g_run) && (n = fread(buf, 1, sizeof(buf), in)) > 0)
         engine_push_stream(c->eng, buf, n);
     engine_finish(c->eng);
-    if (c->sink.fp && fflush(c->sink.fp) != 0)
-        atomic_fetch_add(&c->sink.errors, 1);
+    sinks_finish(&c->sinks);
 
     engine_get_stats(c->eng, &st);
     memset(&r, 0, sizeof(r));
     r.input_age_ms = -1;
-    r.send_errors = atomic_load(&c->sink.errors);
+    r.send_errors = sinks_errors(&c->sinks);
     if (st.out.packets)
         r.null_pct = 100.0 * (double)st.out.nulls / (double)st.out.packets;
-    write_stats(o, &st, &r);
+    write_stats(c, &st, &r);
+    (void)o;
 
     log_info("input : %llu packets, cc errors %llu, sync errors %llu, "
              "PES %llu (dropped %llu, invalid %llu), sections %llu",
@@ -556,12 +757,20 @@ static void usage(FILE *f)
     fprintf(f,
 "caricoder3 %s - MPEG-TS to MPEG-TS live processor\n"
 "\n"
-"Usage: caricoder3 -i INPUT -o OUTPUT [options]\n"
+"Usage: caricoder3 -i INPUT -o OUTPUT [-o OUTPUT ...] [options]\n"
+"       caricoder3 ctl SOCKET|NAME COMMAND ...   (outputs at run time; ctl -h)\n"
 "\n"
 "  -i, --input URL          udp://[source@]group:port[?iface=eth0&buf=BYTES]\n"
 "                           rtp://... (RTP is also detected automatically)\n"
 "                           or a .ts file\n"
-"  -o, --output URL         udp://host:port[?ttl=8&iface=eth0&pkt=7] or a file\n"
+"  -o, --output URL         udp://host:port[?ttl=8&iface=eth0&pkt=7] or a file;\n"
+"                           may be repeated. Each output runs on its own: a slow\n"
+"                           one loses packets, the others do not notice\n"
+"      --control PATH       Unix socket for adding and removing outputs while\n"
+"                           the channel runs (caricoder3 ctl PATH ...)\n"
+"      --name NAME          the same, at " SOCK_DIR "/NAME.sock\n"
+"      --config FILE        JSON file of outputs: read at start and on SIGHUP,\n"
+"                           written when one is added with --save\n"
 "  -p, --program N          service to take from the input (default: first)\n"
 "  -r, --muxrate RATE       constant bit rate output, e.g. 5M, 4500k, 5000000\n"
 "      --vbr                variable bit rate: no null packets. This is the\n"
@@ -639,7 +848,7 @@ enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET,
-    OPT_GOP, OPT_VBV, OPT_GPU_TEST,
+    OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG,
 };
 
 static bool parse_where(const char *s, enum codec_where *out)
@@ -682,6 +891,9 @@ int main(int argc, char **argv)
         { "gop", required_argument, 0, OPT_GOP },
         { "vbv", required_argument, 0, OPT_VBV },
         { "gpu-test", no_argument, 0, OPT_GPU_TEST },
+        { "control", required_argument, 0, OPT_CONTROL },
+        { "name", required_argument, 0, OPT_NAME_SOCK },
+        { "config", required_argument, 0, OPT_CONFIG },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -690,12 +902,16 @@ int main(int argc, char **argv)
     };
     struct options o;
     struct ctx c;
-    struct udp_addr in_addr, out_addr;
+    struct udp_addr in_addr;
+    char sock_path[256];
     struct sigaction sa;
     char err[256];
     bool vbr_flag = false, delay_given = false, gpu_test = false;
     FILE *in_fp = NULL;
     int opt, rc;
+
+    if (argc > 1 && !strcmp(argv[1], "ctl"))
+        return ctl_main(argc, argv);
 
     memset(&o, 0, sizeof(o));
     memset(&c, 0, sizeof(c));
@@ -709,7 +925,16 @@ int main(int argc, char **argv)
     while ((opt = getopt_long(argc, argv, "i:o:p:r:d:vqVh", longopts, NULL)) != -1) {
         switch (opt) {
         case 'i': o.input = optarg; break;
-        case 'o': o.output = optarg; break;
+        case 'o':
+            if (o.n_output == OUTPUTS_MAX) {
+                fprintf(stderr, "no more than %d outputs\n", OUTPUTS_MAX);
+                return 2;
+            }
+            o.output[o.n_output++] = optarg;
+            break;
+        case OPT_CONTROL: o.control = optarg; break;
+        case OPT_NAME_SOCK: o.name = optarg; break;
+        case OPT_CONFIG: o.config = optarg; break;
         case 'p': o.eng.program = atoi(optarg); break;
         case 'r':
             if (!parse_rate(optarg, &o.eng.mux.muxrate)) {
@@ -768,9 +993,17 @@ int main(int argc, char **argv)
     }
     if (gpu_test)
         return nv_selftest(stdout, o.eng.gpu);
-    if (!o.input || !o.output || optind < argc) {
+    if (!o.input || (!o.n_output && !o.config) || optind < argc) {
         usage(stderr);
         return 2;
+    }
+    if (o.name && !o.control) {
+        if (strchr(o.name, '/') || strlen(o.name) > 64) {
+            fprintf(stderr, "--name is a plain name, without '/' and up to 64 characters\n");
+            return 2;
+        }
+        snprintf(sock_path, sizeof(sock_path), SOCK_DIR "/%s.sock", o.name);
+        o.control = sock_path;
     }
 
     /* Decoding and encoding take time, and an encoder looks ahead: what
@@ -831,38 +1064,49 @@ int main(int argc, char **argv)
     sa.sa_handler = on_signal;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
     o.eng.live = is_udp(o.input);
     c.opt = &o;
     c.rx_fd = -1;
-    c.sink.fd = -1;
-    c.sink.pkt = 7;
+    pthread_mutex_init(&c.stats_lock, NULL);
 
-    if (!o.eng.live && is_udp(o.output)) {
-        fprintf(stderr, "a file input can only be written to a file in this version\n");
-        return 2;
+    if (!o.eng.live) {
+        for (int i = 0; i < o.n_output; i++)
+            if (strstr(o.output[i], "://") && strncmp(o.output[i], "file://", 7)) {
+                fprintf(stderr, "a file input can only be written to a file in this version\n");
+                return 2;
+            }
+        if (o.control || o.config) {
+            fprintf(stderr, "--control, --name and --config are for a live (UDP) input\n");
+            return 2;
+        }
     }
 
-    /* Output first: nothing is read until there is somewhere to put it. */
-    if (is_udp(o.output)) {
-        if (udp_parse(o.output, &out_addr, err, sizeof(err)) < 0 ||
-            (c.sink.fd = udp_open_tx(&out_addr, err, sizeof(err))) < 0) {
+    /* Outputs first: nothing is read until there is somewhere to put it. */
+    if (!ring_init(&c.ring)) {
+        log_err("out of memory");
+        return 1;
+    }
+    sinks_init(&c.sinks, &c.ring, o.eng.live);
+    for (int i = 0; i < o.n_output; i++) {
+        if (!sinks_add(&c.sinks, NULL, o.output[i], false, err, sizeof(err))) {
             log_err("output: %s", err);
             return 1;
         }
-        c.sink.pkt = out_addr.pkt;
-        if (!sink_init(&c.sink)) {
-            log_err("out of memory");
+    }
+    if (o.config && !config_load(&c, err, sizeof(err)))
+        log_err("config: %s", err);
+    if (o.control) {
+        if (o.name)
+            mkdir(SOCK_DIR, 0775);
+        c.ctl = control_start(o.control, on_control, &c, err, sizeof(err));
+        if (!c.ctl) {
+            log_err("control: %s", err);
             return 1;
         }
-    } else {
-        c.sink.fp = fopen(file_path(o.output), "wb");
-        if (!c.sink.fp) {
-            log_err("output: %s: %s", file_path(o.output), strerror(errno));
-            return 1;
-        }
-        setvbuf(c.sink.fp, NULL, _IOFBF, 1 << 20);
+        log_info("control: %s", o.control);
     }
 
     if (o.eng.live) {
@@ -879,14 +1123,16 @@ int main(int argc, char **argv)
         }
     }
 
-    c.eng = engine_new(&o.eng, sink_out, &c.sink);
+    c.eng = o.eng.live ? engine_new(&o.eng, ring_out, &c.ring)
+                       : engine_new(&o.eng, sync_out, &c.sinks);
     if (!c.eng) {
         log_err("out of memory");
         return 1;
     }
 
-    log_info("caricoder3 %s: %s -> %s, %s %.3f Mb/s, delay %d ms",
-             CC3_VERSION, o.input, o.output,
+    log_info("caricoder3 %s: %s -> %s%s, %s %.3f Mb/s, delay %d ms",
+             CC3_VERSION, o.input, sinks_first_url(&c.sinks, err, sizeof(err)),
+             sinks_count(&c.sinks) > 1 ? " and more" : "",
              o.eng.mux.vbr ? "VBR up to" : "CBR",
              (double)o.eng.mux.muxrate / 1e6, o.eng.delay_ms);
 
@@ -900,18 +1146,13 @@ int main(int argc, char **argv)
 
     if (in_fp)
         fclose(in_fp);
-    if (c.sink.fp && fclose(c.sink.fp) != 0) {
-        log_err("output: write failed: %s", strerror(errno));
-        rc = 1;
-    }
+    control_stop(c.ctl);
     if (c.rx_fd >= 0)
         close(c.rx_fd);
-    if (c.sink.fd >= 0)
-        close(c.sink.fd);
     engine_free(c.eng);
-    free(c.sink.dg);
-    free(c.sink.mm);
-    free(c.sink.iov);
+    sinks_destroy(&c.sinks);
+    ring_destroy(&c.ring);
+    free(c.stats_json);
     log_info("stopped");
     return rc;
 }
