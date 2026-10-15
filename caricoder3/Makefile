@@ -22,7 +22,7 @@ LDLIBS   = -lpthread -lm
 #
 #   Ubuntu: apt install libtwolame-dev libmp3lame-dev (fdk-aac: see install.sh) \
 #           libmpg123-dev liba52-0.7.4-dev libx264-dev libx265-dev \
-#           libavcodec-dev libavutil-dev pkg-config
+#           libavcodec-dev libavutil-dev libsrt-openssl-dev librist-dev pkg-config
 #
 # Libraries built from source by install.sh (the full fdk-aac, with HE-AAC)
 # live under LIBS_PREFIX and take precedence over the distribution's.
@@ -78,6 +78,18 @@ CODEC_DEFS += -DHAVE_NVIDIA
 CODEC_LIBS += -ldl
 endif
 endif
+# Output transports (apt install libsrt-openssl-dev librist-dev). Absent,
+# the srt:// and rist:// output types are left out and say so.
+ifeq ($(call have_pkg,srt),yes)
+CODEC_DEFS += -DHAVE_SRT $(shell $(PKG_CONFIG) --cflags srt)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs srt)
+SINK_SRC += src/sink_srt.c
+endif
+ifeq ($(call have_pkg,librist),yes)
+CODEC_DEFS += -DHAVE_RIST $(shell $(PKG_CONFIG) --cflags librist)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs librist)
+SINK_SRC += src/sink_rist.c
+endif
 CPPFLAGS += $(CODEC_DEFS)
 LDLIBS   += $(CODEC_LIBS)
 
@@ -86,7 +98,7 @@ CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
        src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
        src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_selftest.c
-SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/sink_udp.c src/json.c src/control.c src/main.c
+SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/sink_udp.c $(SINK_SRC) src/json.c src/control.c src/main.c
 
 OBJ      = $(SRC:src/%.c=build/rel/%.o)
 OBJ_ASAN = $(SRC:src/%.c=build/asan/%.o)

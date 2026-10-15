@@ -57,6 +57,8 @@ libavcodec-dev:H.264 / H.265 decode on the CPU
 libavutil-dev:(needed by libavcodec)
 libx264-dev:H.264 encode on the CPU
 libx265-dev:H.265 encode on the CPU
+libsrt-openssl-dev:SRT output
+librist-dev:RIST output
 "
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }

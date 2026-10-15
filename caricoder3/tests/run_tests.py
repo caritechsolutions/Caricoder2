@@ -1654,6 +1654,194 @@ def live_output_dead_port_isolated():
     return f"good output {good['packets']} packets, 0 errors; dead one {dead['errors']} send errors"
 
 
+def _transport_run(out_url, receiver, name, duration=8.0, extra=(), mid=None):
+    """
+    Runs the channel with one output of a transport type and a receiver
+    process (started by `receiver(port)` -> Popen writing TS to stdout, or
+    a (Popen, Capture) pair). `mid(proc, sock)` runs at 3 s. Returns
+    (stats listing, log, packets received).
+    """
+    src = synth("live_src", duration=duration)
+    pin = _port[0]
+    _port[0] += 4
+    sock = w(name + ".sock")
+    out = w(name + ".ts")
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", out_url.format(port=pin + 1),
+         "-r", "4M", "--control", sock, *extra], stderr=subprocess.PIPE, text=True)
+    rx = cap = None
+    try:
+        time.sleep(0.3)
+        r = receiver(pin + 1, out)
+        rx, cap = r if isinstance(r, tuple) else (r, None)
+        time.sleep(1.0)
+        p = Player("127.0.0.1", pin)
+        done = []
+
+        def gate(t):
+            if mid and t >= 3.0 and not done:
+                done.append(1)
+                mid(proc, sock)
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(0.8)
+        rc, listing = ctl(sock, "list-outputs")
+        time.sleep(0.7)
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+        if rx:
+            time.sleep(0.5)
+            rx.send_signal(signal.SIGINT)
+            try:
+                rx.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rx.kill()
+                rx.wait()
+        if cap:
+            cap.stop(out)
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    need(rc == 0 and listing["ok"], f"list-outputs: {listing}")
+    got = os.path.getsize(out) // TS if os.path.exists(out) else 0
+    return listing["outputs"][0], log, got, src
+
+
+def _srt_receiver(mode):
+    def start(port, out):
+        url = f"srt://127.0.0.1:{port}?mode=caller" if mode == "caller" else f"srt://:{port}?mode=listener"
+        return subprocess.Popen(["srt-live-transmit", "-q", url, "file://con"],
+                                stdout=open(out, "wb"), stderr=subprocess.DEVNULL)
+    return start
+
+
+def _rist_receiver(listen):
+    def start(port, out):
+        cap = Capture(port + 100)
+        url = f"rist://@127.0.0.1:{port}" if listen else f"rist://127.0.0.1:{port}"
+        rx = subprocess.Popen(["ristreceiver", "-p", "1", "-i", url,
+                               "-o", f"udp://127.0.0.1:{port + 100}", "-v", "-1"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return rx, cap
+    return start
+
+
+def _stream_ok(out, src, what):
+    must_pass(out, cbr=True)
+    must_match(src, out, subset=True)
+    orig = sum(len(v) for v in Analysis(src).pes.values())
+    got = sum(len(v) for v in Analysis(out).pes.values())
+    need(got >= orig - 6, f"{what}: only {got} of {orig} PES arrived")
+    return got, orig
+
+
+@test
+def live_srt_listener():
+    """SRT output in listener mode; srt-live-transmit calls in and receives the stream."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+    o, log, got, src = _transport_run("srt://:{port}", _srt_receiver("caller"), "srt_listener")
+    need(o["type"] == "srt" and o["state"].startswith("listening: 1 receiver"), f"state: {o}")
+    need(o["errors"] == 0 and o["overruns"] == 0, f"errors: {o}")
+    pes, orig = _stream_ok(w("srt_listener.ts"), src, "SRT listener")
+    return f"1 receiver joined, {pes}/{orig} PES received, RTT {o.get('rtt_ms')} ms, " \
+           f"{o['retransmitted']} retransmitted"
+
+
+@test
+def live_srt_caller_encrypted():
+    """SRT output as caller with a passphrase; the listener must know it."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+
+    def start(port, out):
+        return subprocess.Popen(["srt-live-transmit", "-q",
+                                 f"srt://:{port}?mode=listener&passphrase=caricoder3test&pbkeylen=16",
+                                 "file://con"], stdout=open(out, "wb"), stderr=subprocess.DEVNULL)
+    o, log, got, src = _transport_run("srt://127.0.0.1:{port}?latency=200&passphrase=caricoder3test&pbkeylen=16",
+                                      start, "srt_caller")
+    need(o["state"] == "connected", f"state: {o}")
+    need(o["errors"] == 0, f"errors: {o}")
+    pes, orig = _stream_ok(w("srt_caller.ts"), src, "SRT caller")
+    return f"connected with AES-128, {pes}/{orig} PES received"
+
+
+@test
+def live_srt_reconnect():
+    """SRT caller: the listener goes away and comes back; the output reconnects by itself."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+    box = {}
+
+    def start(port, out):
+        box["port"], box["out"] = port, out
+        box["first"] = subprocess.Popen(["srt-live-transmit", "-q", f"srt://:{port}?mode=listener", "file://con"],
+                                        stdout=open(out + ".1", "wb"), stderr=subprocess.DEVNULL)
+        return box["first"]
+
+    def mid(proc, sock):
+        box["first"].send_signal(signal.SIGINT)
+        box["first"].wait(timeout=5)
+        time.sleep(1.5)                     # the caller sees the break, waits, retries
+        box["second"] = subprocess.Popen(["srt-live-transmit", "-q", f"srt://:{box['port']}?mode=listener", "file://con"],
+                                         stdout=open(box["out"], "wb"), stderr=subprocess.DEVNULL)
+    o, log, got, src = _transport_run("srt://127.0.0.1:{port}", start, "srt_reconnect", duration=10.0, mid=mid)
+    try:
+        box["second"].send_signal(signal.SIGINT)
+        box["second"].wait(timeout=5)
+    except Exception:
+        box["second"].kill()
+    need(o["state"] == "connected", f"state at the end: {o}")
+    need(o["reconnects"] >= 1, f"no reconnect counted: {o}")
+    need(o["errors"] > 0, f"nothing counted as lost while the listener was away: {o}")
+    got2 = os.path.getsize(w("srt_reconnect.ts")) // TS
+    need(got2 > 4 * 4_000_000 // 8 // TS, f"second listener got only {got2} packets")
+    return f"listener restarted at 3 s: {o['reconnects']} reconnect, {o['errors']} datagrams lost " \
+           f"meanwhile, {got2} packets to the new listener"
+
+
+@test
+def live_rist_caller():
+    """RIST output (main profile) to a ristreceiver listening."""
+    if "rist://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without librist"
+    if not shutil.which("ristreceiver"):
+        return "SKIPPED: rist-tools not installed"
+    o, log, got, src = _transport_run("rist://127.0.0.1:{port}", _rist_receiver(True), "rist_caller")
+    need(o["type"] == "rist" and o["state"] == "connected", f"state: {o}")
+    need(o["errors"] == 0 and o["reconnects"] == 0, f"errors: {o}")
+    pes, orig = _stream_ok(w("rist_caller.ts"), src, "RIST caller")
+    return f"connected, {pes}/{orig} PES received, RTT {o.get('rtt_ms')} ms, {o['retransmitted']} retransmitted"
+
+
+@test
+def live_rist_listener_encrypted():
+    """RIST output listening, with a shared secret; ristreceiver calls in."""
+    if "rist://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without librist"
+    if not shutil.which("ristreceiver"):
+        return "SKIPPED: rist-tools not installed"
+
+    def start(port, out):
+        cap = Capture(port + 100)
+        rx = subprocess.Popen(["ristreceiver", "-p", "1",
+                               "-i", f"rist://127.0.0.1:{port}?secret=caricoder3test&aes-type=128",
+                               "-o", f"udp://127.0.0.1:{port + 100}", "-v", "-1"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return rx, cap
+    o, log, got, src = _transport_run("rist://@127.0.0.1:{port}?secret=caricoder3test&aes-type=128",
+                                      start, "rist_listener")
+    need(o["state"].startswith("listening: 1 receiver"), f"state: {o}")
+    pes, orig = _stream_ok(w("rist_listener.ts"), src, "RIST listener")
+    return f"1 receiver, AES-128, {pes}/{orig} PES received"
+
+
 @test
 def live_systemd_watchdog():
     """Reports READY and keeps petting the systemd watchdog while healthy."""

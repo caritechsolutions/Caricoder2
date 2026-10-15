@@ -958,7 +958,7 @@ int main(int argc, char **argv)
         case OPT_STATS_FILE: o.stats_file = optarg; break;
         case OPT_STATS_INT: o.stats_interval = atoi(optarg); break;
         case OPT_RT: o.rt_prio = atoi(optarg); break;
-        case OPT_BACKENDS: codec_list(stdout); return 0;
+        case OPT_BACKENDS: codec_list(stdout); sink_list(stdout); return 0;
         case OPT_AUDIO:
         case OPT_VIDEO: {
             bool v = opt == OPT_VIDEO;

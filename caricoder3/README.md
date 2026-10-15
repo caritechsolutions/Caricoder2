@@ -21,7 +21,7 @@ rest of this repository.
 | 3c | Video on Intel (VPL) | not started |
 | 4 | Several renditions of a channel in one stream (scaling, deinterlace, aligned key frames) | done on the CPU and against the stand-in card; not yet run on a real card |
 | 5a | Outputs added and removed while the channel runs; several outputs per channel; control socket; config file | done, tested (UDP, RTP, file) |
-| 5b | SRT and RIST outputs (caller and listener) | not started |
+| 5b | SRT and RIST outputs (caller and listener, encryption, reconnect) | done, tested against srt-live-transmit and ristreceiver |
 | 5c | RTMP push | not started |
 | 6 | HLS packager as an output | not started |
 | 7 | Supervisor, GUI, side-by-side run against Flussonic | not started |
@@ -173,8 +173,19 @@ the next packet the mux produces (it is not sent what was already
 sent), and the moment it is removed its last datagram goes out and its
 thread ends; the other outputs see nothing of either.
 
-Output types in this version: `udp://`, `rtp://`, a file. SRT, RIST and
-RTMP are the next stages.
+Output types (`caricoder3 --backends` lists what the build has):
+
+| URL | What |
+|---|---|
+| `udp://host:port[?ttl=&iface=&pkt=&buf=]`, `rtp://...` | plain UDP or RTP, unicast or multicast |
+| a file path | written as fast as it comes |
+| `srt://host:port[?latency=120&passphrase=...&pbkeylen=16&streamid=...]` | SRT caller: connects, and connects again by itself when the link breaks (`reconnects` in the stats; datagrams dropped meanwhile count as `errors`) |
+| `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 8 receivers may call in; each gets every datagram, a slow one loses its own |
+| `rist://host:port[?profile=main&buffer=1000&secret=...&aes-type=128&bandwidth=...]` | RIST caller (librist; main profile by default, `simple` or `advanced` on request). The parameters after `profile` are librist's own |
+| `rist://@:port[?...]` | RIST listener (librist's notation) |
+
+SRT and RIST outputs report what their libraries measure: `rtt_ms`,
+`retransmitted`, and for SRT `lost`. RTMP is the next stage.
 
 ### Under systemd
 

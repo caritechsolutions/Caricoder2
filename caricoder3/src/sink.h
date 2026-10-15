@@ -113,5 +113,28 @@ void sinks_json_saved(struct sinks *s, FILE *f, int indent);
 
 /* The known sink types, for --help and for choosing by URL. */
 const struct sink_ops *sink_ops_for(const char *url);
+/* Lists the output types this build has (for --backends). */
+void sink_list(FILE *f);
+
+/* ---- helpers for the sink types ---------------------------------------- */
+
+/* The value of `name` in the URL's query (?a=1&b=2); false when absent. */
+bool sink_url_param(const char *url, const char *name, char *buf, size_t len);
+/* host and port of "scheme://host:port?..." (host may be empty; [v6]). */
+bool sink_url_hostport(const char *url, char *host, size_t hostlen, int *port);
+
+/* Packs transport packets into datagrams of `pkt` packets (7 by default,
+ * 1316 bytes: what SRT and RIST carry). */
+#define PACKER_MAX_PKT  7
+struct packer {
+    uint8_t buf[PACKER_MAX_PKT * TS_SIZE];
+    int pkt, fill;
+};
+typedef void (*packer_fn)(void *ctx, const uint8_t *dgram, int len);
+void packer_init(struct packer *p, int pkt);
+/* Feeds `n` packets; `fn` is called for every datagram completed. */
+void packer_feed(struct packer *p, const uint8_t (*pkts)[TS_SIZE], int n, packer_fn fn, void *ctx);
+/* Sends the part-built datagram, if any. */
+void packer_flush(struct packer *p, packer_fn fn, void *ctx);
 
 #endif

@@ -849,6 +849,43 @@ of a core, each output 2.7% → 0.5%; CBR 1.7% → 1.6% and 0.9% → 0.8%.
 Checked under ThreadSanitizer (live add/remove, VBR and CBR) and with
 the live fuzzer.
 
+**As built (5b, 2026-10-15).** `sink_srt.c` and `sink_rist.c`, each
+behind a `HAVE_` define the Makefile sets when pkg-config finds the
+library, so a build without them still has UDP and says what is
+missing. Both pack seven packets to a datagram (`packer` in sink.c;
+`?pkt=` changes it) and never block the sink thread: libsrt sockets are
+opened with `SRTO_SNDSYN` off, librist queues internally.
+
+- *SRT.* A thread per sink does the connecting: a caller connects with a
+  3 s timeout, polls the socket state five times a second, and after a
+  break waits a second and tries again (`reconnects`); a listener waits
+  in `srt_epoll_wait` for callers and keeps up to eight, pruning the
+  ones whose state went broken. Sends go to every peer under the sink's
+  lock; a failed send (full buffer, or no peer at all) is one `error`.
+  Statistics from `srt_bstats`: RTT of the first peer, retransmissions
+  and sender-side loss summed. libsrt's own log goes through ours at
+  warning level and up. `srt.h` drags in `syslog.h`, whose `LOG_*`
+  names clash with `log.h`; `sink_srt.c` undefines them in between.
+- *RIST.* librist runs its own threads and does the connecting,
+  retransmission and encryption; the sink creates a sender context,
+  parses the URL with `rist_parse_address2` (after removing our own
+  `profile` and `pkt` parameters), and hands it datagrams with
+  `rist_sender_data_write`. Connection state comes from the status
+  callback, RTT and retransmissions from the stats callback once a
+  second. The `rist_stats` struct gives the RTT as whole milliseconds;
+  the JSON librist writes alongside has it to the microsecond, so the
+  sink reads it from there. The status callback also fires while
+  `rist_destroy` tears the peer down, which would log "connection
+  lost" at every stop; a `closing` flag silences it.
+
+Tests (five): SRT listener with `srt-live-transmit` calling in, SRT
+caller with AES-128, SRT caller whose listener is killed and restarted
+(reconnect counted, datagrams lost meanwhile counted, the new listener
+gets the rest), RIST caller to `ristreceiver`, RIST listener with a
+shared secret. Each checks the received stream is conformant and a
+subset of the source with at most 6 PES missing (the receivers' own
+start-up).
+
 The config file lists only *saved* outputs: those it already had and
 those added with `"save": true`. Outputs from `-o` are not written to it,
 so a service file's `-o` and a GUI's saved outputs do not fight over the

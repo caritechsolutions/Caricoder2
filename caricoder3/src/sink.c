@@ -403,3 +403,103 @@ void sinks_json_saved(struct sinks *s, FILE *f, int indent)
     fprintf(f, "\n%*s]", indent > 2 ? indent - 2 : 0, "");
     pthread_mutex_unlock(&s->lock);
 }
+
+void sink_list(FILE *f)
+{
+    fprintf(f, "Output types:\n");
+    fprintf(f, "  udp        udp://host:port  rtp://host:port  (?ttl= iface= pkt= buf=), or a file\n");
+#ifdef HAVE_SRT
+    fprintf(f, "  srt        srt://host:port (caller) or srt://:port (listener)\n"
+               "             ?mode=caller|listener latency=120 passphrase= pbkeylen=16|24|32 streamid= pkt=7\n");
+#else
+    fprintf(f, "  srt        not in this build (libsrt was not found)\n");
+#endif
+#ifdef HAVE_RIST
+    fprintf(f, "  rist       rist://host:port (caller) or rist://@:port (listener)\n"
+               "             ?profile=main|simple buffer=ms secret= aes-type=128|256 bandwidth=kbps cname= pkt=7\n");
+#else
+    fprintf(f, "  rist       not in this build (librist was not found)\n");
+#endif
+}
+
+bool sink_url_param(const char *url, const char *name, char *buf, size_t len)
+{
+    const char *q = strchr(url, '?');
+    size_t nl = strlen(name);
+
+    while (q) {
+        q++;
+        if (!strncmp(q, name, nl) && q[nl] == '=') {
+            const char *v = q + nl + 1;
+            const char *e = strchr(v, '&');
+            size_t vl = e ? (size_t)(e - v) : strlen(v);
+
+            if (vl >= len)
+                vl = len - 1;
+            memcpy(buf, v, vl);
+            buf[vl] = 0;
+            return true;
+        }
+        q = strchr(q, '&');
+    }
+    return false;
+}
+
+bool sink_url_hostport(const char *url, char *host, size_t hostlen, int *port)
+{
+    const char *p = strstr(url, "://");
+    const char *end, *colon;
+
+    if (!p)
+        return false;
+    p += 3;
+    end = strchr(p, '?');
+    if (!end)
+        end = p + strlen(p);
+    if (*p == '[') {                        /* [v6]:port */
+        const char *close = memchr(p, ']', (size_t)(end - p));
+
+        if (!close || close[1] != ':')
+            return false;
+        if ((size_t)(close - p - 1) >= hostlen)
+            return false;
+        memcpy(host, p + 1, (size_t)(close - p - 1));
+        host[close - p - 1] = 0;
+        colon = close + 1;
+    } else {
+        colon = memrchr(p, ':', (size_t)(end - p));
+        if (!colon)
+            return false;
+        if ((size_t)(colon - p) >= hostlen)
+            return false;
+        memcpy(host, p, (size_t)(colon - p));
+        host[colon - p] = 0;
+    }
+    *port = atoi(colon + 1);
+    return *port > 0 && *port < 65536;
+}
+
+void packer_init(struct packer *p, int pkt)
+{
+    p->pkt = pkt > 0 && pkt <= PACKER_MAX_PKT ? pkt : PACKER_MAX_PKT;
+    p->fill = 0;
+}
+
+void packer_feed(struct packer *p, const uint8_t (*pkts)[TS_SIZE], int n, packer_fn fn, void *ctx)
+{
+    for (int i = 0; i < n; i++) {
+        memcpy(p->buf + (size_t)p->fill * TS_SIZE, pkts[i], TS_SIZE);
+        if (++p->fill == p->pkt) {
+            fn(ctx, p->buf, p->fill * TS_SIZE);
+            p->fill = 0;
+        }
+    }
+}
+
+void packer_flush(struct packer *p, packer_fn fn, void *ctx)
+{
+    if (p->fill) {
+        fn(ctx, p->buf, p->fill * TS_SIZE);
+        p->fill = 0;
+    }
+}
