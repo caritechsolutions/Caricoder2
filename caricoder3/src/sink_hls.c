@@ -419,7 +419,17 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                             while (e + 3 <= v->probe_len &&
                                    !(v->probe[e] == 0 && v->probe[e + 1] == 0 && v->probe[e + 2] <= 1))
                                 e++;
-                            h264_parse_sps(v->probe + i + 3, e - i - 3, &v->width, &v->height, &v->fps);
+                            {
+                                int w = 0, h = 0;
+                                double fps = 0;
+
+                                h264_parse_sps(v->probe + i + 3, e - i - 3, &w, &h, &fps);
+                                pthread_mutex_lock(&s->lock);   /* the master playlist reads these */
+                                v->width = w;
+                                v->height = h;
+                                v->fps = fps;
+                                pthread_mutex_unlock(&s->lock);
+                            }
                             break;
                         }
                 /* a non-key slice before any key NAL settles it the other way */
@@ -559,12 +569,16 @@ static void on_sdt(void *opaque, const uint8_t *sec, int len)
         uint8_t out[1024];
         int olen;
 
-        if (!v->used || !psi_parse_sdt(sec, len, &v->prog))
+        if (!v->used)
             continue;
-        list[0] = v->prog;
-        olen = psi_build_sdt(list, 1, v->prog.sdt_version, out);
-        if (olen > 0)
-            v->n_sdt = packetize(out, olen, 0x11, v->sdt_pkts, 6);
+        pthread_mutex_lock(&s->lock);       /* the playlist reads the service name */
+        if (psi_parse_sdt(sec, len, &v->prog)) {
+            list[0] = v->prog;
+            olen = psi_build_sdt(list, 1, v->prog.sdt_version, out);
+            if (olen > 0)
+                v->n_sdt = packetize(out, olen, 0x11, v->sdt_pkts, 6);
+        }
+        pthread_mutex_unlock(&s->lock);
     }
 }
 
