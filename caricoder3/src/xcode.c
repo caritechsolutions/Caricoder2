@@ -42,6 +42,9 @@
 #define CATCHING_UP     (STC_HZ * 3 / 10)
 #define BEHIND          (STC_HZ / 2)
 #define LATE_WARN_NS    10000000000LL
+#define VERY_LATE       STC_HZ              /* a unit this late is logged on the spot, so
+                                             * that the journal says when and by how much */
+#define VERY_LATE_EVERY_NS 5000000000LL
 #define SKIP_MAX        (5 * STC_HZ)
 #define FINISH_WAIT_NS   300000000L          /* longest a finish may hold up its caller */
 
@@ -63,6 +66,9 @@ struct xcode {
     int64_t late_now;           /* how late the last unit was */
     stc_t skip_from;            /* worker only: send time of the first unit skipped */
     int64_t late_warned;        /* worker only */
+    int64_t very_late_logged;   /* ns; under st_lock */
+    unsigned very_late_n;       /* since the last line */
+    int64_t last_late_pts;
     bool skip_to_key;           /* worker only: video input was thrown away */
 
     bool threaded;
@@ -511,9 +517,10 @@ void xcode_finish(struct xcode *x)
     publish(x);
 }
 
-void xcode_note_slack(struct xcode *x, int64_t slack)
+void xcode_note_slack(struct xcode *x, int64_t slack, int64_t pts90)
 {
     pthread_mutex_lock(&x->st_lock);
+    x->last_late_pts = pts90;
     if (slack < x->slack_min)
         x->slack_min = slack;
     if (slack < x->slack_ever)
@@ -532,6 +539,22 @@ void xcode_note_slack(struct xcode *x, int64_t slack)
         x->late_now = -slack;
         if (-slack > x->late_worst)
             x->late_worst = -slack;
+        /* Far too late to be the codec's usual lag: say so now, with the
+         * amount, so that the log carries the moment. The periodic
+         * figure (slack_min_ms) only says that it happened some time. */
+        if (-slack > VERY_LATE) {
+            x->very_late_n++;
+            if (now - x->very_late_logged > VERY_LATE_EVERY_NS) {
+                x->very_late_logged = now;
+                pthread_mutex_unlock(&x->st_lock);
+                log_warn("PID 0x%04X: a transcoded %s unit reached the mux %.1f s after its "
+                         "send time (%u such in the last %d s; pts %lld)", x->cfg.out_pid,
+                         x->video ? "video" : "audio", (double)-slack / STC_HZ, x->very_late_n,
+                         (int)(VERY_LATE_EVERY_NS / 1000000000LL), (long long)x->last_late_pts);
+                pthread_mutex_lock(&x->st_lock);
+                x->very_late_n = 0;
+            }
+        }
     }
     pthread_mutex_unlock(&x->st_lock);
 }

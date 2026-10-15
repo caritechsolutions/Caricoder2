@@ -97,7 +97,7 @@ void xcode_start_after(struct xcode *x, int64_t dts90, stc_t t1);
 void xcode_get_stats(struct xcode *x, struct xcode_stats *st);
 
 /* For the engine, when it measures how much time a unit had to spare. */
-void xcode_note_slack(struct xcode *x, int64_t slack);
+void xcode_note_slack(struct xcode *x, int64_t slack, int64_t pts90);
 
 /* "[PID=]codec[:bitrate]", e.g. "aac", "mp2:192k", "1653=aac:128k", "copy".
  * Returns false with a message in err. */

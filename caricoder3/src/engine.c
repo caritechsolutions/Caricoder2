@@ -179,7 +179,7 @@ static void on_xcode_out(void *opaque, struct es_unit *u)
         if (e->xc_cfg[k].out_pid == u->pid)
             x = e->xc_list[k];
     if (x && now != NOPTS)
-        xcode_note_slack(x, u->t0 - now);
+        xcode_note_slack(x, u->t0 - now, u->pts);
     mux_push(e->mux, u);
     if (live)
         pthread_mutex_unlock(&e->lock);
