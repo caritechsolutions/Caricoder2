@@ -139,7 +139,7 @@ function statusTab(c) {
       <td>${esc(s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : (s.codec||""))}</td>
       <td>${s.decoder?esc(s.decoder+" → "+(s.encoder||"")):""}</td>
       <td>${s.frames_out!=null?`${s.frames_in||0} in / ${s.frames_out} out`:""}${s.decode_errors?` <span style="color:var(--warn)">${s.decode_errors} decode errors</span>`:""}${s.input_dropped?` <span style="color:var(--warn)">${s.input_dropped} dropped</span>`:""}${s.silence_ms?` <span class="small">${s.silence_ms} ms silence</span>`:""}${s.failed?` <span style="color:var(--bad)">failed</span>`:""}</td>
-      <td>${s.slack_min_ms!=null?`${s.slack_ms.toFixed(0)} ms (min ${s.slack_min_ms.toFixed(0)})`:""}</td></tr>`).join("");
+      <td>${s.slack_min_ms!=null?`${s.slack_ms!=null?s.slack_ms.toFixed(0)+" ms":"–"} (min ${s.slack_min_ms.toFixed(0)})`:""}</td></tr>`).join("");
   return `
     <div class="panel"><h2>Input</h2><div class="grid">
       ${kv("Bit rate", fmtRate(inp.bitrate||0))}${kv("Last packet", inp.last_packet_age_ms!=null && inp.last_packet_age_ms>=0 ? inp.last_packet_age_ms+" ms ago" : "–")}

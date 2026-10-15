@@ -416,10 +416,14 @@ static void on_signal(int sig)
 /* Reads --config and makes the outputs match it: ones not yet running
  * are added, saved ones no longer listed are removed. Outputs added at
  * run time without "save" are left alone. */
-static bool config_load(struct ctx *c, char *err, size_t errlen)
+/* The config file is read by the main thread (SIGHUP) and the control
+ * thread (reload), and written by the control thread: one at a time. */
+static pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool config_load_locked(struct ctx *c, char *err, size_t errlen)
 {
-    static struct json_doc doc;
-    static char text[JSON_TEXT_MAX];
+    struct json_doc *doc = malloc(sizeof(*doc));
+    char *text = malloc(JSON_TEXT_MAX);
     FILE *f = fopen(c->opt->config, "r");
     size_t n;
     int root, outs, i;
@@ -428,7 +432,17 @@ static bool config_load(struct ctx *c, char *err, size_t errlen)
     int n_keep = 0;
     char id[SINK_ID_MAX], e[200];
 
+    if (!doc || !text) {
+        free(doc);
+        free(text);
+        if (f)
+            fclose(f);
+        snprintf(err, errlen, "out of memory");
+        return false;
+    }
     if (!f) {
+        free(doc);
+        free(text);
         if (errno == ENOENT) {
             log_info("config %s: not there yet", c->opt->config);
             return true;
@@ -436,20 +450,25 @@ static bool config_load(struct ctx *c, char *err, size_t errlen)
         snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
         return false;
     }
-    n = fread(text, 1, sizeof(text) - 1, f);
+    n = fread(text, 1, JSON_TEXT_MAX - 1, f);
     fclose(f);
     text[n] = 0;
-    root = json_parse(&doc, text, err, errlen);
-    if (root < 0)
-        return false;
-    outs = json_get(&doc, root, "outputs");
-    if (outs < 0 || doc.node[outs].type != JSON_ARRAY) {
-        snprintf(err, errlen, "%s: no \"outputs\" array", c->opt->config);
+    root = json_parse(doc, text, err, errlen);
+    if (root < 0) {
+        free(doc);
+        free(text);
         return false;
     }
-    for (i = doc.node[outs].first_child; i >= 0; i = doc.node[i].next) {
-        const char *oid = json_get_str(&doc, i, "id", NULL);
-        const char *url = json_get_str(&doc, i, "url", NULL);
+    outs = json_get(doc, root, "outputs");
+    if (outs < 0 || doc->node[outs].type != JSON_ARRAY) {
+        snprintf(err, errlen, "%s: no \"outputs\" array", c->opt->config);
+        free(doc);
+        free(text);
+        return false;
+    }
+    for (i = doc->node[outs].first_child; i >= 0; i = doc->node[i].next) {
+        const char *oid = json_get_str(doc, i, "id", NULL);
+        const char *url = json_get_str(doc, i, "url", NULL);
 
         if (!oid || !url) {
             log_warn("config: an output without \"id\" or \"url\" is skipped");
@@ -470,6 +489,18 @@ static bool config_load(struct ctx *c, char *err, size_t errlen)
         sinks_remove(&c->sinks, id, e, sizeof(e));
     if (!ok)
         snprintf(err, errlen, "some outputs in %s could not be started", c->opt->config);
+    free(doc);
+    free(text);
+    return ok;
+}
+
+static bool config_load(struct ctx *c, char *err, size_t errlen)
+{
+    bool ok;
+
+    pthread_mutex_lock(&config_lock);
+    ok = config_load_locked(c, err, errlen);
+    pthread_mutex_unlock(&config_lock);
     return ok;
 }
 
@@ -478,25 +509,29 @@ static bool config_save(struct ctx *c, char *err, size_t errlen)
 {
     char tmp[1024];
     FILE *f;
+    bool ok = false;
 
     if (!c->opt->config) {
         snprintf(err, errlen, "no --config file to save to");
         return false;
     }
+    pthread_mutex_lock(&config_lock);
     if (snprintf(tmp, sizeof(tmp), "%s.tmp", c->opt->config) >= (int)sizeof(tmp) ||
         !(f = fopen(tmp, "w"))) {
         snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
-        return false;
+    } else {
+        fprintf(f, "{\n  \"outputs\": ");
+        sinks_json_saved(&c->sinks, f, 4);
+        fprintf(f, "\n}\n");
+        if (fclose(f) != 0 || rename(tmp, c->opt->config) != 0) {
+            snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
+            unlink(tmp);
+        } else {
+            ok = true;
+        }
     }
-    fprintf(f, "{\n  \"outputs\": ");
-    sinks_json_saved(&c->sinks, f, 4);
-    fprintf(f, "\n}\n");
-    if (fclose(f) != 0 || rename(tmp, c->opt->config) != 0) {
-        snprintf(err, errlen, "%s: %s", c->opt->config, strerror(errno));
-        unlink(tmp);
-        return false;
-    }
-    return true;
+    pthread_mutex_unlock(&config_lock);
+    return ok;
 }
 
 /* ---- the control socket ------------------------------------------------ */
@@ -526,6 +561,10 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
 
         if (!url) {
             reply_error(f, "add-output needs \"url\"");
+            return;
+        }
+        if (!strstr(url, "://")) {
+            reply_error(f, "a URL with a scheme is expected here (file:///path for a file)");
             return;
         }
         if (save && !c->opt->config) {

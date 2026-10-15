@@ -82,7 +82,7 @@ uint64_t ring_now(struct ring *r)
 
 /* Sleeps until the head moves past `cursor`, the ring closes, or the
  * timeout. Returns whether anything changed. */
-static void wait_for(struct ring *r, uint64_t cursor, int64_t timeout_ns)
+static void wait_for(struct ring *r, uint64_t cursor, uint64_t flushed, int64_t timeout_ns)
 {
     struct timespec ts;
 
@@ -96,7 +96,8 @@ static void wait_for(struct ring *r, uint64_t cursor, int64_t timeout_ns)
     pthread_mutex_lock(&r->lock);
     atomic_fetch_add_explicit(&r->waiters, 1, memory_order_acq_rel);
     while (atomic_load_explicit(&r->head, memory_order_acquire) == cursor &&
-           !atomic_load_explicit(&r->closed, memory_order_acquire))
+           !atomic_load_explicit(&r->closed, memory_order_acquire) &&
+           !(atomic_load_explicit(&r->flush_at, memory_order_acquire) == cursor && flushed != cursor))
         if (pthread_cond_timedwait(&r->cond, &r->lock, &ts) == ETIMEDOUT)
             break;
     atomic_fetch_sub_explicit(&r->waiters, 1, memory_order_acq_rel);
@@ -117,7 +118,7 @@ int ring_read(struct ring *r, uint64_t *cursor, uint8_t (*out)[TS_SIZE], int max
     if (head == *cursor && timeout_ns > 0 &&
         !atomic_load_explicit(&r->closed, memory_order_acquire) &&
         !(atomic_load_explicit(&r->flush_at, memory_order_acquire) == head && flushed != head)) {
-        wait_for(r, *cursor, timeout_ns);
+        wait_for(r, *cursor, flushed, timeout_ns);
         head = atomic_load_explicit(&r->head, memory_order_acquire);
     }
     for (;;) {
@@ -136,7 +137,9 @@ int ring_read(struct ring *r, uint64_t *cursor, uint8_t (*out)[TS_SIZE], int max
             memcpy(out[n], r->pkt[(from + (uint64_t)n) % RING_PACKETS], TS_SIZE);
             n++;
         }
-        /* Lapped while copying? Then some of `out` may be mixed: again. */
+        /* Lapped while copying? Then some of `out` may be mixed: again.
+         * (The fence orders the copy before the reload of the head.) */
+        atomic_thread_fence(memory_order_acquire);
         head = atomic_load_explicit(&r->head, memory_order_acquire);
         if (head - from < RING_PACKETS) {
             *cursor = from + (uint64_t)n;

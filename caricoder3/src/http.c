@@ -22,6 +22,8 @@
 
 #define MAX_CLIENTS     64
 #define IO_TIMEOUT_MS   15000
+#define HEADER_DEADLINE_S 10                /* the whole request header */
+#define REQUEST_DEADLINE_S 120              /* header to last byte sent */
 
 struct http_server {
     int fd;
@@ -35,6 +37,17 @@ struct http_server {
 
 struct conn { struct http_server *s; int fd; };
 
+static __thread time_t t_deadline;          /* this request's, 0 when none */
+
+static int ms_left(void)
+{
+    time_t now = time(NULL);
+
+    if (!t_deadline)
+        return IO_TIMEOUT_MS;
+    return t_deadline > now ? (int)((t_deadline - now) * 1000) : 0;
+}
+
 bool http_send(int fd, const void *d, size_t len)
 {
     const uint8_t *p = d;
@@ -42,8 +55,9 @@ bool http_send(int fd, const void *d, size_t len)
     while (len) {
         struct pollfd pf = { fd, POLLOUT, 0 };
         ssize_t w;
+        int ms = ms_left();
 
-        if (poll(&pf, 1, IO_TIMEOUT_MS) <= 0)
+        if (ms <= 0 || poll(&pf, 1, ms < IO_TIMEOUT_MS ? ms : IO_TIMEOUT_MS) <= 0)
             return false;
         w = send(fd, p, len, MSG_NOSIGNAL);
         if (w < 0) {
@@ -164,8 +178,9 @@ static bool read_more(int fd, char *buf, size_t *len, size_t cap)
 {
     struct pollfd pf = { fd, POLLIN, 0 };
     ssize_t r;
+    int ms = ms_left();
 
-    if (*len >= cap || poll(&pf, 1, IO_TIMEOUT_MS) <= 0)
+    if (*len >= cap || ms <= 0 || poll(&pf, 1, ms < IO_TIMEOUT_MS ? ms : IO_TIMEOUT_MS) <= 0)
         return false;
     r = recv(fd, buf + *len, cap - *len, 0);
     if (r <= 0)
@@ -189,7 +204,8 @@ static void *conn_thread(void *arg)
     memset(&resp, 0, sizeof(resp));
     if (!buf)
         goto out;
-    /* the header */
+    /* the header, within its own deadline */
+    t_deadline = time(NULL) + HEADER_DEADLINE_S;
     for (;;) {
         if (!read_more(c->fd, buf, &len, HTTP_HDR_MAX))
             goto out;
@@ -258,6 +274,7 @@ static void *conn_thread(void *arg)
     req.fd = c->fd;
     resp.status = 404;
     resp.type = "text/plain";
+    t_deadline = time(NULL) + REQUEST_DEADLINE_S;
     s->fn(s->opaque, &req, &resp);
 reply:
     if (!resp.handled) {

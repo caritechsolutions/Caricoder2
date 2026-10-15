@@ -188,7 +188,7 @@ int control_client(const char *path, const char *request, FILE *out)
 {
     struct sockaddr_un sa;
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    char buf[4096];
+    char buf[4097];
     bool ok = false, any = false;
     ssize_t n;
 
@@ -210,7 +210,15 @@ int control_client(const char *path, const char *request, FILE *out)
         close(fd);
         return 2;
     }
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+    for (;;) {
+        struct pollfd pf = { fd, POLLIN, 0 };
+
+        if (poll(&pf, 1, 5000) <= 0)        /* a channel that does not answer in 5 s */
+            break;
+        n = read(fd, buf, sizeof(buf) - 1);
+        if (n <= 0)
+            break;
+        buf[n] = 0;
         if (!any)
             ok = strstr(buf, "\"ok\": true") != NULL;
         any = true;

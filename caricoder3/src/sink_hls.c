@@ -54,9 +54,18 @@
 #define SEG_MAX_BYTES   (32u << 20)         /* a segment never grows past this */
 #define HTTP_CLIENTS    64
 #define PROBE_PACKETS   8                   /* packets of a PES looked at for the key frame */
+#define PTS_MASK        ((1LL << 33) - 1)
+#define REQ_DEADLINE_S  120                 /* a request, header to last byte */
+
+/* a - b on the 33-bit PTS clock (positive when a is later) */
+static int64_t pts_diff(int64_t a, int64_t b)
+{
+    return (a - b) & PTS_MASK;
+}
 
 struct segment {
     uint32_t seq;
+    bool disc;                              /* the stream broke before this one */
     double duration;                        /* seconds, from the PTS of its first and next key frame */
     int64_t pts_first;                      /* 90 kHz */
     uint8_t *data;
@@ -122,11 +131,15 @@ struct hls_sink {
     char unix_path[108];
     bool stop;
     int clients;
+    int client_fd[HTTP_CLIENTS];            /* open connections, to shut them at close */
     _Atomic uint64_t packets, bytes, errors, requests;
 };
 
-/* The Unix socket the next HLS sink listens on (set by main from --name). */
+/* The Unix socket the next HLS sink listens on (set by main from --name);
+ * one sink at a time owns it. */
 static char g_http_socket[108];
+static pthread_mutex_t g_socket_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool g_socket_taken;
 
 void sink_hls_set_socket(const char *path)
 {
@@ -225,8 +238,8 @@ static void seg_cut(struct hls_sink *s, int vi, size_t at, int64_t pts)
         done->len = at;
     }
     next->pts_first = pts;
-    done->duration = done->pts_first != NOPTS && pts > done->pts_first
-                     ? (double)(pts - done->pts_first) / 90000.0 : s->target;
+    done->duration = done->pts_first != NOPTS && pts_diff(pts, done->pts_first) < 90000 * 120
+                     ? (double)pts_diff(pts, done->pts_first) / 90000.0 : s->target;
     done->refs = 1;
     pthread_mutex_lock(&s->lock);
     if (v->n_win == s->window + 1) {
@@ -316,6 +329,8 @@ static void variant_setup(struct hls_sink *s, int vi, const struct program *p)
         v->cur = seg_new(v->next_seq++);
         if (v->cur)
             v->cur->pts_first = NOPTS;
+    } else {
+        v->cur->disc = true;                /* the program changed under it */
     }
     v->last_cut_pts = NOPTS;
 }
@@ -374,7 +389,7 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                     v->cur->pts_first = pts;
                 if (rai) {
                     /* the stream says so: cut here if the segment is long enough */
-                    if (v->last_cut_pts != NOPTS && pts - v->last_cut_pts >= (int64_t)(s->target * 90000)) {
+                    if (v->last_cut_pts != NOPTS && pts_diff(pts, v->last_cut_pts) >= (int64_t)(s->target * 90000)) {
                         seg_cut(s, vi, v->cur->len, pts);
                         v->last_cut_pts = pts;
                     } else if (v->last_cut_pts == NOPTS) {
@@ -447,7 +462,7 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                     v->probing = false;
                     if (key) {
                         if (v->last_cut_pts != NOPTS &&
-                            v->cut_pts - v->last_cut_pts >= (int64_t)(s->target * 90000)) {
+                            pts_diff(v->cut_pts, v->last_cut_pts) >= (int64_t)(s->target * 90000)) {
                             seg_cut(s, vi, v->cut_at, v->cut_pts);
                             v->last_cut_pts = v->cut_pts;
                         } else if (v->last_cut_pts == NOPTS) {
@@ -467,7 +482,7 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                 v->cur->pts_first = pts;
             if (v->last_cut_pts == NOPTS)
                 v->last_cut_pts = pts;
-            else if (pts - v->last_cut_pts >= (int64_t)(s->target * 90000)) {
+            else if (pts_diff(pts, v->last_cut_pts) >= (int64_t)(s->target * 90000)) {
                 seg_cut(s, vi, v->cur->len, pts);
                 v->last_cut_pts = pts;
             }
@@ -477,6 +492,7 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
         atomic_fetch_add(&s->errors, 1);
         v->cur->len = 0;                    /* no key frame for 32 MB: start over */
         v->cur->pts_first = NOPTS;
+        v->cur->disc = true;
         v->last_cut_pts = NOPTS;
     }
 }
@@ -494,6 +510,7 @@ static void on_pat(void *opaque, const uint8_t *sec, int len)
         return;
     if (s->have_pat && version == s->pat_version)
         return;
+    pthread_mutex_lock(&s->lock);           /* the playlists read n_var */
     s->pat_version = version;
     s->have_pat = true;
     s->n_var = 0;
@@ -506,6 +523,7 @@ static void on_pat(void *opaque, const uint8_t *sec, int len)
     }
     for (int i = 0; i < HLS_VARIANTS; i++)
         section_asm_reset(&s->pmt_asm[i]);
+    pthread_mutex_unlock(&s->lock);
 }
 
 static void on_pmt(void *opaque, const uint8_t *sec, int len)
@@ -665,6 +683,8 @@ static void playlist_text(struct hls_sink *s, int vi, const char *prefix, char *
             if (!v->used)
                 continue;
             program_service_name(&v->prog, name, sizeof(name));
+            if (o + 400 >= cap)
+                break;
             o += (size_t)snprintf(out + o, cap - o, "#EXT-X-STREAM-INF:BANDWIDTH=%u",
                                   v->bandwidth ? v->bandwidth : 1000000);
             if (v->width && v->height)
@@ -672,7 +692,7 @@ static void playlist_text(struct hls_sink *s, int vi, const char *prefix, char *
             if (v->fps > 0)
                 o += (size_t)snprintf(out + o, cap - o, ",FRAME-RATE=%.3f", v->fps);
             if (name[0])
-                o += (size_t)snprintf(out + o, cap - o, ",NAME=\"%s\"", name);
+                o += (size_t)snprintf(out + o, cap - o, ",NAME=\"%.100s\"", name);
             o += (size_t)snprintf(out + o, cap - o, "\nv%d/index.m3u8\n", i);
         }
     } else if (vi < s->n_var && s->var[vi].used) {
@@ -686,9 +706,13 @@ static void playlist_text(struct hls_sink *s, int vi, const char *prefix, char *
                               "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n"
                               "#EXT-X-MEDIA-SEQUENCE:%u\n",
                               (int)(target + 0.999), v->n_win ? v->win[0]->seq : v->next_seq);
-        for (int i = 0; i < v->n_win && o < cap; i++)
-            o += (size_t)snprintf(out + o, cap - o, "#EXTINF:%.3f,\n%sseg%u.ts\n",
-                                  v->win[i]->duration, prefix, v->win[i]->seq);
+        for (int i = 0; i < v->n_win && o + 100 < cap; i++) {
+            if (v->win[i]->disc && i > 0)
+                o += (size_t)snprintf(out + o, cap - o, "#EXT-X-DISCONTINUITY\n");
+            if (o < cap)
+                o += (size_t)snprintf(out + o, cap - o, "#EXTINF:%.3f,\n%sseg%u.ts\n",
+                                      v->win[i]->duration, prefix, v->win[i]->seq);
+        }
     } else {
         o += (size_t)snprintf(out + o, cap - o, "#EXTM3U\n");
     }
@@ -757,17 +781,25 @@ static unsigned next_seq_of(struct hls_sink *s, int vi)
     return seq;
 }
 
-struct client { struct hls_sink *s; int fd; };
+struct client { struct hls_sink *s; int fd; time_t deadline; };
 
-static bool send_bytes(int fd, const void *d, size_t len)
+static int ms_left(time_t deadline)
+{
+    time_t now = time(NULL);
+
+    return deadline > now ? (int)((deadline - now) * 1000) : 0;
+}
+
+static bool send_bytes_until(int fd, const void *d, size_t len, time_t deadline)
 {
     const uint8_t *p = d;
 
     while (len) {
         struct pollfd pf = { fd, POLLOUT, 0 };
         ssize_t w;
+        int ms = ms_left(deadline);
 
-        if (poll(&pf, 1, 10000) <= 0)
+        if (ms <= 0 || poll(&pf, 1, ms < 10000 ? ms : 10000) <= 0)
             return false;
         w = send(fd, p, len, MSG_NOSIGNAL);
         if (w < 0) {
@@ -781,8 +813,9 @@ static bool send_bytes(int fd, const void *d, size_t len)
     return true;
 }
 
-static void reply(int fd, int code, const char *type, const char *extra, const void *body, size_t len)
+static void reply(const struct client *c, int code, const char *type, const char *extra, const void *body, size_t len)
 {
+    int fd = c->fd;
     char hdr[1024];
     int n = snprintf(hdr, sizeof(hdr),
                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
@@ -790,8 +823,8 @@ static void reply(int fd, int code, const char *type, const char *extra, const v
                      code, code == 200 ? "OK" : code == 404 ? "Not Found" : "Bad Request", type, len,
                      strstr(type, "mpegurl") ? "no-cache" : "max-age=60", extra ? extra : "");
 
-    if (send_bytes(fd, hdr, (size_t)n))
-        send_bytes(fd, body, len);
+    if (send_bytes_until(fd, hdr, (size_t)n, c->deadline))
+        send_bytes_until(fd, body, len, c->deadline);
 }
 
 static void *client_thread(void *arg)
@@ -804,7 +837,9 @@ static void *client_thread(void *arg)
 
     prctl(PR_SET_NAME, "cc3-http");
     atomic_fetch_add(&s->requests, 1);
-    while (n < (int)sizeof(req) - 1 && poll(&pf, 1, 5000) > 0) {
+    c->deadline = time(NULL) + REQ_DEADLINE_S;
+    while (n < (int)sizeof(req) - 1 && ms_left(c->deadline) > REQ_DEADLINE_S * 1000 - 10000 &&
+           poll(&pf, 1, 5000) > 0) {       /* the header within 10 s */
         ssize_t r = recv(c->fd, req + n, sizeof(req) - 1 - (size_t)n, 0);
 
         if (r <= 0)
@@ -816,7 +851,7 @@ static void *client_thread(void *arg)
     }
     req[n] = 0;
     if (sscanf(req, "GET %511s", path) != 1) {
-        reply(c->fd, 400, "text/plain", NULL, "bad request\n", 12);
+        reply(c, 400, "text/plain", NULL, "bad request\n", 12);
         goto out;
     }
     {
@@ -850,7 +885,7 @@ static void *client_thread(void *arg)
             } else {
                 playlist_text(s, -1, "", pl, 65536);
             }
-            reply(c->fd, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
+            reply(c, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
             free(pl);
             goto out;
         }
@@ -865,7 +900,7 @@ static void *client_thread(void *arg)
                 goto out;
             playlist_text(s, vi, "", pl, 65536);
             snprintf(extra, sizeof(extra), "X-Next-Segment: seg%u.ts\r\n", next_seq_of(s, vi));
-            reply(c->fd, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
+            reply(c, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
             free(pl);
             goto out;
         }
@@ -882,18 +917,21 @@ static void *client_thread(void *arg)
                 }
             pthread_mutex_unlock(&s->lock);
             if (g) {
-                reply(c->fd, 200, "video/mp2t", NULL, g->data, g->len);
+                reply(c, 200, "video/mp2t", NULL, g->data, g->len);
                 pthread_mutex_lock(&s->lock);
                 seg_unref(g);
                 pthread_mutex_unlock(&s->lock);
                 goto out;
             }
         }
-        reply(c->fd, 404, "text/plain", NULL, "not here\n", 9);
+        reply(c, 404, "text/plain", NULL, "not here\n", 9);
     }
 out:
-    close(c->fd);
     pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < HTTP_CLIENTS; i++)
+        if (s->client_fd[i] == c->fd)
+            s->client_fd[i] = -1;
+    close(c->fd);
     s->clients--;
     pthread_mutex_unlock(&s->lock);
     free(c);
@@ -911,9 +949,15 @@ static void accept_one(struct hls_sink *s, int lfd)
     if (fd < 0)
         return;
     pthread_mutex_lock(&s->lock);
-    full = s->clients >= HTTP_CLIENTS;
-    if (!full)
+    full = s->clients >= HTTP_CLIENTS || s->stop;
+    if (!full) {
         s->clients++;
+        for (int i = 0; i < HTTP_CLIENTS; i++)
+            if (s->client_fd[i] < 0) {
+                s->client_fd[i] = fd;
+                break;
+            }
+    }
     pthread_mutex_unlock(&s->lock);
     if (full) {
         close(fd);
@@ -921,6 +965,12 @@ static void accept_one(struct hls_sink *s, int lfd)
     }
     c = malloc(sizeof(*c));
     if (!c) {
+        pthread_mutex_lock(&s->lock);
+        for (int i = 0; i < HTTP_CLIENTS; i++)
+            if (s->client_fd[i] == fd)
+                s->client_fd[i] = -1;
+        s->clients--;
+        pthread_mutex_unlock(&s->lock);
         close(fd);
         return;
     }
@@ -930,11 +980,14 @@ static void accept_one(struct hls_sink *s, int lfd)
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&attr, 512 * 1024);
     if (pthread_create(&th, &attr, client_thread, c) != 0) {
-        close(fd);
-        free(c);
         pthread_mutex_lock(&s->lock);
+        for (int i = 0; i < HTTP_CLIENTS; i++)
+            if (s->client_fd[i] == fd)
+                s->client_fd[i] = -1;
         s->clients--;
         pthread_mutex_unlock(&s->lock);
+        close(fd);
+        free(c);
     }
     pthread_attr_destroy(&attr);
 }
@@ -962,16 +1015,21 @@ static void *http_thread(void *arg)
             if (pf[i].revents & POLLIN)
                 accept_one(s, pf[i].fd);
     }
-    /* let the client threads finish their replies */
-    for (int i = 0; i < 50; i++) {
+    /* The client threads must be gone before the sink is freed: their
+     * connections are shut, which makes their poll/send/recv return, and
+     * then they are waited for (no time limit: each has a deadline). */
+    for (;;) {
         bool none;
 
         pthread_mutex_lock(&s->lock);
         none = s->clients == 0;
+        for (int i = 0; i < HTTP_CLIENTS; i++)
+            if (s->client_fd[i] >= 0)
+                shutdown(s->client_fd[i], SHUT_RDWR);
         pthread_mutex_unlock(&s->lock);
         if (none)
             break;
-        usleep(100000);
+        usleep(50000);
     }
     return NULL;
 }
@@ -994,6 +1052,8 @@ static void *hls_open(const char *url, char *err, size_t errlen)
         return NULL;
     }
     s->lfd_tcp = s->lfd_unix = -1;
+    for (int i = 0; i < HTTP_CLIENTS; i++)
+        s->client_fd[i] = -1;
     s->target = 4;
     s->window = 6;
     s->keep = 20;
@@ -1088,9 +1148,19 @@ static void *hls_open(const char *url, char *err, size_t errlen)
             goto fail;
         }
     }
-    if (g_http_socket[0]) {
+    pthread_mutex_lock(&g_socket_lock);
+    if (g_http_socket[0] && g_socket_taken) {
+        pthread_mutex_unlock(&g_socket_lock);
+        if (!s->port && !s->dir[0]) {
+            snprintf(err, errlen, "another hls output already serves this channel's socket; give this one a port or a dir=");
+            goto fail;
+        }
+    } else if (g_http_socket[0]) {
         struct sockaddr_un sa;
 
+        g_socket_taken = true;
+        pthread_mutex_unlock(&g_socket_lock);
+        snprintf(s->unix_path, sizeof(s->unix_path), "%s", g_http_socket);
         s->lfd_unix = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         memset(&sa, 0, sizeof(sa));
         sa.sun_family = AF_UNIX;
@@ -1102,7 +1172,8 @@ static void *hls_open(const char *url, char *err, size_t errlen)
             goto fail;
         }
         chmod(sa.sun_path, 0660);
-        snprintf(s->unix_path, sizeof(s->unix_path), "%s", g_http_socket);
+    } else {
+        pthread_mutex_unlock(&g_socket_lock);
     }
     if (s->lfd_tcp < 0 && s->lfd_unix < 0 && !s->dir[0]) {
         snprintf(err, errlen, "nowhere to serve from: give a port (hls://:8080), a dir=, or run with --name");
@@ -1116,9 +1187,13 @@ static void *hls_open(const char *url, char *err, size_t errlen)
 fail:
     if (s->lfd_tcp >= 0)
         close(s->lfd_tcp);
-    if (s->lfd_unix >= 0) {
-        close(s->lfd_unix);
+    if (s->lfd_unix >= 0 || s->unix_path[0]) {
+        if (s->lfd_unix >= 0)
+            close(s->lfd_unix);
         unlink(s->unix_path);
+        pthread_mutex_lock(&g_socket_lock);
+        g_socket_taken = false;
+        pthread_mutex_unlock(&g_socket_lock);
     }
     pthread_mutex_destroy(&s->lock);
     free(s);
@@ -1156,13 +1231,18 @@ static void hls_close(void *ctx)
 {
     struct hls_sink *s = ctx;
 
-    __atomic_store_n(&s->stop, true, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&s->lock);
+    s->stop = true;                         /* no new clients from here */
+    pthread_mutex_unlock(&s->lock);
     pthread_join(s->th, NULL);
     if (s->lfd_tcp >= 0)
         close(s->lfd_tcp);
     if (s->lfd_unix >= 0) {
         close(s->lfd_unix);
         unlink(s->unix_path);
+        pthread_mutex_lock(&g_socket_lock);
+        g_socket_taken = false;
+        pthread_mutex_unlock(&g_socket_lock);
     }
     for (int i = 0; i < HLS_VARIANTS; i++) {
         struct variant *v = &s->var[i];

@@ -1012,6 +1012,34 @@ starts it, changes its config (new pid), kills it (restarted, counted),
 reads its log, deletes it, and checks the GUI is served and that no
 password means 401.
 
+**Review of stages 5-7 (2026-10-15, a fresh reader of the code; 20
+findings, all addressed).** The ones worth knowing about: an HLS sink
+could be freed while a slow player's thread was still sending it a
+segment (the close now shuts every client connection and waits for the
+threads, and every request has a deadline, header in 10 s, all of it in
+120 s — the same in the supervisor's server, which also closes the
+slow-loris hole); the supervisor held its lock while asking a channel's
+control socket, so one unresponsive channel would have frozen the GUI
+and the restart loop (the API now takes a snapshot under the lock and
+does its I/O outside it, and the control client gives a channel 5 s to
+answer); HLS compared raw 33-bit PTS values, so no segment would have
+been cut for a minute at every 26.5 h wrap (differences are taken
+modulo 2^33, and a restart of the window is marked
+`#EXT-X-DISCONTINUITY`); the channel's config file was read by two
+threads through one static buffer (a mutex and heap buffers); a second
+`hls://` output in one process would have taken over the first one's
+Unix socket (refused unless it has a port or a directory of its own);
+an SPS of 1 kB with an emulation-prevention byte at the end overran a
+stack buffer by one (bounded); `passphrase=` and `secret=` were shown
+in every stats and API answer (redacted to `***` everywhere but the
+saved config); `add-output` over the socket took a bare path as a file
+to write (a scheme is required there: `file:///path`); removing an RTMP
+output could take up to 15 s while its thread sat in a send (the socket
+is shut first); SRT's accept could block for good (non-blocking now);
+the GUI stopped polling when a transcoder had no frames in the last
+second; a flush published with no new packets was only seen after the
+20 ms wait; channel slots in the supervisor were never reused.
+
 The config file lists only *saved* outputs: those it already had and
 those added with `"save": true`. Outputs from `-o` are not written to it,
 so a service file's `-o` and a GUI's saved outputs do not fight over the

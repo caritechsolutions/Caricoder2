@@ -18,6 +18,7 @@ KillMode=mixed
 TimeoutStopSec=20
 AmbientCapabilities=CAP_SYS_NICE
 LimitNOFILE=65536
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

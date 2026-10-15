@@ -560,11 +560,16 @@ static void scan_channels(struct super *s)
         }
         c = find_chan(s, name);
         if (!c) {
-            if (s->n == CHANNELS_MAX) {
+            for (int i = 0; i < s->n && !c; i++)    /* a slot whose channel was deleted */
+                if (!s->ch[i].cfg && s->ch[i].pid == 0)
+                    c = &s->ch[i];
+            if (!c && s->n == CHANNELS_MAX) {
+                log_err("channel %s: no room (%d channels at most)", name, CHANNELS_MAX);
                 free(text);
                 continue;
             }
-            c = &s->ch[s->n++];
+            if (!c)
+                c = &s->ch[s->n++];
             memset(c, 0, sizeof(*c));
             snprintf(c->name, sizeof(c->name), "%s", name);
             c->log_fd = -1;
@@ -681,23 +686,74 @@ static char *chan_stats(struct super *s, struct chan *c)
     return read_file(path, NULL);
 }
 
-static void json_chan_brief(struct super *s, struct chan *c, FILE *f, bool full)
+/* What the API says about a channel, taken under the lock so the I/O
+ * (control socket, files) can happen without it. */
+struct chan_view {
+    char name[64];
+    enum chan_state state;
+    bool enabled;
+    pid_t pid;
+    double uptime;
+    int restarts;
+    char why[160];
+    char *cfg;
+    char *log;                              /* JSON array text, or NULL */
+};
+
+static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
 {
-    char q[200];
     int64_t now = clock_now_ns();
 
+    memset(v, 0, sizeof(*v));
+    snprintf(v->name, sizeof(v->name), "%s", c->name);
+    v->state = c->state;
+    v->enabled = c->enabled;
+    v->pid = c->pid;
+    v->uptime = c->state == CH_RUNNING || c->state == CH_STOPPING ? (double)(now - c->started_ns) / 1e9 : 0.0;
+    v->restarts = c->restarts;
+    snprintf(v->why, sizeof(v->why), "%s", c->why);
+    v->cfg = c->cfg ? strdup(c->cfg) : NULL;
+    if (with_log) {
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f = open_memstream(&out, &len);
+        char q[LOG_LINE_MAX * 2 + 4];
+
+        if (f) {
+            fprintf(f, "[");
+            for (int i = 0; i < c->log_n; i++)
+                fprintf(f, "%s%s", i ? ", " : "", json_quote(c->log[(c->log_head + i) % LOG_LINES], q, sizeof(q)));
+            fprintf(f, "]");
+            fclose(f);
+            v->log = out;
+        }
+    }
+}
+
+static void chan_view_drop(struct chan_view *v)
+{
+    free(v->cfg);
+    free(v->log);
+}
+
+static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, bool full)
+{
+    char q[200];
+    struct chan tmp;
+
+    memset(&tmp, 0, sizeof(tmp));
+    snprintf(tmp.name, sizeof(tmp.name), "%s", v->name);
     fprintf(f, "{\"name\": %s, \"state\": \"%s\", \"enabled\": %s, \"pid\": %d, \"uptime\": %.0f, "
                "\"restarts\": %d, \"why\": ",
-            json_quote(c->name, q, sizeof(q)), state_name(c->state), c->enabled ? "true" : "false",
-            (int)c->pid, c->state == CH_RUNNING || c->state == CH_STOPPING ? (double)(now - c->started_ns) / 1e9 : 0.0,
-            c->restarts);
-    fprintf(f, "%s", json_quote(c->why, q, sizeof(q)));
-    fprintf(f, ", \"config\": %s", c->cfg ? c->cfg : "null");
-    if (c->state == CH_RUNNING || full) {
-        char *st = chan_stats(s, c);
-        char *outs = c->state == CH_RUNNING ? chan_ctl(s, c, "{\"cmd\": \"list-outputs\"}") : NULL;
+            json_quote(v->name, q, sizeof(q)), state_name(v->state), v->enabled ? "true" : "false",
+            (int)v->pid, v->uptime, v->restarts);
+    fprintf(f, "%s", json_quote(v->why, q, sizeof(q)));
+    fprintf(f, ", \"config\": %s", v->cfg ? v->cfg : "null");
+    if (v->state == CH_RUNNING || full) {
+        char *st = chan_stats(s, &tmp);
+        char *outs = v->state == CH_RUNNING ? chan_ctl(s, &tmp, "{\"cmd\": \"list-outputs\"}") : NULL;
 
-        fprintf(f, ", \"stats\": %s", st && c->state == CH_RUNNING ? st : "null");
+        fprintf(f, ", \"stats\": %s", st && v->state == CH_RUNNING ? st : "null");
         fprintf(f, ", \"outputs\": %s", outs ? outs : "null");
         free(st);
         free(outs);
@@ -705,18 +761,14 @@ static void json_chan_brief(struct super *s, struct chan *c, FILE *f, bool full)
             /* not running: what the outputs file says */
             char path[600], *text;
 
-            snprintf(path, sizeof(path), "%s/%s.outputs.json", s->channels_dir, c->name);
+            snprintf(path, sizeof(path), "%.400s/%s.outputs.json", s->channels_dir, v->name);
             text = read_file(path, NULL);
             fprintf(f, ", \"saved_outputs\": %s", text ? text : "null");
             free(text);
         }
     }
-    if (full) {
-        fprintf(f, ", \"log\": [");
-        for (int i = 0; i < c->log_n; i++)
-            fprintf(f, "%s%s", i ? ", " : "", json_quote(c->log[(c->log_head + i) % LOG_LINES], q, sizeof(q)));
-        fprintf(f, "]");
-    }
+    if (full)
+        fprintf(f, ", \"log\": %s", v->log ? v->log : "[]");
     fprintf(f, "}");
 }
 
@@ -859,15 +911,20 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
 
         if (!f)
             return;
+        struct chan_view views[CHANNELS_MAX];
+        int nv = 0;
+
         fprintf(f, "{\"ok\": true, \"channels\": [");
         pthread_mutex_lock(&s->lock);
-        for (int i = 0, k = 0; i < s->n; i++) {
-            if (!s->ch[i].cfg)
-                continue;
-            fprintf(f, "%s\n", k++ ? "," : "");
-            json_chan_brief(s, &s->ch[i], f, false);
-        }
+        for (int i = 0; i < s->n; i++)
+            if (s->ch[i].cfg)
+                chan_view_take(&s->ch[i], &views[nv++], false);
         pthread_mutex_unlock(&s->lock);
+        for (int i = 0; i < nv; i++) {
+            fprintf(f, "%s\n", i ? "," : "");
+            json_chan_view(s, &views[i], f, false);
+            chan_view_drop(&views[i]);
+        }
         fprintf(f, "]}\n");
         fclose(f);
         resp->status = 200;
@@ -934,10 +991,13 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             char *out = NULL;
             size_t len = 0;
             FILE *f = open_memstream(&out, &len);
+            struct chan_view v;
 
+            chan_view_take(c, &v, true);
+            pthread_mutex_unlock(&s->lock);
             if (f) {
                 fprintf(f, "{\"ok\": true, \"channel\": ");
-                json_chan_brief(s, c, f, true);
+                json_chan_view(s, &v, f, true);
                 fprintf(f, "}\n");
                 fclose(f);
                 resp->status = 200;
@@ -945,6 +1005,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 resp->body = out;
                 resp->body_len = len;
             }
+            chan_view_drop(&v);
+            return;
         } else if (!rest[0] && !strcmp(req->method, "DELETE")) {
             char opath[600];
 
@@ -1016,15 +1078,24 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             snprintf(reqline, sizeof(reqline), "{\"cmd\": \"add-output\", \"url\": %s, \"id\": %s, \"save\": true}",
                      json_quote(url, q2, sizeof(q2)), json_quote(id, q3, sizeof(q3)));
             free(doc);
-            reply = chan_ctl(s, c, reqline);
+            {
+                struct chan tmp;
+
+                memset(&tmp, 0, sizeof(tmp));
+                snprintf(tmp.name, sizeof(tmp.name), "%s", c->name);
+                pthread_mutex_unlock(&s->lock);
+                reply = chan_ctl(s, &tmp, reqline);
+            }
             if (reply) {
                 http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
                 free(reply);
             } else {
                 api_error(resp, 502, "the channel did not answer");
             }
+            return;
         } else if (!strncmp(rest, "outputs/", 8) && !strcmp(req->method, "DELETE")) {
             char reqline[400], q3[200], *reply;
+            struct chan tmp;
 
             if (c->state != CH_RUNNING) {
                 pthread_mutex_unlock(&s->lock);
@@ -1033,13 +1104,17 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             }
             snprintf(reqline, sizeof(reqline), "{\"cmd\": \"remove-output\", \"id\": %s}",
                      json_quote(rest + 8, q3, sizeof(q3)));
-            reply = chan_ctl(s, c, reqline);
+            memset(&tmp, 0, sizeof(tmp));
+            snprintf(tmp.name, sizeof(tmp.name), "%s", c->name);
+            pthread_mutex_unlock(&s->lock);
+            reply = chan_ctl(s, &tmp, reqline);
             if (reply) {
                 http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
                 free(reply);
             } else {
                 api_error(resp, 502, "the channel did not answer");
             }
+            return;
         } else {
             api_error(resp, 404, "unknown request");
         }

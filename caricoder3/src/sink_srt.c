@@ -361,8 +361,11 @@ static void *srt_open(const char *url, char *err, size_t errlen)
         bool ok;
 
         err[0] = 0;
+        int no = 0;
+
         s->sock = srt_create_socket();
         ok = s->sock != SRT_INVALID_SOCK && set_opts(s, s->sock, err, errlen) &&
+             srt_setsockflag(s->sock, SRTO_RCVSYN, &no, sizeof(no)) >= 0 &&    /* accept never blocks */
              resolve(s->host, s->port, &sa, &salen, err, errlen) &&
              srt_bind(s->sock, (struct sockaddr *)&sa, salen) >= 0 &&
              srt_listen(s->sock, 4) >= 0;

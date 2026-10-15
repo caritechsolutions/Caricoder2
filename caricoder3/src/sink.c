@@ -261,9 +261,37 @@ static void json_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* The URL with passphrase= and secret= values hidden, for anything shown. */
+static void redact_url(const char *url, char *out, size_t len)
+{
+    size_t o = 0;
+    const char *p = url;
+
+    while (*p && o + 1 < len) {
+        if ((p == url || p[-1] == '?' || p[-1] == '&') &&
+            (!strncmp(p, "passphrase=", 11) || !strncmp(p, "secret=", 7) || !strncmp(p, "password=", 9))) {
+            const char *eq = strchr(p, '=');
+            const char *e = strchr(p, '&');
+            size_t kl = (size_t)(eq - p + 1);
+
+            if (o + kl + 3 >= len)
+                break;
+            memcpy(out + o, p, kl);
+            o += kl;
+            memcpy(out + o, "***", 3);
+            o += 3;
+            p = e ? e : p + strlen(p);
+            continue;
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+
 int sinks_json(struct sinks *s, FILE *f, int indent)
 {
     int n;
+    char shown[SINK_URL_MAX];
 
     pthread_mutex_lock(&s->lock);
     n = s->n;
@@ -279,7 +307,8 @@ int sinks_json(struct sinks *s, FILE *f, int indent)
         fprintf(f, "%s\n%*s{\"id\": ", i ? "," : "", indent, "");
         json_str(f, k->id);
         fprintf(f, ", \"type\": \"%s\", \"url\": ", k->ops->name);
-        json_str(f, k->url);
+        redact_url(k->url, shown, sizeof(shown));
+        json_str(f, shown);
         fprintf(f, ", \"state\": ");
         json_str(f, st.state);
         fprintf(f, ",\n%*s \"packets\": %llu, \"bytes\": %llu, \"errors\": %llu, "

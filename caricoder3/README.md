@@ -298,6 +298,13 @@ survives a restart. The supervisor re-reads the directory on `SIGHUP`
 (`systemctl reload caricoder3`) and when the GUI or API changes a
 channel; a running channel whose file changed is restarted.
 
+The GUI and the API are plain HTTP with basic authentication: fine on a
+management network, not something to put on the public internet as it
+is (a reverse proxy with TLS in front, or a firewall rule, is the way).
+The `/hls/` paths are open, as players cannot sign in. Anyone with the
+password can make the machine write files (`file:///path` outputs,
+`hls://?dir=`), so the password is a root password for this purpose.
+
 The API (basic auth, JSON in and out):
 
 | | |

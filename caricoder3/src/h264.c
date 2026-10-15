@@ -34,7 +34,7 @@ static unsigned ue(struct bits *b)
 {
     int zeros = 0;
 
-    while (bit(b) == 0 && zeros < 32)
+    while (bit(b) == 0 && zeros < 31)
         zeros++;
     return ((1u << zeros) - 1) + bits_n(b, zeros);
 }
@@ -58,6 +58,8 @@ void h264_parse_sps(const uint8_t *nal, int len, int *w, int *h, double *fps)
 
     for (int i = 1; i < len && n < (int)sizeof(rbsp); i++) {
         if (i + 2 < len && nal[i] == 0 && nal[i + 1] == 0 && nal[i + 2] == 3) {
+            if (n + 1 >= (int)sizeof(rbsp))
+                break;
             rbsp[n++] = 0;
             rbsp[n++] = 0;
             i += 2;

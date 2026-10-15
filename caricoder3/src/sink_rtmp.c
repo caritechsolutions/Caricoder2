@@ -172,7 +172,7 @@ static void amf_prop_bool(struct buf *b, const char *k, bool v) { amf_key(b, k);
 
 /* ---- tags into the queue ---------------------------------------------- */
 
-static void queue_tag(struct rtmp_sink *s, uint8_t type, bool key, uint32_t ts, const struct buf *body)
+static bool queue_tag(struct rtmp_sink *s, uint8_t type, bool key, uint32_t ts, const struct buf *body)
 {
     struct tag *t;
 
@@ -194,12 +194,12 @@ static void queue_tag(struct rtmp_sink *s, uint8_t type, bool key, uint32_t ts, 
         s->waiting_key = s->have_video;
         s->seq_sent = false;
         pthread_mutex_unlock(&s->lock);
-        return;
+        return false;
     }
     t = malloc(sizeof(*t) + body->len);
     if (!t) {
         pthread_mutex_unlock(&s->lock);
-        return;
+        return false;
     }
     t->next = NULL;
     t->type = type;
@@ -216,6 +216,7 @@ static void queue_tag(struct rtmp_sink *s, uint8_t type, bool key, uint32_t ts, 
     s->q_tags++;
     pthread_cond_signal(&s->cond);
     pthread_mutex_unlock(&s->lock);
+    return true;
 }
 
 static uint32_t ts_ms(struct rtmp_sink *s, int64_t t90)
@@ -227,9 +228,10 @@ static uint32_t ts_ms(struct rtmp_sink *s, int64_t t90)
     return (uint32_t)((t90 - s->base_dts) / 90);
 }
 
-static void queue_sequence_headers(struct rtmp_sink *s, uint32_t ts)
+static bool queue_sequence_headers(struct rtmp_sink *s, uint32_t ts)
 {
     struct buf b = { 0 };
+    bool ok;
 
     /* onMetaData, so players know what is coming */
     amf_str(&b, "@setDataFrame");
@@ -251,8 +253,12 @@ static void queue_sequence_headers(struct rtmp_sink *s, uint32_t ts)
     }
     amf_prop_str(&b, "encoder", "caricoder3 " CC3_VERSION);
     amf_obj_end(&b);
-    queue_tag(s, 18, true, ts, &b);
+    ok = queue_tag(s, 18, true, ts, &b);
     b.len = 0;
+    if (!ok) {
+        free(b.p);
+        return false;
+    }
 
     if (s->have_video && s->sps_len > 3 && s->pps_len > 0) {
         /* AVCDecoderConfigurationRecord */
@@ -264,8 +270,12 @@ static void queue_sequence_headers(struct rtmp_sink *s, uint32_t ts)
         put16(&b, (unsigned)s->sps_len); put(&b, s->sps, (size_t)s->sps_len);
         put8(&b, 1);                        /* 1 PPS */
         put16(&b, (unsigned)s->pps_len); put(&b, s->pps, (size_t)s->pps_len);
-        queue_tag(s, 9, true, ts, &b);
+        ok = queue_tag(s, 9, true, ts, &b);
         b.len = 0;
+        if (!ok) {
+            free(b.p);
+            return false;
+        }
     }
     if (s->have_audio && s->aac_sr) {
         static const int rates[] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
@@ -279,10 +289,15 @@ static void queue_sequence_headers(struct rtmp_sink *s, uint32_t ts)
         put8(&b, 0xAF); put8(&b, 0x00);
         put8(&b, (unsigned)((s->aac_obj << 3) | (sri >> 1)));
         put8(&b, (unsigned)(((sri & 1) << 7) | (s->aac_ch << 3)));
-        queue_tag(s, 8, true, ts, &b);
+        ok = queue_tag(s, 8, true, ts, &b);
+        if (!ok) {
+            free(b.p);
+            return false;
+        }
     }
     free(b.p);
     s->seq_sent = true;
+    return true;
 }
 
 static void pend_release(struct rtmp_sink *s, uint32_t from_ts);
@@ -344,9 +359,12 @@ static void video_unit(struct rtmp_sink *s, const uint8_t *es, size_t len, int64
     }
     ts = ts_ms(s, dts);
     if (!s->seq_sent || c.params_changed) {
-        if (s->sps_len && s->pps_len)
-            queue_sequence_headers(s, ts);
-        else {
+        if (s->sps_len && s->pps_len) {
+            if (!queue_sequence_headers(s, ts)) {
+                free(b.p);              /* the queue is full: this GOP is lost */
+                return;
+            }
+        } else {
             free(b.p);
             s->waiting_key = true;          /* no parameters yet: wait for a key frame with them */
             return;
@@ -456,9 +474,8 @@ static void audio_unit(struct rtmp_sink *s, const uint8_t *es, size_t len, int64
             if (s->waiting_key) {
                 pend_audio(s, ts_ms(s, t), &b);
             } else {
-                if (!s->seq_sent)
-                    queue_sequence_headers(s, ts_ms(s, t));
-                queue_tag(s, 8, false, ts_ms(s, t), &b);
+                if (s->seq_sent || queue_sequence_headers(s, ts_ms(s, t)))
+                    queue_tag(s, 8, false, ts_ms(s, t), &b);
             }
             free(b.p);
         }
@@ -806,7 +823,11 @@ static bool connect_tcp(struct rtmp_sink *s, char *err, size_t errlen)
 
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     }
+    pthread_mutex_lock(&s->lock);
     s->fd = fd;
+    if (s->stop)
+        shutdown(fd, SHUT_RDWR);            /* closing meanwhile: do not start */
+    pthread_mutex_unlock(&s->lock);
     return true;
 }
 
@@ -916,8 +937,10 @@ out:
     free(b.p);
     free(m);
     if (!ok && s->fd >= 0) {
+        pthread_mutex_lock(&s->lock);
         close(s->fd);
         s->fd = -1;
+        pthread_mutex_unlock(&s->lock);
     }
     return ok;
 }
@@ -1030,8 +1053,10 @@ static void *rtmp_thread(void *arg)
         }
         for (int i = 0; i < 64; i++)
             free(st.cs[i].buf);
+        pthread_mutex_lock(&s->lock);
         close(s->fd);
         s->fd = -1;
+        pthread_mutex_unlock(&s->lock);
         if (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
             struct tag *x;
 
@@ -1177,6 +1202,8 @@ static void rtmp_close(void *ctx)
     pthread_mutex_lock(&s->lock);
     s->stop = true;
     pthread_cond_broadcast(&s->cond);
+    if (s->fd >= 0)
+        shutdown(s->fd, SHUT_RDWR);         /* a send or connect in progress returns at once */
     pthread_mutex_unlock(&s->lock);
     pthread_join(s->th, NULL);
     demux_free(s->dmx);
