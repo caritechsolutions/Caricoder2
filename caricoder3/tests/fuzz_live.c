@@ -91,7 +91,7 @@ static void check_out(void *opaque, const uint8_t *pkt)
 static void run_output(struct engine *e, int64_t now)
 {
     for (int i = 0; i < 4096; i++)
-        if (engine_run(e, now + i, 7, 0) > now + i)
+        if (engine_run(e, now + i, 7, 0, NULL) > now + i)
             return;
     fprintf(stderr, "INVARIANT VIOLATED: output never catches up\n");
     abort();

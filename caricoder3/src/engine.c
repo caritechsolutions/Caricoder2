@@ -38,6 +38,8 @@
 #define PCR_QUIET_NS    500000000LL     /* live: data but no PCR for this long */
 #define ANCHOR_EVERY_NS 100000000LL
 #define FLOW_GAP_NS     400000000LL     /* live: a pause at least this long restarts the run */
+#define VBR_COALESCE    (STC_HZ / 1000)      /* 1 ms: VBR packets due within it go out together */
+#define VBR_FLUSH_GAP   (STC_HZ * 5 / 1000)  /* 5 ms: a gap this long sends the part-built datagram */
 #define CATCHUP_MAX     (STC_HZ / 2)    /* live: further behind than this, skip */
 #define FILE_SPLICE_MIN (STC_HZ / 10)   /* file: breaks smaller than this are left */
 #define DRAIN_LIMIT     (30 * STC_HZ)   /* file: most output written after the end */
@@ -1034,11 +1036,14 @@ void engine_finish(struct engine *e)
 
 /* ---- live output ---------------------------------------------------- */
 
-int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill)
+int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill, bool *flush)
 {
     int64_t wake;
     stc_t next;
     bool started_now = false;
+
+    if (flush)
+        *flush = false;
 
     pthread_mutex_lock(&e->lock);
     if (!mux_started(e->mux)) {
@@ -1079,6 +1084,15 @@ int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill)
             next = mux_next_event(e->mux);
             if (next > mux_next_stc(e->mux) + STC_HZ)
                 next = mux_next_stc(e->mux) + STC_HZ;
+            /* A VBR stream paces its packets one by one; a datagram only
+             * leaves when full, so there is no point waking for each of
+             * them. Packets due within the next millisecond go together,
+             * unless the stream has a gap there: then what is built goes
+             * out now. */
+            if (flush && next > mux_next_stc(e->mux) + VBR_FLUSH_GAP)
+                *flush = true;
+            else if (next < target + VBR_COALESCE)
+                next = target + VBR_COALESCE;
         } else {
             int need = dgram - ((fill + n) % dgram);
 

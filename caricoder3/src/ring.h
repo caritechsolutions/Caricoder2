@@ -5,14 +5,15 @@
  * One writer (the mux, in the output thread), any number of readers (the
  * sinks, each in its own thread). A reader keeps a cursor: the sequence
  * number of the next packet it wants. The writer never waits for a
- * reader: one that has fallen a whole ring behind has its cursor moved
- * up and the packets it missed counted for it alone, so no sink can slow
- * another or the pipeline.
+ * reader, and takes no lock: one that has fallen a whole ring behind has
+ * its cursor moved up and the packets it missed counted for it alone, so
+ * no sink can slow another or the pipeline.
  */
 #ifndef CC3_RING_H
 #define CC3_RING_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -22,11 +23,12 @@
 
 struct ring {
     uint8_t (*pkt)[TS_SIZE];
-    pthread_mutex_t lock;
+    _Atomic uint64_t head;                  /* sequence number of the next packet written */
+    _Atomic uint64_t flush_at;              /* head when the writer last asked for a flush */
+    _Atomic bool     closed;                /* no more will come: readers may leave */
+    _Atomic int      waiters;               /* readers asleep on cond */
+    pthread_mutex_t lock;                   /* for cond only */
     pthread_cond_t  cond;
-    uint64_t head;                          /* sequence number of the next packet written */
-    uint64_t flush_at;                      /* head when the writer last asked for a flush */
-    bool     closed;                        /* no more will come: readers may leave */
 };
 
 bool ring_init(struct ring *r);

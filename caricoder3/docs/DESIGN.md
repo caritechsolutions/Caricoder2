@@ -817,6 +817,38 @@ that the design above did not settle:
   what stage 4 produced (checked: 36 file runs against the previous
   binary, byte for byte), and the tests stay deterministic.
 
+**What an output costs (measured 2026-10-15).** On transcoder2 the first
+build showed each output thread at 4-5% of a core at 4 Mb/s VBR, and in
+the lab the output thread itself at 10%: 2,700 wake-ups and 27,000
+futex calls a second. Three causes, three changes:
+
+- The ring took a mutex per packet pushed and per read, and the writer
+  broadcast on the condition variable on every mux run whether or not a
+  reader was asleep. Now the packet path has no lock: the writer stores
+  the head with release semantics after the copy, a reader loads it with
+  acquire, copies, and checks afterwards that the writer did not lap it
+  meanwhile (if it did, the copy may be mixed and is done again from the
+  oldest safe packet). The mutex guards only the sleep, and the writer
+  makes the wake-up system call only when a reader is asleep (`waiters`).
+- A VBR stream paces its packets one at a time (each unit's packets are
+  spread across its send window), so the output thread woke per packet.
+  A datagram leaves only when full, so packets due within the next
+  millisecond now go out together (`VBR_COALESCE`); CBR is untouched and
+  its wake-up still aims at the packet that completes a datagram.
+- The part-built-datagram flush was tied to the wake-up time (next
+  wake more than 300 µs away), which at 4 Mb/s VBR meant almost every
+  packet went out alone: 29,000 of 35,000 datagrams carried one packet.
+  Now the mux reports a *gap in the stream* (`engine_run`'s `flush`: the
+  next packet is due more than 5 ms after the last, `VBR_FLUSH_GAP`) and
+  only then is a short datagram sent. The same stream now goes out as
+  6,700 datagrams, 6,460 of them full. The outputs are woken once per
+  seven packets, or at a flush.
+
+Result in the lab (two outputs, 4 Mb/s): VBR output thread 10.6% → 2.2%
+of a core, each output 2.7% → 0.5%; CBR 1.7% → 1.6% and 0.9% → 0.8%.
+Checked under ThreadSanitizer (live add/remove, VBR and CBR) and with
+the live fuzzer.
+
 The config file lists only *saved* outputs: those it already had and
 those added with `"save": true`. Outputs from `-o` are not written to it,
 so a service file's `-o` and a GUI's saved outputs do not fight over the

@@ -151,8 +151,7 @@ static void *input_thread(void *arg)
 static void *output_thread(void *arg)
 {
     struct ctx *c = arg;
-    bool vbr = c->opt->eng.mux.vbr;
-
+    uint64_t head, published = 0;
     /* Wake up when asked, not up to 50 us later (the default slack). */
     prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
     if (c->opt->rt_prio > 0) {
@@ -165,12 +164,18 @@ static void *output_thread(void *arg)
 
     while (atomic_load(&g_run)) {
         int64_t now = clock_now_ns();
+        bool flush;
         /* The wake-up aims at the packet that completes a datagram of
          * seven (what every UDP output sends unless its URL says otherwise). */
-        int64_t wake = engine_run(c->eng, now, 7, (int)(ring_now(&c->ring) % 7));
+        int64_t wake = engine_run(c->eng, now, 7, (int)(ring_now(&c->ring) % 7), &flush);
 
-        /* VBR: outputs must not sit on a part-filled datagram until more turns up. */
-        ring_publish(&c->ring, vbr && wake > now + 300000);
+        /* The outputs are woken once a datagram's worth is in (or at a
+         * gap in a VBR stream, when a part-built datagram must go out). */
+        head = ring_now(&c->ring);
+        if (flush || head / 7 != published / 7) {
+            ring_publish(&c->ring, flush);
+            published = head;
+        }
         atomic_store(&c->beat_out, now);
 
         now = clock_now_ns();
@@ -184,6 +189,7 @@ static void *output_thread(void *arg)
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
         }
     }
+    ring_publish(&c->ring, true);
     return NULL;
 }
 

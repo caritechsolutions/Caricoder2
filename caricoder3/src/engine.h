@@ -66,11 +66,14 @@ void engine_finish(struct engine *e);
 
 /*
  * Live mode only, called from the output thread: emits every packet that
- * is due at now_ns and returns the time the next one is due. `fill` is
- * the number of packets waiting in a partly built datagram of `dgram`
+ * is due at now_ns and returns the time to call again. `fill` is the
+ * number of packets waiting in a partly built datagram of `dgram`
  * packets, so the wake-up can be aimed at the packet that completes it.
+ * `*flush` (may be NULL) is set when the stream has a gap after what was
+ * just emitted (VBR only), so a part-built datagram should go out rather
+ * than wait for the gap to end.
  */
-int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill);
+int64_t engine_run(struct engine *e, int64_t now_ns, int dgram, int fill, bool *flush);
 
 void engine_get_stats(struct engine *e, struct engine_stats *out);
 
