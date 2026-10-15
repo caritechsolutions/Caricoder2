@@ -23,8 +23,8 @@ rest of this repository.
 | 5a | Outputs added and removed while the channel runs; several outputs per channel; control socket; config file | done, tested (UDP, RTP, file) |
 | 5b | SRT and RIST outputs (caller and listener, encryption, reconnect) | done, tested against srt-live-transmit and ristreceiver |
 | 5c | RTMP push (H.264 + AAC) | done, tested against ffmpeg as the server; not yet against a public RTMP service |
-| 6 | HLS packager as an output | not started |
-| 7 | Supervisor, GUI, side-by-side run against Flussonic | not started |
+| 6 | HLS packager as an output (TS segments, master playlist for renditions, served by the process, optional directory) | done, tested; played by ffmpeg's HLS client |
+| 7 | Supervisor (`caricoder3 serve`): runs the channels, REST API, GUI on port 8550, HLS for every channel on that port | done, tested; side-by-side run against Flussonic not done |
 
 MPEG-2 video is parked by decision: it is copied, not transcoded.
 
@@ -173,7 +173,9 @@ the next packet the mux produces (it is not sent what was already
 sent), and the moment it is removed its last datagram goes out and its
 thread ends; the other outputs see nothing of either.
 
-Output types (`caricoder3 --backends` lists what the build has):
+Under the supervisor all of this is done for you by the GUI; the
+commands below are what it runs. Output types (`caricoder3 --backends`
+lists what the build has):
 
 | URL | What |
 |---|---|
@@ -183,11 +185,41 @@ Output types (`caricoder3 --backends` lists what the build has):
 | `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 8 receivers may call in; each gets every datagram, a slow one loses its own |
 | `rist://host:port[?profile=main&buffer=1000&secret=...&aes-type=128&bandwidth=...]` | RIST caller (librist; main profile by default, `simple` or `advanced` on request). The parameters after `profile` are librist's own |
 | `rist://@:port[?...]` | RIST listener (librist's notation) |
+| `hls://[:port][/name][?segment=4&window=6&dir=PATH&keep=20]` | HLS: TS segments cut at key frames (every `segment` seconds, the last `window` kept), one variant per program of the output (a master playlist for a channel with renditions), served by this process on `port` and through the supervisor; `dir=` also writes segments and playlists there for nginx or a CDN origin. See "HLS" |
 | `rtmp://host[:1935]/app/stream[?program=N]` | RTMP push of the program's H.264 video and AAC audio (what RTMP carries; HEVC and other audio are left out, and the log says so). Reconnects by itself; a server that cannot keep up costs it its own frames (`errors`) until the next key frame |
 
 SRT and RIST outputs report what their libraries measure: `rtt_ms`,
 `retransmitted`, and for SRT `lost`. For an RTMP output `packets` counts
 FLV tags.
+
+### HLS
+
+An `hls://` output is a packager and a small web server in one. It cuts
+the output into MPEG-TS segments at video key frames (so `--gop` sets the
+shortest possible segment; with several renditions their key frames are
+aligned and so are their segments), keeps the newest `window` segments
+in memory and serves:
+
+```
+http://host:PORT/index.m3u8        the media playlist (one program) or the
+                                   master playlist (several: one variant per
+                                   program, with BANDWIDTH, RESOLUTION, FRAME-RATE)
+http://host:PORT/v0/index.m3u8     variant 0's media playlist
+http://host:PORT/v0/seg123.ts      a segment
+```
+
+Each variant is a clean single-program stream: its own PAT and SDT, the
+program's PMT and PIDs, no null packets; every segment opens with the
+tables and a key frame, so any segment plays on its own. An audio-only
+program is cut on time. Playlist answers carry `X-Next-Segment`, the name
+of the segment that will be listed next, so a proxy in front can fetch
+it the moment it appears.
+
+With `--name`, the same is served on a Unix socket next to the control
+socket, which the supervisor (stage 7) serves under `/hls/NAME/` on its
+own port, so one port serves every channel. With `dir=`, segments and
+playlists are also written to that directory (atomically), the newest
+`keep` segments kept, for a web server or CDN origin of your own.
 
 ### Under systemd
 
@@ -217,6 +249,69 @@ The process reports `READY=1` once its threads are up and pets the watchdog
 once a second, but only while both the input and the output thread are
 really turning over. A hung process is restarted by systemd; a missing
 input is not a hang and does not cause a restart.
+
+## The supervisor and the GUI
+
+`caricoder3 serve` is one process for the machine: it runs every channel
+described in `/etc/caricoder3/channels/*.json` as a child process,
+restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
+**8550** (set in `/etc/caricoder3/caricoder3.json`):
+
+- `/` — the GUI: plain HTML and JavaScript, built into the binary. Channel
+  list with state and rates; per channel the live statistics, the
+  outputs (add and remove while it runs), the settings form, the log.
+- `/api/...` — the same, as JSON (see below)
+- `/hls/NAME/index.m3u8` — every channel's HLS output, through one port
+
+The installer sets it up as the `caricoder3` systemd service, enabled
+and started. The GUI asks for a password: user `admin`, password made
+up on the first run and kept in the config file:
+
+```
+caricoder3 serve --show-password
+caricoder3 serve --password MyNewPassword      # change it (then restart the service)
+```
+
+A channel file holds what the command line would, for example
+`/etc/caricoder3/channels/vacation.json`:
+
+```json
+{
+  "input": "udp://224.100.1.5:49500?iface=eth1",
+  "program": 1840,
+  "muxrate": "5M",
+  "video": ["h264:3M", "640x360:h264:1M"],
+  "audio": ["aac:128k"],
+  "gpu": 0,
+  "service_name": "Vacation",
+  "enabled": true
+}
+```
+
+Keys: `input`, `program`, `muxrate`, `vbr`, `delay`, `video` (list),
+`audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `gop`, `vbv`,
+`pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
+`extra_args` (list, passed as they are), `enabled`. The channel's outputs
+live next to it in `vacation.outputs.json`, which the channel itself
+reads and writes (the `--config` file), so an output added in the GUI
+survives a restart. The supervisor re-reads the directory on `SIGHUP`
+(`systemctl reload caricoder3`) and when the GUI or API changes a
+channel; a running channel whose file changed is restarted.
+
+The API (basic auth, JSON in and out):
+
+| | |
+|---|---|
+| `GET /api/system` | version, host, uptime, channels, what this build can do |
+| `GET /api/channels` | every channel: state, pid, uptime, restarts, config, statistics, outputs |
+| `GET /api/channels/NAME` | the same for one, plus its last 200 log lines |
+| `PUT /api/channels/NAME` | create or replace the channel (body: the JSON above) |
+| `DELETE /api/channels/NAME` | stop it and remove its files |
+| `POST /api/channels/NAME/start`, `/stop`, `/restart` | |
+| `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "..."}`: add an output, saved |
+| `DELETE /api/channels/NAME/outputs/ID` | remove one |
+| `GET /api/channels/NAME/log` | the last lines it wrote |
+| `GET /hls/NAME/...` | the channel's HLS output (no password) |
 
 ## Transcoding
 

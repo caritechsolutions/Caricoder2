@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>caricoder3</title>
+<style>
+:root { --bg:#0f1317; --panel:#171c22; --line:#263038; --fg:#dfe6ec; --dim:#8a97a3; --ok:#39c27a; --warn:#e6b422; --bad:#e5533d; --acc:#3f8cff; }
+* { box-sizing:border-box }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif }
+header { display:flex; align-items:center; gap:16px; padding:10px 20px; border-bottom:1px solid var(--line); background:var(--panel) }
+header h1 { font-size:17px; margin:0; letter-spacing:.3px } header h1 span { color:var(--dim); font-weight:normal; margin-left:8px; font-size:13px }
+header .sp { flex:1 } header .sys { color:var(--dim); font-size:12px }
+main { padding:20px; max-width:1240px; margin:0 auto }
+a { color:var(--acc); text-decoration:none } a:hover { text-decoration:underline }
+button { background:#222a33; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit }
+button:hover { border-color:#3a4752 } button.primary { background:var(--acc); border-color:var(--acc); color:#fff }
+button.danger { color:#ffb0a4 } button:disabled { opacity:.45; cursor:default }
+input, select { background:#0c1014; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; width:100% }
+table { border-collapse:collapse; width:100% } th { text-align:left; color:var(--dim); font-weight:600; font-size:12px; padding:8px 10px; border-bottom:1px solid var(--line) }
+td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top } tr.row:hover td { background:#1b222a; cursor:pointer }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; vertical-align:middle; background:var(--dim) }
+.dot.running { background:var(--ok) } .dot.failed { background:var(--bad) } .dot.stopping,.dot.starting { background:var(--warn) }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px }
+.panel h2 { font-size:14px; margin:0 0 12px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px 18px }
+.kv b { display:block; color:var(--dim); font-weight:normal; font-size:11px; text-transform:uppercase; letter-spacing:.5px } .kv span { font-size:16px }
+.tabs { display:flex; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--line) }
+.tabs button { background:none; border:none; border-bottom:2px solid transparent; border-radius:0; padding:8px 14px; color:var(--dim) }
+.tabs button.on { color:var(--fg); border-bottom-color:var(--acc) }
+.toolbar { display:flex; gap:8px; align-items:center; margin-bottom:14px; flex-wrap:wrap } .toolbar .sp { flex:1 }
+pre.log { background:#0b0e12; border:1px solid var(--line); border-radius:8px; padding:12px; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; max-height:420px; overflow:auto; white-space:pre-wrap; margin:0 }
+.form { display:grid; grid-template-columns:180px 1fr; gap:10px 14px; align-items:center; max-width:820px }
+.form label { color:var(--dim) } .form .help { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px }
+.form .list { display:flex; flex-direction:column; gap:6px } .form .list div { display:flex; gap:6px }
+.msg { padding:10px 12px; border-radius:8px; margin-bottom:12px } .msg.err { background:#3a1e1a; color:#ffc9bf } .msg.ok { background:#163626; color:#b9f0d0 }
+.mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px }
+.small { color:var(--dim); font-size:12px }
+.hidden { display:none }
+dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:12px; padding:20px; min-width:420px } dialog::backdrop { background:rgba(0,0,0,.6) }
+.wide { grid-column:1 / -1 }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#" onclick="go('list');return false" style="color:inherit">caricoder3</a><span id="sysline"></span></h1>
+  <div class="sp"></div>
+  <div class="sys" id="sysright"></div>
+</header>
+<main id="main"></main>
+
+<dialog id="dlg"></dialog>
+
+<script>
+"use strict";
+const $ = (s, el=document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtRate = b => b >= 1e6 ? (b/1e6).toFixed(2)+" Mb/s" : b >= 1e3 ? (b/1e3).toFixed(0)+" kb/s" : (b|0)+" b/s";
+const fmtUp = s => { s = Math.floor(s); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${s%60}s`; };
+let view = { name: "list" }, timer = null, sys = null;
+
+async function api(path, opts={}) {
+  const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
+  let j = null; try { j = await r.json(); } catch(e) {}
+  if (!r.ok || (j && j.ok === false)) throw new Error((j && j.error) || (r.status + " " + r.statusText));
+  return j;
+}
+function go(name, arg) { view = { name, arg }; render(); }
+function schedule(ms) { clearTimeout(timer); timer = setTimeout(render, ms); }
+function showMsg(el, text, cls) { el.innerHTML = `<div class="msg ${cls}">${esc(text)}</div>`; }
+
+async function loadSys() {
+  try { sys = await api("/api/system"); } catch(e) { sys = null; }
+  $("#sysline").textContent = sys ? `${sys.version} on ${sys.host}` : "";
+  $("#sysright").textContent = sys ? `${sys.running} of ${sys.channels} channels running · up ${fmtUp(sys.uptime)}` : "cannot reach the supervisor";
+}
+
+/* ---------- the list ---------- */
+async function renderList() {
+  const m = $("#main");
+  let data; try { data = await api("/api/channels"); } catch(e) { m.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
+  const rows = data.channels.map(c => {
+    const st = c.stats || {}, inp = st.input || {}, out = st.output || {}, svc = st.service || {};
+    const outs = (c.outputs && c.outputs.outputs) || [];
+    const what = (svc.streams || []).map(s => s.mode === "transcode" ? `${s.from || ""} → ${s.codec || ""}${s.size ? " " + s.size : ""}` : `${s.codec || ""} copy`).filter(Boolean).slice(0,4).join(", ");
+    return `<tr class="row" onclick="go('chan','${esc(c.name)}')">
+      <td><span class="dot ${c.state}"></span>${esc(c.name)}</td>
+      <td>${esc(c.state)}${c.state==='running' ? ` <span class="small">${fmtUp(c.uptime)}</span>` : c.why ? ` <span class="small">${esc(c.why)}</span>` : ""}</td>
+      <td class="mono">${esc((c.config||{}).input || "")}</td>
+      <td>${c.state==='running' ? fmtRate(inp.bitrate||0) : "–"}</td>
+      <td>${c.state==='running' ? fmtRate(out.bitrate||0) : "–"}</td>
+      <td class="small">${esc(what)}</td>
+      <td>${outs.length ? outs.map(o => `<span class="mono">${esc(o.type)}</span>`).join(" ") : (c.state==='running' ? "none" : "")}</td>
+    </tr>`;
+  }).join("");
+  m.innerHTML = `
+    <div class="toolbar"><h2 style="margin:0">Channels</h2><div class="sp"></div><button class="primary" onclick="newChannel()">New channel</button></div>
+    <div class="panel" style="padding:0">
+    <table><thead><tr><th>Name</th><th>State</th><th>Input</th><th>In</th><th>Out</th><th>Streams</th><th>Outputs</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="7" class="small" style="padding:24px;text-align:center">No channels yet. "New channel" makes one.</td></tr>`}</tbody></table></div>`;
+  schedule(2000);
+}
+
+/* ---------- one channel ---------- */
+let tab = "status";
+async function renderChan(name) {
+  const m = $("#main");
+  let data; try { data = await api("/api/channels/" + encodeURIComponent(name)); } catch(e) { m.innerHTML = `<div class="msg err">${esc(e.message)}</div> <button onclick="go('list')">Back</button>`; return; }
+  const c = data.channel, running = c.state === "running";
+  const head = `
+    <div class="toolbar">
+      <a href="#" onclick="go('list');return false">← Channels</a>
+      <h2 style="margin:0 8px"><span class="dot ${c.state}"></span>${esc(c.name)}</h2>
+      <span class="small">${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? " · " + esc(c.why) : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}</span>
+      <div class="sp"></div>
+      <button onclick="act('${esc(name)}','start')" ${running?"disabled":""}>Start</button>
+      <button onclick="act('${esc(name)}','stop')" ${!running?"disabled":""}>Stop</button>
+      <button onclick="act('${esc(name)}','restart')">Restart</button>
+      <button class="danger" onclick="delChannel('${esc(name)}')">Delete</button>
+    </div>
+    <div id="msg"></div>
+    <div class="tabs">${["status","outputs","settings","log"].map(t => `<button class="${tab===t?"on":""}" onclick="tab='${t}';render()">${t[0].toUpperCase()+t.slice(1)}</button>`).join("")}</div>`;
+  let body = "";
+  if (tab === "status") body = statusTab(c);
+  else if (tab === "outputs") body = outputsTab(c);
+  else if (tab === "settings") body = settingsTab(c);
+  else body = `<pre class="log">${esc((c.log||[]).join("\n")) || "(nothing yet)"}</pre>`;
+  m.innerHTML = head + body;
+  if (tab === "settings") fillForm(c.config || {});
+  if (tab !== "settings") schedule(2000);
+}
+
+function statusTab(c) {
+  const st = c.stats; if (!st) return `<div class="panel small">No statistics: the channel is ${esc(c.state)}.</div>`;
+  const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
+  const kv = (k,v) => `<div class="kv"><b>${k}</b><span>${v}</span></div>`;
+  const streams = (svc.streams||[]).map(s => `<tr>
+      <td class="mono">0x${(s.pid||0).toString(16).padStart(4,"0")}</td><td>${esc(s.mode||"")}</td>
+      <td>${esc(s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : (s.codec||""))}</td>
+      <td>${s.decoder?esc(s.decoder+" → "+(s.encoder||"")):""}</td>
+      <td>${s.frames_out!=null?`${s.frames_in||0} in / ${s.frames_out} out`:""}${s.decode_errors?` <span style="color:var(--warn)">${s.decode_errors} decode errors</span>`:""}${s.input_dropped?` <span style="color:var(--warn)">${s.input_dropped} dropped</span>`:""}${s.silence_ms?` <span class="small">${s.silence_ms} ms silence</span>`:""}${s.failed?` <span style="color:var(--bad)">failed</span>`:""}</td>
+      <td>${s.slack_min_ms!=null?`${s.slack_ms.toFixed(0)} ms (min ${s.slack_min_ms.toFixed(0)})`:""}</td></tr>`).join("");
+  return `
+    <div class="panel"><h2>Input</h2><div class="grid">
+      ${kv("Bit rate", fmtRate(inp.bitrate||0))}${kv("Last packet", inp.last_packet_age_ms!=null && inp.last_packet_age_ms>=0 ? inp.last_packet_age_ms+" ms ago" : "–")}
+      ${kv("CC errors", inp.cc_errors??0)}${kv("Sync errors", inp.sync_errors??0)}${kv("Socket overflow", inp.socket_overflow??0)}
+      ${kv("PES dropped", inp.pes_dropped??0)}${kv("PCR jumps", inp.pcr_jumps??0)}</div></div>
+    <div class="panel"><h2>Clock</h2><div class="grid">
+      ${kv("Locked", clk.locked?"yes":"no")}${kv("Drift", (clk.drift_ppm??0).toFixed(1)+" ppm")}${kv("Jitter", (clk.jitter_us??0).toFixed(0)+" µs")}
+      ${kv("Discontinuities", clk.discontinuities??0)}${kv("Held units", clk.held_units??0)}</div></div>
+    <div class="panel"><h2>Output</h2><div class="grid">
+      ${kv("Mode", esc(out.mode||""))}${kv("Bit rate", fmtRate(out.bitrate||0))}${kv("Mux rate", fmtRate(out.muxrate||0))}${kv("Null", (out.null_percent??0).toFixed(1)+"%")}
+      ${kv("Dropped units", out.dropped_units??0)}${kv("Late units", out.late_units??0)}${kv("Worst late", (out.max_late_ms??0).toFixed(1)+" ms")}${kv("Send errors", out.send_errors??0)}
+      ${kv("Programs", svc.programs??1)}</div></div>
+    <div class="panel"><h2>Streams</h2><table><thead><tr><th>PID</th><th>Mode</th><th>Codec</th><th>Where</th><th>Frames</th><th>Time to spare</th></tr></thead><tbody>${streams}</tbody></table></div>`;
+}
+
+function outputsTab(c) {
+  const running = c.state === "running";
+  const outs = (c.outputs && c.outputs.outputs) || ((c.saved_outputs||{}).outputs||[]).map(o => Object.assign({state:"(saved; starts with the channel)"}, o));
+  const rows = outs.map(o => `<tr>
+      <td class="mono">${esc(o.id)}</td><td>${esc(o.type||"")}</td><td class="mono">${esc(o.url)}</td><td>${esc(o.state||"")}</td>
+      <td>${o.packets!=null ? `${o.packets} pkts${o.errors?`, <span style="color:var(--warn)">${o.errors} errors</span>`:""}${o.overruns?`, <span style="color:var(--bad)">${o.overruns} overruns</span>`:""}${o.rtt_ms!=null?`, rtt ${o.rtt_ms} ms`:""}${o.reconnects?`, ${o.reconnects} reconnects`:""}` : ""}</td>
+      <td>${o.saved?"saved":""}</td>
+      <td>${running ? `<button class="danger" onclick="delOutput('${esc(c.name)}','${esc(o.id)}')">Remove</button>` : ""}</td></tr>`).join("");
+  const hls = outs.find(o => o.type === "hls");
+  return `
+    <div class="panel">
+    <div class="toolbar"><h2 style="margin:0">Outputs</h2><div class="sp"></div>
+      <button class="primary" onclick="addOutput('${esc(c.name)}')" ${running?"":"disabled title='start the channel first'"}>Add output</button></div>
+    <table><thead><tr><th>Id</th><th>Type</th><th>URL</th><th>State</th><th>Counters</th><th></th><th></th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="7" class="small">No outputs.</td></tr>`}</tbody></table>
+    ${hls ? `<p class="small">HLS through this server: <a href="/hls/${esc(c.name)}/index.m3u8" target="_blank">/hls/${esc(c.name)}/index.m3u8</a></p>` : ""}
+    <p class="small">URL forms: <span class="mono">udp://239.1.1.1:5000?ttl=8</span> · <span class="mono">srt://host:9000</span> (caller) · <span class="mono">srt://:9000</span> (listener) · <span class="mono">rist://host:9100</span> · <span class="mono">rist://@:9100</span> (listener) · <span class="mono">rtmp://host/app/stream</span> · <span class="mono">hls://:8080?segment=4</span> · <span class="mono">/path/file.ts</span></p>
+    </div>`;
+}
+
+function settingsTab(c) {
+  const f = (id, label, help, input) => `<label for="${id}">${label}</label>${input || `<input id="${id}">`}${help?`<div class="help">${help}</div>`:""}`;
+  return `<div class="panel"><form class="form" onsubmit="saveChannel('${esc(c.name)}');return false">
+    ${f("input","Input","udp://[source@]group:port?iface=eth1 or rtp://; a file path for testing")}
+    ${f("program","Program","Service number to take; 0 = the first in the PAT")}
+    ${f("muxrate","Mux rate","5M, 4500k, or empty for VBR")}
+    ${f("vbr","VBR","With a mux rate: VBR capped at it", `<select id="vbr"><option value="false">no (CBR)</option><option value="true">yes</option></select>`)}
+    ${f("delay","Delay (ms)","Empty: 500, or 800 / 3000 when audio / video is transcoded")}
+    <label>Video renditions</label><div class="list" id="video"></div><div class="help">Each line is one rendition: h264:3M, 1280x720:h264:2M, hevc:2M. Empty: video copied.</div>
+    <label>Audio</label><div class="list" id="audio"></div><div class="help">aac:128k, mp2:192k, mp3:128k; PID=spec for one stream (0x103=aac:96k). Empty: copied.</div>
+    ${f("decoder","Decoder","", `<select id="decoder"><option value="">auto</option><option>nvidia</option><option>cpu</option></select>`)}
+    ${f("encoder","Encoder","", `<select id="encoder"><option value="">auto</option><option>nvidia</option><option>cpu</option></select>`)}
+    ${f("gpu","GPU","Which NVIDIA card (0, 1, ...)")}
+    ${f("preset","Preset","x264/x265: ultrafast … medium; NVENC: p1 … p7")}
+    ${f("gop","GOP (ms)","Longest gap between key frames; empty = 2000")}
+    ${f("vbv","VBV (ms)","Video decoder buffer; empty = 1000")}
+    ${f("service_name","Service name","Replaces the name in the SDT")}
+    ${f("service_provider","Provider","")}
+    ${f("enabled","Enabled","A disabled channel is not started", `<select id="enabled"><option value="true">yes</option><option value="false">no</option></select>`)}
+    <div></div><div><button class="primary" type="submit">Save</button> <span class="small">A running channel restarts with the new settings.</span></div>
+  </form></div>`;
+}
+function listRow(id, val) { return `<div><input value="${esc(val)}"><button type="button" onclick="this.parentNode.remove()">×</button></div>`; }
+function fillList(id, arr) { const el = $("#"+id); el.innerHTML = (arr||[]).map(v => listRow(id, v)).join("") + `<div><button type="button" onclick="this.parentNode.insertAdjacentHTML('beforebegin', listRow('${id}',''))">+ add</button></div>`; }
+function fillForm(cfg) {
+  for (const k of ["input","program","muxrate","delay","gpu","preset","gop","vbv","service_name","service_provider"]) { const el = $("#"+k); if (el) el.value = cfg[k] ?? ""; }
+  $("#vbr").value = String(!!cfg.vbr); $("#enabled").value = String(cfg.enabled !== false);
+  $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || "";
+  fillList("video", cfg.video); fillList("audio", cfg.audio);
+}
+function readForm() {
+  const v = id => $("#"+id).value.trim();
+  const num = id => v(id) === "" ? undefined : Number(v(id));
+  const list = id => [...$("#"+id).querySelectorAll("input")].map(i => i.value.trim()).filter(Boolean);
+  const cfg = { input: v("input"), program: num("program"), muxrate: v("muxrate") || undefined, vbr: v("vbr") === "true",
+    delay: num("delay"), video: list("video"), audio: list("audio"), decoder: v("decoder") || undefined, encoder: v("encoder") || undefined,
+    gpu: num("gpu"), preset: v("preset") || undefined, gop: num("gop"), vbv: num("vbv"),
+    service_name: v("service_name") || undefined, service_provider: v("service_provider") || undefined, enabled: v("enabled") === "true" };
+  for (const k of Object.keys(cfg)) if (cfg[k] === undefined || (Array.isArray(cfg[k]) && !cfg[k].length)) delete cfg[k];
+  return cfg;
+}
+
+/* ---------- actions ---------- */
+async function act(name, what) {
+  try { await api(`/api/channels/${encodeURIComponent(name)}/${what}`, {method:"POST"}); } catch(e) { showMsg($("#msg"), e.message, "err"); return; }
+  schedule(400);
+}
+async function saveChannel(name) {
+  const cfg = readForm();
+  if (!cfg.input) { showMsg($("#msg"), "The input is needed.", "err"); return; }
+  try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify(cfg, null, 2) + "\n"}); showMsg($("#msg"), "Saved.", "ok"); }
+  catch(e) { showMsg($("#msg"), e.message, "err"); }
+}
+async function delChannel(name) {
+  if (!confirm(`Delete channel ${name}? It is stopped and its files removed.`)) return;
+  try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"DELETE"}); go("list"); } catch(e) { showMsg($("#msg"), e.message, "err"); }
+}
+async function delOutput(name, id) {
+  if (!confirm(`Remove output ${id}?`)) return;
+  try { await api(`/api/channels/${encodeURIComponent(name)}/outputs/${encodeURIComponent(id)}`, {method:"DELETE"}); } catch(e) { showMsg($("#msg"), e.message, "err"); return; }
+  schedule(200);
+}
+function addOutput(name) {
+  const d = $("#dlg");
+  d.innerHTML = `<h3 style="margin-top:0">Add an output to ${esc(name)}</h3>
+    <div class="form"><label>URL</label><input id="o_url" placeholder="udp://239.1.1.1:5000"><label>Id</label><input id="o_id" placeholder="(made up if empty)"></div>
+    <div id="o_msg" style="margin-top:10px"></div>
+    <div class="toolbar" style="margin-top:14px;justify-content:flex-end"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">Add</button></div>`;
+  $("#o_go").onclick = async () => {
+    try { await api(`/api/channels/${encodeURIComponent(name)}/outputs`, {method:"POST", body: JSON.stringify({url: $("#o_url").value.trim(), id: $("#o_id").value.trim()})}); d.close(); schedule(200); }
+    catch(e) { showMsg($("#o_msg"), e.message, "err"); }
+  };
+  d.showModal(); $("#o_url").focus();
+}
+function newChannel() {
+  const d = $("#dlg");
+  d.innerHTML = `<h3 style="margin-top:0">New channel</h3>
+    <div class="form"><label>Name</label><input id="n_name" placeholder="letters, digits, - and _"><label>Input</label><input id="n_input" placeholder="udp://239.5.5.5:5000"></div>
+    <div id="n_msg" style="margin-top:10px"></div>
+    <div class="toolbar" style="margin-top:14px;justify-content:flex-end"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="n_go">Create</button></div>`;
+  $("#n_go").onclick = async () => {
+    const name = $("#n_name").value.trim();
+    try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: $("#n_input").value.trim(), enabled: false}, null, 2)}); d.close(); tab = "settings"; go("chan", name); }
+    catch(e) { showMsg($("#n_msg"), e.message, "err"); }
+  };
+  d.showModal(); $("#n_name").focus();
+}
+
+async function render() {
+  clearTimeout(timer);
+  await loadSys();
+  if (view.name === "chan") await renderChan(view.arg); else await renderList();
+}
+render();
+</script>
+</body>
+</html>

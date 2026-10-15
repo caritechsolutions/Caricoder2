@@ -52,30 +52,38 @@ static int read_line(int fd, char *buf, size_t len)
 
 static void serve(struct control *c, int fd)
 {
-    static _Thread_local char line[LINE_MAX_BYTES];
-    static _Thread_local struct json_doc doc;
+    char *line = malloc(LINE_MAX_BYTES);
+    struct json_doc *doc = malloc(sizeof(*doc));
     char err[200];
     char *reply = NULL;
     size_t reply_len = 0;
     FILE *f;
     int root;
 
-    if (read_line(fd, line, sizeof(line)) < 0)
+    if (!line || !doc || read_line(fd, line, LINE_MAX_BYTES) < 0) {
+        free(line);
+        free(doc);
         return;
+    }
     f = open_memstream(&reply, &reply_len);
-    if (!f)
+    if (!f) {
+        free(line);
+        free(doc);
         return;
-    root = json_parse(&doc, line, err, sizeof(err));
-    if (root < 0 || doc.node[root].type != JSON_OBJECT) {
+    }
+    root = json_parse(doc, line, err, sizeof(err));
+    if (root < 0 || doc->node[root].type != JSON_OBJECT) {
         char q[400];
 
         fprintf(f, "{\"ok\": false, \"error\": %s}",
                 json_quote(root < 0 ? err : "the request must be a JSON object", q, sizeof(q)));
     } else {
-        c->fn(c->opaque, &doc, f);
+        c->fn(c->opaque, doc, f);
     }
     fputc('\n', f);
     fclose(f);
+    free(line);
+    free(doc);
     if (reply) {
         size_t off = 0;
 

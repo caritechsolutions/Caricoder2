@@ -115,6 +115,9 @@ void sinks_json_saved(struct sinks *s, FILE *f, int indent);
 const struct sink_ops *sink_ops_for(const char *url);
 /* Lists the output types this build has (for --backends). */
 void sink_list(FILE *f);
+/* The Unix socket an HLS output serves HTTP on (next to the control
+ * socket; the supervisor proxies it). Set before outputs are added. */
+void sink_hls_set_socket(const char *path);
 
 /* ---- helpers for the sink types ---------------------------------------- */
 

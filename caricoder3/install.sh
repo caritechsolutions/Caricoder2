@@ -307,12 +307,32 @@ main() {
         note "$running channel(s) are running on the previous binary until restarted"
     fi
 
+    # The supervisor as a service: enabled and started on the first
+    # install, restarted on an update so it runs the new binary (its
+    # channels restart with it; a soak channel with its own unit does not).
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        install -m 644 "$SRC_DIR/systemd/caricoder3.service" /etc/systemd/system/caricoder3.service
+        systemctl daemon-reload
+        if systemctl is-active --quiet caricoder3; then
+            systemctl restart caricoder3
+            note "supervisor restarted on the new binary (systemctl status caricoder3)"
+        else
+            systemctl enable --now caricoder3 >/dev/null 2>&1 || true
+            note "supervisor started: systemctl status caricoder3"
+        fi
+        sleep 1
+        if [ -f /etc/caricoder3/caricoder3.json ]; then
+            note "GUI: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$("$PREFIX/bin/caricoder3" serve --show-port 2>/dev/null || echo 8550)/  user admin, password: caricoder3 serve --show-password"
+        fi
+    fi
+
     say "Done: $("$PREFIX/bin/caricoder3" --version)"
     say "What this build can do (caricoder3 --backends)"
     "$PREFIX/bin/caricoder3" --backends 2>&1 | while IFS= read -r line; do note "$line"; done
     note ""
     note "try:  caricoder3 --help"
     note "      caricoder3 --gpu-test        (checks the NVIDIA path on card 0)"
+    note "      caricoder3 serve --show-password   (the GUI password)"
 }
 
 # Everything above is only definitions. Running main from the last line

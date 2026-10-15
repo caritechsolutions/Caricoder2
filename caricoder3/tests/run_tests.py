@@ -1650,7 +1650,8 @@ def live_output_dead_port_isolated():
     must_match(src, w("dead_out.ts"), subset=True)
     good, dead = st["outputs"]
     need(good["errors"] == 0 and good["overruns"] == 0, f"the good output: {good}")
-    need(dead["packets"] == good["packets"], f"both outputs were offered the same packets: {st['outputs']}")
+    # (the two sinks read the ring in batches of 448; a snapshot may catch one a batch ahead)
+    need(abs(dead["packets"] - good["packets"]) <= 448, f"both outputs were offered the same packets: {st['outputs']}")
     return f"good output {good['packets']} packets, 0 errors; dead one {dead['errors']} send errors"
 
 
@@ -1990,6 +1991,281 @@ def live_rtmp_reconnect():
     need(p.returncode == 0 and not p.stderr.strip(), f"ffmpeg decoding the second FLV: {p.stderr[:300]}")
     return f"server restarted at 4 s: {o['reconnects']} reconnect, new server got {gv} video / {ga} audio " \
            f"frames from a key frame, decodes clean"
+
+
+def _decodes_clean(path, what):
+    """
+    ffmpeg decodes the file with no complaint, except for the one AAC
+    frame cut in half where the last segment ends (the rest of that PES
+    is in the segment still being built; a player fetches it next).
+    """
+    p = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
+                       capture_output=True, text=True)
+    bad = [l for l in p.stderr.splitlines()
+           if l.strip() and "Input buffer exhausted" not in l and "Error submitting packet" not in l]
+    need(p.returncode == 0 and not bad, f"{what} does not decode: {p.stderr[:300]}")
+
+
+def _http_get(url):
+    import urllib.request
+    r = urllib.request.urlopen(url, timeout=5)
+    return r.headers, r.read()
+
+
+def _hls_check(base, out_path, want_variants=1):
+    """
+    Fetches the playlist(s) from an HLS output, every listed segment, and
+    checks each segment opens with PAT/PMT and a key frame; writes the
+    segments of variant 0 joined to out_path. Returns (n_segments,
+    durations, master text).
+    """
+    h, master = _http_get(base + "/index.m3u8")
+    master = master.decode()
+    need(master.startswith("#EXTM3U"), f"not a playlist: {master[:80]}")
+    if want_variants > 1:
+        need(master.count("#EXT-X-STREAM-INF") == want_variants, f"master playlist:\n{master}")
+        need("RESOLUTION=" in master, f"no RESOLUTION in the master playlist:\n{master}")
+        lists = [l for l in master.split("\n") if l.endswith(".m3u8")]
+        h, media = _http_get(base + "/" + lists[0])
+        media = media.decode()
+        prefix = lists[0].rsplit("/", 1)[0] + "/"
+    else:
+        need("#EXT-X-STREAM-INF" not in master, "one program but a master playlist")
+        need(h.get("X-Next-Segment"), "no X-Next-Segment header")
+        media, prefix = master, ""
+    need("#EXT-X-TARGETDURATION" in media and "#EXT-X-MEDIA-SEQUENCE" in media, f"media playlist:\n{media}")
+    segs = [l for l in media.split("\n") if l.endswith(".ts")]
+    durs = [float(l.split(":")[1].rstrip(",")) for l in media.split("\n") if l.startswith("#EXTINF")]
+    need(segs, f"no segments listed:\n{media}")
+    with open(out_path, "wb") as f:
+        for name in segs:
+            h, d = _http_get(base + "/" + (name if name.startswith("v") else prefix + name))
+            need(h.get("Content-Type") == "video/mp2t", f"{name}: content type {h.get('Content-Type')}")
+            need(len(d) % TS == 0 and len(d) > 0, f"{name}: {len(d)} bytes")
+            pids = [((d[i + 1] & 0x1F) << 8) | d[i + 2] for i in range(0, 3 * TS, TS)]
+            need(pids[0] == 0, f"{name}: does not open with a PAT (PIDs {[hex(x) for x in pids]})")
+            need(0x1FFF not in [((d[i + 1] & 0x1F) << 8) | d[i + 2] for i in range(0, len(d), TS)],
+                 f"{name}: null packets in a segment")
+            f.write(d)
+    return len(segs), durs, master
+
+
+@test
+def live_hls_single():
+    """HLS output: segments cut at key frames, served over HTTP, playable with ffmpeg."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return "SKIPPED: ffmpeg not installed"
+    src = _real_h264_aac(12)
+    if not src:
+        return "SKIPPED: this ffmpeg cannot encode H.264/AAC"
+    pin = _port[0]
+    _port[0] += 4
+    hdir = w("hls_dir")
+    shutil.rmtree(hdir, ignore_errors=True)
+    os.makedirs(hdir)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"hls://:{pin + 1}?segment=2&dir={hdir}",
+         "-r", "4M", "--control", w("hls.sock")], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.5)
+        p = Player("127.0.0.1", pin)
+        box = {}
+
+        def gate(t):
+            if t >= 9.0 and "ff" not in box:   # a real HLS player, part way through
+                box["ff"] = subprocess.run(
+                    ["ffmpeg", "-v", "error", "-xerror", "-i", f"http://127.0.0.1:{pin + 1}/index.m3u8",
+                     "-t", "3", "-f", "null", "-"], capture_output=True, text=True)
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(0.5)
+        n, durs, _ = _hls_check(f"http://127.0.0.1:{pin + 1}", w("hls_joined.ts"))
+        rc, listing = ctl(w("hls.sock"), "list-outputs")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    o = listing["outputs"][0]
+    need(o["type"] == "hls" and o["errors"] == 0, f"output: {o}")
+    need(n >= 4, f"only {n} segments after 12 s with 2 s segments")
+    need(all(1.5 <= d <= 2.5 for d in durs), f"segment durations: {durs}")
+    _decodes_clean(w("hls_joined.ts"), "the joined segments")
+    # every segment starts on a key frame
+    for name in sorted(os.listdir(os.path.join(hdir, "v0"))):
+        if not name.endswith(".ts"):
+            continue
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "packet=flags", "-of", "csv=p=0", os.path.join(hdir, "v0", name)],
+                           capture_output=True, text=True)
+        flags = p.stdout.split()
+        need(flags and "K" in flags[0], f"{name} does not start on a key frame ({flags[:3]})")
+    need(os.path.exists(os.path.join(hdir, "index.m3u8")), "no playlist written to the directory")
+    need("ff" in box and box["ff"].returncode == 0 and not box["ff"].stderr.strip(),
+         f"ffmpeg could not play the live playlist: {box.get('ff') and box['ff'].stderr[:300]}")
+    return f"{n} segments of {min(durs):.2f}..{max(durs):.2f} s, each PAT/PMT + key frame first, " \
+           f"joined they decode clean; ffmpeg played the live playlist; {o['state']}"
+
+
+@test
+def live_hls_renditions():
+    """HLS from a channel with two renditions: a master playlist, one clean variant each."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_640", "h264", size="640x360", duration=8,
+                   extra=("-output_ts_offset", "100"))
+    pin = _port[0]
+    _port[0] += 4
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"hls://:{pin + 1}?segment=2",
+         "-r", "3000k", "--video", "h264:900k", "--video", "320x180:h264:300k", "--audio", "aac:96k",
+         "--control", w("hls2.sock")], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.5)
+        p = Player("127.0.0.1", pin)
+        p.play(src, rate=2_500_000)
+        p.close()
+        time.sleep(4.0)                     # the transcoders' delay
+        n, durs, master = _hls_check(f"http://127.0.0.1:{pin + 1}", w("hls_v0.ts"), want_variants=2)
+        h, v1 = _http_get(f"http://127.0.0.1:{pin + 1}/v1/index.m3u8")
+        segs1 = [l for l in v1.decode().split("\n") if l.endswith(".ts")]
+        with open(w("hls_v1.ts"), "wb") as f:
+            for name in segs1:
+                f.write(_http_get(f"http://127.0.0.1:{pin + 1}/v1/" + name)[1])
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    need(n >= 2 and len(segs1) >= 2, f"segments: v0 {n}, v1 {len(segs1)}")
+    for name, want in (("hls_v0.ts", "640x360"), ("hls_v1.ts", "320x180")):
+        # (ffprobe lists the streams once per program and once more for
+        # the file, so a single program shows each stream twice)
+        p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height",
+                            "-of", "csv=p=0", w(name)], capture_output=True, text=True)
+        need(f"video,{want.replace('x', ',')}" in p.stdout.replace("\n", " "),
+             f"{name}: streams {p.stdout.strip()} (want video {want})")
+        need(p.stdout.count("video") <= 2, f"{name}: a variant must carry one video stream: {p.stdout.strip()}")
+        p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "program=program_id",
+                            "-of", "csv=p=0", w(name)], capture_output=True, text=True)
+        need(len(p.stdout.split()) == 1, f"{name}: a variant must be one program: {p.stdout.split()}")
+        _decodes_clean(w(name), name)
+    need("RESOLUTION=640x360" in master and "RESOLUTION=320x180" in master, f"master:\n{master}")
+    return f"master playlist with 2 variants (640x360, 320x180), {n} + {len(segs1)} segments, " \
+           f"each variant a single-program stream that decodes clean"
+
+
+@test
+def supervisor_api():
+    """The supervisor: makes, runs, restarts, stops and deletes a channel over its API; proxies HLS."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    pin = _port[0] + 2
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1"}, open(cfg, "w"))
+    src = _real_h264_aac(12)
+    if not src:
+        return "SKIPPED: this ffmpeg cannot encode H.264/AAC"
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None, headers=auth):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=headers,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.load(e)
+            except ValueError:
+                return e.code, None
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.7)
+        code, j = api("/api/system")
+        need(code == 200 and j["ok"] and j["channels"] == 0, f"system: {code} {j}")
+        code, j = api("/api/channels", headers={})
+        need(code == 401, f"no password, yet {code}")
+        r = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/", headers=auth), timeout=5)
+        need(r.status == 200 and b"<title>caricoder3</title>" in r.read(), "the GUI page")
+        code, j = api("/api/channels/bad%20name", "PUT", {"input": "x"})
+        need(code == 400, f"a bad name was taken: {code} {j}")
+        code, j = api("/api/channels/t1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "muxrate": "4M", "enabled": True})
+        need(code == 200 and j["ok"], f"create: {code} {j}")
+        time.sleep(1.0)
+        code, j = api("/api/channels/t1")
+        need(code == 200 and j["channel"]["state"] == "running", f"after create: {j}")
+        code, j = api("/api/channels/t1/outputs", "POST", {"url": "hls://?segment=2", "id": "hls"})
+        need(code == 200 and j["ok"] and j["id"] == "hls", f"add output: {code} {j}")
+        p = Player("127.0.0.1", pin)
+        box = {}
+
+        def gate(t):
+            if t >= 7.0 and "pl" not in box:
+                r = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1/index.m3u8", timeout=5)
+                box["pl"] = r.read().decode()
+                seg = [l for l in box["pl"].split("\n") if l.endswith(".ts")]
+                if seg:
+                    box["seg"] = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1/" + seg[-1], timeout=5).read()
+                code, j = api("/api/channels/t1")
+                box["running"] = j["channel"]
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        need("seg" in box and len(box["seg"]) > 100 * TS, f"HLS through the supervisor: {box.get('pl')}")
+        c = box["running"]
+        need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["hls"],
+             f"running channel: in {c['stats']['input']['bitrate']}, outputs {c['outputs']}")
+        # stop, start, config change -> restart, delete
+        code, j = api("/api/channels/t1/stop", "POST")
+        time.sleep(1.5)
+        code, j = api("/api/channels/t1")
+        need(j["channel"]["state"] == "stopped" and j["channel"]["saved_outputs"]["outputs"][0]["id"] == "hls",
+             f"after stop: {j['channel']['state']} {j['channel'].get('saved_outputs')}")
+        code, j = api("/api/channels/t1/start", "POST")
+        time.sleep(1.5)
+        code, j = api("/api/channels/t1")
+        need(j["channel"]["state"] == "running" and [o["id"] for o in j["channel"]["outputs"]["outputs"]] == ["hls"],
+             f"after start: {j['channel']['state']}")
+        pid = j["channel"]["pid"]
+        code, j = api("/api/channels/t1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "muxrate": "5M", "enabled": True})
+        time.sleep(2.5)
+        code, j = api("/api/channels/t1")
+        need(j["channel"]["state"] == "running" and j["channel"]["pid"] != pid and j["channel"]["config"]["muxrate"] == "5M",
+             f"after a config change: {j['channel']['state']} pid {j['channel']['pid']} (was {pid})")
+        # a channel that dies is started again
+        os.kill(j["channel"]["pid"], signal.SIGKILL)
+        time.sleep(2.5)
+        code, j = api("/api/channels/t1")
+        need(j["channel"]["state"] == "running" and j["channel"]["restarts"] >= 1,
+             f"after a crash: {j['channel']['state']}, restarts {j['channel']['restarts']}, why {j['channel']['why']}")
+        code, j = api("/api/channels/t1/log")
+        need(code == 200 and any("caricoder3" in l for l in j["log"]), "the channel's log lines")
+        code, j = api("/api/channels/t1", "DELETE")
+        time.sleep(1.0)
+        code, j = api("/api/channels")
+        need(code == 200 and j["channels"] == [], f"after delete: {j}")
+        need(not os.path.exists(os.path.join(root, "channels", "t1.json")), "the channel file is still there")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            _, log = sup.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+            _, log = sup.communicate()
+            raise Fail("the supervisor did not stop")
+    need(sup.returncode == 0, f"supervisor exit {sup.returncode}\n{log[-800:]}")
+    need(not [l for l in log.splitlines() if "channel t1" in l and "did not stop" in l], "a channel had to be killed")
+    return "created, ran, HLS proxied, stopped, started, restarted on a config change and after a crash, deleted; " \
+           "GUI served; password required"
 
 
 @test

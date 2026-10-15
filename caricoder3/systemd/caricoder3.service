@@ -1,0 +1,23 @@
+# caricoder3 supervisor: runs the channels, serves the API and the GUI.
+# Installed by install.sh; the port and password are in
+# /etc/caricoder3/caricoder3.json (caricoder3 serve --show-password).
+[Unit]
+Description=caricoder3 supervisor (channels, API, GUI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/caricoder3 serve --config /etc/caricoder3/caricoder3.json
+ExecReload=/bin/kill -HUP $MAINPID
+RuntimeDirectory=caricoder3
+RuntimeDirectoryPreserve=yes
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=20
+AmbientCapabilities=CAP_SYS_NICE
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -917,6 +917,101 @@ clean), and the server killed and restarted at 4 s (one reconnect, the
 new server's file starts on a key frame). Not yet tried against
 nginx-rtmp or a public service.
 
+### Stage 6: the HLS packager (built 2026-10-15)
+
+Decided here, the owner having left it open: TS segments (every player
+takes them, the mux already makes them; fMP4/CMAF can come later as a
+second segment type behind the same playlists), served by the channel
+process itself (so the GUI's supervisor can offer every channel's HLS
+on one port, and the "we know which segment comes next" idea has a
+place to live: `X-Next-Segment`), with a directory as an option for
+those who want nginx or a CDN origin in front.
+
+`sink_hls.c` reads the muxed stream's PAT, PMTs and SDT (the section
+assembler of psi.c) and keeps one *variant* per program. A variant
+takes the packets of its PIDs, drops null packets, and writes its own
+PAT (one program) and SDT (one service, rebuilt with psi_build_sdt)
+where the stream's own were. Segments are cut at the PES start of a
+video key frame: the random-access indicator when the stream sets it
+(our transcoders do), else the first packets of the PES are looked at
+for an IDR (or a non-key slice, which settles it the other way) and the
+cut is made retroactively at the PES start, which is easy because the
+segment is still in memory. The SPS is parsed on the way (h264.c, shared
+with the RTMP sink) for RESOLUTION and FRAME-RATE in the master
+playlist; BANDWIDTH is the window's bytes over its duration. Durations
+are from PTS, so `#EXTINF` is exact. Each new segment is opened with
+the PAT and a copy of the last PMT, and the first segment is trimmed to
+start the same way. Memory: `window + 1` segments per variant.
+
+The HTTP side is deliberately small: GET only, one short-lived thread
+per request (at most 64 at once, 256 kB stacks), `Connection: close`,
+CORS open, playlists `no-cache` and segments cacheable for a minute. It
+listens on the TCP port of the URL (IPv6 with IPv4 mapped, or IPv4 when
+the machine has no IPv6) and, with `--name`, on `/run/caricoder3/NAME.http`
+for the supervisor. Request paths may carry the supervisor's
+`/hls/NAME/` prefix, which is dropped.
+
+Tests: a 12 s H.264/AAC channel with 2 s segments (five segments,
+exactly 2.000 s each, every one PAT/PMT then a key frame, joined they
+decode clean, ffmpeg's HLS client played the live playlist part way
+through, the directory got the same files), and a two-rendition channel
+(master playlist with both resolutions, each variant one program with
+one video stream, decodes clean).
+
+### Stage 7: the supervisor and the GUI (built 2026-10-15)
+
+Decided with the owner: plain HTML/JS served by a supervisor written in
+C; TCP 8550 by default, set in the system config. The supervisor is a
+mode of the same binary (`caricoder3 serve`, super.c), so a machine has
+one thing to install and one version of everything.
+
+**Processes, not threads.** Each channel stays its own process, exactly
+as before: the supervisor forks and execs `caricoder3 -i ... --name NAME
+--run-dir ... --config channels/NAME.outputs.json --stats-file
+run/NAME.json` with the rest of the command line built from the
+channel's JSON. A channel that crashes takes nothing else with it; the
+supervisor sees it exit (waitpid once around its 200 ms loop), keeps
+the reason (exit status or signal), and starts it again after 1, 2, 4,
+8, 16, 30 s, the back-off reset once a channel has run a minute. Stop is
+SIGTERM, then SIGKILL after 6 s. The children's stderr goes through a
+pipe into a ring of the last 200 lines per channel (shown in the GUI)
+and on to the supervisor's own stderr prefixed with the channel name,
+so `journalctl -u caricoder3` has everything.
+
+**The API is the control socket, over HTTP.** Adding or removing an
+output is a request to the channel's control socket with `save` set;
+statistics are the channel's own statistics file read on request;
+`/hls/NAME/` is a byte-for-byte proxy to the channel's HLS Unix socket.
+The supervisor holds no state of its own beyond the channel files and
+what it learns from its children, so restarting it loses nothing (the
+channels are restarted with it, as children of the service).
+
+**http.c** is a plain HTTP/1.1 server: one thread per request, no
+keep-alive, GET/PUT/POST/DELETE with a body up to 1 MB, basic auth
+checked by the handler. Big per-request buffers are on the heap: static
+TLS the size of a few 64 kB arrays is carved out of each thread's stack
+by glibc, and a 256 kB stack was not enough once super.c joined the
+binary — the HLS sink's client threads failed to start, which showed as
+connection resets. No `_Thread_local` arrays larger than a line anywhere
+now.
+
+**The GUI** is one HTML file (gui/index.html), built into the binary at
+compile time (Makefile turns it into build/gui_html.c), no framework,
+no build step, no outside resources: list of channels with state and
+rates, and per channel four tabs — status (the statistics file laid
+out), outputs (add/remove live, HLS link), settings (the channel JSON as
+a form, saved with PUT), log. It polls every two seconds.
+
+**Password.** Made up on the first run (14 characters), written to the
+system config, printed by `caricoder3 serve --show-password`, changed
+with `--password`. `/hls/` is open, as players cannot sign in.
+
+Tests: `supervisor_api` creates a channel over the API, sees it run,
+adds an HLS output and fetches a segment through the proxy, stops and
+starts it, changes its config (new pid), kills it (restarted, counted),
+reads its log, deletes it, and checks the GUI is served and that no
+password means 401.
+
 The config file lists only *saved* outputs: those it already had and
 those added with `"save": true`. Outputs from `-o` are not written to it,
 so a service file's `-o` and a GUI's saved outputs do not fight over the

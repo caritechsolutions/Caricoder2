@@ -53,7 +53,7 @@ struct options {
     const char *input;
     const char *output[OUTPUTS_MAX];
     int n_output;
-    const char *control, *name, *config;
+    const char *control, *name, *config, *run_dir;
     const char *stats_file;
     int stats_interval;
     int rt_prio;
@@ -577,6 +577,8 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
 }
 
 /* `caricoder3 ctl SOCKET|NAME cmd [args]`: the command-line client. */
+int super_main(int argc, char **argv);      /* super.c */
+
 static int ctl_main(int argc, char **argv)
 {
     char path[256], req[2048], q[1200];
@@ -765,6 +767,7 @@ static void usage(FILE *f)
 "\n"
 "Usage: caricoder3 -i INPUT -o OUTPUT [-o OUTPUT ...] [options]\n"
 "       caricoder3 ctl SOCKET|NAME COMMAND ...   (outputs at run time; ctl -h)\n"
+"       caricoder3 serve [--config PATH]          (the supervisor, API and GUI; serve -h)\n"
 "\n"
 "  -i, --input URL          udp://[source@]group:port[?iface=eth0&buf=BYTES]\n"
 "                           rtp://... (RTP is also detected automatically)\n"
@@ -774,7 +777,7 @@ static void usage(FILE *f)
 "                           one loses packets, the others do not notice\n"
 "      --control PATH       Unix socket for adding and removing outputs while\n"
 "                           the channel runs (caricoder3 ctl PATH ...)\n"
-"      --name NAME          the same, at " SOCK_DIR "/NAME.sock\n"
+"      --name NAME          the same, at " SOCK_DIR "/NAME.sock (--run-dir DIR changes the directory)\n"
 "      --config FILE        JSON file of outputs: read at start and on SIGHUP,\n"
 "                           written when one is added with --save\n"
 "  -p, --program N          service to take from the input (default: first)\n"
@@ -854,7 +857,7 @@ enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET,
-    OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG,
+    OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
 };
 
 static bool parse_where(const char *s, enum codec_where *out)
@@ -900,6 +903,7 @@ int main(int argc, char **argv)
         { "control", required_argument, 0, OPT_CONTROL },
         { "name", required_argument, 0, OPT_NAME_SOCK },
         { "config", required_argument, 0, OPT_CONFIG },
+        { "run-dir", required_argument, 0, OPT_RUN_DIR },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -918,6 +922,8 @@ int main(int argc, char **argv)
 
     if (argc > 1 && !strcmp(argv[1], "ctl"))
         return ctl_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "serve"))
+        return super_main(argc, argv);
 
     memset(&o, 0, sizeof(o));
     memset(&c, 0, sizeof(c));
@@ -941,6 +947,7 @@ int main(int argc, char **argv)
         case OPT_CONTROL: o.control = optarg; break;
         case OPT_NAME_SOCK: o.name = optarg; break;
         case OPT_CONFIG: o.config = optarg; break;
+        case OPT_RUN_DIR: o.run_dir = optarg; break;
         case 'p': o.eng.program = atoi(optarg); break;
         case 'r':
             if (!parse_rate(optarg, &o.eng.mux.muxrate)) {
@@ -1008,7 +1015,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "--name is a plain name, without '/' and up to 64 characters\n");
             return 2;
         }
-        snprintf(sock_path, sizeof(sock_path), SOCK_DIR "/%s.sock", o.name);
+        snprintf(sock_path, sizeof(sock_path), "%s/%s.sock", o.run_dir ? o.run_dir : SOCK_DIR, o.name);
         o.control = sock_path;
     }
 
@@ -1090,6 +1097,14 @@ int main(int argc, char **argv)
         }
     }
 
+    if (o.name) {
+        static char http_sock[256];
+
+        mkdir(o.run_dir ? o.run_dir : SOCK_DIR, 0775);
+        snprintf(http_sock, sizeof(http_sock), "%s/%s.http", o.run_dir ? o.run_dir : SOCK_DIR, o.name);
+        sink_hls_set_socket(http_sock);     /* an hls:// output serves on it */
+    }
+
     /* Outputs first: nothing is read until there is somewhere to put it. */
     if (!ring_init(&c.ring)) {
         log_err("out of memory");
@@ -1106,7 +1121,7 @@ int main(int argc, char **argv)
         log_err("config: %s", err);
     if (o.control) {
         if (o.name)
-            mkdir(SOCK_DIR, 0775);
+            mkdir(o.run_dir ? o.run_dir : SOCK_DIR, 0775);
         c.ctl = control_start(o.control, on_control, &c, err, sizeof(err));
         if (!c.ctl) {
             log_err("control: %s", err);
