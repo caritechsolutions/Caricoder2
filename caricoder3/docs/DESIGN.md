@@ -886,6 +886,37 @@ shared secret. Each checks the received stream is conformant and a
 subset of the source with at most 6 PES missing (the receivers' own
 start-up).
 
+**As built (5c, 2026-10-15).** `sink_rtmp.c`, no library. The sink runs
+the input demultiplexer (`demux.c`) a second time on the muxed stream,
+takes the first H.264 and the first AAC stream of the program (`?program=`
+picks another), and makes FLV tags: AVC in length-prefixed form with the
+AUDs left out, SPS/PPS kept for the AVCDecoderConfigurationRecord, AAC
+frames stripped of their ADTS headers with the AudioSpecificConfig made
+from the first one; `onMetaData` with the size and frame rate from the
+SPS (parsed as far as the VUI timing). Timestamps are the stream's DTS
+in milliseconds from the first one, with the composition offset in the
+tag. The RTMP side is written here too: plain handshake, Set Chunk Size
+4096, AMF0 `connect` / `releaseStream` / `FCPublish` / `createStream` /
+`publish`, type-0 chunk headers throughout (a few bytes per tag), and a
+small reader for the server's chunks that answers pings and recognises
+`_result`, `_error` and `onStatus`.
+
+Threads: the sink thread demultiplexes and queues tags; the RTMP thread
+connects and sends, so a slow server blocks only itself. The queue holds
+8 MB or 4,096 tags; past that everything queued is dropped, one `error`
+counted, and sending resumes at the next key frame with the headers
+again. Audio that arrives before the first key frame is held back and
+released after it (what came before it in time is dropped), so playback
+starts in sync. On a break the queue is emptied, the thread reconnects
+after 2 s and waits for the next headers before sending anything: a
+connection always begins `onMetaData`, sequence headers, key frame.
+
+Tests: push to ffmpeg listening as an RTMP server (every frame but the
+last PES of each stream arrives, in order, from a key frame, decodes
+clean), and the server killed and restarted at 4 s (one reconnect, the
+new server's file starts on a key frame). Not yet tried against
+nginx-rtmp or a public service.
+
 The config file lists only *saved* outputs: those it already had and
 those added with `"save": true`. Outputs from `-o` are not written to it,
 so a service file's `-o` and a GUI's saved outputs do not fight over the

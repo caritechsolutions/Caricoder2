@@ -22,7 +22,7 @@ rest of this repository.
 | 4 | Several renditions of a channel in one stream (scaling, deinterlace, aligned key frames) | done on the CPU and against the stand-in card; not yet run on a real card |
 | 5a | Outputs added and removed while the channel runs; several outputs per channel; control socket; config file | done, tested (UDP, RTP, file) |
 | 5b | SRT and RIST outputs (caller and listener, encryption, reconnect) | done, tested against srt-live-transmit and ristreceiver |
-| 5c | RTMP push | not started |
+| 5c | RTMP push (H.264 + AAC) | done, tested against ffmpeg as the server; not yet against a public RTMP service |
 | 6 | HLS packager as an output | not started |
 | 7 | Supervisor, GUI, side-by-side run against Flussonic | not started |
 
@@ -183,9 +183,11 @@ Output types (`caricoder3 --backends` lists what the build has):
 | `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 8 receivers may call in; each gets every datagram, a slow one loses its own |
 | `rist://host:port[?profile=main&buffer=1000&secret=...&aes-type=128&bandwidth=...]` | RIST caller (librist; main profile by default, `simple` or `advanced` on request). The parameters after `profile` are librist's own |
 | `rist://@:port[?...]` | RIST listener (librist's notation) |
+| `rtmp://host[:1935]/app/stream[?program=N]` | RTMP push of the program's H.264 video and AAC audio (what RTMP carries; HEVC and other audio are left out, and the log says so). Reconnects by itself; a server that cannot keep up costs it its own frames (`errors`) until the next key frame |
 
 SRT and RIST outputs report what their libraries measure: `rtt_ms`,
-`retransmitted`, and for SRT `lost`. RTMP is the next stage.
+`retransmitted`, and for SRT `lost`. For an RTMP output `packets` counts
+FLV tags.
 
 ### Under systemd
 

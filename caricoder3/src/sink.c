@@ -11,6 +11,7 @@
 #include "log.h"
 
 extern const struct sink_ops sink_udp_ops;
+extern const struct sink_ops sink_rtmp_ops;
 #ifdef HAVE_SRT
 extern const struct sink_ops sink_srt_ops;
 #endif
@@ -20,6 +21,7 @@ extern const struct sink_ops sink_rist_ops;
 
 static const struct sink_ops *const types[] = {
     &sink_udp_ops,
+    &sink_rtmp_ops,
 #ifdef HAVE_SRT
     &sink_srt_ops,
 #endif
@@ -100,7 +102,7 @@ bool sinks_add(struct sinks *s, const char *id, const char *url, bool from_confi
     char made[SINK_ID_MAX];
 
     if (!ops) {
-        snprintf(err, errlen, "no output type takes '%s' (udp://, rtp://, a file path"
+        snprintf(err, errlen, "no output type takes '%s' (udp://, rtp://, rtmp://, a file path"
 #ifdef HAVE_SRT
                  ", srt://"
 #endif
@@ -408,6 +410,7 @@ void sink_list(FILE *f)
 {
     fprintf(f, "Output types:\n");
     fprintf(f, "  udp        udp://host:port  rtp://host:port  (?ttl= iface= pkt= buf=), or a file\n");
+    fprintf(f, "  rtmp       rtmp://host[:1935]/app/stream (?program=N): H.264 + AAC pushed to a server\n");
 #ifdef HAVE_SRT
     fprintf(f, "  srt        srt://host:port (caller) or srt://:port (listener)\n"
                "             ?mode=caller|listener latency=120 passphrase= pbkeylen=16|24|32 streamid= pkt=7\n");

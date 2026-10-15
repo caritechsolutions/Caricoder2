@@ -1842,6 +1842,156 @@ def live_rist_listener_encrypted():
     return f"1 receiver, AES-128, {pes}/{orig} PES received"
 
 
+def _real_h264_aac(seconds=8):
+    """A real H.264 + AAC stream from ffmpeg (made once), or None."""
+    src = w(f"rtmp_src_{seconds}.ts")
+    if not os.path.exists(src):
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25",
+             "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+             "-t", str(seconds), "-pix_fmt", "yuv420p", "-g", "25",
+             "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2000k", "-bf", "2",
+             "-c:a", "aac", "-b:a", "128k", "-f", "mpegts", "-muxrate", "3M", src],
+            capture_output=True, text=True)
+        if p.returncode:
+            return None
+    return src
+
+
+def _frames(path):
+    """(video frames, audio frames) ffprobe counts in a file."""
+    out = []
+    for kind in ("v", "a"):
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", kind + ":0",
+                            "-count_packets", "-show_entries", "stream=nb_read_packets",
+                            "-of", "csv=p=0", path], capture_output=True, text=True)
+        out.append(int((p.stdout.split() or ["0"])[0]))
+    return tuple(out)
+
+
+def _rtmp_server(port, out):
+    """ffmpeg listening as an RTMP server, writing what it gets to `out`."""
+    return subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                             "-listen", "1", "-i", f"rtmp://127.0.0.1:{port}/live/test",
+                             "-c", "copy", out], stderr=subprocess.DEVNULL)
+
+
+@test
+def live_rtmp_push():
+    """RTMP push of H.264 + AAC to a server (ffmpeg listening); every frame arrives, in order."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return "SKIPPED: ffmpeg not installed"
+    src = _real_h264_aac()
+    if not src:
+        return "SKIPPED: this ffmpeg cannot encode H.264/AAC"
+    pin = _port[0]
+    _port[0] += 4
+    sock = w("rtmp.sock")
+    srv = _rtmp_server(pin + 1, w("rtmp_out.flv"))
+    time.sleep(0.5)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"rtmp://127.0.0.1:{pin + 1}/live/test",
+         "-r", "4M", "--control", sock], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(1.0)
+        p = Player("127.0.0.1", pin)
+        p.play(src)
+        p.close()
+        time.sleep(1.2)
+        rc, listing = ctl(sock, "list-outputs")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+        try:
+            srv.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            srv.kill()
+            srv.wait()
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    o = listing["outputs"][0]
+    need(o["type"] == "rtmp" and o["state"] == "publishing", f"state: {o}")
+    need(o["errors"] == 0 and o["reconnects"] == 0, f"errors: {o}")
+    sv, sa = _frames(src)
+    gv, ga = _frames(w("rtmp_out.flv"))
+    # (the last PES of each stream stays in the input demultiplexer when
+    # the source just stops, as in every live test: one picture, one
+    # audio PES of 8 frames)
+    need(gv >= sv - 2 and ga >= sa - 10, f"frames: video {gv}/{sv}, audio {ga}/{sa}")
+    # decode clean, and timestamps in order
+    p = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", w("rtmp_out.flv"), "-f", "null", "-"],
+                       capture_output=True, text=True)
+    need(p.returncode == 0 and not p.stderr.strip(), f"ffmpeg decoding the FLV: {p.stderr[:300]}")
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "packet=dts_time,flags", "-of", "csv=p=0", w("rtmp_out.flv")],
+                       capture_output=True, text=True)
+    rows = [r.split(",") for r in p.stdout.split() if r]
+    dts = [float(r[0]) for r in rows if r[0] != "N/A"]
+    need(all(b >= a for a, b in zip(dts, dts[1:])), "video DTS not in order in the FLV")
+    need(rows and "K" in rows[0][1], "the FLV does not start on a key frame")
+    return f"video {gv}/{sv} frames, audio {ga}/{sa}, {o['packets']} tags, starts on a key frame, " \
+           f"decodes clean"
+
+
+@test
+def live_rtmp_reconnect():
+    """RTMP push: the server goes away and comes back; publishing resumes on a key frame."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return "SKIPPED: ffmpeg not installed"
+    src = _real_h264_aac(12)
+    if not src:
+        return "SKIPPED: this ffmpeg cannot encode H.264/AAC"
+    pin = _port[0]
+    _port[0] += 4
+    sock = w("rtmp2.sock")
+    srv = _rtmp_server(pin + 1, w("rtmp_first.flv"))
+    time.sleep(0.5)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"rtmp://127.0.0.1:{pin + 1}/live/test",
+         "-r", "4M", "--control", sock], stderr=subprocess.PIPE, text=True)
+    box = {}
+    try:
+        time.sleep(1.0)
+        p = Player("127.0.0.1", pin)
+
+        def gate(t):
+            if t >= 4.0 and "cut" not in box:
+                box["cut"] = 1
+                srv.kill()
+                srv.wait()
+                time.sleep(1.0)
+                box["second"] = _rtmp_server(pin + 1, w("rtmp_second.flv"))
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(1.5)
+        rc, listing = ctl(sock, "list-outputs")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+        if "second" in box:
+            try:
+                box["second"].wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                box["second"].kill()
+                box["second"].wait()
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    o = listing["outputs"][0]
+    need(o["state"] == "publishing" and o["reconnects"] >= 1, f"state at the end: {o}")
+    gv, ga = _frames(w("rtmp_second.flv"))
+    need(gv > 25 * 3, f"the second server got only {gv} video frames")
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "packet=flags", "-of", "csv=p=0", w("rtmp_second.flv")],
+                       capture_output=True, text=True)
+    first = p.stdout.split()[0] if p.stdout.split() else ""
+    need("K" in first, "the stream to the new server does not start on a key frame")
+    p = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", w("rtmp_second.flv"), "-f", "null", "-"],
+                       capture_output=True, text=True)
+    need(p.returncode == 0 and not p.stderr.strip(), f"ffmpeg decoding the second FLV: {p.stderr[:300]}")
+    return f"server restarted at 4 s: {o['reconnects']} reconnect, new server got {gv} video / {ga} audio " \
+           f"frames from a key frame, decodes clean"
+
+
 @test
 def live_systemd_watchdog():
     """Reports READY and keeps petting the systemd watchdog while healthy."""
