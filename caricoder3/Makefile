@@ -100,6 +100,9 @@ CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_selftest.c
 SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
 
+# The first rule below is the GUI's, so the default goal is named here.
+.DEFAULT_GOAL := all
+
 OBJ      = $(SRC:src/%.c=build/rel/%.o) build/rel/gui_html.o
 OBJ_ASAN = $(SRC:src/%.c=build/asan/%.o) build/asan/gui_html.o
 
