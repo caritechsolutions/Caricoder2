@@ -875,6 +875,8 @@ static void usage(FILE *f)
 "                           --muxrate it sets the peak rate\n"
 "  -d, --delay MS           input-to-output buffer. Default 500; 800 when audio\n"
 "                           is transcoded, 3000 when video is\n"
+"      --drop PID[,PID..]   leave these streams of the service out of the output\n"
+"                           (an audio track not wanted, say; caricoder3 probe lists them)\n"
 "      --audio SPEC         transcode audio: aac, mp2 or mp3, with an optional\n"
 "                           bit rate (aac:128k). PID=SPEC for one stream only\n"
 "                           (1653=aac:96k); may be repeated. Default: copy\n"
@@ -939,7 +941,7 @@ static const char *file_path(const char *s)
 enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
-    OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET,
+    OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
 };
 
@@ -975,6 +977,7 @@ int main(int argc, char **argv)
         { "rt-prio", required_argument, 0, OPT_RT },
         { "backends", no_argument, 0, OPT_BACKENDS },
         { "audio", required_argument, 0, OPT_AUDIO },
+        { "drop", required_argument, 0, OPT_DROP },
         { "video", required_argument, 0, OPT_VIDEO },
         { "decoder", required_argument, 0, OPT_DECODER },
         { "encoder", required_argument, 0, OPT_ENCODER },
@@ -1075,6 +1078,25 @@ int main(int argc, char **argv)
                 return 2;
             }
             break;
+        case OPT_DROP: {
+            /* PID[,PID...], decimal or 0x hex; may be repeated */
+            for (const char *p = optarg; *p; ) {
+                char *end;
+                long pid = strtol(p, &end, 0);
+
+                if (end == p || pid < 0x10 || pid > 0x1FFE || (*end && *end != ',')) {
+                    fprintf(stderr, "--drop: PIDs between 0x10 and 0x1FFE, separated by commas\n");
+                    return 2;
+                }
+                if (o.eng.n_drop >= MAX_ES) {
+                    fprintf(stderr, "--drop: too many PIDs\n");
+                    return 2;
+                }
+                o.eng.drop[o.eng.n_drop++] = (uint16_t)pid;
+                p = *end == ',' ? end + 1 : end;
+            }
+            break;
+        }
         case OPT_GPU: o.eng.gpu = atoi(optarg); break;
         case OPT_PRESET: o.eng.preset = optarg; break;
         case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;

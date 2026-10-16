@@ -527,6 +527,14 @@ static int update_xcodes(struct engine *e, const struct program *p, struct progr
 
 /* ---- demux callbacks ------------------------------------------------ */
 
+static bool dropped(const struct engine *e, uint16_t pid)
+{
+    for (int i = 0; i < e->cfg.n_drop; i++)
+        if (e->cfg.drop[i] == pid)
+            return true;
+    return false;
+}
+
 static void on_program(void *opaque, const struct program *p)
 {
     struct engine *e = opaque;
@@ -535,6 +543,17 @@ static void on_program(void *opaque, const struct program *p)
     int n_prog = 1;
 
     program_set_service(&named, e->cfg.service_provider, e->cfg.service_name);
+    /* The streams left out go before anything is planned for them. The
+     * PCR PID stays as it is: the mux writes PCRs of its own on it, which
+     * needs no packets of the input's. */
+    for (int i = 0; i < named.n_es; )
+        if (dropped(e, named.es[i].pid)) {
+            log_info("PID 0x%04X: %s left out of the output", named.es[i].pid,
+                     stream_type_name(named.es[i].stream_type));
+            program_remove_es(&named, i);
+        } else {
+            i++;
+        }
     if (e->cfg.n_audio || e->cfg.n_video)
         n_prog = update_xcodes(e, &named, np);
     else
@@ -679,6 +698,10 @@ static void on_unit(void *opaque, struct es_unit *u)
 {
     struct engine *e = opaque;
 
+    if (e->cfg.n_drop && dropped(e, u->pid)) {
+        free(u);
+        return;
+    }
     pthread_mutex_lock(&e->lock);
     if (!e->cfg.live) {
         stc_t t1;

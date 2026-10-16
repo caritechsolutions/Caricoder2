@@ -33,6 +33,12 @@ from udptools import Player, Capture                    # noqa: E402
 
 BIN = os.path.join(ROOT, "caricoder3")
 ASAN = os.path.join(ROOT, "caricoder3-asan")
+# A sanitizer build older than the plain one is stale (sources changed since):
+# it is not used, so the tests never run old code without saying so.
+if os.path.exists(ASAN) and os.path.exists(os.path.join(ROOT, "caricoder3")) and \
+        os.path.getmtime(ASAN) < os.path.getmtime(os.path.join(ROOT, "caricoder3")):
+    print(f"note: {ASAN} is older than the plain binary; testing the plain one (make debug to refresh)")
+    ASAN = ASAN + ".stale"
 WORK = os.path.join(ROOT, "build", "test-work")
 HZ = 27_000_000
 TESTS = []
@@ -140,6 +146,22 @@ def file_cbr_exact():
     need(st["input"]["cc_errors"] == 0, "false continuity errors on a clean input")
     return f"PCR accuracy {rep['pcr_accuracy_ns']} ns, PCR interval " \
            f"{rep['pcr_interval_max_ms']} ms, {sum(rep['pes'].values())} PES"
+
+
+@test
+def file_drop_streams():
+    """--drop leaves the named streams out: gone from the PMT and from the packets; the rest exact."""
+    src = synth("syn")
+    out = w("drop.ts")
+    st = run_file(src, out, "-r", "4M", "--drop", "1653,0x1FF0")
+    rep = must_pass(out, cbr=True)
+    a = Analysis(out)
+    pids = {e["pid"] for e in a.pmt["streams"]}
+    need(pids == {1651, 1652}, f"PMT lists {sorted(pids)}")
+    need(1653 not in a.pid_packets and 0x1FF0 not in a.pid_packets, "dropped PIDs still have packets")
+    must_match(src, out, only={1651, 1652})
+    need(st["service"]["programs"] == 1 and len(st["service"]["streams"]) == 2, f"stats: {st['service']}")
+    return "AC-3 and the section PID left out; video and AAC exact"
 
 
 @test

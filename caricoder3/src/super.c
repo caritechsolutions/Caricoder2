@@ -28,7 +28,7 @@
  *
  * A channel file (channels/NAME.json) holds what the command line would:
  * {"input": "udp://...", "program": 0, "muxrate": "5M", "vbr": false,
- *  "delay": 500, "video": ["h264:3M", "640x360:h264:1M"], "audio": ["aac:128k"],
+ *  "delay": 500, "video": ["h264:3M", "640x360:h264:1M"], "audio": ["aac:128k"], "drop": [258],
  *  "decoder": "auto", "encoder": "auto", "gpu": 0, "preset": "", "gop": 2000,
  *  "vbv": 1000, "service_name": "", "service_provider": "", "enabled": true}
  * Its outputs live in channels/NAME.outputs.json, which the channel
@@ -332,6 +332,20 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "psi_interval", 0);
         if (v > 0)
             ARG("--psi-interval=%d", (int)v);
+        {
+            /* "drop": [257, 258] -> --drop=257,258 */
+            int a = json_get(&doc, root, "drop");
+            char list[256] = "";
+            size_t o = 0;
+
+            if (a >= 0 && doc.node[a].type == JSON_ARRAY)
+                for (int j = doc.node[a].first_child; j >= 0; j = doc.node[j].next)
+                    if (doc.node[j].type == JSON_NUMBER && o + 8 < sizeof(list))
+                        o += (size_t)snprintf(list + o, sizeof(list) - o, "%s%d", o ? "," : "",
+                                              (int)doc.node[j].num);
+            if (list[0])
+                ARG("--drop=%s", list);
+        }
     }
     {
         static const char *const strs[][2] = {

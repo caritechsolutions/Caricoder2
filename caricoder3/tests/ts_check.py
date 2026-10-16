@@ -113,7 +113,12 @@ def compare(orig_path, out_path, program=0, subset=False, shifted=False,
         fails.append("PCR PID differs")
     if a.pmt["info"] != b.pmt["info"]:
         fails.append("program descriptors differ")
-    if [s["pid"] for s in a.pmt["streams"]] != [s["pid"] for s in b.pmt["streams"]]:
+    pa = [s["pid"] for s in a.pmt["streams"]]
+    pb = [s["pid"] for s in b.pmt["streams"]]
+    if only is not None:                # streams outside `only` may have been left out
+        pa = [p for p in pa if p in only]
+        pb = [p for p in pb if p in only]
+    if pa != pb:
         fails.append("PMT lists different PIDs")
     if [(s["pid"], s["type"], s["desc"]) for s in a.pmt["streams"]
         if only is None or s["pid"] in only] != \

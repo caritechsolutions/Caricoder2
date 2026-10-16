@@ -117,6 +117,9 @@ void program_set_es(struct program *p, int idx, uint8_t stream_type,
                     const uint8_t *keep, int n_keep,
                     const uint8_t *extra, int extra_len);
 
+/* Takes stream `idx` out of the program's list. */
+void program_remove_es(struct program *p, int idx);
+
 const char *stream_type_name(int stream_type);
 
 #endif

@@ -478,6 +478,15 @@ bool program_es_has_desc(const struct program *p, int idx, int tag,
     return false;
 }
 
+void program_remove_es(struct program *p, int idx)
+{
+    if (idx < 0 || idx >= p->n_es)
+        return;
+    memmove(&p->es[idx], &p->es[idx + 1], sizeof(p->es[0]) * (size_t)(p->n_es - idx - 1));
+    p->n_es--;
+    memset(&p->es[p->n_es], 0, sizeof(p->es[0]));   /* programs are compared with memcmp */
+}
+
 void program_set_es(struct program *p, int idx, uint8_t stream_type,
                     const uint8_t *keep, int n_keep,
                     const uint8_t *extra, int extra_len)

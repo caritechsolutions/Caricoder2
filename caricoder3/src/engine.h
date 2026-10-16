@@ -27,6 +27,10 @@ struct engine_cfg {
     int  gpu;                           /* NVIDIA card to use */
     int  vbv_ms, gop_ms;                /* 0: defaults */
     const char *preset;
+
+    /* Streams of the service left out of the output (by input PID). */
+    uint16_t drop[MAX_ES];
+    int  n_drop;
 };
 
 struct engine_stats {
