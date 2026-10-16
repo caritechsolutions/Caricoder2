@@ -165,6 +165,53 @@ def file_drop_streams():
 
 
 @test
+def probe_file_and_live():
+    """caricoder3 probe: programs, streams, formats and rates, from a file and from UDP."""
+    src = synth("syn_mpts", mpts=True)
+    p = subprocess.run([BIN, "probe", src], capture_output=True, text=True)
+    need(p.returncode == 0, f"probe exit {p.returncode}: {p.stdout[-300:]}")
+    rep = json.loads(p.stdout)
+    need(rep["ok"] and len(rep["programs"]) == 2, f"programs: {rep.get('programs')}")
+    prog = {q["number"]: q for q in rep["programs"]}
+    need(prog[1650]["name"] == "Vacation" and prog[2000]["name"] == "Other", f"names: {prog}")
+    st = {x["pid"]: x for x in prog[1650]["streams"]}
+    need(st[1651]["kind"] == "video" and st[1652]["kind"] == "audio" and st[1652]["language"] == "eng"
+         and st[1653]["codec"] == "ac3" and st[0x1FF0]["kind"] == "data", f"streams: {st}")
+    need(1_500_000 < st[1651]["bitrate"] < 2_600_000, f"video bit rate {st[1651]['bitrate']}")
+    need(3_800_000 < rep["bitrate"] < 4_200_000, f"mux bit rate {rep['bitrate']}")
+    # a real stream: the parsers say what the pictures and the sound are
+    real = _real_h264_aac(8)
+    if real:
+        p = subprocess.run([BIN, "probe", real], capture_output=True, text=True)
+        rep2 = json.loads(p.stdout)
+        v = [x for x in rep2["programs"][0]["streams"] if x["kind"] == "video"][0]
+        a = [x for x in rep2["programs"][0]["streams"] if x["kind"] == "audio"][0]
+        need((v["width"], v["height"], v["interlaced"]) == (640, 360, False) and abs(v["fps"] - 25) < 0.1,
+             f"video format: {v}")
+        need(a["sample_rate"] == 48000 and a["channels"] == 1, f"audio format: {a}")
+    # live, over UDP, for 2 seconds
+    pin = _port[0]
+    _port[0] += 2
+    pl = Player("127.0.0.1", pin)
+    import threading
+    t = threading.Thread(target=lambda: pl.play(src), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    p = subprocess.run([BIN, "probe", f"udp://127.0.0.1:{pin}", "--seconds", "2", "--program", "1650"],
+                       capture_output=True, text=True, timeout=20)
+    t.join()
+    pl.close()
+    need(p.returncode == 0, f"live probe exit {p.returncode}: {p.stdout[-300:]}")
+    rep3 = json.loads(p.stdout)
+    need(len(rep3["programs"]) == 1 and rep3["programs"][0]["number"] == 1650 and
+         3_500_000 < rep3["bitrate"] < 4_500_000, f"live: {rep3['bitrate']} b/s, {len(rep3['programs'])} programs")
+    # a wrong address says so, without hanging
+    p = subprocess.run([BIN, "probe", "udp://127.0.0.1:1", "--seconds", "1"], capture_output=True, text=True, timeout=30)
+    need(p.returncode == 1 and not json.loads(p.stdout)["ok"], "a silent address must fail")
+    return f"2 programs, formats read, live {rep3['bitrate'] / 1e6:.2f} Mb/s over UDP"
+
+
+@test
 def file_vbr_exact():
     """VBR remux: no null packets, content identical."""
     src = synth("syn")

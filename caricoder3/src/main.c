@@ -664,6 +664,7 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
 
 /* `caricoder3 ctl SOCKET|NAME cmd [args]`: the command-line client. */
 int super_main(int argc, char **argv);      /* super.c */
+int probe_main(int argc, char **argv);      /* probe.c */
 
 static int ctl_main(int argc, char **argv)
 {
@@ -854,6 +855,7 @@ static void usage(FILE *f)
 "Usage: caricoder3 -i INPUT -o OUTPUT [-o OUTPUT ...] [options]\n"
 "       caricoder3 ctl SOCKET|NAME COMMAND ...   (outputs at run time; ctl -h)\n"
 "       caricoder3 serve [--config PATH]          (the supervisor, API and GUI; serve -h)\n"
+"       caricoder3 probe URL [--seconds N]        (what is in a source, as JSON; probe -h)\n"
 "\n"
 "  -i, --input URL          udp://[source@]group:port[?iface=eth0&buf=BYTES]\n"
 "                           rtp://... (RTP is also detected automatically)\n"
@@ -1010,6 +1012,8 @@ int main(int argc, char **argv)
         return ctl_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "serve"))
         return super_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "probe"))
+        return probe_main(argc, argv);
 
     memset(&o, 0, sizeof(o));
     memset(&c, 0, sizeof(c));
