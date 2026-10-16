@@ -96,12 +96,12 @@ def decode_raw(path, stream_index, size, out_path, nframes):
 
 
 def thumbs(raw, size):
-    """Every frame of a raw yuv420p file as 16 luma means (a 4x4 picture)."""
+    """Every frame of a raw yuv420p file as 64 luma means (an 8x8 picture)."""
     w, h = (int(x) for x in size.split("x"))
     p = run(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-i", raw,
-             "-vf", "scale=4:4:flags=area", "-pix_fmt", "gray", "-f", "rawvideo", "-"], text=False)
+             "-vf", "scale=8:8:flags=area", "-pix_fmt", "gray", "-f", "rawvideo", "-"], text=False)
     d = p.stdout
-    return [list(d[i:i + 16]) for i in range(0, len(d) - 15, 16)]
+    return [list(d[i:i + 64]) for i in range(0, len(d) - 63, 64)]
 
 
 def pick_frames(raw_in, raw_out, size, indices):
@@ -224,16 +224,18 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
     # only run on the best few of them).
     s_th, o_th = thumbs(s_all, size), thumbs(o_all, size)
     coarse = []
+    counts = {k: len(pairs_at(spts, opts, base + k * period, period, 400)) for k in range(-reach, reach + 1)}
+    enough = max(counts.values()) // 2     # shifts at the window's edge pair few frames: a lucky few look good
     for k in range(-reach, reach + 1):
         off = base + k * period
-        pairs = pairs_at(spts, opts, off, period, 400)
-        if len(pairs) < 10:
+        if counts[k] < max(10, enough):
             continue
+        pairs = pairs_at(spts, opts, off, period, 400)
         err = n = 0
         for i, j in pairs[::max(1, len(pairs) // 60)]:
             if i < len(s_th) and j < len(o_th):
                 a, b = s_th[i], o_th[j]
-                err += sum((a[q] - b[q]) ** 2 for q in range(16))
+                err += sum((a[q] - b[q]) ** 2 for q in range(64))
                 n += 1
         if n:
             coarse.append((err / n, k))
@@ -259,6 +261,40 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
           "best shifts (frames: PSNR dB) " +
           ", ".join(f"{k:+d}: {sc:.1f}" for sc, k, _ in scores[:5]), file=sys.stderr)
     pairs = pairs_at(spts, opts, best, period, limit)
+    # An output whose clock was re-stamped (another transcoder's) drifts
+    # off the global offset, or jumps: each second of output is paired
+    # again on its own, by the shift (within three seconds of the global
+    # one) at which its thumbnails agree best with the source.
+    def block_err(block, d):
+        e = n = 0
+        for i, j in block:
+            ii = i + d
+            if 0 <= ii < len(s_th) and j < len(o_th) and spts[ii] is not None:
+                e += sum((s_th[ii][q] - o_th[j][q]) ** 2 for q in range(64))
+                n += 1
+        return e / n if n >= len(block) // 2 else None
+    step = max(1, int(round(fps)))
+    fixed = []
+    moved = 0
+    for b in range(0, len(pairs), step):
+        block = pairs[b:b + step]
+        e0 = block_err(block, 0)
+        best_d, best_e = 0, e0
+        for d in range(-3 * step, 3 * step + 1):
+            if d == 0:
+                continue
+            e = block_err(block, d)
+            if e is not None and (best_e is None or e < best_e):
+                best_d, best_e = d, e
+        # only a clearly better shift (two thirds of the error): frames of a
+        # still picture look alike on a thumbnail and must not be swapped
+        if best_d != 0 and e0 is not None and best_e is not None and best_e < 0.67 * e0 and e0 > 4:
+            moved += 1
+            block = [(i + best_d, j) for i, j in block if 0 <= i + best_d < len(spts) and spts[i + best_d] is not None]
+        fixed.extend(block)
+    pairs = fixed
+    if moved:
+        print(f"{moved} second(s) of the output paired again at a shift of their own (the output's clock drifts or jumped)", file=sys.stderr)
     # a capture stops mid-frame, so the last frame on either side may be
     # a partial decode: those pairs are not the transcoder's doing
     ns, no = len(spts), len(opts)
