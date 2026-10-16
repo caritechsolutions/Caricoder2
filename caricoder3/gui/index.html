@@ -25,8 +25,9 @@ input, select { font:inherit; color:var(--fg); background:#0f151b; border:1px so
 input:focus, select:focus, button:focus-visible { outline:2px solid var(--acc); outline-offset:1px }
 select { appearance:none; -webkit-appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--fg2) 50%),linear-gradient(135deg,var(--fg2) 50%,transparent 50%); background-position:calc(100% - 15px) 55%,calc(100% - 10px) 55%; background-size:5px 5px; background-repeat:no-repeat; padding-right:28px }
 .lamp { display:inline-block; width:10px; height:10px; border-radius:50%; background:#3a4854; box-shadow:inset 0 0 0 1px rgba(0,0,0,.4); vertical-align:middle; flex:none }
-.lamp.running { background:var(--air); box-shadow:0 0 0 3px rgba(240,165,58,.18), 0 0 10px rgba(240,165,58,.6) }
-.lamp.failed { background:var(--bad); box-shadow:0 0 8px rgba(236,95,74,.6) } .lamp.starting,.lamp.stopping { background:var(--warn) }
+.lamp.ok { background:var(--ok); box-shadow:0 0 0 3px rgba(76,195,138,.18), 0 0 10px rgba(76,195,138,.6) }
+.lamp.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(232,197,71,.18), 0 0 10px rgba(232,197,71,.6) }
+.lamp.bad { background:var(--bad); box-shadow:0 0 8px rgba(236,95,74,.6) } .lamp.off { background:#3a4854 }
 
 /* rail */
 nav { width:270px; flex:none; background:var(--rail); border-right:1px solid var(--line); display:flex; flex-direction:column; height:100vh; position:sticky; top:0 }
@@ -107,6 +108,36 @@ const ABR = ["64k","96k","128k","160k","192k","256k","320k","384k"];
 const MUX = [["", "Variable (no padding)"], ["2M","2 Mb/s"],["3M","3 Mb/s"],["4M","4 Mb/s"],["5M","5 Mb/s"],["6M","6 Mb/s"],["8M","8 Mb/s"],["10M","10 Mb/s"],["12M","12 Mb/s"],["15M","15 Mb/s"],["20M","20 Mb/s"],["custom","Custom…"]];
 
 let view = { name: null }, timer = null, sys = null, channels = [], dirty = false, logOpen = false;
+const prevCounters = {};   // per channel: the error counters at the last poll, to see what is still happening
+
+/* The lamp: green = running and healthy, yellow = running with trouble
+ * (no input, errors in the last few seconds, a transcoder failed, not
+ * keeping up), red = failed to run, grey = stopped. Returns [class, why]. */
+function health(c) {
+  if (c._health) return c._health;        /* once per poll, so rail and page agree */
+  return c._health = healthOf(c);
+}
+function healthOf(c) {
+  if (c.state === "failed") return ["bad", c.why || "failed"];
+  if (c.state !== "running") return ["off", c.state];
+  const st = c.stats; if (!st) return ["warn", "starting"];
+  const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
+  const outs = (c.outputs && c.outputs.outputs) || [];
+  const now = { cc: inp.cc_errors||0, ovf: inp.socket_overflow||0, drop: out.dropped_units||0, late: out.late_units||0,
+                send: outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0), xdrop: (svc.streams||[]).reduce((a,s)=>a+(s.input_dropped||0),0) };
+  const was = prevCounters[c.name] || now;
+  prevCounters[c.name] = now;
+  const why = [];
+  if (inp.last_packet_age_ms > 2000 || (st.uptime_s > 10 && !inp.bitrate)) why.push("no input");
+  if ((svc.streams||[]).some(s => s.failed)) why.push("a transcoder failed");
+  if (st.uptime_s > 15 && !clk.locked) why.push("clock not locked");
+  if (now.cc > was.cc) why.push("input errors");
+  if (now.ovf > was.ovf) why.push("input overflow");
+  if (now.drop > was.drop || now.xdrop > was.xdrop) why.push("dropping");
+  if (now.late > was.late) why.push("running late");
+  if (now.send > was.send) why.push("send errors");
+  return why.length ? ["warn", why.join(", ")] : ["ok", "healthy"];
+}
 
 async function api(path, opts={}) {
   const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
@@ -127,9 +158,10 @@ async function loadAll() {
 function renderRail() {
   $("#rail").innerHTML = channels.map(c => {
     const st = c.stats || {}, inp = st.input || {}, out = st.output || {};
+    const [h, why] = health(c);
     return `<div class="ch ${view.name===c.name?"on":""}" onclick="openChannel('${esc(c.name)}')">
-      <span class="lamp ${c.state}"></span>
-      <div><b>${esc(c.name)}</b><i>${esc(c.state)}${c.state==="running"?" · "+fmtUp(c.uptime):""}</i></div>
+      <span class="lamp ${h}" title="${esc(why)}"></span>
+      <div><b>${esc(c.name)}</b><i>${esc(c.state==="running" && h !== "ok" ? why : c.state)}${c.state==="running"?" · "+fmtUp(c.uptime):""}</i></div>
       <div class="rate">${c.state==="running" ? `${fmtRate(inp.bitrate)}<br>${fmtRate(out.bitrate)}` : ""}</div></div>`;
   }).join("") || `<div class="empty">No channels yet.</div>`;
 }
@@ -140,7 +172,8 @@ function renderOverview() {
   const rows = channels.map(c => { const st=c.stats||{}, inp=st.input||{}, out=st.output||{}, svc=st.service||{};
     const what = (svc.streams||[]).map(s => s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : `${s.codec||""} copy`).join(", ");
     const outs = (c.outputs && c.outputs.outputs) || [];
-    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${c.state}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
+    const [h, why] = health(c);
+    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
   $("#main").innerHTML = `<div class="head"><h1>Channels</h1><div class="sp"></div></div>
     <section class="card"><table><thead><tr><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="7" class="empty">No channels yet. "New channel" on the left makes one: give it a name and a source, and it is ready to be set up.</td></tr>`}</tbody></table></section>`;
@@ -151,11 +184,13 @@ let current = null;   // the channel object as last fetched
 async function renderChan(name) {
   let data; try { data = await api("/api/channels/" + encodeURIComponent(name)); } catch(e) { $("#main").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; view = {name:null}; return; }
   const c = current = data.channel, running = c.state === "running";
+  const inRail = channels.find(x => x.name === c.name);
+  if (inRail && inRail._health) c._health = inRail._health;
   const formHtml = $("#settings") ? null : settingsHtml();   // keep the form while editing
   if (!$("#main .head") || $("#main").dataset.chan !== name) {
     $("#main").dataset.chan = name;
     $("#main").innerHTML = `
-      <div class="head"><h1><span class="lamp ${c.state}" id="hlamp"></span>${esc(c.name)}</h1><span class="state" id="hstate"></span><div class="sp"></div>
+      <div class="head"><h1><span class="lamp" id="hlamp"></span>${esc(c.name)}</h1><span class="state" id="hstate"></span><div class="sp"></div>
         <span id="hbtns"></span></div>
       <div id="msg"></div>
       <div class="path" id="path"></div>
@@ -165,8 +200,9 @@ async function renderChan(name) {
       <div class="savebar hidden" id="savebar"><span>Settings changed</span><div class="sp"></div><button class="quiet" onclick="fillForm(current.config||{});setDirty(false)">Discard</button><button class="primary" onclick="saveChannel()">Save changes</button></div>`;
     fillForm(c.config || {});
   }
-  $("#hlamp").className = "lamp " + c.state;
-  $("#hstate").innerHTML = `${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? ` · <span class="bad">${esc(c.why)}</span>` : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}`;
+  const [h, why] = health(c);
+  $("#hlamp").className = "lamp " + h;
+  $("#hstate").innerHTML = `${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? ` · <span class="bad">${esc(c.why)}</span>` : ""}${running && h === "warn" ? ` · <span class="warn">${esc(why)}</span>` : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}`;
   $("#hbtns").innerHTML = `<button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button> <button class="danger quiet" onclick="delChannel()">Delete</button>`;
   $("#path").innerHTML = pathHtml(c);
   $("#outputs").innerHTML = outputsHtml(c);
