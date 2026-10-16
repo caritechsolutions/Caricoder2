@@ -38,6 +38,7 @@
 #include "ring.h"
 #include "sink.h"
 #include "source.h"
+#include "thumb.h"
 #include "udp.h"
 
 #define RX_SIZE         16384
@@ -59,6 +60,8 @@ struct options {
     int n_output;
     const char *control, *name, *config, *run_dir;
     const char *stats_file;
+    const char *thumb;                      /* JPEG of the picture, every few seconds */
+    int thumb_interval;
     int stats_interval;
     int rt_prio;
     struct engine_cfg eng;
@@ -861,6 +864,8 @@ static void usage(FILE *f)
 "      --service-name TEXT  replace the service name in the SDT\n"
 "      --service-provider TEXT\n"
 "      --stats-file PATH    JSON statistics, rewritten every second\n"
+"      --thumb PATH         a JPEG of the picture, 320 wide, rewritten every\n"
+"      --thumb-interval S   S seconds (default 5)\n"
 "      --stats-interval S   log a status line every S seconds (default 10, 0 off)\n"
 "      --rt-prio N          SCHED_FIFO priority for the output thread\n"
 "      --backends           list codec backends and exit\n"
@@ -906,7 +911,7 @@ enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
-    OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY,
+    OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
 };
 
@@ -944,6 +949,8 @@ int main(int argc, char **argv)
         { "audio", required_argument, 0, OPT_AUDIO },
         { "drop", required_argument, 0, OPT_DROP },
         { "switch-after", required_argument, 0, OPT_SWITCH_AFTER },
+        { "thumb", required_argument, 0, OPT_THUMB },
+        { "thumb-interval", required_argument, 0, OPT_THUMB_INTERVAL },
         { "retry-primary", required_argument, 0, OPT_RETRY_PRIMARY },
         { "video", required_argument, 0, OPT_VIDEO },
         { "decoder", required_argument, 0, OPT_DECODER },
@@ -999,6 +1006,8 @@ int main(int argc, char **argv)
             o.input = o.inputs[0];
             break;
         case OPT_SWITCH_AFTER: o.switch_ms = atoi(optarg); break;
+        case OPT_THUMB: o.thumb = optarg; break;
+        case OPT_THUMB_INTERVAL: o.thumb_interval = atoi(optarg); break;
         case OPT_RETRY_PRIMARY: o.retry_s = atoi(optarg); break;
         case 'o':
             if (o.n_output == OUTPUTS_MAX) {
@@ -1182,6 +1191,8 @@ int main(int argc, char **argv)
         }
     }
 
+    if (o.thumb)
+        thumb_init(o.thumb, o.thumb_interval);
     if (o.name) {
         static char http_sock[256];
 

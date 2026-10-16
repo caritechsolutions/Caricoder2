@@ -86,6 +86,8 @@ dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line2)
 dialog h3 { margin:0 0 14px; font-size:17px } dialog .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px }
 .urlprev { background:#0f151b; border:1px dashed var(--line2); border-radius:var(--r); padding:8px 10px; color:var(--fg2); word-break:break-all }
 .empty { padding:40px 20px; text-align:center; color:var(--dim) }
+.thumb { width:96px; height:54px; object-fit:cover; border-radius:4px; background:#0d1216; display:block } .thumb.off { opacity:.35 } td.thumbcell { width:96px; padding:4px 0 4px 10px }
+.big-thumb { width:100%; height:auto; aspect-ratio:16/9; object-fit:contain; margin-bottom:8px; background:#0d1216 }
 .tag { display:inline-block; padding:1px 7px; border-radius:4px; background:var(--panel2); color:var(--fg2); font-size:12px }
 .warn { color:var(--warn) } .bad { color:var(--bad) }
 @media (max-width:900px) { body { flex-direction:column } nav { width:auto; height:auto; position:static; max-height:40vh } .path { grid-template-columns:1fr } .path .arrow { transform:rotate(90deg); height:20px } .f { grid-template-columns:1fr } .f .help { grid-column:1 } }
@@ -197,12 +199,14 @@ function renderOverview() {
     const what = (svc.streams||[]).map(s => s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : `${s.codec||""} copy`).join(", ");
     const outs = (c.outputs && c.outputs.outputs) || [];
     const [h, why] = health(c);
-    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
+    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td class="thumbcell">${c.state==="running" ? `<img class="thumb" src="${thumbUrl(c.name)}" alt="" onerror="this.style.visibility='hidden'">` : `<div class="thumb off"></div>`}</td><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
   const counts = { ok:0, warn:0, bad:0, off:0 }; channels.forEach(c => counts[health(c)[0]]++);
   $("#main").innerHTML = `<div class="head"><h1>Channels</h1><span class="state">${channels.length ? `${counts.ok} fine · ${counts.warn} with trouble · ${counts.bad} failed · ${counts.off} stopped${shown.length !== channels.length ? ` · showing ${shown.length} of ${channels.length}` : ""}` : ""}</span><div class="sp"></div></div>
-    <section class="card"><table><thead><tr><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="7" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
+    <section class="card"><table><thead><tr><th></th><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="8" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
 }
+
+const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${Math.floor(Date.now() / 5000)}`;
 
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
@@ -272,7 +276,7 @@ function pathHtml(c) {
   const outs = (c.outputs && c.outputs.outputs) || [];
   const oerr = outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0);
   return `
-    <div class="node ${inBad?"bad":""}"><h3>Source</h3><div class="big">${fmtRate(inp.bitrate)}</div>
+    <div class="node ${inBad?"bad":""}"><h3>Source</h3><img class="thumb big-thumb" src="${thumbUrl(c.name)}" alt="" onerror="this.style.display='none'" onload="this.style.display=''"><div class="big">${fmtRate(inp.bitrate)}</div>
       <div class="sub">${esc(inp.url||"")}${(inp.sources||[]).length > 1 ? ` <span class="${inp.active ? "flag" : ""}">· source ${inp.active + 1} of ${inp.sources.length}${inp.active ? " (a backup)" : ""}</span>${inp.switches ? ` · ${inp.switches} switch${inp.switches > 1 ? "es" : ""}` : ""}` : ""}</div>
       ${inp.link ? `<div class="sub">${inp.link.transport.toUpperCase()} ${inp.link.connected ? esc(inp.link.state) : `<span class="flag ${st.uptime_s > 10 ? "bad" : ""}">${esc(inp.link.state)}</span>`}${inp.link.connected && inp.link.rtt_ms ? ` · RTT ${inp.link.rtt_ms.toFixed(1)} ms` : ""}${inp.link.recovered ? ` · ${inp.link.recovered} recovered` : ""}${inp.link.lost ? ` · <span class="flag">${inp.link.lost} lost</span>` : ""}${inp.link.reconnects ? ` · ${inp.link.reconnects} reconnects` : ""}</div>` : ""}
       <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}</div></div>

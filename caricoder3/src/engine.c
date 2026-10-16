@@ -28,6 +28,7 @@
 
 #include "clock.h"
 #include "log.h"
+#include "thumb.h"
 #include "xcode.h"
 
 #define RESYNC_LIMIT    (STC_HZ / 5)    /* live: PCR this far off the model ... */
@@ -94,6 +95,8 @@ struct engine {
      * guarded by the lock; the xcode objects themselves are created and
      * destroyed by the input thread only. */
     uint8_t xc_mode[PID_COUNT];         /* enum stream_mode */
+    uint16_t thumb_pid;                 /* a copied video stream, decoded for thumbnails */
+    enum codec_id thumb_codec;
     struct xcode *xc_list[MAX_ES];
     struct xcode_cfg xc_cfg[MAX_ES];
     int n_xc;
@@ -336,6 +339,7 @@ static int plan_stream(struct engine *e, const struct program *p, int idx,
         c->in = in;
         c->out = s->codec;
         c->bitrate = s->bitrate;
+        c->first_rendition = video && out == 0;
         if (video) {
             c->width = s->width;
             c->height = s->height;
@@ -525,6 +529,24 @@ static int update_xcodes(struct engine *e, const struct program *p, struct progr
     return n_prog;
 }
 
+/* The video stream that is copied (no transcoder on it), for thumbnails. */
+static void thumb_source(struct engine *e, const struct program *p)
+{
+    e->thumb_pid = 0;
+    e->thumb_codec = CODEC_NONE;
+    for (int i = 0; i < p->n_es; i++) {
+        enum codec_id c = xcode_input_codec(p, i);
+
+        if (!codec_is_video(c))
+            continue;
+        if (e->xc_mode[p->es[i].pid] == STREAM_TRANSCODE)
+            return;                     /* the transcoder makes them */
+        e->thumb_pid = p->es[i].pid;
+        e->thumb_codec = c;
+        return;
+    }
+}
+
 /* ---- demux callbacks ------------------------------------------------ */
 
 static bool dropped(const struct engine *e, uint16_t pid)
@@ -558,6 +580,7 @@ static void on_program(void *opaque, const struct program *p)
         n_prog = update_xcodes(e, &named, np);
     else
         np[0] = named;
+    thumb_source(e, &named);
 
     bool same_streams;
 
@@ -702,6 +725,8 @@ static void on_unit(void *opaque, struct es_unit *u)
         free(u);
         return;
     }
+    if (thumb_enabled() && u->pid == e->thumb_pid && e->thumb_codec != CODEC_NONE)
+        thumb_tap_unit(u, e->thumb_codec);  /* a copied video stream: decoded for the thumbnail now and then */
     pthread_mutex_lock(&e->lock);
     if (!e->cfg.live) {
         stc_t t1;

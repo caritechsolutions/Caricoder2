@@ -132,6 +132,7 @@ caricoder3 ctl vacation remove-output out3
 | `--control PATH`, `--name NAME` | A Unix socket for adding and removing outputs while the channel runs; `--name` puts it at `/run/caricoder3/NAME.sock`. See "Outputs" |
 | `--config FILE` | JSON file of outputs, read at start and on `SIGHUP`; outputs added with `--save` are written to it |
 | `--stats-file PATH` | JSON status, rewritten atomically once a second |
+| `--thumb PATH` | A 320-wide JPEG of the picture, rewritten every `--thumb-interval` s (default 5): from the transcoder's decoder, or one key frame decoded on the CPU when the video is copied. The supervisor sets it; the GUI shows it on the list and the channel page |
 | `--rt-prio N` | Real-time priority for the output thread (needs `CAP_SYS_NICE`) |
 
 | `--drop PID[,PID..]` | Leave these streams of the service out of the output: an audio track not wanted, say. `caricoder3 probe` lists what there is |
@@ -365,6 +366,7 @@ The API (basic auth, JSON in and out):
 | `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "..."}`: add an output, saved |
 | `DELETE /api/channels/NAME/outputs/ID` | remove one |
 | `GET /api/channels/NAME/log` | the last lines it wrote |
+| `GET /api/channels/NAME/thumb.jpg` | a picture of the channel, up to 5 s old (320 wide) |
 | `GET /hls/NAME/...` | the channel's HLS output (no password) |
 
 ## Transcoding

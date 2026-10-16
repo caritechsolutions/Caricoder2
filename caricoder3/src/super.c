@@ -20,6 +20,7 @@
  *   /api/channels/NAME/outputs                    POST {url, id}: add (saved)
  *   /api/channels/NAME/outputs/ID                 DELETE
  *   /api/channels/NAME/log                        the last lines it wrote
+ *   /api/channels/NAME/thumb.jpg                  a picture of the channel, a few seconds old
  *   /api/probe                 POST {url, seconds, program}: what is in a source
  *                              (caricoder3 probe, run as a child; up to 30 s)
  *   /hls/NAME/...              the channel's HLS output, proxied
@@ -310,6 +311,8 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARG("%.400s/%s.outputs.json", s->channels_dir, c->name);
     ARGS("--stats-file");
     ARG("%.400s/%s.json", s->run_dir, c->name);
+    ARGS("--thumb");
+    ARG("%.400s/%s.jpg", s->run_dir, c->name);
     ARGS("--stats-interval");
     ARGS("60");
     {
@@ -1197,6 +1200,25 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             else if (c->state != CH_STOPPING)
                 chan_start(s, c);
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+        } else if (!strcmp(rest, "thumb.jpg")) {
+            char tpath[600];
+            size_t len = 0;
+            char *data;
+
+            snprintf(tpath, sizeof(tpath), "%.400s/%s.jpg", s->run_dir, c->name);
+            pthread_mutex_unlock(&s->lock);
+            data = read_file(tpath, &len);
+            if (!data || len == 0) {
+                free(data);
+                api_error(resp, 404, "no thumbnail yet");
+                return;
+            }
+            resp->status = 200;
+            resp->type = "image/jpeg";
+            resp->body = data;
+            resp->body_len = len;
+            snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: no-store\r\n");
+            return;
         } else if (!strcmp(rest, "log")) {
             char *out = NULL;
             size_t len = 0;

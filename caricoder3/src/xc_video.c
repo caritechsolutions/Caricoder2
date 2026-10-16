@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "log.h"
+#include "thumb.h"
 #include "xcode.h"
 
 #define DEFAULT_VBV_MS  1000
@@ -501,6 +502,8 @@ static void picture_in(struct vxc *v, const struct vframe *in)
     struct vframe f = *in, tmp;
 
     v->st->frames_in++;
+    if (v->cfg.first_rendition)
+        thumb_offer(in);
     /* Another size wanted and the decoder did not make it: scaled here. */
     if (f.mem == VMEM_CPU && v->cfg.width > 0 && v->cfg.height > 0 &&
         (f.width != v->cfg.width || f.height != v->cfg.height)) {

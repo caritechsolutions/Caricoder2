@@ -3177,6 +3177,32 @@ def xc_video_mpeg2_in():
 
 
 @test
+def thumbnails_copy_and_transcode():
+    """--thumb: a JPEG of the picture, from the transcoder's decoder and, on a copied stream, a decoded key frame."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = _real_h264_aac(8)
+    if not src:
+        return "SKIPPED: no ffmpeg to make a real stream"
+    res = []
+    for mode, args in (("copy", []), ("transcode", ["--video", "h264:500k"])):
+        jpg = w(f"thumb_{mode}.jpg")
+        if os.path.exists(jpg):
+            os.remove(jpg)
+        run_file(src, w(f"thumb_{mode}.ts"), "--thumb", jpg, "--thumb-interval", "1", *args)
+        need(os.path.exists(jpg) and os.path.getsize(jpg) > 500, f"{mode}: no thumbnail written")
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height",
+                            "-of", "csv=p=0", jpg], capture_output=True, text=True)
+        need(p.stdout.strip().startswith("mjpeg,320,180"), f"{mode}: ffprobe says {p.stdout.strip()!r}")
+        # it decodes to a picture that is not flat
+        p = subprocess.run(["ffmpeg", "-v", "error", "-i", jpg, "-vf", "signalstats", "-f", "null", "-"], capture_output=True, text=True)
+        need(p.returncode == 0, f"{mode}: the JPEG does not decode: {p.stderr[-200:]}")
+        res.append(f"{mode}: {os.path.getsize(jpg)} bytes, 320x180")
+    return "; ".join(res)
+
+
+@test
 def xc_video_and_audio_together():
     """Video and audio transcoded in one run stay in sync with each other."""
     skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")

@@ -30,6 +30,7 @@ struct xcode_spec {
 
 struct xcode_cfg {
     uint16_t pid;               /* input stream */
+    bool first_rendition;       /* the first transcoder of the video: makes the thumbnails */
     uint16_t out_pid;           /* output stream: the same, or another for a
                                  * further rendition of the same input */
     enum codec_id in, out;
