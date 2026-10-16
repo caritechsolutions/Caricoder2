@@ -123,7 +123,7 @@ function healthOf(c) {
   const st = c.stats; if (!st) return ["warn", "starting"];
   const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
   const outs = (c.outputs && c.outputs.outputs) || [];
-  const now = { cc: inp.cc_errors||0, ovf: inp.socket_overflow||0, drop: out.dropped_units||0, late: out.late_units||0,
+  const now = { cc: inp.cc_errors||0, ovf: inp.socket_overflow||0, drop: out.dropped_units||0, late: out.late_units||0, lost: (inp.link||{}).lost||0,
                 send: outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0), xdrop: (svc.streams||[]).reduce((a,s)=>a+(s.input_dropped||0),0) };
   const was = prevCounters[c.name] || now;
   prevCounters[c.name] = now;
@@ -133,6 +133,7 @@ function healthOf(c) {
   if (st.uptime_s > 15 && !clk.locked) why.push("clock not locked");
   if (now.cc > was.cc) why.push("input errors");
   if (now.ovf > was.ovf) why.push("input overflow");
+  if (now.lost > was.lost) why.push("packets lost on the link");
   if (now.drop > was.drop || now.xdrop > was.xdrop) why.push("dropping");
   if (now.late > was.late) why.push("running late");
   if (now.send > was.send) why.push("send errors");
@@ -222,6 +223,7 @@ function pathHtml(c) {
   return `
     <div class="node ${inBad?"bad":""}"><h3>Source</h3><div class="big">${fmtRate(inp.bitrate)}</div>
       <div class="sub">${esc(inp.url||"")}</div>
+      ${inp.link ? `<div class="sub">${inp.link.transport.toUpperCase()} ${inp.link.connected ? esc(inp.link.state) : `<span class="flag ${st.uptime_s > 10 ? "bad" : ""}">${esc(inp.link.state)}</span>`}${inp.link.connected && inp.link.rtt_ms ? ` · RTT ${inp.link.rtt_ms.toFixed(1)} ms` : ""}${inp.link.recovered ? ` · ${inp.link.recovered} recovered` : ""}${inp.link.lost ? ` · <span class="flag">${inp.link.lost} lost</span>` : ""}${inp.link.reconnects ? ` · ${inp.link.reconnects} reconnects` : ""}</div>` : ""}
       <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}</div></div>
     <div class="arrow">›</div>
     <div class="node"><h3>Processing</h3><div class="sub" style="font-size:14px;color:var(--fg)">${proc}</div>
@@ -292,8 +294,11 @@ function sel(id, opts, extra="") { return `<select id="${id}" ${extra}>${opts.ma
 function settingsHtml() {
   return `<form onsubmit="saveChannel();return false" oninput="setDirty(true)" onchange="setDirty(true)">
     <div class="f">
-      <label>Source</label><div class="row"><select id="in_kind" class="n" style="flex:0 0 140px" onchange="syncInput()"><option value="udp">UDP multicast</option><option value="rtp">RTP</option><option value="file">File (test)</option></select><input id="in_host" placeholder="239.5.5.5 (address)" oninput="syncInput()"><input id="in_port" class="n" placeholder="port" oninput="syncInput()"></div>
-      <div class="help">Interface: <input id="in_iface" style="width:120px;display:inline-block;padding:3px 7px" placeholder="any" oninput="syncInput()"> &nbsp; Source address for SSM: <input id="in_src" style="width:140px;display:inline-block;padding:3px 7px" placeholder="none" oninput="syncInput()"> &nbsp; <span class="mono" id="in_url"></span></div>
+      <label>Source</label><div class="row"><select id="in_kind" class="n" style="flex:0 0 240px" onchange="syncInput()">${IN_KINDS.map(k=>`<option value="${k[0]}">${k[1]}</option>`).join("")}</select><input id="in_host" placeholder="239.5.5.5 (address)" oninput="syncInput()"><input id="in_port" class="n" placeholder="port" oninput="syncInput()"></div>
+      <div class="help" id="in_udp">Interface: <input id="in_iface" style="width:120px;display:inline-block;padding:3px 7px" placeholder="any" oninput="syncInput()"> &nbsp; Source address for SSM: <input id="in_src" style="width:140px;display:inline-block;padding:3px 7px" placeholder="none" oninput="syncInput()"></div>
+      <div class="help" id="in_srt">Latency: <input id="in_latency" style="width:70px;display:inline-block;padding:3px 7px" placeholder="120" oninput="syncInput()"> ms &nbsp; Passphrase: <input id="in_pass" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (10+ characters)" oninput="syncInput()"></div>
+      <div class="help" id="in_rist">Secret: <input id="in_secret" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (AES-128 when set)" oninput="syncInput()"> &nbsp; Buffer: <input id="in_buffer" style="width:70px;display:inline-block;padding:3px 7px" placeholder="1000" oninput="syncInput()"> ms</div>
+      <div class="help"><span class="mono" id="in_url"></span></div>
       <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first.</span></div>
       <label>Output rate</label><div class="row"><select id="muxsel" onchange="$('#muxcustom').style.display=this.value==='custom'?'':'none'">${MUX.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("")}</select><input id="muxcustom" class="n" placeholder="e.g. 4500k" style="display:none"><label style="flex:0 0 auto;display:flex;gap:6px;align-items:center"><input type="checkbox" id="vbr" style="width:auto"> peak only (VBR)</label></div>
       <div class="help">Constant rate pads with null packets to exactly this rate (for satellite and cable). Variable sends only what there is.</div>
@@ -325,16 +330,50 @@ function settingsHtml() {
     </div></details>
   </form>`;
 }
+const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["file","File (test)"]];
+function inputUrl(v) {
+  const q = [];
+  switch (v.kind) {
+  case "file": return v.host;
+  case "udp": case "rtp":
+    if (v.iface) q.push("iface=" + v.iface);
+    return `${v.kind}://${v.src?v.src+"@":""}${v.host}${v.port?":"+v.port:""}${q.length?"?"+q.join("&"):""}`;
+  case "srtl": case "srtc":
+    if (v.latency) q.push("latency=" + v.latency);
+    if (v.pass) q.push("passphrase=" + v.pass);
+    return `srt://${v.kind==="srtc"?v.host:""}:${v.port}${q.length?"?"+q.join("&"):""}`;
+  case "ristl": case "ristc":
+    if (v.secret) { q.push("secret=" + v.secret); q.push("aes-type=128"); }
+    if (v.buffer) q.push("buffer=" + v.buffer);
+    return `rist://${v.kind==="ristl"?"@":""}${v.host}:${v.port}${q.length?"?"+q.join("&"):""}`;
+  }
+  return "";
+}
+function inputForm() {
+  return { kind: $("#in_kind").value, host: $("#in_host").value.trim(), port: $("#in_port").value.trim(),
+           iface: $("#in_iface").value.trim(), src: $("#in_src").value.trim(),
+           latency: $("#in_latency").value.trim(), pass: $("#in_pass").value.trim(),
+           secret: $("#in_secret").value.trim(), buffer: $("#in_buffer").value.trim() };
+}
 function syncInput() {
-  const k = $("#in_kind").value, h = $("#in_host").value.trim(), p = $("#in_port").value.trim(), i = $("#in_iface").value.trim(), s = $("#in_src").value.trim();
-  const url = k === "file" ? h : `${k}://${s?s+"@":""}${h}${p?":"+p:""}${i?"?iface="+i:""}`;
-  $("#in_url").textContent = url;
+  const v = inputForm(), k = v.kind;
+  $("#in_udp").style.display = (k === "udp" || k === "rtp") ? "" : "none";
+  $("#in_srt").style.display = (k === "srtl" || k === "srtc") ? "" : "none";
+  $("#in_rist").style.display = (k === "ristl" || k === "ristc") ? "" : "none";
+  $("#in_host").style.display = (k === "srtl") ? "none" : "";
+  $("#in_host").placeholder = k === "file" ? "/path/to/file.ts" : (k === "srtc" || k === "ristc") ? "sender's address" : k === "ristl" ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
+  $("#in_url").textContent = inputUrl(v);
 }
 function parseInput(url) {
-  const m = /^(udp|rtp):\/\/(?:([^@]+)@)?([^:?]+)(?::(\d+))?(?:\?(.*))?$/.exec(url || "");
-  if (!m) return { kind: "file", host: url || "", port: "", iface: "", src: "" };
-  const q = Object.fromEntries((m[5]||"").split("&").filter(Boolean).map(x => x.split("=")));
-  return { kind: m[1], host: m[3], port: m[4] || "", iface: q.iface || "", src: m[2] || "" };
+  const r = { kind: "file", host: url || "", port: "", iface: "", src: "", latency: "", pass: "", secret: "", buffer: "" };
+  const m = /^(udp|rtp|srt|rist):\/\/(@?)(?:([^@\/?:]+)@)?([^:?]*)(?::(\d+))?(?:\?(.*))?$/.exec(url || "");
+  if (!m) return r;
+  const q = Object.fromEntries((m[6]||"").split("&").filter(Boolean).map(x => x.split("=")));
+  r.host = m[4]; r.port = m[5] || "";
+  if (m[1] === "udp" || m[1] === "rtp") { r.kind = m[1]; r.iface = q.iface || ""; r.src = m[3] || ""; }
+  else if (m[1] === "srt") { r.kind = (!m[4] || q.mode === "listener") && q.mode !== "caller" ? "srtl" : "srtc"; r.latency = q.latency || ""; r.pass = q.passphrase || ""; }
+  else { r.kind = m[2] ? "ristl" : "ristc"; r.secret = q.secret || ""; r.buffer = q.buffer || ""; }
+  return r;
 }
 function rendRow(spec) {
   // spec: "WxH:codec:rate" | "codec:rate" | "codec"
@@ -362,7 +401,8 @@ function setVideo(xc) {
 const rendHeader = () => `<div class="rend" style="margin-bottom:4px;color:var(--dim);font-size:12px"><div>Resolution</div><div>Codec</div><div>Bit rate</div><div></div></div>`;
 const rendAdd = () => `<div><button type="button" class="quiet" onclick="this.parentNode.insertAdjacentHTML('beforebegin', rendRow('640x360:h264:1M'));setDirty(true)">+ Add a rendition</button> <span style="color:var(--dim);font-size:12px">Each rendition is a program of the output and a variant in HLS; key frames stay aligned.</span></div>`;
 function fillForm(cfg) {
-  const i = parseInput(cfg.input); $("#in_kind").value = i.kind; $("#in_host").value = i.host; $("#in_port").value = i.port; $("#in_iface").value = i.iface; $("#in_src").value = i.src; syncInput();
+  const i = parseInput(cfg.input); $("#in_kind").value = i.kind; $("#in_host").value = i.host; $("#in_port").value = i.port; $("#in_iface").value = i.iface; $("#in_src").value = i.src;
+  $("#in_latency").value = i.latency; $("#in_pass").value = i.pass; $("#in_secret").value = i.secret; $("#in_buffer").value = i.buffer; syncInput();
   $("#program").value = cfg.program || "";
   const mux = cfg.muxrate ? String(cfg.muxrate) : "";
   if (MUX.some(m => m[0] === mux)) { $("#muxsel").value = mux; $("#muxcustom").style.display = "none"; } else { $("#muxsel").value = "custom"; $("#muxcustom").value = mux; $("#muxcustom").style.display = ""; }
@@ -402,6 +442,8 @@ function setDirty(d) { dirty = d; $("#savebar").classList.toggle("hidden", !d); 
 async function saveChannel() {
   const cfg = readForm();
   if (!cfg.input || cfg.input.endsWith("://")) { showMsg("A source address is needed.", "err"); return; }
+  if (/^(srt|rist):\/\/[^?]*:(\?|$)/.test(cfg.input)) { showMsg("The SRT or RIST port is needed.", "err"); return; }
+  if (/passphrase=[^&]{1,9}(&|$)/.test(cfg.input)) { showMsg("An SRT passphrase is 10 characters or more.", "err"); return; }
   for (const r of cfg.video || []) if (!/^(\d+x\d+:)?(h264|hevc)(:\S+)?$/.test(r)) { showMsg("A custom resolution needs both width and height, and a bit rate like 2500k.", "err"); return; }
   try { await api(`/api/channels/${encodeURIComponent(view.name)}`, {method:"PUT", body: JSON.stringify(cfg, null, 2) + "\n"}); setDirty(false); showMsg("Saved." + (current && current.state === "running" ? " The channel is restarting with the new settings." : ""), "ok"); schedule(800); }
   catch(e) { showMsg(e.message, "err"); }

@@ -32,6 +32,7 @@
 #include "codec.h"
 #include "control.h"
 #include "engine.h"
+#include "input.h"
 #include "json.h"
 #include "log.h"
 #include "ring.h"
@@ -81,7 +82,9 @@ struct ctx {
     struct ring ring;
     struct sinks sinks;
     struct control *ctl;
-    int rx_fd;
+    int rx_fd;                              /* a UDP/RTP input */
+    const struct input_ops *in_ops;         /* an SRT/RIST input, read through the library */
+    void *in_ctx;
     pthread_mutex_t stats_lock;             /* the last statistics as JSON, for the control socket */
     char *stats_json;
     size_t stats_len;
@@ -145,6 +148,35 @@ static void *input_thread(void *arg)
             atomic_store(&c->last_rx, now);
     }
     free(bufs);
+    return NULL;
+}
+
+/* An SRT or RIST input: the library hands over one datagram at a time. */
+static void *link_input_thread(void *arg)
+{
+    struct ctx *c = arg;
+    uint8_t *buf = malloc(INPUT_DGRAM_MAX);
+
+    if (!buf) {
+        atomic_store(&c->fatal, 1);
+        return NULL;
+    }
+    while (atomic_load(&g_run)) {
+        int n = c->in_ops->recv(c->in_ctx, buf, INPUT_DGRAM_MAX);
+        int64_t now = clock_now_ns();
+
+        atomic_store(&c->beat_in, now);
+        if (n < 0) {
+            log_err("input: %s: finished", c->in_ops->name);
+            atomic_store(&c->fatal, 1);
+            break;
+        }
+        if (n > 0) {
+            engine_push_datagram(c->eng, buf, (size_t)n, now);
+            atomic_store(&c->last_rx, now);
+        }
+    }
+    free(buf);
     return NULL;
 }
 
@@ -271,7 +303,7 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
                "    \"pcr_jumps\": %llu,\n    \"pcr_glitches\": %llu,\n"
                "    \"pcr_missing\": %llu,\n"
                "    \"timestamps_out_of_range\": %llu,\n"
-               "    \"socket_overflow\": %llu,\n    \"truncated_datagrams\": %llu\n  },\n",
+               "    \"socket_overflow\": %llu,\n    \"truncated_datagrams\": %llu",
             (unsigned long long)st->in.packets, (unsigned long long)st->in.sync_errors,
             (unsigned long long)st->in.tei, (unsigned long long)st->in.cc_errors,
             (unsigned long long)st->in.cc_errors_other,
@@ -286,6 +318,21 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
             (unsigned long long)st->in.pcr_missing,
             (unsigned long long)st->in.ts_out_of_range,
             (unsigned long long)r->rx_overflow, (unsigned long long)r->rx_truncated);
+    if (c->in_ops) {
+        struct input_stats is;
+
+        memset(&is, 0, sizeof(is));
+        c->in_ops->stats(c->in_ctx, &is);
+        fprintf(f, ",\n    \"link\": {\n      \"transport\": \"%s\",\n      \"state\": ", c->in_ops->name);
+        json_str(f, is.state);
+        fprintf(f, ",\n      \"connected\": %s,\n      \"rtt_ms\": %.1f,\n"
+                   "      \"lost\": %lld,\n      \"recovered\": %lld,\n"
+                   "      \"reconnects\": %llu,\n      \"errors\": %llu\n    }",
+                is.connected ? "true" : "false", is.rtt_ms, (long long)is.lost,
+                (long long)is.retransmitted, (unsigned long long)is.reconnects,
+                (unsigned long long)is.errors);
+    }
+    fprintf(f, "\n  },\n");
 
     fprintf(f, "  \"service\": {\n    \"number\": %u,\n    \"ts_id\": %u,\n"
                "    \"pmt_pid\": %u,\n    \"pcr_pid\": %u,\n    \"changes\": %llu,\n"
@@ -684,7 +731,7 @@ static int run_live(struct options *o, struct ctx *c)
     atomic_store(&c->beat_in, t_start);
     atomic_store(&c->beat_out, t_start);
 
-    if (pthread_create(&tin, NULL, input_thread, c) != 0) {
+    if (pthread_create(&tin, NULL, c->in_ops ? link_input_thread : input_thread, c) != 0) {
         log_err("cannot start the input thread");
         return 1;
     }
@@ -810,7 +857,9 @@ static void usage(FILE *f)
 "\n"
 "  -i, --input URL          udp://[source@]group:port[?iface=eth0&buf=BYTES]\n"
 "                           rtp://... (RTP is also detected automatically)\n"
-"                           or a .ts file\n"
+"                           srt://host:port[?latency=120&passphrase=..] (caller)\n"
+"                           srt://:port (listener), rist://@:port (listener),\n"
+"                           rist://host:port (caller), or a .ts file\n"
 "  -o, --output URL         udp://host:port[?ttl=8&iface=eth0&pkt=7] or a file;\n"
 "                           may be repeated. Each output runs on its own: a slow\n"
 "                           one loses packets, the others do not notice\n"
@@ -880,11 +929,6 @@ static bool parse_rate(const char *s, int64_t *out)
         return false;
     *out = (int64_t)(v + 0.5);
     return true;
-}
-
-static bool is_udp(const char *s)
-{
-    return !strncmp(s, "udp://", 6) || !strncmp(s, "rtp://", 6);
 }
 
 static const char *file_path(const char *s)
@@ -1119,7 +1163,7 @@ int main(int argc, char **argv)
     sigaction(SIGHUP, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
-    o.eng.live = is_udp(o.input);
+    o.eng.live = input_is_live(o.input);
     c.opt = &o;
     c.rx_fd = -1;
     pthread_mutex_init(&c.stats_lock, NULL);
@@ -1131,7 +1175,7 @@ int main(int argc, char **argv)
                 return 2;
             }
         if (o.control || o.config) {
-            fprintf(stderr, "--control, --name and --config are for a live (UDP) input\n");
+            fprintf(stderr, "--control, --name and --config are for a live input\n");
             return 2;
         }
     }
@@ -1169,7 +1213,17 @@ int main(int argc, char **argv)
         log_info("control: %s", o.control);
     }
 
-    if (o.eng.live) {
+    if (o.eng.live && (c.in_ops = input_ops_for(o.input)) != NULL) {
+        c.in_ctx = c.in_ops->open(o.input, err, sizeof(err));
+        if (!c.in_ctx) {
+            log_err("input: %s", err);
+            return 1;
+        }
+    } else if (o.eng.live) {
+        if (!strncmp(o.input, "srt://", 6) || !strncmp(o.input, "rist://", 7)) {
+            log_err("input: this build has no %.4s input (transports: %s)", o.input, input_transports());
+            return 1;
+        }
         if (udp_parse(o.input, &in_addr, err, sizeof(err)) < 0 ||
             (c.rx_fd = udp_open_rx(&in_addr, err, sizeof(err))) < 0) {
             log_err("input: %s", err);
@@ -1209,6 +1263,8 @@ int main(int argc, char **argv)
     control_stop(c.ctl);
     if (c.rx_fd >= 0)
         close(c.rx_fd);
+    if (c.in_ctx)
+        c.in_ops->close(c.in_ctx);
     engine_free(c.eng);
     sinks_destroy(&c.sinks);
     ring_destroy(&c.ring);

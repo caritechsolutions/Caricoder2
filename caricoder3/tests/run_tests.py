@@ -1843,6 +1843,177 @@ def live_rist_listener_encrypted():
     return f"1 receiver, AES-128, {pes}/{orig} PES received"
 
 
+# ---- link inputs: an outside sender pushes into caricoder3 over SRT or RIST ----
+
+def _input_run(in_url, sender, name, duration=8.0, mid=None):
+    """
+    Runs the channel with a link input (`in_url`) and a UDP output, with
+    `sender(port)` -> Popen reading UDP on `port` and pushing it to the
+    input. Returns (stats JSON, log, output file, source file).
+    """
+    src = synth("live_src", duration=duration)
+    pin = _port[0]
+    _port[0] += 4
+    sock = w(name + ".sock")
+    out = w(name + ".ts")
+    cap = Capture(pin + 2)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", in_url.format(port=pin + 1), "-o", f"udp://127.0.0.1:{pin + 2}",
+         "-r", "4M", "--control", sock], stderr=subprocess.PIPE, text=True)
+    tx = None
+    try:
+        time.sleep(0.3)
+        tx = sender(pin, pin + 1)
+        time.sleep(1.5)                     # the link comes up
+        p = Player("127.0.0.1", pin)
+        done = []
+
+        def gate(t):
+            if mid and t >= 3.0 and not done:
+                done.append(1)
+                mid(proc, sock)
+            return True
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(1.0)
+        rc, stats = ctl(sock, "stats")
+        time.sleep(0.5)
+    finally:
+        if tx:
+            tx.send_signal(signal.SIGINT)
+            try:
+                tx.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tx.kill()
+                tx.wait()
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+        cap.stop(out)
+    need(proc.returncode == 0, f"exit status {proc.returncode}\n{log[-600:]}")
+    need(rc == 0 and stats["ok"], f"stats: {stats}")
+    return stats["stats"], log, out, src
+
+
+def _srt_sender(mode):
+    def start(udp_port, port):
+        url = f"srt://127.0.0.1:{port}?mode=caller" if mode == "caller" else f"srt://:{port}?mode=listener"
+        return subprocess.Popen(["srt-live-transmit", "-q", f"udp://127.0.0.1:{udp_port}", url],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return start
+
+
+def _rist_sender(listen):
+    def start(udp_port, port):
+        url = f"rist://@127.0.0.1:{port}" if listen else f"rist://127.0.0.1:{port}"
+        return subprocess.Popen(["ristsender", "-p", "1", "-i", f"udp://127.0.0.1:{udp_port}",
+                                 "-o", url, "-v", "-1"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return start
+
+
+@test
+def live_input_srt_listener():
+    """SRT input listening; srt-live-transmit calls in and pushes the stream."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+    st, log, out, src = _input_run("srt://:{port}", _srt_sender("caller"), "in_srt_listener")
+    link = st["input"]["link"]
+    need(link["transport"] == "srt" and link["connected"] and link["state"].startswith("sender "), f"link: {link}")
+    need(link["errors"] == 0 and link["reconnects"] == 0, f"link: {link}")
+    pes, orig = _stream_ok(out, src, "SRT input")
+    return f"{link['state']}, {pes}/{orig} PES through, RTT {link['rtt_ms']} ms, {link['recovered']} recovered"
+
+
+@test
+def live_input_srt_caller_encrypted():
+    """SRT input as caller with a passphrase, to a listening srt-live-transmit."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+
+    def start(udp_port, port):
+        return subprocess.Popen(["srt-live-transmit", "-q", f"udp://127.0.0.1:{udp_port}",
+                                 f"srt://:{port}?mode=listener&passphrase=caricoder3test&pbkeylen=16"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    st, log, out, src = _input_run("srt://127.0.0.1:{port}?latency=200&passphrase=caricoder3test&pbkeylen=16",
+                                   start, "in_srt_caller")
+    link = st["input"]["link"]
+    need(link["connected"] and link["state"] == "connected", f"link: {link}")
+    pes, orig = _stream_ok(out, src, "SRT input caller")
+    return f"connected with AES-128, {pes}/{orig} PES through"
+
+
+@test
+def live_input_srt_sender_restart():
+    """SRT input listening: the sender dies and a new one connects; the input takes it."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+    box = {}
+
+    def start(udp_port, port):
+        box["udp"], box["port"] = udp_port, port
+        box["first"] = _srt_sender("caller")(udp_port, port)
+        return box["first"]
+
+    def mid(proc, sock):
+        box["first"].kill()
+        box["first"].wait()
+        time.sleep(0.5)
+        box["second"] = _srt_sender("caller")(box["udp"], box["port"])
+    st, log, out, src = _input_run("srt://:{port}", start, "in_srt_restart", duration=12.0, mid=mid)
+    try:
+        box["second"].send_signal(signal.SIGINT)
+        box["second"].wait(timeout=5)
+    except Exception:
+        box["second"].kill()
+    link = st["input"]["link"]
+    need(link["connected"], f"the second sender is not connected: {link}")
+    need(link["reconnects"] >= 1, f"the first sender's loss was not seen: {link}")
+    got = sum(len(v) for v in Analysis(out).pes.values())
+    orig = sum(len(v) for v in Analysis(src).pes.values())
+    need(got > orig // 2, f"only {got} of {orig} PES through after the restart")
+    return f"sender replaced at 3 s: {link['reconnects']} reconnect, {got}/{orig} PES through"
+
+
+@test
+def live_input_rist_listener():
+    """RIST input listening; ristsender calls in."""
+    if "rist://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without librist"
+    if not shutil.which("ristsender"):
+        return "SKIPPED: rist-tools not installed"
+    st, log, out, src = _input_run("rist://@127.0.0.1:{port}", _rist_sender(False), "in_rist_listener")
+    link = st["input"]["link"]
+    need(link["transport"] == "rist" and link["connected"], f"link: {link}")
+    pes, orig = _stream_ok(out, src, "RIST input")
+    return f"{link['state']}, {pes}/{orig} PES through, RTT {link['rtt_ms']} ms"
+
+
+@test
+def live_input_rist_caller_encrypted():
+    """RIST input calling a listening ristsender, with a shared secret."""
+    if "rist://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without librist"
+    if not shutil.which("ristsender"):
+        return "SKIPPED: rist-tools not installed"
+
+    def start(udp_port, port):
+        return subprocess.Popen(["ristsender", "-p", "1", "-i", f"udp://127.0.0.1:{udp_port}",
+                                 "-o", f"rist://@127.0.0.1:{port}?secret=caricoder3test&aes-type=128", "-v", "-1"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    st, log, out, src = _input_run("rist://127.0.0.1:{port}?secret=caricoder3test&aes-type=128",
+                                   start, "in_rist_caller")
+    link = st["input"]["link"]
+    need(link["connected"] and link["state"] == "connected", f"link: {link}")
+    pes, orig = _stream_ok(out, src, "RIST input caller")
+    return f"connected, AES-128, {pes}/{orig} PES through"
+
+
 def _real_h264_aac(seconds=8):
     """A real H.264 + AAC stream from ffmpeg (made once), or None."""
     src = w(f"rtmp_src_{seconds}.ts")
