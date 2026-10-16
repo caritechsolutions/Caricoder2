@@ -20,6 +20,8 @@
  *   /api/channels/NAME/outputs                    POST {url, id}: add (saved)
  *   /api/channels/NAME/outputs/ID                 DELETE
  *   /api/channels/NAME/log                        the last lines it wrote
+ *   /api/probe                 POST {url, seconds, program}: what is in a source
+ *                              (caricoder3 probe, run as a child; up to 30 s)
  *   /hls/NAME/...              the channel's HLS output, proxied
  *
  * Everything but /hls needs HTTP basic authentication: user "admin",
@@ -916,6 +918,120 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->type = "application/json";
         resp->body = out;
         resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/probe") && !strcmp(req->method, "POST")) {
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char err[200];
+        int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
+        const char *url = root >= 0 ? json_get_str(doc, root, "url", NULL) : NULL;
+        double seconds = root >= 0 ? json_get_num(doc, root, "seconds", 3) : 3;
+        int program = root >= 0 ? (int)json_get_num(doc, root, "program", 0) : 0;
+        char secs[16], prog[16];
+        char *argv[8];
+        int n = 0, pfd[2];
+        pid_t pid;
+
+        if (!url || !url[0] || !strstr(url, "://")) {
+            api_error(resp, 400, root < 0 ? err : "needs \"url\" with a scheme");
+            free(doc);
+            return;
+        }
+        if (seconds < 1)
+            seconds = 1;
+        if (seconds > 30)
+            seconds = 30;
+        snprintf(secs, sizeof(secs), "%.0f", seconds);
+        snprintf(prog, sizeof(prog), "%d", program);
+        argv[n++] = s->binary;
+        argv[n++] = "probe";
+        argv[n++] = (char *)url;
+        argv[n++] = "--seconds";
+        argv[n++] = secs;
+        if (program > 0) {
+            argv[n++] = "--program";
+            argv[n++] = prog;
+        }
+        argv[n] = NULL;
+        if (pipe(pfd) < 0) {
+            api_error(resp, 500, "pipe");
+            free(doc);
+            return;
+        }
+        pid = fork();
+        if (pid == 0) {
+            dup2(pfd[1], 1);
+            close(pfd[0]);
+            close(pfd[1]);
+            {
+                int devnull = open("/dev/null", O_RDWR);
+
+                if (devnull >= 0) {
+                    dup2(devnull, 0);
+                    dup2(devnull, 2);
+                }
+            }
+            execv(argv[0], argv);
+            _exit(127);
+        }
+        close(pfd[1]);
+        free(doc);
+        if (pid < 0) {
+            close(pfd[0]);
+            api_error(resp, 500, "fork");
+            return;
+        }
+        {
+            char *out = NULL;
+            size_t len = 0, cap = 0;
+            int64_t deadline = clock_now_ns() + (int64_t)((seconds + 15) * 1e9);
+            bool timed_out = false;
+
+            for (;;) {
+                struct pollfd pf = { pfd[0], POLLIN, 0 };
+                int64_t left = deadline - clock_now_ns();
+                int rc;
+
+                if (left <= 0) {
+                    timed_out = true;
+                    break;
+                }
+                rc = poll(&pf, 1, (int)(left / 1000000));
+                if (rc <= 0) {
+                    if (rc < 0 && errno == EINTR)
+                        continue;
+                    timed_out = rc == 0;
+                    break;
+                }
+                if (len + 65536 > cap) {
+                    char *nb = realloc(out, cap + 262144);
+
+                    if (!nb)
+                        break;
+                    out = nb;
+                    cap += 262144;
+                }
+                ssize_t r = read(pfd[0], out + len, cap - len - 1);
+
+                if (r <= 0)
+                    break;
+                len += (size_t)r;
+            }
+            close(pfd[0]);
+            if (timed_out)
+                kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            if (timed_out || !out || len == 0) {
+                free(out);
+                api_error(resp, 504, timed_out ? "the probe did not finish" : "the probe gave nothing");
+                return;
+            }
+            out[len] = 0;
+            resp->status = strstr(out, "\"ok\": true") ? 200 : 400;
+            resp->type = "application/json";
+            resp->body = out;
+            resp->body_len = len;
+        }
         return;
     }
     if (!strcmp(p, "/api/channels") && !strcmp(req->method, "GET")) {

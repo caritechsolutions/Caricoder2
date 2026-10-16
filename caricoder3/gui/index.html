@@ -61,6 +61,7 @@ section.card.collapsed > .body { display:none } section.card > header .tog { cur
 
 .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px 20px }
 .kv b { display:block; font-weight:500; font-size:12px; color:var(--dim) } .kv span { font-size:15px }
+.prog { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:8px; cursor:pointer } .prog.on { border-color:var(--acc); background:var(--panel2, transparent) }
 table { border-collapse:collapse; width:100% } th { text-align:left; font-weight:500; font-size:12px; color:var(--dim); padding:6px 10px; border-bottom:1px solid var(--line) }
 td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle } tr:last-child td { border-bottom:none }
 
@@ -299,7 +300,8 @@ function settingsHtml() {
       <div class="help" id="in_srt">Latency: <input id="in_latency" style="width:70px;display:inline-block;padding:3px 7px" placeholder="120" oninput="syncInput()"> ms &nbsp; Passphrase: <input id="in_pass" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (10+ characters)" oninput="syncInput()"></div>
       <div class="help" id="in_rist">Secret: <input id="in_secret" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (AES-128 when set)" oninput="syncInput()"> &nbsp; Buffer: <input id="in_buffer" style="width:70px;display:inline-block;padding:3px 7px" placeholder="1000" oninput="syncInput()"> ms</div>
       <div class="help"><span class="mono" id="in_url"></span></div>
-      <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first.</span></div>
+      <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><button type="button" class="quiet" onclick="scanSource()" style="flex:0 0 auto">Scan source…</button><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first. Scan lists what the source carries, to pick the program and the streams.</span></div>
+      <label>Streams</label><div class="row"><input type="hidden" id="drop"><span id="drop_text" style="color:var(--dim)">All streams of the program.</span><button type="button" class="quiet" onclick="$('#drop').value='';showDrop();setDirty(true)" id="drop_clear" style="flex:0 0 auto;display:none">Keep all</button></div>
       <label>Output rate</label><div class="row"><select id="muxsel" onchange="$('#muxcustom').style.display=this.value==='custom'?'':'none'">${MUX.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("")}</select><input id="muxcustom" class="n" placeholder="e.g. 4500k" style="display:none"><label style="flex:0 0 auto;display:flex;gap:6px;align-items:center"><input type="checkbox" id="vbr" style="width:auto"> peak only (VBR)</label></div>
       <div class="help">Constant rate pads with null packets to exactly this rate (for satellite and cable). Variable sends only what there is.</div>
     </div>
@@ -404,6 +406,7 @@ function fillForm(cfg) {
   const i = parseInput(cfg.input); $("#in_kind").value = i.kind; $("#in_host").value = i.host; $("#in_port").value = i.port; $("#in_iface").value = i.iface; $("#in_src").value = i.src;
   $("#in_latency").value = i.latency; $("#in_pass").value = i.pass; $("#in_secret").value = i.secret; $("#in_buffer").value = i.buffer; syncInput();
   $("#program").value = cfg.program || "";
+  $("#drop").value = (cfg.drop || []).join(","); showDrop();
   const mux = cfg.muxrate ? String(cfg.muxrate) : "";
   if (MUX.some(m => m[0] === mux)) { $("#muxsel").value = mux; $("#muxcustom").style.display = "none"; } else { $("#muxsel").value = "custom"; $("#muxcustom").value = mux; $("#muxcustom").style.display = ""; }
   $("#vbr").checked = !!cfg.vbr;
@@ -417,11 +420,61 @@ function fillForm(cfg) {
   $("#enabled").value = String(cfg.enabled !== false);
   setDirty(false);
 }
+const dropNames = {};   // pid -> "audio spa AC-3", from the last scan, for the Streams line
+function showDrop() {
+  const d = $("#drop").value.split(",").filter(Boolean);
+  $("#drop_text").innerHTML = d.length ? `Left out: ${d.map(p => `<span class="mono">${esc(p)}</span>${dropNames[p] ? " (" + esc(dropNames[p]) + ")" : ""}`).join(", ")}. The rest pass.` : "All streams of the program.";
+  $("#drop_clear").style.display = d.length ? "" : "none";
+}
+const fmtK = b => b >= 1e6 ? (b / 1e6).toFixed(2) + " Mb/s" : Math.round(b / 1000) + " kb/s";
+function streamLine(x) {
+  const bits = [];
+  if (x.kind === "video") bits.push((x.codec || x.type_name).toUpperCase().replace("MPEG2", "MPEG-2"), x.width ? `${x.width}x${x.height}${x.interlaced ? "i" : x.interlaced === false ? "p" : ""}` : "", x.fps ? `${x.fps.toFixed(x.fps % 1 ? 2 : 0)} fps` : "", x.profile || "");
+  else if (x.kind === "audio") bits.push((x.codec || x.type_name).toUpperCase().replace("MPA", "MPEG audio"), x.language || "", x.sample_rate ? `${x.sample_rate / 1000} kHz` : "", x.channels ? (x.channels === 1 ? "mono" : x.channels === 2 ? "stereo" : x.channels + " ch") : "");
+  else bits.push(x.type_name, x.language || "");
+  bits.push(fmtK(x.bitrate));
+  if (x.scrambled) bits.push("scrambled");
+  if (x.cc_errors) bits.push(`${x.cc_errors} CC errors`);
+  return bits.filter(Boolean).join(" · ");
+}
+async function scanSource() {
+  const url = $("#in_url").textContent, d = $("#dlg");
+  if (!url || url.endsWith("://")) { showMsg("A source address is needed before scanning.", "err"); return; }
+  d.innerHTML = `<h3>Scanning the source</h3><div style="color:var(--dim)">Listening to <span class="mono">${esc(url)}</span> for 3 seconds…</div>
+    <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button></div>`;
+  d.showModal();
+  let rep;
+  try { rep = await api("/api/probe", {method:"POST", body: JSON.stringify({url, seconds: 3})}); }
+  catch(e) { d.innerHTML = `<h3>Scan failed</h3><div class="msg err">${esc(e.message)}</div><div class="actions"><button onclick="document.getElementById('dlg').close()">Close</button></div>`; return; }
+  const cur = Number($("#program").value) || 0;
+  const dropped = new Set($("#drop").value.split(",").filter(Boolean).map(Number));
+  const progs = rep.programs || [];
+  if (!progs.length) { d.innerHTML = `<h3>Nothing found</h3><div class="msg err">${esc(rep.bitrate ? "Packets arrive (" + fmtK(rep.bitrate) + ") but no program table was seen." : "Nothing arrived from the source.")}</div><div class="actions"><button onclick="document.getElementById('dlg').close()">Close</button></div>`; return; }
+  const pick = progs.some(p => p.number === cur) ? cur : progs[0].number;
+  d.innerHTML = `<h3>What the source carries</h3><div style="color:var(--dim);margin-bottom:10px">${fmtK(rep.bitrate)} in all, ${progs.length} program${progs.length === 1 ? "" : "s"}${rep.sync_errors ? `, <span class="flag bad">${rep.sync_errors} sync errors</span>` : ""}. Pick the program, then untick any stream to leave out.</div>
+    <div id="p_list" style="max-height:60vh;overflow:auto"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="p_go">Use this program</button></div>`;
+  const render = () => {
+    const sel = Number(d.dataset.sel);
+    $("#p_list").innerHTML = progs.map(p => `<div class="prog ${p.number === sel ? "on" : ""}" onclick="document.getElementById('dlg').dataset.sel='${p.number}';document.getElementById('dlg')._render()">
+      <div style="display:flex;gap:10px;align-items:baseline"><input type="radio" name="prog" ${p.number === sel ? "checked" : ""} style="width:auto"><b>${esc(p.name || "(no name)")}</b><span class="mono" style="color:var(--dim)">program ${p.number}</span><span style="color:var(--dim)">${fmtK(p.bitrate)}${p.scrambled ? " · scrambled" : ""}${p.pmt_seen ? "" : " · no PMT seen"}</span></div>
+      ${p.number === sel ? `<div style="margin:8px 0 0 26px">${p.streams.map(x => `<label style="display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer"><input type="checkbox" data-pid="${x.pid}" ${dropped.has(x.pid) ? "" : "checked"} style="width:auto" onclick="event.stopPropagation()"><span class="mono" style="color:var(--dim);width:52px">${x.pid}</span><span style="width:70px;color:var(--dim)">${esc(x.kind)}</span><span>${esc(streamLine(x))}</span></label>`).join("")}</div>` : ""}</div>`).join("");
+  };
+  d.dataset.sel = String(pick); d._render = render; render();
+  $("#p_go").onclick = () => {
+    const sel = Number(d.dataset.sel), prog = progs.find(p => p.number === sel);
+    const off = [...d.querySelectorAll("input[type=checkbox][data-pid]")].filter(c => !c.checked).map(c => Number(c.dataset.pid));
+    if (off.length === prog.streams.length) { showMsg("At least one stream has to stay.", "err"); return; }
+    $("#program").value = sel;
+    for (const x of prog.streams) dropNames[x.pid] = `${x.kind}${x.language ? " " + x.language : ""} ${(x.codec || x.type_name).toUpperCase()}`;
+    $("#drop").value = off.join(","); showDrop(); setDirty(true); d.close();
+  };
+}
 function readForm() {
   const v = id => $("#"+id).value.trim(), num = id => v(id) === "" ? undefined : Number(v(id));
   const cfg = {};
   cfg.input = $("#in_url").textContent;
   if (num("program")) cfg.program = num("program");
+  if (v("drop")) cfg.drop = v("drop").split(",").map(Number).filter(x => x > 0);
   const mux = $("#muxsel").value === "custom" ? v("muxcustom") : $("#muxsel").value; if (mux) cfg.muxrate = mux;
   if ($("#vbr").checked && mux) cfg.vbr = true;
   if ($("#v_xc").classList.contains("on")) {

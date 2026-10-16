@@ -631,9 +631,22 @@ static void report(struct probe *p, FILE *f, const char *url, double seconds, bo
                 if (s->width > 0)
                     fprintf(f, ", \"width\": %d, \"height\": %d, \"interlaced\": %s", s->width, s->height,
                             s->interlaced < 0 ? "null" : s->interlaced ? "true" : "false");
-                if (kind == KIND_VIDEO && s->pes >= 3 && s->pts_min != NOPTS && s->pts_max > s->pts_min)
-                    fprintf(f, ", \"fps\": %.3f",
-                            (double)(s->pes - 1) * 90000.0 / (double)(s->pts_max - s->pts_min));
+                if (kind == KIND_VIDEO && s->pes >= 3 && s->pts_min != NOPTS && s->pts_max > s->pts_min) {
+                    /* units per second of PTS span; snapped to a standard rate
+                     * when within 3 % (the window's edges hold pictures whose
+                     * neighbours in presentation order are outside it) */
+                    static const double std_rates[] = { 23.976, 24, 25, 29.97, 30, 50, 59.94, 60, 0 };
+                    double fps = (double)(s->pes - 1) * 90000.0 / (double)(s->pts_max - s->pts_min);
+
+                    for (int r = 0; std_rates[r] > 0; r++)
+                        if (fps > std_rates[r] * 0.97 && fps < std_rates[r] * 1.03 &&
+                            !(std_rates[r] == 24 && fps < 23.99) && !(std_rates[r] == 30 && fps < 29.98) &&
+                            !(std_rates[r] == 60 && fps < 59.96)) {
+                            fps = std_rates[r];
+                            break;
+                        }
+                    fprintf(f, ", \"fps\": %.3f", fps);
+                }
                 if (s->sample_rate > 0)
                     fprintf(f, ", \"sample_rate\": %d, \"channels\": %d", s->sample_rate, s->channels);
                 if (s->profile)

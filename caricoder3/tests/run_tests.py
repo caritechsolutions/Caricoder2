@@ -2457,10 +2457,23 @@ def supervisor_api():
                     box["seg"] = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1/" + seg[-1], timeout=5).read()
                 code, j = api("/api/channels/t1")
                 box["running"] = j["channel"]
+                # the probe, through the API, while the source plays (a 1 s
+                # listen, in a thread so the player is not held up)
+                import threading
+                box["probe_t"] = threading.Thread(
+                    target=lambda: box.__setitem__("probe", api("/api/probe", "POST",
+                                                                {"url": f"udp://127.0.0.1:{pin}", "seconds": 1})))
+                box["probe_t"].start()
             return True
         p.play(src, gate=gate)
         p.close()
         need("seg" in box and len(box["seg"]) > 100 * TS, f"HLS through the supervisor: {box.get('pl')}")
+        if "probe_t" in box:
+            box["probe_t"].join(timeout=20)
+        code, pj = box.get("probe", (0, None))
+        need(code == 200 and pj and pj["ok"] and pj["programs"] and
+             any(x["kind"] == "audio" and x.get("sample_rate") == 48000 for x in pj["programs"][0]["streams"]),
+             f"/api/probe: {code} {pj}")
         c = box["running"]
         need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["hls"],
              f"running channel: in {c['stats']['input']['bitrate']}, outputs {c['outputs']}")
