@@ -111,26 +111,39 @@ def pick_frames(raw_in, raw_out, size, indices):
     return n
 
 
-def decode_pairs(src, si, out, oi, size, pairs, work, tag):
+def decode_all(src, si, out, oi, size, ns, no, work):
+    """
+    Both captures decoded once, whole, to raw files; returns (source
+    file, output file). The frame count is checked against ffprobe's
+    frame list, because the pairs index into these files by position.
+    """
+    w, h = (int(x) for x in size.split("x"))
+    fsz = w * h * 3 // 2
+    s_all = os.path.join(work, "s_all.yuv")
+    o_all = os.path.join(work, "o_all.yuv")
+    decode_raw(src, si, size, s_all, ns)
+    decode_raw(out, oi, size, o_all, no)
+    for name, path, n in (("source", s_all, ns), ("output", o_all, no)):
+        have = os.path.getsize(path) // fsz
+        if have != n:
+            print(f"note: {name} decoded to {have} frames, ffprobe listed {n}", file=sys.stderr)
+    return s_all, o_all
+
+
+def pick_pairs(s_all, o_all, size, pairs, work, tag):
     """Raw files of the paired frames, aligned: (source file, output file, frames)."""
-    s_all = os.path.join(work, f"{tag}_s_all.yuv")
-    o_all = os.path.join(work, f"{tag}_o_all.yuv")
-    decode_raw(src, si, size, s_all, max(i for i, _ in pairs) + 1)
-    decode_raw(out, oi, size, o_all, max(j for _, j in pairs) + 1)
     s_raw = os.path.join(work, f"{tag}_s.yuv")
     o_raw = os.path.join(work, f"{tag}_o.yuv")
     n1 = pick_frames(s_all, s_raw, size, [i for i, _ in pairs])
     n2 = pick_frames(o_all, o_raw, size, [j for _, j in pairs])
-    os.remove(s_all)
-    os.remove(o_all)
     return s_raw, o_raw, min(n1, n2)
 
 
-def measure(src_raw, out_raw, size, fps, log_dir):
+def measure(src_raw, out_raw, size, fps, log_dir, names=("psnr", "ssim")):
     """PSNR and SSIM per frame via ffmpeg's filters."""
     w, h = size.split("x")
     res = {}
-    for name in ("psnr", "ssim"):
+    for name in names:
         logf = os.path.join(log_dir, name + ".log")
         p = run(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-r", str(fps),
                  "-i", out_raw, "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-r", str(fps), "-i", src_raw,
@@ -170,7 +183,7 @@ def pairs_at(spts, opts, offset, period, limit):
     return pairs
 
 
-def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
+def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
     """
     Which source frame is which output frame? caricoder3 keeps the PTS,
     but a channel that has absorbed a source restart carries a constant
@@ -178,38 +191,43 @@ def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
     common out - in difference), and then, because an offset of a whole
     number of frames would match every frame to a neighbour just as
     well, the shift that makes the pictures agree best is chosen by
-    comparing a few frames.
+    comparing a few frames at every shift that still overlaps: the
+    histogram is only trusted for the sub-frame phase, since with a
+    regular frame period every whole-frame shift is about as common.
     """
     period = 1.0 / fps
     # the common offset, to the millisecond
     # (every pair, not a sample: sampling both lists hides the one
     # offset at which the frames coincide)
     hist = {}
-    s_all = [t for t in spts if t is not None][:1500]
+    s_list = [t for t in spts if t is not None][:1500]
     for t in [x for x in opts if x is not None][:1500]:
-        for u in s_all:
+        for u in s_list:
             d = round(t - u, 3)
             hist[d] = hist.get(d, 0) + 1
     if not hist:
         return []
     base = max(hist, key=hist.get)
-    best, best_score = None, -1.0
-    for k in range(-3, 4):
+    reach = max(len(s_list), len(opts))
+    scores = []
+    for k in range(-reach, reach + 1):
         off = base + k * period
         pairs = pairs_at(spts, opts, off, period, 400)
         if len(pairs) < 10:
             continue
         sample = pairs[len(pairs) // 4::max(1, len(pairs) // 8)][:6]
-        s_raw, o_raw, _ = decode_pairs(src, si, out, oi, size, sample, work, "probe")
-        m = measure(s_raw, o_raw, size, fps, work)
+        s_raw, o_raw, _ = pick_pairs(s_all, o_all, size, sample, work, "probe")
+        m = measure(s_raw, o_raw, size, fps, work, ("psnr",))
         vals = [v for v in m["psnr"] if v != float("inf")] or [99.0]
-        score = sum(vals) / len(vals)
-        if score > best_score:
-            best, best_score = off, score
-    if best is None:
+        scores.append((sum(vals) / len(vals), k, off))
+    if not scores:
         return []
-    print(f"time-line offset {best:+.3f} s (output - source), picked by content among "
-          f"{len(range(-3, 4))} shifts, best probe PSNR {best_score:.1f} dB", file=sys.stderr)
+    scores.sort(reverse=True)
+    best_score, best_k, best = scores[0]
+    print(f"time-line offset {best:+.3f} s (output - source): PTS offset {base:+.3f} s "
+          f"{best_k:+d} frames, picked by content among {len(scores)} shifts; "
+          "best shifts (frames: PSNR dB) " +
+          ", ".join(f"{k:+d}: {sc:.1f}" for sc, k, _ in scores[:5]), file=sys.stderr)
     return pairs_at(spts, opts, best, period, limit)
 
 
@@ -308,11 +326,12 @@ def main():
             fps = eval(ov.get("avg_frame_rate", "25/1").replace("/", "/1.0/")) if "/" in ov.get("avg_frame_rate", "") else 25
             spts = frame_pts(src, sv["index"])
             opts = frame_pts(out, ov["index"])
-            pairs = match_frames(src, sv["index"], out, ov["index"], spts, opts, size, fps, work, a.max_frames)
+            s_all, o_all = decode_all(src, sv["index"], out, ov["index"], size, len(spts), len(opts), work)
+            pairs = match_frames(s_all, o_all, spts, opts, size, fps, work, a.max_frames)
             if len(pairs) < 10:
                 die(f"only {len(pairs)} frames of the output could be matched to the source "
                     f"(source {len(spts)} frames, output {len(opts)}); are these the same content?")
-            s_raw, o_raw, n = decode_pairs(src, sv["index"], out, ov["index"], size, pairs, work, "full")
+            s_raw, o_raw, n = pick_pairs(s_all, o_all, size, pairs, work, "full")
             m = measure(s_raw, o_raw, size, fps, work)
             if a.pictures:
                 os.makedirs(a.pictures, exist_ok=True)
