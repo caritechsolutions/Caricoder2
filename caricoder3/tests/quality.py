@@ -228,7 +228,11 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
           f"{best_k:+d} frames, picked by content among {len(scores)} shifts; "
           "best shifts (frames: PSNR dB) " +
           ", ".join(f"{k:+d}: {sc:.1f}" for sc, k, _ in scores[:5]), file=sys.stderr)
-    return pairs_at(spts, opts, best, period, limit)
+    pairs = pairs_at(spts, opts, best, period, limit)
+    # a capture stops mid-frame, so the last frame on either side may be
+    # a partial decode: those pairs are not the transcoder's doing
+    ns, no = len(spts), len(opts)
+    return [(i, j) for i, j in pairs if i < ns - 2 and j < no - 2]
 
 
 def bitrate(path, stream_index):
