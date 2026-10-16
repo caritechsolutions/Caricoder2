@@ -182,10 +182,12 @@ def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
     """
     period = 1.0 / fps
     # the common offset, to the millisecond
+    # (every pair, not a sample: sampling both lists hides the one
+    # offset at which the frames coincide)
     hist = {}
-    s_sorted = [t for t in spts if t is not None]
-    for t in [x for x in opts if x is not None][::max(1, len(opts) // 50)]:
-        for u in s_sorted[::max(1, len(s_sorted) // 50)]:
+    s_all = [t for t in spts if t is not None][:1500]
+    for t in [x for x in opts if x is not None][:1500]:
+        for u in s_all:
             d = round(t - u, 3)
             hist[d] = hist.get(d, 0) + 1
     if not hist:
