@@ -142,6 +142,15 @@ RTP is detected per datagram, so a `udp://` URL works for an RTP source.
 The receive socket binds to the group address itself, so two streams that
 share a port number do not get mixed.
 
+`-i` may be given more than once: the first is the primary, the others
+stand by and are tried in turn when it delivers nothing for
+`--switch-after` ms (default 3000); the primary is tried again every
+`--retry-primary` s (default 60) and taken back as soon as it delivers.
+A switch is a source restart to the engine: the output time line stays
+continuous. The statistics list the sources and which is in use; the
+GUI's lamp goes yellow while a backup carries the channel. Channel file:
+`"backup_inputs": [...]`, `"switch_after"`, `"retry_primary"`.
+
 SRT and RIST sources use the same URL forms as the outputs (see
 "Outputs"): `srt://host:port` calls a sender, `srt://:port` listens for
 one (`?latency=`, `?passphrase=`, `?pbkeylen=`, `?streamid=`);
@@ -325,7 +334,7 @@ A channel file holds what the command line would, for example
 }
 ```
 
-Keys: `input`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
+Keys: `input`, `backup_inputs` (list), `switch_after`, `retry_primary`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
 `audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `gop`, `vbv`,
 `pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
 `extra_args` (list, passed as they are), `enabled`. The channel's outputs

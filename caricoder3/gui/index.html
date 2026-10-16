@@ -150,6 +150,7 @@ function healthOf(c) {
   if (now.cc > was.cc) why.push("input errors");
   if (now.ovf > was.ovf) why.push("input overflow");
   if (now.lost > was.lost) why.push("packets lost on the link");
+  if (inp.active) why.push("running on a backup source");
   if (now.drop > was.drop || now.xdrop > was.xdrop) why.push("dropping");
   if (now.late > was.late) why.push("running late");
   if (now.send > was.send) why.push("send errors");
@@ -272,7 +273,7 @@ function pathHtml(c) {
   const oerr = outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0);
   return `
     <div class="node ${inBad?"bad":""}"><h3>Source</h3><div class="big">${fmtRate(inp.bitrate)}</div>
-      <div class="sub">${esc(inp.url||"")}</div>
+      <div class="sub">${esc(inp.url||"")}${(inp.sources||[]).length > 1 ? ` <span class="${inp.active ? "flag" : ""}">· source ${inp.active + 1} of ${inp.sources.length}${inp.active ? " (a backup)" : ""}</span>${inp.switches ? ` · ${inp.switches} switch${inp.switches > 1 ? "es" : ""}` : ""}` : ""}</div>
       ${inp.link ? `<div class="sub">${inp.link.transport.toUpperCase()} ${inp.link.connected ? esc(inp.link.state) : `<span class="flag ${st.uptime_s > 10 ? "bad" : ""}">${esc(inp.link.state)}</span>`}${inp.link.connected && inp.link.rtt_ms ? ` · RTT ${inp.link.rtt_ms.toFixed(1)} ms` : ""}${inp.link.recovered ? ` · ${inp.link.recovered} recovered` : ""}${inp.link.lost ? ` · <span class="flag">${inp.link.lost} lost</span>` : ""}${inp.link.reconnects ? ` · ${inp.link.reconnects} reconnects` : ""}</div>` : ""}
       <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}</div></div>
     <div class="arrow">›</div>
@@ -349,6 +350,7 @@ function settingsHtml() {
       <div class="help" id="in_srt">Latency: <input id="in_latency" style="width:70px;display:inline-block;padding:3px 7px" placeholder="120" oninput="syncInput()"> ms &nbsp; Passphrase: <input id="in_pass" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (10+ characters)" oninput="syncInput()"></div>
       <div class="help" id="in_rist">Secret: <input id="in_secret" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (AES-128 when set)" oninput="syncInput()"> &nbsp; Buffer: <input id="in_buffer" style="width:70px;display:inline-block;padding:3px 7px" placeholder="1000" oninput="syncInput()"> ms</div>
       <div class="help"><input type="hidden" id="in_extra"><input type="hidden" id="in_aes"><span class="mono" id="in_url"></span></div>
+      <label>Backup sources</label><div><div id="backups"></div><button type="button" class="quiet" onclick="addBackup()">+ Add a backup source</button> <span style="color:var(--dim);font-size:12px">Tried in turn when the source above delivers nothing for <input id="switch_after" class="n" style="width:60px;display:inline-block;padding:3px 7px" placeholder="3000"> ms; the main source is tried again every <input id="retry_primary" class="n" style="width:50px;display:inline-block;padding:3px 7px" placeholder="60"> s and taken back when it delivers.</span></div>
       <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><button type="button" class="quiet" onclick="scanSource()" style="flex:0 0 auto">Scan source…</button><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first. Scan lists what the source carries, to pick the program and the streams.</span></div>
       <label>Streams</label><div class="row"><input type="hidden" id="drop"><span id="drop_text" style="color:var(--dim)">All streams of the program.</span><button type="button" class="quiet" onclick="$('#drop').value='';showDrop();setDirty(true)" id="drop_clear" style="flex:0 0 auto;display:none">Keep all</button></div>
       <label>Output rate</label><div class="row"><select id="muxsel" onchange="$('#muxcustom').style.display=this.value==='custom'?'':'none'">${MUX.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("")}</select><input id="muxcustom" class="n" placeholder="e.g. 4500k" style="display:none"><label style="flex:0 0 auto;display:flex;gap:6px;align-items:center"><input type="checkbox" id="vbr" style="width:auto"> peak only (VBR)</label></div>
@@ -460,6 +462,8 @@ function fillForm(cfg) {
   $("#in_latency").value = i.latency; $("#in_pass").value = i.pass; $("#in_secret").value = i.secret; $("#in_buffer").value = i.buffer; $("#in_extra").value = i.extra; $("#in_aes").value = i.aes || ""; syncInput();
   $("#program").value = cfg.program || "";
   $("#drop").value = (cfg.drop || []).join(","); showDrop();
+  backups = (cfg.backup_inputs || []).slice(); showBackups();
+  $("#switch_after").value = cfg.switch_after || ""; $("#retry_primary").value = cfg.retry_primary || "";
   const mux = cfg.muxrate ? String(cfg.muxrate) : "";
   if (MUX.some(m => m[0] === mux)) { $("#muxsel").value = mux; $("#muxcustom").style.display = "none"; } else { $("#muxsel").value = "custom"; $("#muxcustom").value = mux; $("#muxcustom").style.display = ""; }
   $("#vbr").checked = !!cfg.vbr;
@@ -472,6 +476,24 @@ function fillForm(cfg) {
   for (const k of ["delay","gop","vbv","service_name","service_provider"]) $("#"+k).value = cfg[k] ?? "";
   $("#enabled").value = String(cfg.enabled !== false);
   setDirty(false);
+}
+let backups = [];
+function showBackups() {
+  $("#backups").innerHTML = backups.map((u, i) => `<div class="row" style="margin-bottom:6px"><span class="mono" style="flex:1">${esc(u)}</span><button type="button" class="quiet" style="flex:0 0 auto" onclick="backups.splice(${i},1);showBackups();setDirty(true)">Remove</button></div>`).join("");
+}
+function addBackup() {
+  const d = $("#dlg");
+  d.innerHTML = `<h3>Add a backup source</h3><div class="f"><label>Type</label><select id="b_kind">${IN_KINDS.filter(k => k[0] !== "file").map(k => `<option value="${k[0]}">${k[1]}</option>`).join("")}</select>
+    <label>Address</label><input id="b_host" placeholder="address"><label>Port</label><input id="b_port" placeholder="port">
+    <label>Options</label><input id="b_q" placeholder="e.g. latency=300&passphrase=... or iface=eth1"><label>Will be</label><div class="urlprev" id="b_prev"></div></div>
+    <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="b_go">Add</button></div>`;
+  const make = () => { const k = $("#b_kind").value, h = $("#b_host").value.trim(), p = $("#b_port").value.trim(), q = $("#b_q").value.trim();
+    const v = { kind: k, host: h, port: p, iface: "", src: "", latency: "", pass: "", secret: "", buffer: "", aes: "", extra: q };
+    return inputUrl(v); };
+  const prev = () => { $("#b_prev").textContent = make(); };
+  d.querySelectorAll("input,select").forEach(i => { i.oninput = prev; i.onchange = prev; }); prev();
+  $("#b_go").onclick = () => { const u = make(); if (!u || /:\s*$|:\?/.test(u) || !/:\d+/.test(u)) { alert("Address and port are needed."); return; } backups.push(u); showBackups(); setDirty(true); d.close(); };
+  d.showModal();
 }
 const dropNames = {};   // pid -> "audio spa AC-3", from the last scan, for the Streams line
 function showDrop() {
@@ -530,6 +552,9 @@ function readForm() {
   cfg.input = $("#in_url").textContent;
   if (num("program")) cfg.program = num("program");
   if (v("drop")) cfg.drop = v("drop").split(",").map(Number).filter(x => x > 0);
+  if (backups.length) cfg.backup_inputs = backups.slice();
+  if (num("switch_after")) cfg.switch_after = num("switch_after");
+  if (num("retry_primary")) cfg.retry_primary = num("retry_primary");
   const mux = $("#muxsel").value === "custom" ? v("muxcustom") : $("#muxsel").value; if (mux) cfg.muxrate = mux;
   if ($("#vbr").checked && mux) cfg.vbr = true;
   if ($("#v_xc").classList.contains("on")) {

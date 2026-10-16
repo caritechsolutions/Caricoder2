@@ -37,9 +37,9 @@
 #include "log.h"
 #include "ring.h"
 #include "sink.h"
+#include "source.h"
 #include "udp.h"
 
-#define RX_BATCH        64
 #define RX_SIZE         16384
 #define OUTPUTS_MAX     SINKS_MAX
 #define SOCK_DIR        "/run/caricoder3"
@@ -51,7 +51,10 @@ static atomic_int g_run = 1;             /* cleared by SIGINT / SIGTERM */
 static atomic_int g_hup = 0;             /* SIGHUP: re-read the config file */
 
 struct options {
-    const char *input;
+    const char *input;                      /* the primary (inputs[0]) */
+    const char *inputs[SOURCES_MAX];
+    int n_input;
+    int switch_ms, retry_s;                 /* failover: see source.h */
     const char *output[OUTPUTS_MAX];
     int n_output;
     const char *control, *name, *config, *run_dir;
@@ -82,98 +85,42 @@ struct ctx {
     struct ring ring;
     struct sinks sinks;
     struct control *ctl;
-    int rx_fd;                              /* a UDP/RTP input */
-    const struct input_ops *in_ops;         /* an SRT/RIST input, read through the library */
-    void *in_ctx;
+    struct sources *src;                    /* live: the input(s) */
     pthread_mutex_t stats_lock;             /* the last statistics as JSON, for the control socket */
     char *stats_json;
     size_t stats_len;
     _Atomic int64_t beat_in, beat_out;      /* thread heartbeats, ns */
     _Atomic int64_t last_rx;                /* last datagram received, ns */
-    _Atomic uint64_t rx_overflow;           /* kernel socket buffer drops */
-    _Atomic uint64_t rx_truncated;
     _Atomic int fatal;
 };
 
 static void *input_thread(void *arg)
 {
     struct ctx *c = arg;
-    uint8_t *bufs = malloc((size_t)RX_BATCH * RX_SIZE);
-    struct mmsghdr mm[RX_BATCH];
-    struct iovec iov[RX_BATCH];
-    char ctl[RX_BATCH][CMSG_SPACE(sizeof(uint32_t))];
-
-    if (!bufs) {
-        atomic_store(&c->fatal, 1);
-        return NULL;
-    }
-    while (atomic_load(&g_run)) {
-        for (int i = 0; i < RX_BATCH; i++) {
-            iov[i].iov_base = bufs + (size_t)i * RX_SIZE;
-            iov[i].iov_len = RX_SIZE;
-            memset(&mm[i], 0, sizeof(mm[i]));
-            mm[i].msg_hdr.msg_iov = &iov[i];
-            mm[i].msg_hdr.msg_iovlen = 1;
-            mm[i].msg_hdr.msg_control = ctl[i];
-            mm[i].msg_hdr.msg_controllen = sizeof(ctl[i]);
-        }
-
-        int n = recvmmsg(c->rx_fd, mm, RX_BATCH, MSG_WAITFORONE, NULL);
-        int64_t now = clock_now_ns();
-
-        atomic_store(&c->beat_in, now);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-                continue;                   /* receive timeout: no input */
-            log_err("input: recvmmsg: %s", strerror(errno));
-            atomic_store(&c->fatal, 1);
-            break;
-        }
-        for (int i = 0; i < n; i++) {
-            struct msghdr *h = &mm[i].msg_hdr;
-
-            for (struct cmsghdr *cm = CMSG_FIRSTHDR(h); cm; cm = CMSG_NXTHDR(h, cm)) {
-                if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SO_RXQ_OVFL) {
-                    uint32_t drops;
-
-                    memcpy(&drops, CMSG_DATA(cm), sizeof(drops));
-                    atomic_store(&c->rx_overflow, drops);
-                }
-            }
-            if (h->msg_flags & MSG_TRUNC)
-                atomic_fetch_add(&c->rx_truncated, 1);
-            engine_push_datagram(c->eng, iov[i].iov_base, mm[i].msg_len, now);
-        }
-        if (n > 0)
-            atomic_store(&c->last_rx, now);
-    }
-    free(bufs);
-    return NULL;
-}
-
-/* An SRT or RIST input: the library hands over one datagram at a time. */
-static void *link_input_thread(void *arg)
-{
-    struct ctx *c = arg;
-    uint8_t *buf = malloc(INPUT_DGRAM_MAX);
+    uint8_t *buf = malloc(RX_SIZE);
+    int64_t last_tick = 0;
 
     if (!buf) {
         atomic_store(&c->fatal, 1);
         return NULL;
     }
     while (atomic_load(&g_run)) {
-        int n = c->in_ops->recv(c->in_ctx, buf, INPUT_DGRAM_MAX);
+        int n = sources_recv(c->src, buf, RX_SIZE, clock_now_ns());
         int64_t now = clock_now_ns();
 
         atomic_store(&c->beat_in, now);
         if (n < 0) {
-            log_err("input: %s: finished", c->in_ops->name);
+            log_err("input: finished");
             atomic_store(&c->fatal, 1);
             break;
         }
         if (n > 0) {
             engine_push_datagram(c->eng, buf, (size_t)n, now);
             atomic_store(&c->last_rx, now);
+        }
+        if (now - last_tick > 1000000000LL) {
+            last_tick = now;
+            sources_tick(c->src, now);
         }
     }
     free(buf);
@@ -288,8 +235,18 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
             !st->have_program ? "waiting_for_input" :
             !st->started ? "waiting_for_clock" : "running");
 
+    struct source_stats ss;
+
+    memset(&ss, 0, sizeof(ss));
+    if (c->src)
+        sources_stats(c->src, &ss);
     fprintf(f, "  \"input\": {\n    \"url\": ");
-    json_str(f, o->input);
+    json_str(f, c->src ? sources_url(c->src, ss.active) : o->input);
+    if (c->src) {
+        fprintf(f, ",\n    \"active\": %d,\n    \"switches\": %llu,\n    \"sources\": ",
+                ss.active, (unsigned long long)ss.switches);
+        sources_json(c->src, f, json_str);
+    }
     fprintf(f, ",\n    \"bitrate\": %.0f,\n    \"last_packet_age_ms\": %lld,\n",
             r->in_bps, (long long)r->input_age_ms);
     fprintf(f, "    \"rtp\": %s,\n", st->rtp_datagrams ? "true" : "false");
@@ -318,19 +275,15 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
             (unsigned long long)st->in.pcr_missing,
             (unsigned long long)st->in.ts_out_of_range,
             (unsigned long long)r->rx_overflow, (unsigned long long)r->rx_truncated);
-    if (c->in_ops) {
-        struct input_stats is;
-
-        memset(&is, 0, sizeof(is));
-        c->in_ops->stats(c->in_ctx, &is);
-        fprintf(f, ",\n    \"link\": {\n      \"transport\": \"%s\",\n      \"state\": ", c->in_ops->name);
-        json_str(f, is.state);
+    if (ss.link) {
+        fprintf(f, ",\n    \"link\": {\n      \"transport\": \"%s\",\n      \"state\": ", ss.link_transport);
+        json_str(f, ss.link_state);
         fprintf(f, ",\n      \"connected\": %s,\n      \"rtt_ms\": %.1f,\n"
                    "      \"lost\": %lld,\n      \"recovered\": %lld,\n"
                    "      \"reconnects\": %llu,\n      \"errors\": %llu\n    }",
-                is.connected ? "true" : "false", is.rtt_ms, (long long)is.lost,
-                (long long)is.retransmitted, (unsigned long long)is.reconnects,
-                (unsigned long long)is.errors);
+                ss.link_connected ? "true" : "false", ss.rtt_ms, (long long)ss.lost,
+                (long long)ss.recovered, (unsigned long long)ss.reconnects,
+                (unsigned long long)ss.link_errors);
     }
     fprintf(f, "\n  },\n");
 
@@ -732,7 +685,7 @@ static int run_live(struct options *o, struct ctx *c)
     atomic_store(&c->beat_in, t_start);
     atomic_store(&c->beat_out, t_start);
 
-    if (pthread_create(&tin, NULL, c->in_ops ? link_input_thread : input_thread, c) != 0) {
+    if (pthread_create(&tin, NULL, input_thread, c) != 0) {
         log_err("cannot start the input thread");
         return 1;
     }
@@ -761,8 +714,13 @@ static int run_live(struct options *o, struct ctx *c)
             r.null_pct = 100.0 * (double)(st.out.nulls - prev.out.nulls) /
                          (double)(st.out.packets - prev.out.packets);
         r.input_age_ms = last_rx ? (now - last_rx) / 1000000 : -1;
-        r.rx_overflow = atomic_load(&c->rx_overflow);
-        r.rx_truncated = atomic_load(&c->rx_truncated);
+        {
+            struct source_stats ss;
+
+            sources_stats(c->src, &ss);
+            r.rx_overflow = ss.rx_overflow;
+            r.rx_truncated = ss.rx_truncated;
+        }
         r.send_errors = sinks_errors(&c->sinks);
         write_stats(c, &st, &r);
 
@@ -861,7 +819,11 @@ static void usage(FILE *f)
 "                           rtp://... (RTP is also detected automatically)\n"
 "                           srt://host:port[?latency=120&passphrase=..] (caller)\n"
 "                           srt://:port (listener), rist://@:port (listener),\n"
-"                           rist://host:port (caller), or a .ts file\n"
+"                           rist://host:port (caller), or a .ts file.\n"
+"                           Given more than once: the first is used, the others\n"
+"                           stand by and take over when it delivers nothing\n"
+"      --switch-after MS    ... for this long (default 3000); the primary is tried\n"
+"      --retry-primary S    again every S seconds (default 60) and taken back\n"
 "  -o, --output URL         udp://host:port[?ttl=8&iface=eth0&pkt=7] or a file;\n"
 "                           may be repeated. Each output runs on its own: a slow\n"
 "                           one loses packets, the others do not notice\n"
@@ -944,6 +906,7 @@ enum {
     OPT_VBR = 1000, OPT_PCR, OPT_PSI, OPT_SDT, OPT_NAME, OPT_PROVIDER,
     OPT_STATS_FILE, OPT_STATS_INT, OPT_RT, OPT_BACKENDS,
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
+    OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
 };
 
@@ -980,6 +943,8 @@ int main(int argc, char **argv)
         { "backends", no_argument, 0, OPT_BACKENDS },
         { "audio", required_argument, 0, OPT_AUDIO },
         { "drop", required_argument, 0, OPT_DROP },
+        { "switch-after", required_argument, 0, OPT_SWITCH_AFTER },
+        { "retry-primary", required_argument, 0, OPT_RETRY_PRIMARY },
         { "video", required_argument, 0, OPT_VIDEO },
         { "decoder", required_argument, 0, OPT_DECODER },
         { "encoder", required_argument, 0, OPT_ENCODER },
@@ -1000,7 +965,6 @@ int main(int argc, char **argv)
     };
     struct options o;
     struct ctx c;
-    struct udp_addr in_addr;
     char sock_path[256];
     struct sigaction sa;
     char err[256];
@@ -1026,7 +990,16 @@ int main(int argc, char **argv)
 
     while ((opt = getopt_long(argc, argv, "i:o:p:r:d:vqVh", longopts, NULL)) != -1) {
         switch (opt) {
-        case 'i': o.input = optarg; break;
+        case 'i':
+            if (o.n_input >= SOURCES_MAX) {
+                fprintf(stderr, "at most %d inputs\n", SOURCES_MAX);
+                return 2;
+            }
+            o.inputs[o.n_input++] = optarg;
+            o.input = o.inputs[0];
+            break;
+        case OPT_SWITCH_AFTER: o.switch_ms = atoi(optarg); break;
+        case OPT_RETRY_PRIMARY: o.retry_s = atoi(optarg); break;
         case 'o':
             if (o.n_output == OUTPUTS_MAX) {
                 fprintf(stderr, "no more than %d outputs\n", OUTPUTS_MAX);
@@ -1195,7 +1168,6 @@ int main(int argc, char **argv)
 
     o.eng.live = input_is_live(o.input);
     c.opt = &o;
-    c.rx_fd = -1;
     pthread_mutex_init(&c.stats_lock, NULL);
 
     if (!o.eng.live) {
@@ -1243,23 +1215,26 @@ int main(int argc, char **argv)
         log_info("control: %s", o.control);
     }
 
-    if (o.eng.live && (c.in_ops = input_ops_for(o.input)) != NULL) {
-        c.in_ctx = c.in_ops->open(o.input, err, sizeof(err));
-        if (!c.in_ctx) {
-            log_err("input: %s", err);
+    if (o.eng.live) {
+        c.src = sources_new(o.switch_ms, o.retry_s);
+        if (!c.src) {
+            log_err("out of memory");
             return 1;
         }
-    } else if (o.eng.live) {
-        if (!strncmp(o.input, "srt://", 6) || !strncmp(o.input, "rist://", 7)) {
-            log_err("input: this build has no %.4s input (transports: %s)", o.input, input_transports());
-            return 1;
-        }
-        if (udp_parse(o.input, &in_addr, err, sizeof(err)) < 0 ||
-            (c.rx_fd = udp_open_rx(&in_addr, err, sizeof(err))) < 0) {
+        for (int i = 0; i < o.n_input; i++)
+            if (!sources_add(c.src, o.inputs[i], err, sizeof(err))) {
+                log_err("input: %s", err);
+                return 1;
+            }
+        if (!sources_start(c.src, err, sizeof(err))) {
             log_err("input: %s", err);
             return 1;
         }
     } else {
+        if (o.n_input > 1) {
+            log_err("input: a file input cannot have a backup");
+            return 1;
+        }
         in_fp = fopen(file_path(o.input), "rb");
         if (!in_fp) {
             log_err("input: %s: %s", file_path(o.input), strerror(errno));
@@ -1291,10 +1266,7 @@ int main(int argc, char **argv)
     if (in_fp)
         fclose(in_fp);
     control_stop(c.ctl);
-    if (c.rx_fd >= 0)
-        close(c.rx_fd);
-    if (c.in_ctx)
-        c.in_ops->close(c.in_ctx);
+    sources_free(c.src);
     engine_free(c.eng);
     sinks_destroy(&c.sinks);
     ring_destroy(&c.ring);

@@ -29,7 +29,7 @@
  * first run, printed in the log).
  *
  * A channel file (channels/NAME.json) holds what the command line would:
- * {"input": "udp://...", "program": 0, "muxrate": "5M", "vbr": false,
+ * {"input": "udp://...", "backup_inputs": ["srt://..."], "program": 0, "muxrate": "5M", "vbr": false,
  *  "delay": 500, "video": ["h264:3M", "640x360:h264:1M"], "audio": ["aac:128k"], "drop": [258],
  *  "decoder": "auto", "encoder": "auto", "gpu": 0, "preset": "", "gop": 2000,
  *  "vbv": 1000, "service_name": "", "service_provider": "", "enabled": true}
@@ -291,6 +291,17 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARGS(s->binary);
     ARGS("-i");
     ARG("%s", input);
+    {
+        /* "backup_inputs": ["udp://...", ...]: tried in turn when the input gives nothing */
+        int a = json_get(&doc, root, "backup_inputs");
+
+        if (a >= 0 && doc.node[a].type == JSON_ARRAY)
+            for (int j = doc.node[a].first_child; j >= 0; j = doc.node[j].next)
+                if (doc.node[j].type == JSON_STRING && doc.node[j].str[0]) {
+                    ARGS("-i");
+                    ARG("%s", doc.node[j].str);
+                }
+    }
     ARGS("--name");
     ARGS(c->name);
     ARGS("--run-dir");
@@ -335,6 +346,12 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "psi_interval", 0);
         if (v > 0)
             ARG("--psi-interval=%d", (int)v);
+        v = json_get_num(&doc, root, "switch_after", 0);
+        if (v > 0)
+            ARG("--switch-after=%d", (int)v);
+        v = json_get_num(&doc, root, "retry_primary", 0);
+        if (v > 0)
+            ARG("--retry-primary=%d", (int)v);
         {
             /* "drop": [257, 258] -> --drop=257,258 */
             int a = json_get(&doc, root, "drop");

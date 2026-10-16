@@ -977,6 +977,47 @@ def live_input_outage():
 
 
 @test
+def live_failover_and_back():
+    """Two inputs: the primary dies, the backup takes over; the primary returns and is taken back."""
+    a = synth("live_a", duration=5.0, pcr_base=10.0, seed=31)
+    b = synth("live_b", duration=5.0, pcr_base=7000.0, seed=32)
+    pin, pin2 = _port[0], _port[0] + 1
+    _port[0] += 2
+    box = {}
+
+    def feed(p, proc):
+        import threading
+        p2 = Player("127.0.0.1", pin2)
+        # the backup plays all along (a different clock); the primary plays
+        # a, dies for 6 s, then plays a again
+        t = threading.Thread(target=lambda: [p2.play(b) for _ in range(4)], daemon=True)
+        t.start()
+        p.play(a)
+        box["died"] = time.time()
+        time.sleep(6.0)
+        p.play(a)                       # back, and kept alive to the end
+        box["back"] = time.time()
+        p.play(a)
+        t.join(timeout=25)
+        p2.close()
+
+    st, cap, log = live(feed, "-r", "4M", "-i", f"udp://127.0.0.1:{pin2}", "--switch-after", "1500",
+                        "--retry-primary", "2", capture_name="live_failover.ts", with_proc=True, tail=2.0)
+    need(st["input"]["switches"] >= 2, f"switches: {st['input']['switches']} (expected a switch away and one back)")
+    srcs = st["input"]["sources"]
+    need(len(srcs) == 2 and srcs[0]["state"] == "in use", f"sources at the end: {srcs}")
+    need("switching" in log and "back on" in log, "the log does not tell of the switch and the return")
+    rep = must_pass(w("live_failover.ts"), cbr=True, allow_late=True)
+    out = Analysis(w("live_failover.ts"))
+    have = {r["sha_nots"] for v in out.pes.values() for r in v}
+    nb = sum(1 for v in Analysis(b).pes.values() for r in v if r["sha_nots"] in have)
+    need(nb > 100, f"only {nb} PES of the backup came through")
+    no_pause(cap)
+    return f"{st['input']['switches']} switches, {nb} PES from the backup while the primary was down, " \
+           f"output gap max {cap.max_gap_ms():.1f} ms, PCR interval max {rep['pcr_interval_max_ms']} ms"
+
+
+@test
 def live_source_restart():
     """Source stops and comes back on a different clock."""
     a = synth("live_a", duration=5.0, pcr_base=10.0, seed=31)
