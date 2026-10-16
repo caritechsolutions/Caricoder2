@@ -175,6 +175,8 @@ def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
             best, best_score = off, score
     if best is None:
         return []
+    print(f"time-line offset {best:+.3f} s (output - source), picked by content among "
+          f"{len(range(-3, 4))} shifts, best probe PSNR {best_score:.1f} dB", file=sys.stderr)
     return pairs_at(spts, opts, best, period, limit)
 
 
@@ -220,6 +222,7 @@ def main():
     ap.add_argument("--max-frames", type=int, default=600, help="frames compared at most (default 600)")
     ap.add_argument("--keep", action="store_true", help="keep the captures and raw frames")
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
+    ap.add_argument("--pictures", metavar="DIR", help="write side-by-side pictures (source | output) of three matched frames here")
     a = ap.parse_args()
 
     for tool in ("ffmpeg", "ffprobe"):
@@ -282,6 +285,17 @@ def main():
             decode_raw(out, ov["index"], size, o_raw, {j for _, j in pairs})
             n = min(os.path.getsize(s_raw), os.path.getsize(o_raw)) // (ov["width"] * ov["height"] * 3 // 2)
             m = measure(s_raw, o_raw, size, fps, work)
+            if a.pictures:
+                os.makedirs(a.pictures, exist_ok=True)
+                worst = min(range(n), key=lambda k: m["psnr"][k]) if n else 0
+                for label, k in (("first", 0), ("middle", n // 2), ("worst", worst)):
+                    png = os.path.join(a.pictures, f"{size}_{label}.png")
+                    run(["ffmpeg", "-v", "error", "-y",
+                         "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-i", s_raw,
+                         "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-i", o_raw,
+                         "-filter_complex", f"[0:v]select=eq(n\\,{k})[a];[1:v]select=eq(n\\,{k})[b];[a][b]hstack",
+                         "-frames:v", "1", png])
+                    print(f"picture: {png} (frame {k}, PSNR {m['psnr'][k]:.1f} dB)", file=sys.stderr)
             psnr = [v for v in m["psnr"][:n]]
             ssim = m["ssim"][:n]
             finite = [v for v in psnr if v != float("inf")]
