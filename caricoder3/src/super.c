@@ -343,9 +343,16 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
 
             if (a >= 0 && doc.node[a].type == JSON_ARRAY)
                 for (int j = doc.node[a].first_child; j >= 0; j = doc.node[j].next)
-                    if (doc.node[j].type == JSON_NUMBER && o + 8 < sizeof(list))
+                    if (doc.node[j].type == JSON_NUMBER) {
+                        int need = snprintf(NULL, 0, "%s%d", o ? "," : "", (int)doc.node[j].num);
+
+                        if (o + (size_t)need >= sizeof(list)) {
+                            snprintf(err, errlen, "too many PIDs in \"drop\"");
+                            return -1;
+                        }
                         o += (size_t)snprintf(list + o, sizeof(list) - o, "%s%d", o ? "," : "",
                                               (int)doc.node[j].num);
+                    }
             if (list[0])
                 ARG("--drop=%s", list);
         }
@@ -956,7 +963,7 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             argv[n++] = prog;
         }
         argv[n] = NULL;
-        if (pipe(pfd) < 0) {
+        if (pipe2(pfd, O_CLOEXEC) < 0) {
             api_error(resp, 500, "pipe");
             free(doc);
             return;

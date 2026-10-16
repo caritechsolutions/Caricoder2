@@ -51,6 +51,10 @@ struct srt_in {
     SRTSOCKET link;                     /* the connected socket, or SRT_INVALID_SOCK */
     int64_t next_try_us;                /* a caller: not before this (CLOCK_MONOTONIC) */
     int64_t last_data_us;               /* when the link last delivered */
+    bool delivered;                     /* this link has delivered at least once */
+    struct sockaddr_storage sa;         /* a caller: the sender, resolved */
+    int salen;
+    int tries;
 
     pthread_mutex_t lock;               /* state, link (stats read them from another thread) */
     char state[48];
@@ -186,7 +190,7 @@ static void drop_link(struct srt_in *s, const char *why)
 static void caller_try(struct srt_in *s)
 {
     struct sockaddr_storage sa;
-    int salen, timeo = 3000;
+    int salen, timeo = 1500;            /* short: the input thread waits on it */
     char err[200];
     SRTSOCKET u;
 
@@ -195,10 +199,18 @@ static void caller_try(struct srt_in *s)
         return;
     }
     s->next_try_us = mono_us() + RECONNECT_US;
-    if (!resolve(s->host, s->port, &sa, &salen, err, sizeof(err))) {
-        log_warn("srt %s:%d: %s", s->host, s->port, err);
-        return;
+    /* The name is resolved at open and again every tenth try (a DNS
+     * change), not on every try: a slow resolver would hold the thread. */
+    if (s->salen == 0 || s->tries++ % 10 == 9) {
+        if (!resolve(s->host, s->port, &sa, &salen, err, sizeof(err))) {
+            log_warn("srt %s:%d: %s", s->host, s->port, err);
+            return;
+        }
+        s->sa = sa;
+        s->salen = salen;
     }
+    sa = s->sa;
+    salen = s->salen;
     u = srt_create_socket();
     if (u == SRT_INVALID_SOCK || !set_opts(s, u, err, sizeof(err))) {
         log_warn("srt: %s", err);
@@ -217,6 +229,7 @@ static void caller_try(struct srt_in *s)
     snprintf(s->state, sizeof(s->state), "connected");
     pthread_mutex_unlock(&s->lock);
     s->last_data_us = mono_us();
+    s->delivered = false;
     log_info("srt %s:%d: connected", s->host, s->port);
 }
 
@@ -240,8 +253,18 @@ static void listener_try(struct srt_in *s)
     if (!knocking(s, RECV_TIMEOUT_MS))
         return;
     u = srt_accept(s->sock, (struct sockaddr *)&sa, &salen);
-    if (u == SRT_INVALID_SOCK)
+    if (u == SRT_INVALID_SOCK) {
+        /* nobody after all, or the listening socket itself is broken:
+         * either way not a reason to spin */
+        SRT_SOCKSTATUS st = srt_getsockstate(s->sock);
+
+        if (st == SRTS_BROKEN || st == SRTS_CLOSED || st == SRTS_NONEXIST) {
+            atomic_fetch_add(&s->errors, 1);
+            log_err("srt :%d: the listening socket is broken", s->port);
+        }
+        usleep(RECV_TIMEOUT_MS * 1000);
         return;
+    }
     char who[64] = "?";
 
     getnameinfo((struct sockaddr *)&sa, (socklen_t)salen, who, sizeof(who), NULL, 0, NI_NUMERICHOST);
@@ -250,18 +273,23 @@ static void listener_try(struct srt_in *s)
     snprintf(s->state, sizeof(s->state), "sender %.30s", who);
     pthread_mutex_unlock(&s->lock);
     s->last_data_us = mono_us();
+    s->delivered = false;
     log_info("srt :%d: sender %s connected", s->port, who);
 }
 
 /* While a sender is delivering, any other one is turned away. A sender
- * that has gone quiet for a second (its link is dead but libsrt has not
- * timed it out yet) is replaced by the newcomer: an encoder that
- * restarts and pushes again must not have to wait for the timeout. */
+ * that was delivering and has gone quiet for a second (its link is dead
+ * but libsrt has not timed it out yet) is replaced by the newcomer: an
+ * encoder that restarts and pushes again must not have to wait for the
+ * timeout. One that has not delivered yet is given the latency plus a
+ * second: with TSBPD nothing arrives before the latency has passed. */
 static void listener_others(struct srt_in *s)
 {
+    int64_t quiet_us = 1000000 + (s->delivered ? 0 : (int64_t)s->latency_ms * 1000);
+
     if (!knocking(s, 0))
         return;
-    if (mono_us() - s->last_data_us > 1000000) {
+    if (mono_us() - s->last_data_us > quiet_us) {
         drop_link(s, "silent for a second, a new sender is knocking");
         listener_try(s);
         return;
@@ -398,6 +426,7 @@ static int srt_in_recv(void *ctx, uint8_t *buf, int size)
     if (n > 0) {
         atomic_fetch_add(&s->bytes, n);
         s->last_data_us = mono_us();
+        s->delivered = true;
         return n;
     }
     if (n == 0)
@@ -430,7 +459,7 @@ static void srt_in_stats(void *ctx, struct input_stats *st)
             st->rtt_ms = b.msRTT;
             /* loss seen on arrival, of which what was not recovered in time */
             st->lost = b.pktRcvDropTotal;
-            st->retransmitted = b.pktRcvLossTotal - b.pktRcvDropTotal;
+            st->retransmitted = b.pktRcvLossTotal > b.pktRcvDropTotal ? b.pktRcvLossTotal - b.pktRcvDropTotal : 0;
         }
     }
     pthread_mutex_unlock(&s->lock);

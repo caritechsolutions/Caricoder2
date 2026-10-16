@@ -435,6 +435,7 @@ static void pes_feed(struct probe *p, int pid, struct pid_stat *s, const uint8_t
     if (pusi) {
         pes_done(p, pid, s);
         s->pes_open = true;
+        s->pes_len = 0;                 /* also after a head too short to be a PES */
     }
     if (!s->pes_open)
         return;

@@ -184,7 +184,7 @@ static void read_gpus(struct sample *s)
         }
     s->have_smi = exe != NULL;
     s->smi_error[0] = 0;
-    if (!exe || pipe(pfd) < 0)
+    if (!exe || pipe2(pfd, O_CLOEXEC) < 0)
         return;
     pid = fork();
     if (pid == 0) {
@@ -229,10 +229,15 @@ static void read_gpus(struct sample *s)
     close(pfd[0]);
     {
         int status = 0;
+        int k;
 
-        if (waitpid(pid, &status, WNOHANG) == 0) {
+        /* stdout closed is not quite exited: a moment is allowed */
+        for (k = 0; k < 20 && waitpid(pid, &status, WNOHANG) == 0; k++)
+            usleep(50000);
+        if (k == 20) {
             kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
+            for (k = 0; k < 20 && waitpid(pid, &status, WNOHANG) == 0; k++)
+                usleep(50000);          /* a process stuck in the driver may not die: not waited for */
             snprintf(s->smi_error, sizeof(s->smi_error), "nvidia-smi did not answer");
             return;
         }
