@@ -395,8 +395,9 @@ static void send_dgram(void *ctx, const uint8_t *dgram, int len)
     struct srt_sink *s = ctx;
 
     pthread_mutex_lock(&s->lock);
-    if (s->n_peers == 0)
-        atomic_fetch_add(&s->errors, 1);    /* nobody to send to: lost */
+    if (s->n_peers == 0 && !s->listener)
+        atomic_fetch_add(&s->errors, 1);    /* a caller with no link: lost */
+    /* a listener with no receivers is idle, not failing: nobody asked */
     for (int i = 0; i < s->n_peers; i++)
         if (srt_sendmsg2(s->peers[i], (const char *)dgram, len, NULL) < 0)
             atomic_fetch_add(&s->errors, 1);
