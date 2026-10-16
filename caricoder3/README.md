@@ -546,6 +546,24 @@ needs more: see "Transcoding" above.
 
 The same figures go to the log every 10 seconds (`--stats-interval`).
 
+## Picture quality
+
+`tests/quality.py` compares a transcoded stream with its source frame by
+frame (matched by PTS, which caricoder3 passes through unchanged) and
+reports PSNR and SSIM per second and overall, with the bit rates. It
+takes files, or captures both streams from the network for you:
+
+```
+python3 /opt/caricoder3/tests/quality.py \
+    --source udp://224.100.1.5:49500 --program 1840 \
+    --output udp://224.6.7.9:6789 --seconds 20
+```
+
+A rendition smaller than the source is compared with the source scaled
+to its size. Rough guide for broadcast content: PSNR above 40 dB is
+hard to tell from the source, 35-40 good, 30-35 visible on detail,
+below 30 clearly degraded; SSIM above 0.95 good.
+
 ## Tests
 
 ```
