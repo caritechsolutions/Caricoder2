@@ -62,34 +62,68 @@ def video_streams(info):
 
 
 def frame_pts(path, stream_index):
-    """PTS (seconds) of every decoded frame, in output order."""
+    """
+    PTS (seconds) of every decoded frame, in output order; frames before
+    the first key frame are None (a capture starts mid-GOP, and what the
+    decoder makes of those is not the picture).
+    """
     p = run(["ffprobe", "-v", "error", "-select_streams", f"{stream_index}", "-show_frames",
-             "-show_entries", "frame=pts_time,pict_type", "-of", "csv=p=0", path])
+             "-show_entries", "frame=pts_time,key_frame", "-of", "csv=p=0", path])
     if p.returncode:
         die(f"ffprobe frames {path}: {p.stderr.strip()[:200]}")
     pts = []
+    seen_key = False
     for line in p.stdout.splitlines():
         if not line.strip():
             continue
-        t = line.split(",")[0]
-        pts.append(None if t in ("N/A", "") else float(t))
+        parts = line.split(",")          # ffprobe's order: key_frame, pts_time[, side data]
+        if len(parts) < 2:
+            continue
+        key, t = parts[0].strip(), parts[1].strip()
+        if key == "1":
+            seen_key = True
+        pts.append(None if t in ("N/A", "") or not seen_key else float(t))
     return pts
 
 
-def decode_raw(path, stream_index, size, out_path, select_idx=None):
-    """
-    Decodes one video stream to raw yuv420p at `size` ("WxH"). With
-    select_idx (a set of frame numbers in output order) only those frames
-    are written, so the two files line up frame for frame.
-    """
-    vf = f"scale={size}:flags=bicubic"
-    if select_idx is not None:
-        expr = "+".join(f"eq(n\\,{i})" for i in sorted(select_idx))
-        vf = f"select='{expr}',{vf}"
+def decode_raw(path, stream_index, size, out_path, nframes):
+    """Decodes the first `nframes` frames of one video stream to raw yuv420p at `size`."""
     p = run(["ffmpeg", "-v", "error", "-y", "-i", path, "-map", f"0:{stream_index}",
-             "-vf", vf, "-fps_mode", "passthrough", "-pix_fmt", "yuv420p", "-f", "rawvideo", out_path])
+             "-vf", f"scale={size.replace('x', ':')}:flags=bicubic", "-fps_mode", "passthrough",
+             "-frames:v", str(nframes), "-pix_fmt", "yuv420p", "-f", "rawvideo", out_path])
     if p.returncode:
         die(f"ffmpeg decode {path}: {p.stderr.strip()[:300]}")
+
+
+def pick_frames(raw_in, raw_out, size, indices):
+    """Copies the frames with these indices (in order) from one raw file to another."""
+    w, h = (int(x) for x in size.split("x"))
+    fsz = w * h * 3 // 2
+    have = os.path.getsize(raw_in) // fsz
+    n = 0
+    with open(raw_in, "rb") as f, open(raw_out, "wb") as o:
+        for i in indices:
+            if i >= have:
+                break
+            f.seek(i * fsz)
+            o.write(f.read(fsz))
+            n += 1
+    return n
+
+
+def decode_pairs(src, si, out, oi, size, pairs, work, tag):
+    """Raw files of the paired frames, aligned: (source file, output file, frames)."""
+    s_all = os.path.join(work, f"{tag}_s_all.yuv")
+    o_all = os.path.join(work, f"{tag}_o_all.yuv")
+    decode_raw(src, si, size, s_all, max(i for i, _ in pairs) + 1)
+    decode_raw(out, oi, size, o_all, max(j for _, j in pairs) + 1)
+    s_raw = os.path.join(work, f"{tag}_s.yuv")
+    o_raw = os.path.join(work, f"{tag}_o.yuv")
+    n1 = pick_frames(s_all, s_raw, size, [i for i, _ in pairs])
+    n2 = pick_frames(o_all, o_raw, size, [j for _, j in pairs])
+    os.remove(s_all)
+    os.remove(o_all)
+    return s_raw, o_raw, min(n1, n2)
 
 
 def measure(src_raw, out_raw, size, fps, log_dir):
@@ -164,10 +198,7 @@ def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
         if len(pairs) < 10:
             continue
         sample = pairs[len(pairs) // 4::max(1, len(pairs) // 8)][:6]
-        s_raw = os.path.join(work, "probe_s.yuv")
-        o_raw = os.path.join(work, "probe_o.yuv")
-        decode_raw(src, si, size, s_raw, {i for i, _ in sample})
-        decode_raw(out, oi, size, o_raw, {j for _, j in sample})
+        s_raw, o_raw, _ = decode_pairs(src, si, out, oi, size, sample, work, "probe")
         m = measure(s_raw, o_raw, size, fps, work)
         vals = [v for v in m["psnr"] if v != float("inf")] or [99.0]
         score = sum(vals) / len(vals)
@@ -279,11 +310,7 @@ def main():
             if len(pairs) < 10:
                 die(f"only {len(pairs)} frames of the output could be matched to the source "
                     f"(source {len(spts)} frames, output {len(opts)}); are these the same content?")
-            s_raw = os.path.join(work, f"src_{size}.yuv")
-            o_raw = os.path.join(work, f"out_{size}.yuv")
-            decode_raw(src, sv["index"], size, s_raw, {i for i, _ in pairs})
-            decode_raw(out, ov["index"], size, o_raw, {j for _, j in pairs})
-            n = min(os.path.getsize(s_raw), os.path.getsize(o_raw)) // (ov["width"] * ov["height"] * 3 // 2)
+            s_raw, o_raw, n = decode_pairs(src, sv["index"], out, ov["index"], size, pairs, work, "full")
             m = measure(s_raw, o_raw, size, fps, work)
             if a.pictures:
                 os.makedirs(a.pictures, exist_ok=True)
