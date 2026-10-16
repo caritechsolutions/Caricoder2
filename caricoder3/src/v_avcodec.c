@@ -35,7 +35,8 @@ struct av_dec {
 
 static void *avd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
 {
-    enum AVCodecID id = cfg->codec == CODEC_HEVC ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
+    enum AVCodecID id = cfg->codec == CODEC_HEVC ? AV_CODEC_ID_HEVC :
+                        cfg->codec == CODEC_MPEG2 ? AV_CODEC_ID_MPEG2VIDEO : AV_CODEC_ID_H264;
     const AVCodec *codec = avcodec_find_decoder(id);
     struct av_dec *d;
 
@@ -268,7 +269,7 @@ static void avd_close(void *ctx)
 
 static bool avd_handles(enum codec_id c)
 {
-    return c == CODEC_H264 || c == CODEC_HEVC;
+    return c == CODEC_H264 || c == CODEC_HEVC || c == CODEC_MPEG2;
 }
 
 static const struct vdec_ops avd_ops = {
@@ -276,7 +277,7 @@ static const struct vdec_ops avd_ops = {
 };
 
 const struct codec_backend backend_avcodec = {
-    .name = "libavcodec", .codecs = "h264, hevc",
+    .name = "libavcodec", .codecs = "h264, hevc, mpeg2",
     .media = CODEC_VIDEO, .role = CODEC_DECODER, .where = WHERE_CPU,
     .priority = 10, .handles = avd_handles, .vdec = &avd_ops,
 };

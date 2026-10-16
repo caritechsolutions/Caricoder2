@@ -236,7 +236,8 @@ static void *nvd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
     d->cv = nv_cv();
 
     memset(&pp, 0, sizeof(pp));
-    pp.CodecType = cfg->codec == CODEC_HEVC ? cudaVideoCodec_HEVC : cudaVideoCodec_H264;
+    pp.CodecType = cfg->codec == CODEC_HEVC ? cudaVideoCodec_HEVC :
+                   cfg->codec == CODEC_MPEG2 ? cudaVideoCodec_MPEG2 : cudaVideoCodec_H264;
     pp.ulMaxNumDecodeSurfaces = 1;          /* the sequence callback says how many */
     pp.ulClockRate = 90000;                 /* our time stamps are 90 kHz */
     pp.ulErrorThreshold = 100;              /* decode damaged pictures too */
@@ -392,7 +393,7 @@ static void nvd_close(void *ctx)
 
 static bool nvd_handles(enum codec_id c)
 {
-    return c == CODEC_H264 || c == CODEC_HEVC;
+    return c == CODEC_H264 || c == CODEC_HEVC || c == CODEC_MPEG2;
 }
 
 static const struct vdec_ops nvd_ops = {
@@ -400,7 +401,7 @@ static const struct vdec_ops nvd_ops = {
 };
 
 const struct codec_backend backend_nvdec = {
-    .name = "nvdec", .codecs = "h264, hevc",
+    .name = "nvdec", .codecs = "h264, hevc, mpeg2",
     .media = CODEC_VIDEO, .role = CODEC_DECODER, .where = WHERE_NVIDIA,
     .priority = 20, .handles = nvd_handles, .probe = nv_probe, .vdec = &nvd_ops,
 };

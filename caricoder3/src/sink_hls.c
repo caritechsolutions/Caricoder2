@@ -422,8 +422,12 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                 bool key, slice = false;
 
                 for (int i = 0; i < v->prog.n_es; i++)
-                    if (v->prog.es[i].pid == v->vpid && v->prog.es[i].stream_type == 0x24)
-                        c = CODEC_HEVC;
+                    if (v->prog.es[i].pid == v->vpid) {
+                        if (v->prog.es[i].stream_type == 0x24)
+                            c = CODEC_HEVC;
+                        else if (v->prog.es[i].stream_type == 0x02 || v->prog.es[i].stream_type == 0x01)
+                            c = CODEC_MPEG2;
+                    }
                 key = codec_es_has_key(c, v->probe, (size_t)v->probe_len, false);
                 if (c == CODEC_H264 && !v->width)
                     for (int i = 0; i + 4 < v->probe_len; i++)
@@ -452,7 +456,9 @@ static void variant_packet(struct hls_sink *s, int vi, const uint8_t *pkt, uint1
                     if (v->probe[i] == 0 && v->probe[i + 1] == 0 && v->probe[i + 2] == 1) {
                         unsigned t = c == CODEC_H264 ? (v->probe[i + 3] & 0x1F) : ((v->probe[i + 3] >> 1) & 0x3F);
 
-                        if ((c == CODEC_H264 && t == 1) || (c == CODEC_HEVC && t <= 9))
+                        if ((c == CODEC_H264 && t == 1) || (c == CODEC_HEVC && t <= 9) ||
+                            (c == CODEC_MPEG2 && v->probe[i + 3] == 0x00 && i + 5 < v->probe_len &&
+                             ((v->probe[i + 5] >> 3) & 7) != 1))     /* a P or B picture */
                             slice = true;
                     }
                 if (v->probe_sps_only) {

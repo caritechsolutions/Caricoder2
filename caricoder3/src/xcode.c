@@ -252,6 +252,9 @@ enum codec_id xcode_input_codec(const struct program *p, int idx)
         return CODEC_AAC;
     case 0x11:
         return CODEC_AAC_LATM;
+    case 0x01:                              /* MPEG-1 video: the MPEG-2 decoder takes it */
+    case 0x02:
+        return CODEC_MPEG2;
     case 0x1B:
         return CODEC_H264;
     case 0x24:

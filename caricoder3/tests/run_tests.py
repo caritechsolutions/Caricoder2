@@ -2957,11 +2957,14 @@ def video_bitrate(path, pid):
     return sum(r["len"] for r in lst[:-1]) * 8 / span
 
 
-def v_source(name, codec, extra=(), size="320x240", duration=8, pix="yuv420p"):
+def v_source(name, codec, extra=(), size="320x240", duration=8, pix="yuv420p", muxrate="2000k"):
     args = {"h264": ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "900k", "-g", "25",
                      "-bf", "2"],
             "hevc": ["-c:v", "libx265", "-preset", "ultrafast", "-b:v", "900k",
-                     "-x265-params", "log-level=error:keyint=25"]}[codec]
+                     "-x265-params", "log-level=error:keyint=25"],
+            "mpeg2": ["-c:v", "mpeg2video", "-b:v", "1200k", "-g", "12", "-bf", "2"],
+            "mpeg2i": ["-c:v", "mpeg2video", "-b:v", "1200k", "-g", "12", "-bf", "2",
+                       "-flags", "+ilme+ildct", "-top", "1"]}[codec]
     path = w(name + ".ts")
     if name in _cache and os.path.exists(path):
         return path
@@ -2969,7 +2972,7 @@ def v_source(name, codec, extra=(), size="320x240", duration=8, pix="yuv420p"):
                         "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration={duration}",
                         "-f", "lavfi", "-i", f"{BURSTS}:d={duration}",
                         "-pix_fmt", pix, *args, *extra, "-c:a", "mp2", "-b:a", "128k",
-                        "-f", "mpegts", "-muxrate", "2000k", path],
+                        "-f", "mpegts", "-muxrate", muxrate, path],
                        capture_output=True, text=True)
     need(p.returncode == 0, f"ffmpeg could not make {name}: {p.stderr[-400:]}")
     _cache[name] = True
@@ -3022,6 +3025,31 @@ def xc_video_cpu_all_four():
             st = run_file(src, out, "--video", f"{to}:500k")
             q, got, n, total = check_video(src, out, st, f"{src_codec} to {to}", to, 500_000)
             res.append(f"{src_codec}>{to} {n}/{total} pictures, {q:.0f} dB, {got / 1000:.0f} kb/s")
+    return "; ".join(res)
+
+
+@test
+def xc_video_mpeg2_in():
+    """MPEG-2 video (stream type 0x02) decoded on the CPU and encoded as H.264 and H.265."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    res = []
+    src = v_source("xc_v_mpeg2", "mpeg2")
+    for to in ("h264", "hevc"):
+        out = w(f"xc_v_mpeg2_to_{to}.ts")
+        st = run_file(src, out, "--video", f"{to}:500k")
+        q, got, n, total = check_video(src, out, st, f"mpeg2 to {to}", to, 500_000)
+        need(xstats(st, 0x100)["from"] == "mpeg2", f"input codec reported as {xstats(st, 0x100).get('from')}")
+        res.append(f"mpeg2>{to} {n}/{total} pictures, {q:.0f} dB, {got / 1000:.0f} kb/s")
+    # interlaced MPEG-2, as satellite feeds are
+    # (ffmpeg's MPEG-2 overshoots its rate on this; a 2 Mb/s mux leaves its own audio late)
+    src = v_source("xc_v_mpeg2i", "mpeg2i", size="720x576", muxrate="3500k")
+    need(Analysis(src).late_pes() == 0, "the test source itself has late PES")
+    out = w("xc_v_mpeg2i_to_h264.ts")
+    st = run_file(src, out, "--video", "h264:800k")
+    q, got, n, total = check_video(src, out, st, "interlaced mpeg2 to h264", "h264", 800_000, min_psnr=24.0)
+    res.append(f"interlaced mpeg2>h264 {n}/{total} pictures, {q:.0f} dB")
     return "; ".join(res)
 
 

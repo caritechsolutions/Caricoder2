@@ -91,7 +91,13 @@ bool codec_es_has_key(enum codec_id codec, const uint8_t *d, size_t len, bool or
 
         if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1)
             continue;
-        if (codec == CODEC_H264) {
+        if (codec == CODEC_MPEG2) {
+            /* a sequence header, or a picture header saying I-picture */
+            if (or_params && d[i + 3] == 0xB3)
+                return true;
+            if (d[i + 3] == 0x00 && i + 5 < len && ((d[i + 5] >> 3) & 7) == 1)
+                return true;
+        } else if (codec == CODEC_H264) {
             type = d[i + 3] & 0x1F;
             if (type == 5 || (or_params && type == 7))
                 return true;
@@ -116,13 +122,14 @@ const char *codec_name(enum codec_id id)
     case CODEC_AC3:      return "ac3";
     case CODEC_H264:     return "h264";
     case CODEC_HEVC:     return "hevc";
+    case CODEC_MPEG2:    return "mpeg2";
     default:             return "none";
     }
 }
 
 bool codec_is_video(enum codec_id id)
 {
-    return id == CODEC_H264 || id == CODEC_HEVC;
+    return id == CODEC_H264 || id == CODEC_HEVC || id == CODEC_MPEG2;
 }
 
 const struct codec_backend *const *codec_backends(int *count)

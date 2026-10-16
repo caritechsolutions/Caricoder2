@@ -37,6 +37,7 @@ enum codec_id {
     CODEC_AC3,                  /* AC-3 (input) */
     CODEC_H264,
     CODEC_HEVC,
+    CODEC_MPEG2,                /* MPEG-1/2 video (input only) */
 };
 
 const char *codec_name(enum codec_id id);
