@@ -1046,6 +1046,84 @@ so a service file's `-o` and a GUI's saved outputs do not fight over the
 file. On `SIGHUP` saved outputs the file no longer lists are removed,
 new ones added, running ones left running; `-o` outputs are untouched.
 
+### Stage 8: inputs, probe, MPEG-2, the server page (built 2026-10-16)
+
+**Link inputs.** A UDP source is read by `main.c` with `recvmmsg`
+straight into the engine, as before. SRT and RIST go through a small
+interface (`input.h`: open, receive one datagram with a 200 ms timeout,
+stats, close) and a second input thread that loops on it. The
+libraries own the connecting and the recovery; the thread only moves
+datagrams and heartbeats. The SRT caller reconnects a second after a
+break; the SRT listener holds one sender. A second sender knocking is
+refused while the first still delivers, but a sender that has been
+silent for a second is replaced by the newcomer: an encoder that
+restarts pushes again long before libsrt's idle timeout (set to 3 s)
+would notice, and a listener that kept the dead socket would keep the
+new one out. Reads use `SRTO_RCVSYN` with `SRTO_RCVTIMEO`; a timeout is
+not a broken link (first version treated `SRT_ETIMEOUT` as one and
+reconnected four times a second). The listening socket is watched with
+`srt_epoll_wait`, because a non-blocking `srt_accept` logs an error
+inside libsrt every time nobody is there. RIST's receiver stats arrive
+per interval, so `recovered` and `lost` are summed here; its RTT is
+taken from the JSON beside the struct, which has it finer than the
+whole milliseconds in the struct. The stats JSON gains `input.link`
+(transport, state, connected, rtt_ms, lost, recovered, reconnects,
+errors); the GUI's lamp counts new `lost` as "packets lost on the
+link", and a disconnected link shows as "no input" through the usual
+last-packet age.
+
+**MPEG-2.** `CODEC_MPEG2` maps stream types 0x01 and 0x02 to
+libavcodec's `mpeg2video` (which takes MPEG-1 too) and to
+`cudaVideoCodec_MPEG2` on the card; nothing else in the video path
+cares what the input coding is, because the decoders deliver frames.
+The only codec-specific piece is `codec_es_has_key`: a sequence header
+(0xB3) counts as "parameters", a picture header (0x00) with
+`picture_coding_type` 1 as a key frame, and the HLS packager's
+key-frame probe reads the same. Tested progressive and interlaced at
+720x576 to H.264 and H.265 on the CPU; the card path compiles against
+the SDK and falls back to the CPU on `VDEC_CANNOT` like the others.
+(The first interlaced test failed on the *source*: ffmpeg's MPEG-2
+encoder overshoots its rate and at a 2 Mb/s mux its own audio came out
+late; the test makes that source at 3.5 Mb/s and checks it first.)
+
+**Stream selection.** "All PIDs in any one program" was the decision:
+the channel still takes one service, and `--drop PID,..` (channel key
+`drop`) names the streams of it to leave out. `on_program` removes
+them from the announced program before transcoders are planned
+(`program_remove_es`, with the tail zeroed so programs still compare
+with `memcmp`), and `on_unit` discards their units before the lock.
+The PCR PID is never a problem: the mux writes its own PCRs on it.
+Subtitles, teletext and data are kept unless named.
+
+**The probe.** `caricoder3 probe URL` is its own small reader
+(`probe.c`) rather than the demux, because the demux follows one
+program and the probe wants all of them: a section assembler for the
+PAT, every PMT and the SDT, a per-PID PES assembler whose payloads go
+to libavcodec's parsers (`av_parser_parse2` reads SPS/sequence/frame
+headers without decoding: size, field order, profile, sample rate,
+channels), an ADTS header read by hand (the AAC parser leaves the rate
+to the decoder), and the frame rate as PES units per second of PTS
+span, snapped to a standard rate within 3 % because the window's edges
+hold pictures whose neighbours in presentation order are outside it. A
+file's rates are over the longest PCR span of any one PID (each
+program has a clock of its own). The supervisor's `POST /api/probe`
+forks the binary and reads its stdout under a deadline; each HTTP
+connection has a thread, so a 3 s probe blocks nobody else. The GUI's
+dialog lists programs as cards; picking one shows its streams with
+tick boxes, and "Use this program" sets `program` and `drop`.
+
+**The server page.** `sysstat.c` samples `/proc/stat`, `/proc/meminfo`,
+`/proc/net/dev` (and `/sys/class/net/*/operstate`, `speed`) every 2 s
+in a thread of its own and runs `nvidia-smi --query-gpu` every 5 s
+with a 3 s deadline (killed if it hangs, as it can on a wedged driver).
+Rates are deltas between samples. The JSON rides on `/api/system`,
+which the GUI already polls, under `system`.
+
+**The GUI.** A rail with two pages (Channels, Server), a filter by
+name and by health (the four lamp states), a back link on a channel,
+and source kinds for SRT and RIST with their own fields; the saved
+input URL is parsed back into the form.
+
 ### Decisions still open
 
 **HE-AAC** (decided 2026-10-14). Ubuntu ships fdk-aac with the HE-AAC

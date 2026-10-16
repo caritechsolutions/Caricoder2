@@ -25,8 +25,11 @@ rest of this repository.
 | 5c | RTMP push (H.264 + AAC) | done, tested against ffmpeg as the server; not yet against a public RTMP service |
 | 6 | HLS packager as an output (TS segments, master playlist for renditions, served by the process, optional directory) | done, tested; played by ffmpeg's HLS client |
 | 7 | Supervisor (`caricoder3 serve`): runs the channels, REST API, GUI on port 8550, HLS for every channel on that port | done, tested; side-by-side run against Flussonic not done |
+| 8 | SRT and RIST inputs; MPEG-2 video decode; `caricoder3 probe` and "Scan source" in the GUI with stream selection (`--drop`); server page (CPU, memory, GPU, interfaces); list filter | done, tested in the lab (2026-10-16); not yet run on transcoder2 |
 
-MPEG-2 video is parked by decision: it is copied, not transcoded.
+Picture quality has been measured on real streams with `tests/quality.py`
+(see "Picture quality"): 45 dB PSNR for HEVC → H.264 on the CPU at 2.5× the
+source rate, 43 dB for HEVC 960x720 → HEVC 1080p at the source rate on NVENC.
 
 ## Install on a server
 
@@ -131,11 +134,42 @@ caricoder3 ctl vacation remove-output out3
 | `--stats-file PATH` | JSON status, rewritten atomically once a second |
 | `--rt-prio N` | Real-time priority for the output thread (needs `CAP_SYS_NICE`) |
 
+| `--drop PID[,PID..]` | Leave these streams of the service out of the output: an audio track not wanted, say. `caricoder3 probe` lists what there is |
+
 Input URLs accept `udp://` and `rtp://`, a source for source-specific
 multicast (`udp://10.0.0.1@232.1.1.1:5000`), and `?iface=`, `?buf=`.
 RTP is detected per datagram, so a `udp://` URL works for an RTP source.
 The receive socket binds to the group address itself, so two streams that
 share a port number do not get mixed.
+
+SRT and RIST sources use the same URL forms as the outputs (see
+"Outputs"): `srt://host:port` calls a sender, `srt://:port` listens for
+one (`?latency=`, `?passphrase=`, `?pbkeylen=`, `?streamid=`);
+`rist://@:port` listens, `rist://host:port` calls (`?secret=`,
+`?aes-type=`, `?buffer=`, `?profile=`). An SRT listener takes one sender
+at a time: another is refused while the first delivers, and replaces it
+once the first has been silent for a second (an encoder that restarts
+and pushes again gets in without waiting for a timeout). The link's
+state, RTT, recovered and lost packets and reconnects are in the
+statistics (`input.link`) and on the channel's Source card.
+
+### What is in a source
+
+```
+caricoder3 probe udp://224.100.1.5:49500            # listens 3 s, prints JSON
+caricoder3 probe srt://:9000 --seconds 5
+caricoder3 probe recording.ts --program 1840
+```
+
+Every program of the multiplex with its name, PCR PID and streams; for
+each stream the PID, type, kind (video, audio, subtitles, teletext,
+data), language, bit rate, and what the bytes say: picture size,
+interlace, frame rate and profile for video, sample rate and channels for
+audio (libavcodec's parsers read the headers, nothing is decoded). The
+GUI's "Scan source…" button on a channel's settings runs the same and
+lists the programs to pick one, with a tick box per stream: unticked
+streams become the channel's `drop` list. Subtitles, teletext and data
+streams stay ticked unless you say otherwise.
 
 Output URLs accept `?ttl=` (default 8), `?iface=`, `?buf=`, and `?pkt=`
 (TS packets per datagram, default 7).
@@ -258,8 +292,11 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
 **8550** (set in `/etc/caricoder3/caricoder3.json`):
 
 - `/` — the GUI: plain HTML and JavaScript, built into the binary. Channel
-  list with state and rates; per channel the live statistics, the
-  outputs (add and remove while it runs), the settings form, the log.
+  list with state and rates, filtered by name or health; per channel the
+  live statistics, the outputs (add and remove while it runs), the
+  settings form with "Scan source…", the log; a Server page with CPU,
+  memory, the NVIDIA cards (through `nvidia-smi`) and the network
+  interfaces, sampled every two seconds.
 - `/api/...` — the same, as JSON (see below)
 - `/hls/NAME/index.m3u8` — every channel's HLS output, through one port
 
@@ -288,7 +325,7 @@ A channel file holds what the command line would, for example
 }
 ```
 
-Keys: `input`, `program`, `muxrate`, `vbr`, `delay`, `video` (list),
+Keys: `input`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
 `audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `gop`, `vbv`,
 `pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
 `extra_args` (list, passed as they are), `enabled`. The channel's outputs
@@ -309,7 +346,8 @@ The API (basic auth, JSON in and out):
 
 | | |
 |---|---|
-| `GET /api/system` | version, host, uptime, channels, what this build can do |
+| `GET /api/system` | version, host, uptime, channels, what this build can do, and `system`: CPU, memory, GPUs, interfaces |
+| `POST /api/probe` | `{"url": "...", "seconds": 3, "program": 0}`: what is in a source (runs `caricoder3 probe`; up to 30 s) |
 | `GET /api/channels` | every channel: state, pid, uptime, restarts, config, statistics, outputs |
 | `GET /api/channels/NAME` | the same for one, plus its last 200 log lines |
 | `PUT /api/channels/NAME` | create or replace the channel (body: the JSON above) |
@@ -402,8 +440,9 @@ x264), because every extra thread is one more picture held back. The
 delay is therefore the same on a 72-processor server as on a small
 machine; measured at 1080p, the video has about 1.5 s of the 3 s to spare.
 
-**Not decodable here** (the stream is copied, with a warning): E-AC-3,
-MPEG-2 video, anything else.
+Video in: H.264, H.265 and MPEG-2 (stream types 0x01/0x02, progressive
+or interlaced), on the CPU or the card. **Not decodable here** (the
+stream is copied, with a warning): E-AC-3, anything else.
 
 ### HE-AAC
 
@@ -619,7 +658,8 @@ Transcoding:
 - No change of frame rate. The audio sample rate is not changed either.
   Deinterlacing happens only on the way to a scaled rendition, and on the
   CPU it is a plain field blend (soft on motion).
-- No AC-3 or HE-AAC output. No E-AC-3 input.
+- No AC-3 or HE-AAC output. No E-AC-3 input. MPEG-2 video is decoded
+  (CPU or NVDEC) but never produced.
 - HE-AAC input needs the full fdk-aac, which the installer builds; a build
   against Ubuntu's package is half band (see "HE-AAC").
 - The NVIDIA path: first run on a Tesla P40 on 2026-10-14 (self-test and a
