@@ -37,8 +37,8 @@ import tempfile
 import time
 
 
-def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+def run(cmd, text=True, **kw):
+    return subprocess.run(cmd, capture_output=True, text=text, **kw)
 
 
 def die(msg):
@@ -93,6 +93,15 @@ def decode_raw(path, stream_index, size, out_path, nframes):
              "-frames:v", str(nframes), "-pix_fmt", "yuv420p", "-f", "rawvideo", out_path])
     if p.returncode:
         die(f"ffmpeg decode {path}: {p.stderr.strip()[:300]}")
+
+
+def thumbs(raw, size):
+    """Every frame of a raw yuv420p file as 16 luma means (a 4x4 picture)."""
+    w, h = (int(x) for x in size.split("x"))
+    p = run(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", size, "-i", raw,
+             "-vf", "scale=4:4:flags=area", "-pix_fmt", "gray", "-f", "rawvideo", "-"], text=False)
+    d = p.stdout
+    return [list(d[i:i + 16]) for i in range(0, len(d) - 15, 16)]
 
 
 def pick_frames(raw_in, raw_out, size, indices):
@@ -209,8 +218,29 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
         return []
     base = max(hist, key=hist.get)
     reach = max(len(s_list), len(opts))
-    scores = []
+    # A cheap pass first: every frame as a 4x4 thumbnail, and for every
+    # shift the mean squared difference of the thumbnails of the paired
+    # frames (a 20 s capture is a thousand shifts; the full comparison is
+    # only run on the best few of them).
+    s_th, o_th = thumbs(s_all, size), thumbs(o_all, size)
+    coarse = []
     for k in range(-reach, reach + 1):
+        off = base + k * period
+        pairs = pairs_at(spts, opts, off, period, 400)
+        if len(pairs) < 10:
+            continue
+        err = n = 0
+        for i, j in pairs[::max(1, len(pairs) // 60)]:
+            if i < len(s_th) and j < len(o_th):
+                a, b = s_th[i], o_th[j]
+                err += sum((a[q] - b[q]) ** 2 for q in range(16))
+                n += 1
+        if n:
+            coarse.append((err / n, k))
+    coarse.sort()
+    candidates = sorted(k for _, k in coarse[:8])
+    scores = []
+    for k in candidates:
         off = base + k * period
         pairs = pairs_at(spts, opts, off, period, 400)
         if len(pairs) < 10:
@@ -225,7 +255,7 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
     scores.sort(reverse=True)
     best_score, best_k, best = scores[0]
     print(f"time-line offset {best:+.3f} s (output - source): PTS offset {base:+.3f} s "
-          f"{best_k:+d} frames, picked by content among {len(scores)} shifts; "
+          f"{best_k:+d} frames, picked by content among {len(coarse)} shifts; "
           "best shifts (frames: PSNR dB) " +
           ", ".join(f"{k:+d}: {sc:.1f}" for sc, k, _ in scores[:5]), file=sys.stderr)
     pairs = pairs_at(spts, opts, best, period, limit)
