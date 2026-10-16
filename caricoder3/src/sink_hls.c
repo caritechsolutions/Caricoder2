@@ -781,7 +781,7 @@ static unsigned next_seq_of(struct hls_sink *s, int vi)
     return seq;
 }
 
-struct client { struct hls_sink *s; int fd; time_t deadline; };
+struct client { struct hls_sink *s; int fd; time_t deadline; bool keep; };
 
 static int ms_left(time_t deadline)
 {
@@ -819,41 +819,17 @@ static void reply(const struct client *c, int code, const char *type, const char
     char hdr[1024];
     int n = snprintf(hdr, sizeof(hdr),
                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-                     "Access-Control-Allow-Origin: *\r\nCache-Control: %s\r\nConnection: close\r\n%s\r\n",
+                     "Access-Control-Allow-Origin: *\r\nCache-Control: %s\r\nConnection: %s\r\n%s\r\n",
                      code, code == 200 ? "OK" : code == 404 ? "Not Found" : "Bad Request", type, len,
-                     strstr(type, "mpegurl") ? "no-cache" : "max-age=60", extra ? extra : "");
+                     strstr(type, "mpegurl") ? "no-cache" : "max-age=60",
+                     c->keep ? "keep-alive" : "close", extra ? extra : "");
 
     if (send_bytes_until(fd, hdr, (size_t)n, c->deadline))
         send_bytes_until(fd, body, len, c->deadline);
 }
 
-static void *client_thread(void *arg)
+static void serve_path(struct hls_sink *s, struct client *c, char *path)
 {
-    struct client *c = arg;
-    struct hls_sink *s = c->s;
-    char req[2048], path[512];
-    int n = 0;
-    struct pollfd pf = { c->fd, POLLIN, 0 };
-
-    prctl(PR_SET_NAME, "cc3-http");
-    atomic_fetch_add(&s->requests, 1);
-    c->deadline = time(NULL) + REQ_DEADLINE_S;
-    while (n < (int)sizeof(req) - 1 && ms_left(c->deadline) > REQ_DEADLINE_S * 1000 - 10000 &&
-           poll(&pf, 1, 5000) > 0) {       /* the header within 10 s */
-        ssize_t r = recv(c->fd, req + n, sizeof(req) - 1 - (size_t)n, 0);
-
-        if (r <= 0)
-            break;
-        n += (int)r;
-        req[n] = 0;
-        if (strstr(req, "\r\n\r\n"))
-            break;
-    }
-    req[n] = 0;
-    if (sscanf(req, "GET %511s", path) != 1) {
-        reply(c, 400, "text/plain", NULL, "bad request\n", 12);
-        goto out;
-    }
     {
         char *q = strchr(path, '?');
         const char *p = path;
@@ -874,7 +850,7 @@ static void *client_thread(void *arg)
             int one = -1;
 
             if (!pl)
-                goto out;
+                return;
             pthread_mutex_lock(&s->lock);
             if (s->n_var == 1)
                 one = 0;
@@ -887,7 +863,7 @@ static void *client_thread(void *arg)
             }
             reply(c, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
             free(pl);
-            goto out;
+            return;
         }
         int used = 0;
 
@@ -897,12 +873,12 @@ static void *client_thread(void *arg)
             char extra[128];
 
             if (!pl)
-                goto out;
+                return;
             playlist_text(s, vi, "", pl, 65536);
             snprintf(extra, sizeof(extra), "X-Next-Segment: seg%u.ts\r\n", next_seq_of(s, vi));
             reply(c, 200, "application/vnd.apple.mpegurl", extra, pl, strlen(pl));
             free(pl);
-            goto out;
+            return;
         }
         if (sscanf(p, "/v%d/seg%u.ts%n", &vi, &seq, &used) == 2 && used == (int)strlen(p) &&
             vi >= 0 && vi < HLS_VARIANTS) {
@@ -921,10 +897,54 @@ static void *client_thread(void *arg)
                 pthread_mutex_lock(&s->lock);
                 seg_unref(g);
                 pthread_mutex_unlock(&s->lock);
-                goto out;
+                return;
             }
         }
         reply(c, 404, "text/plain", NULL, "not here\n", 9);
+    }
+}
+
+static void *client_thread(void *arg)
+{
+    struct client *c = arg;
+    struct hls_sink *s = c->s;
+    char req[2048], path[512];
+    int n = 0;
+    struct pollfd pf = { c->fd, POLLIN, 0 };
+
+    prctl(PR_SET_NAME, "cc3-http");
+    /* Players keep the connection and send the next request on it
+     * (keep-alive); each request gets its own deadline. */
+    for (;;) {
+        char *hdr_end;
+
+        n = 0;
+        c->deadline = time(NULL) + REQ_DEADLINE_S;
+        while (n < (int)sizeof(req) - 1 && ms_left(c->deadline) > REQ_DEADLINE_S * 1000 - 10000 &&
+               poll(&pf, 1, 5000) > 0) {   /* the header within 10 s */
+            ssize_t r = recv(c->fd, req + n, sizeof(req) - 1 - (size_t)n, 0);
+
+            if (r <= 0)
+                goto out;
+            n += (int)r;
+            req[n] = 0;
+            if (strstr(req, "\r\n\r\n"))
+                break;
+        }
+        req[n] = 0;
+        hdr_end = strstr(req, "\r\n\r\n");
+        if (!hdr_end)
+            goto out;
+        atomic_fetch_add(&s->requests, 1);
+        c->keep = strstr(req, "HTTP/1.1") != NULL && !strcasestr(req, "Connection: close");
+        if (sscanf(req, "GET %511s", path) != 1) {
+            c->keep = false;
+            reply(c, 400, "text/plain", NULL, "bad request\n", 12);
+        } else {
+            serve_path(s, c, path);
+        }
+        if (!c->keep)
+            break;
     }
 out:
     pthread_mutex_lock(&s->lock);

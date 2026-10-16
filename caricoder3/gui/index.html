@@ -5,59 +5,108 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>caricoder3</title>
 <style>
-:root { --bg:#0f1317; --panel:#171c22; --line:#263038; --fg:#dfe6ec; --dim:#8a97a3; --ok:#39c27a; --warn:#e6b422; --bad:#e5533d; --acc:#3f8cff; }
+:root {
+  --bg:#141a21; --rail:#0f1419; --panel:#1b232c; --panel2:#202a34; --line:#2b3741; --line2:#36434f;
+  --fg:#e8edf2; --fg2:#aab6c2; --dim:#74828f;
+  --air:#f0a53a;           /* on air: the amber lamp */
+  --ok:#4cc38a; --bad:#ec5f4a; --warn:#e8c547; --acc:#5aa9ff;
+  --r:8px;
+}
 * { box-sizing:border-box }
-body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif }
-header { display:flex; align-items:center; gap:16px; padding:10px 20px; border-bottom:1px solid var(--line); background:var(--panel) }
-header h1 { font-size:17px; margin:0; letter-spacing:.3px } header h1 span { color:var(--dim); font-weight:normal; margin-left:8px; font-size:13px }
-header .sp { flex:1 } header .sys { color:var(--dim); font-size:12px }
-main { padding:20px; max-width:1240px; margin:0 auto }
+html,body { height:100% }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; display:flex; }
 a { color:var(--acc); text-decoration:none } a:hover { text-decoration:underline }
-button { background:#222a33; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit }
-button:hover { border-color:#3a4752 } button.primary { background:var(--acc); border-color:var(--acc); color:#fff }
-button.danger { color:#ffb0a4 } button:disabled { opacity:.45; cursor:default }
-input, select { background:#0c1014; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; width:100% }
-table { border-collapse:collapse; width:100% } th { text-align:left; color:var(--dim); font-weight:600; font-size:12px; padding:8px 10px; border-bottom:1px solid var(--line) }
-td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top } tr.row:hover td { background:#1b222a; cursor:pointer }
-.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; vertical-align:middle; background:var(--dim) }
-.dot.running { background:var(--ok) } .dot.failed { background:var(--bad) } .dot.stopping,.dot.starting { background:var(--warn) }
-.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px }
-.panel h2 { font-size:14px; margin:0 0 12px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px }
-.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px 18px }
-.kv b { display:block; color:var(--dim); font-weight:normal; font-size:11px; text-transform:uppercase; letter-spacing:.5px } .kv span { font-size:16px }
-.tabs { display:flex; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--line) }
-.tabs button { background:none; border:none; border-bottom:2px solid transparent; border-radius:0; padding:8px 14px; color:var(--dim) }
-.tabs button.on { color:var(--fg); border-bottom-color:var(--acc) }
-.toolbar { display:flex; gap:8px; align-items:center; margin-bottom:14px; flex-wrap:wrap } .toolbar .sp { flex:1 }
-pre.log { background:#0b0e12; border:1px solid var(--line); border-radius:8px; padding:12px; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; max-height:420px; overflow:auto; white-space:pre-wrap; margin:0 }
-.form { display:grid; grid-template-columns:180px 1fr; gap:10px 14px; align-items:center; max-width:820px }
-.form label { color:var(--dim) } .form .help { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px }
-.form .list { display:flex; flex-direction:column; gap:6px } .form .list div { display:flex; gap:6px }
-.msg { padding:10px 12px; border-radius:8px; margin-bottom:12px } .msg.err { background:#3a1e1a; color:#ffc9bf } .msg.ok { background:#163626; color:#b9f0d0 }
-.mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px }
-.small { color:var(--dim); font-size:12px }
-.hidden { display:none }
-dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:12px; padding:20px; min-width:420px } dialog::backdrop { background:rgba(0,0,0,.6) }
-.wide { grid-column:1 / -1 }
+code, .mono { font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; font-size:12.5px }
+button { font:inherit; color:var(--fg); background:var(--panel2); border:1px solid var(--line2); border-radius:var(--r); padding:7px 13px; cursor:pointer }
+button:hover { border-color:#4a5a69 } button:disabled { opacity:.4; cursor:default }
+button.primary { background:var(--acc); border-color:var(--acc); color:#06213f; font-weight:600 }
+button.danger { color:#ffb3a6 } button.quiet { background:none; border-color:transparent; color:var(--fg2) } button.quiet:hover { color:var(--fg); border-color:var(--line2) }
+input, select { font:inherit; color:var(--fg); background:#0f151b; border:1px solid var(--line2); border-radius:var(--r); padding:7px 9px; width:100%; min-width:0 }
+input:focus, select:focus, button:focus-visible { outline:2px solid var(--acc); outline-offset:1px }
+select { appearance:none; -webkit-appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--fg2) 50%),linear-gradient(135deg,var(--fg2) 50%,transparent 50%); background-position:calc(100% - 15px) 55%,calc(100% - 10px) 55%; background-size:5px 5px; background-repeat:no-repeat; padding-right:28px }
+.lamp { display:inline-block; width:10px; height:10px; border-radius:50%; background:#3a4854; box-shadow:inset 0 0 0 1px rgba(0,0,0,.4); vertical-align:middle; flex:none }
+.lamp.running { background:var(--air); box-shadow:0 0 0 3px rgba(240,165,58,.18), 0 0 10px rgba(240,165,58,.6) }
+.lamp.failed { background:var(--bad); box-shadow:0 0 8px rgba(236,95,74,.6) } .lamp.starting,.lamp.stopping { background:var(--warn) }
+
+/* rail */
+nav { width:270px; flex:none; background:var(--rail); border-right:1px solid var(--line); display:flex; flex-direction:column; height:100vh; position:sticky; top:0 }
+nav .brand { padding:18px 18px 10px; font-weight:700; font-size:17px; letter-spacing:.2px } nav .brand small { display:block; font-weight:400; color:var(--dim); font-size:12px; margin-top:2px }
+nav .list { flex:1; overflow:auto; padding:6px 10px }
+nav .ch { display:grid; grid-template-columns:14px 1fr auto; gap:10px; align-items:center; padding:9px 10px; border-radius:var(--r); cursor:pointer; color:var(--fg2) }
+nav .ch:hover { background:var(--panel) } nav .ch.on { background:var(--panel2); color:var(--fg) }
+nav .ch b { font-weight:600; display:block } nav .ch i { font-style:normal; font-size:12px; color:var(--dim); display:block }
+nav .ch .rate { font-size:12px; color:var(--dim); text-align:right; white-space:nowrap }
+nav .foot { padding:12px 14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:8px } nav .foot .sys { color:var(--dim); font-size:12px }
+
+/* main */
+main { flex:1; min-width:0; padding:22px 28px 60px; max-width:1180px }
+.head { display:flex; align-items:center; gap:14px; margin-bottom:18px; flex-wrap:wrap }
+.head h1 { margin:0; font-size:22px; display:flex; align-items:center; gap:12px } .head .state { color:var(--fg2) } .head .sp { flex:1 }
+.msg { padding:10px 14px; border-radius:var(--r); margin:0 0 14px } .msg.err { background:#3b211c; color:#ffd0c7 } .msg.ok { background:#1b3a2b; color:#c7f1d9 }
+
+/* signal path */
+.path { display:grid; grid-template-columns:1fr 24px 1fr 24px 1fr; align-items:stretch; gap:0; margin-bottom:22px }
+.path .node { background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:14px 16px; min-height:110px }
+.path .node h3 { margin:0 0 6px; font-size:12px; font-weight:600; color:var(--dim); text-transform:none }
+.path .node .big { font-size:24px; font-weight:600; line-height:1.15 } .path .node .sub { color:var(--fg2); font-size:12.5px; margin-top:4px }
+.path .arrow { display:flex; align-items:center; justify-content:center; color:var(--line2); font-size:20px }
+.path .node.bad { border-color:var(--bad) } .path .node .flag { color:var(--warn) } .path .node .flag.bad { color:var(--bad) }
+
+section.card { background:var(--panel); border:1px solid var(--line); border-radius:var(--r); margin-bottom:16px }
+section.card > header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line) }
+section.card > header h2 { margin:0; font-size:15px } section.card > header .hint { color:var(--dim); font-size:12.5px } section.card > header .sp { flex:1 }
+section.card > .body { padding:16px }
+section.card.collapsed > .body { display:none } section.card > header .tog { cursor:pointer }
+
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px 20px }
+.kv b { display:block; font-weight:500; font-size:12px; color:var(--dim) } .kv span { font-size:15px }
+table { border-collapse:collapse; width:100% } th { text-align:left; font-weight:500; font-size:12px; color:var(--dim); padding:6px 10px; border-bottom:1px solid var(--line) }
+td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle } tr:last-child td { border-bottom:none }
+
+/* forms */
+.f { display:grid; grid-template-columns:150px minmax(0,1fr); gap:12px 16px; align-items:center; max-width:860px }
+.f label { color:var(--fg2) } .f .help { grid-column:2; color:var(--dim); font-size:12px; margin-top:-8px }
+.f .row { display:flex; gap:8px; align-items:center } .f .row > * { flex:1 } .f .row .n { flex:0 0 90px } .f .row .x { flex:0 0 auto }
+.rend { display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:8px; align-items:center; margin-bottom:8px }
+.rend .custom { display:flex; gap:6px; align-items:center } .rend .custom input { width:70px } .rend .custom span { color:var(--dim) }
+.choice { display:inline-flex; border:1px solid var(--line2); border-radius:var(--r); overflow:hidden }
+.choice button { border:none; border-radius:0; background:none; padding:7px 14px; color:var(--fg2) } .choice button.on { background:var(--panel2); color:var(--fg) }
+.savebar { position:sticky; bottom:0; margin-top:14px; background:var(--panel2); border:1px solid var(--line2); border-radius:var(--r); padding:10px 14px; display:flex; gap:10px; align-items:center; box-shadow:0 -6px 20px rgba(0,0,0,.35) }
+.savebar .sp { flex:1 } .savebar.hidden { display:none }
+pre.log { margin:0; padding:12px 14px; background:#0d1216; border-radius:0 0 var(--r) var(--r); font:12px/1.55 ui-monospace,Menlo,Consolas,monospace; max-height:380px; overflow:auto; white-space:pre-wrap; color:var(--fg2) }
+dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line2); border-radius:12px; padding:22px; width:560px; max-width:95vw } dialog::backdrop { background:rgba(0,0,0,.6) }
+dialog h3 { margin:0 0 14px; font-size:17px } dialog .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px }
+.urlprev { background:#0f151b; border:1px dashed var(--line2); border-radius:var(--r); padding:8px 10px; color:var(--fg2); word-break:break-all }
+.empty { padding:40px 20px; text-align:center; color:var(--dim) }
+.tag { display:inline-block; padding:1px 7px; border-radius:4px; background:var(--panel2); color:var(--fg2); font-size:12px }
+.warn { color:var(--warn) } .bad { color:var(--bad) }
+@media (max-width:900px) { body { flex-direction:column } nav { width:auto; height:auto; position:static; max-height:40vh } .path { grid-template-columns:1fr } .path .arrow { transform:rotate(90deg); height:20px } .f { grid-template-columns:1fr } .f .help { grid-column:1 } }
+@media (prefers-reduced-motion:no-preference) { .lamp.running { animation:none } }
 </style>
 </head>
 <body>
-<header>
-  <h1><a href="#" onclick="go('list');return false" style="color:inherit">caricoder3</a><span id="sysline"></span></h1>
-  <div class="sp"></div>
-  <div class="sys" id="sysright"></div>
-</header>
+<nav>
+  <div class="brand">caricoder3<small id="sysline">connecting…</small></div>
+  <div class="list" id="rail"></div>
+  <div class="foot"><button class="primary" onclick="newChannel()">New channel</button><div class="sys" id="sysright"></div></div>
+</nav>
 <main id="main"></main>
-
 <dialog id="dlg"></dialog>
 
 <script>
 "use strict";
 const $ = (s, el=document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const fmtRate = b => b >= 1e6 ? (b/1e6).toFixed(2)+" Mb/s" : b >= 1e3 ? (b/1e3).toFixed(0)+" kb/s" : (b|0)+" b/s";
-const fmtUp = s => { s = Math.floor(s); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${s%60}s`; };
-let view = { name: "list" }, timer = null, sys = null;
+const fmtRate = b => !b ? "—" : b >= 1e6 ? (b/1e6).toFixed(2)+" Mb/s" : b >= 1e3 ? (b/1e3).toFixed(0)+" kb/s" : (b|0)+" b/s";
+const fmtUp = s => { s = Math.floor(s||0); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${s%60}s`; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const RES = [["", "Same as source"], ["1920x1080","1080p (1920 × 1080)"], ["1280x720","720p (1280 × 720)"], ["960x540","540p (960 × 540)"], ["854x480","480p (854 × 480)"], ["640x360","360p (640 × 360)"], ["426x240","240p (426 × 240)"], ["custom","Custom…"]];
+const VBR = ["400k","600k","800k","1M","1.5M","2M","2.5M","3M","4M","5M","6M","8M","10M","12M"];
+const ABR = ["64k","96k","128k","160k","192k","256k","320k","384k"];
+const MUX = [["", "Variable (no padding)"], ["2M","2 Mb/s"],["3M","3 Mb/s"],["4M","4 Mb/s"],["5M","5 Mb/s"],["6M","6 Mb/s"],["8M","8 Mb/s"],["10M","10 Mb/s"],["12M","12 Mb/s"],["15M","15 Mb/s"],["20M","20 Mb/s"],["custom","Custom…"]];
+
+let view = { name: null }, timer = null, sys = null, channels = [], dirty = false, logOpen = false;
 
 async function api(path, opts={}) {
   const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
@@ -65,210 +114,293 @@ async function api(path, opts={}) {
   if (!r.ok || (j && j.ok === false)) throw new Error((j && j.error) || (r.status + " " + r.statusText));
   return j;
 }
-function go(name, arg) { view = { name, arg }; render(); }
-function schedule(ms) { clearTimeout(timer); timer = setTimeout(render, ms); }
-function showMsg(el, text, cls) { el.innerHTML = `<div class="msg ${cls}">${esc(text)}</div>`; }
+function schedule(ms) { clearTimeout(timer); timer = setTimeout(refresh, ms); }
+function showMsg(text, cls) { const m = $("#msg"); if (m) m.innerHTML = `<div class="msg ${cls}">${esc(text)}</div>`; }
 
-async function loadSys() {
+/* ---------- data ---------- */
+async function loadAll() {
   try { sys = await api("/api/system"); } catch(e) { sys = null; }
-  $("#sysline").textContent = sys ? `${sys.version} on ${sys.host}` : "";
-  $("#sysright").textContent = sys ? `${sys.running} of ${sys.channels} channels running · up ${fmtUp(sys.uptime)}` : "cannot reach the supervisor";
+  $("#sysline").textContent = sys ? `${sys.version} on ${sys.host}` : "cannot reach the supervisor";
+  $("#sysright").textContent = sys ? `${sys.running} of ${sys.channels} running · up ${fmtUp(sys.uptime)}` : "";
+  try { channels = (await api("/api/channels")).channels; } catch(e) { channels = []; }
 }
+function renderRail() {
+  $("#rail").innerHTML = channels.map(c => {
+    const st = c.stats || {}, inp = st.input || {}, out = st.output || {};
+    return `<div class="ch ${view.name===c.name?"on":""}" onclick="openChannel('${esc(c.name)}')">
+      <span class="lamp ${c.state}"></span>
+      <div><b>${esc(c.name)}</b><i>${esc(c.state)}${c.state==="running"?" · "+fmtUp(c.uptime):""}</i></div>
+      <div class="rate">${c.state==="running" ? `${fmtRate(inp.bitrate)}<br>${fmtRate(out.bitrate)}` : ""}</div></div>`;
+  }).join("") || `<div class="empty">No channels yet.</div>`;
+}
+function openChannel(name) { if (dirty && !confirm("Leave without saving the changes?")) return; dirty = false; view = { name }; refresh(); }
 
-/* ---------- the list ---------- */
-async function renderList() {
-  const m = $("#main");
-  let data; try { data = await api("/api/channels"); } catch(e) { m.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
-  const rows = data.channels.map(c => {
-    const st = c.stats || {}, inp = st.input || {}, out = st.output || {}, svc = st.service || {};
+/* ---------- overview (no channel chosen) ---------- */
+function renderOverview() {
+  const rows = channels.map(c => { const st=c.stats||{}, inp=st.input||{}, out=st.output||{}, svc=st.service||{};
+    const what = (svc.streams||[]).map(s => s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : `${s.codec||""} copy`).join(", ");
     const outs = (c.outputs && c.outputs.outputs) || [];
-    const what = (svc.streams || []).map(s => s.mode === "transcode" ? `${s.from || ""} → ${s.codec || ""}${s.size ? " " + s.size : ""}` : `${s.codec || ""} copy`).filter(Boolean).slice(0,4).join(", ");
-    return `<tr class="row" onclick="go('chan','${esc(c.name)}')">
-      <td><span class="dot ${c.state}"></span>${esc(c.name)}</td>
-      <td>${esc(c.state)}${c.state==='running' ? ` <span class="small">${fmtUp(c.uptime)}</span>` : c.why ? ` <span class="small">${esc(c.why)}</span>` : ""}</td>
-      <td class="mono">${esc((c.config||{}).input || "")}</td>
-      <td>${c.state==='running' ? fmtRate(inp.bitrate||0) : "–"}</td>
-      <td>${c.state==='running' ? fmtRate(out.bitrate||0) : "–"}</td>
-      <td class="small">${esc(what)}</td>
-      <td>${outs.length ? outs.map(o => `<span class="mono">${esc(o.type)}</span>`).join(" ") : (c.state==='running' ? "none" : "")}</td>
-    </tr>`;
-  }).join("");
-  m.innerHTML = `
-    <div class="toolbar"><h2 style="margin:0">Channels</h2><div class="sp"></div><button class="primary" onclick="newChannel()">New channel</button></div>
-    <div class="panel" style="padding:0">
-    <table><thead><tr><th>Name</th><th>State</th><th>Input</th><th>In</th><th>Out</th><th>Streams</th><th>Outputs</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="7" class="small" style="padding:24px;text-align:center">No channels yet. "New channel" makes one.</td></tr>`}</tbody></table></div>`;
-  schedule(2000);
+    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${c.state}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
+  $("#main").innerHTML = `<div class="head"><h1>Channels</h1><div class="sp"></div></div>
+    <section class="card"><table><thead><tr><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="7" class="empty">No channels yet. "New channel" on the left makes one: give it a name and a source, and it is ready to be set up.</td></tr>`}</tbody></table></section>`;
 }
 
-/* ---------- one channel ---------- */
-let tab = "status";
+/* ---------- a channel ---------- */
+let current = null;   // the channel object as last fetched
 async function renderChan(name) {
-  const m = $("#main");
-  let data; try { data = await api("/api/channels/" + encodeURIComponent(name)); } catch(e) { m.innerHTML = `<div class="msg err">${esc(e.message)}</div> <button onclick="go('list')">Back</button>`; return; }
-  const c = data.channel, running = c.state === "running";
-  const head = `
-    <div class="toolbar">
-      <a href="#" onclick="go('list');return false">← Channels</a>
-      <h2 style="margin:0 8px"><span class="dot ${c.state}"></span>${esc(c.name)}</h2>
-      <span class="small">${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? " · " + esc(c.why) : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}</span>
-      <div class="sp"></div>
-      <button onclick="act('${esc(name)}','start')" ${running?"disabled":""}>Start</button>
-      <button onclick="act('${esc(name)}','stop')" ${!running?"disabled":""}>Stop</button>
-      <button onclick="act('${esc(name)}','restart')">Restart</button>
-      <button class="danger" onclick="delChannel('${esc(name)}')">Delete</button>
-    </div>
-    <div id="msg"></div>
-    <div class="tabs">${["status","outputs","settings","log"].map(t => `<button class="${tab===t?"on":""}" onclick="tab='${t}';render()">${t[0].toUpperCase()+t.slice(1)}</button>`).join("")}</div>`;
-  let body = "";
-  if (tab === "status") body = statusTab(c);
-  else if (tab === "outputs") body = outputsTab(c);
-  else if (tab === "settings") body = settingsTab(c);
-  else body = `<pre class="log">${esc((c.log||[]).join("\n")) || "(nothing yet)"}</pre>`;
-  m.innerHTML = head + body;
-  if (tab === "settings") fillForm(c.config || {});
-  if (tab !== "settings") schedule(2000);
+  let data; try { data = await api("/api/channels/" + encodeURIComponent(name)); } catch(e) { $("#main").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; view = {name:null}; return; }
+  const c = current = data.channel, running = c.state === "running";
+  const formHtml = $("#settings") ? null : settingsHtml();   // keep the form while editing
+  if (!$("#main .head") || $("#main").dataset.chan !== name) {
+    $("#main").dataset.chan = name;
+    $("#main").innerHTML = `
+      <div class="head"><h1><span class="lamp ${c.state}" id="hlamp"></span>${esc(c.name)}</h1><span class="state" id="hstate"></span><div class="sp"></div>
+        <span id="hbtns"></span></div>
+      <div id="msg"></div>
+      <div class="path" id="path"></div>
+      <section class="card" id="outputs"></section>
+      <section class="card" id="settingscard"><header><h2>Settings</h2><span class="hint">A running channel restarts when settings are saved.</span></header><div class="body" id="settings">${settingsHtml()}</div></section>
+      <section class="card ${logOpen?"":"collapsed"}" id="logcard"><header><h2>Log</h2><span class="hint">The last lines this channel wrote</span><div class="sp"></div><button class="quiet tog" onclick="logOpen=!logOpen;this.closest('section').classList.toggle('collapsed')">${logOpen?"Hide":"Show"}</button></header><div class="body" style="padding:0"><pre class="log" id="log"></pre></div></section>
+      <div class="savebar hidden" id="savebar"><span>Settings changed</span><div class="sp"></div><button class="quiet" onclick="fillForm(current.config||{});setDirty(false)">Discard</button><button class="primary" onclick="saveChannel()">Save changes</button></div>`;
+    fillForm(c.config || {});
+  }
+  $("#hlamp").className = "lamp " + c.state;
+  $("#hstate").innerHTML = `${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? ` · <span class="bad">${esc(c.why)}</span>` : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}`;
+  $("#hbtns").innerHTML = `<button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button> <button class="danger quiet" onclick="delChannel()">Delete</button>`;
+  $("#path").innerHTML = pathHtml(c);
+  $("#outputs").innerHTML = outputsHtml(c);
+  $("#log").textContent = (c.log||[]).join("\n") || "(nothing yet)";
+  renderRail();
 }
 
-function statusTab(c) {
-  const st = c.stats; if (!st) return `<div class="panel small">No statistics: the channel is ${esc(c.state)}.</div>`;
+function pathHtml(c) {
+  const st = c.stats; if (!st) return `<div class="node"><h3>Source</h3><div class="sub">${esc((c.config||{}).input||"")}</div></div><div class="arrow">›</div><div class="node"><h3>Processing</h3><div class="sub">Not running</div></div><div class="arrow">›</div><div class="node"><h3>Outputs</h3><div class="sub">${((c.saved_outputs||{}).outputs||[]).length} saved</div></div>`;
   const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
-  const kv = (k,v) => `<div class="kv"><b>${k}</b><span>${v}</span></div>`;
-  const streams = (svc.streams||[]).map(s => `<tr>
-      <td class="mono">0x${(s.pid||0).toString(16).padStart(4,"0")}</td><td>${esc(s.mode||"")}</td>
-      <td>${esc(s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : (s.codec||""))}</td>
-      <td>${s.decoder?esc(s.decoder+" → "+(s.encoder||"")):""}</td>
-      <td>${s.frames_out!=null?`${s.frames_in||0} in / ${s.frames_out} out`:""}${s.decode_errors?` <span style="color:var(--warn)">${s.decode_errors} decode errors</span>`:""}${s.input_dropped?` <span style="color:var(--warn)">${s.input_dropped} dropped</span>`:""}${s.silence_ms?` <span class="small">${s.silence_ms} ms silence</span>`:""}${s.failed?` <span style="color:var(--bad)">failed</span>`:""}</td>
-      <td>${s.slack_min_ms!=null?`${s.slack_ms!=null?s.slack_ms.toFixed(0)+" ms":"–"} (min ${s.slack_min_ms.toFixed(0)})`:""}</td></tr>`).join("");
+  const inBad = inp.last_packet_age_ms > 2000 || inp.bitrate === 0;
+  const xs = (svc.streams||[]).filter(s => s.mode === "transcode");
+  const proc = !(svc.streams||[]).length ? `<span style="color:var(--dim)">Waiting for the source</span>` : xs.length ? xs.map(s => `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}${s.encoder?` <span style="color:var(--dim)">on ${s.encoder}</span>`:""}`).join("<br>") : "Copied as is";
+  const slack = xs.length ? Math.min(...xs.map(s => s.slack_min_ms ?? 1e9)) : null;
+  const outs = (c.outputs && c.outputs.outputs) || [];
+  const oerr = outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0);
   return `
-    <div class="panel"><h2>Input</h2><div class="grid">
-      ${kv("Bit rate", fmtRate(inp.bitrate||0))}${kv("Last packet", inp.last_packet_age_ms!=null && inp.last_packet_age_ms>=0 ? inp.last_packet_age_ms+" ms ago" : "–")}
-      ${kv("CC errors", inp.cc_errors??0)}${kv("Sync errors", inp.sync_errors??0)}${kv("Socket overflow", inp.socket_overflow??0)}
-      ${kv("PES dropped", inp.pes_dropped??0)}${kv("PCR jumps", inp.pcr_jumps??0)}</div></div>
-    <div class="panel"><h2>Clock</h2><div class="grid">
-      ${kv("Locked", clk.locked?"yes":"no")}${kv("Drift", (clk.drift_ppm??0).toFixed(1)+" ppm")}${kv("Jitter", (clk.jitter_us??0).toFixed(0)+" µs")}
-      ${kv("Discontinuities", clk.discontinuities??0)}${kv("Held units", clk.held_units??0)}</div></div>
-    <div class="panel"><h2>Output</h2><div class="grid">
-      ${kv("Mode", esc(out.mode||""))}${kv("Bit rate", fmtRate(out.bitrate||0))}${kv("Mux rate", fmtRate(out.muxrate||0))}${kv("Null", (out.null_percent??0).toFixed(1)+"%")}
-      ${kv("Dropped units", out.dropped_units??0)}${kv("Late units", out.late_units??0)}${kv("Worst late", (out.max_late_ms??0).toFixed(1)+" ms")}${kv("Send errors", out.send_errors??0)}
-      ${kv("Programs", svc.programs??1)}</div></div>
-    <div class="panel"><h2>Streams</h2><table><thead><tr><th>PID</th><th>Mode</th><th>Codec</th><th>Where</th><th>Frames</th><th>Time to spare</th></tr></thead><tbody>${streams}</tbody></table></div>`;
+    <div class="node ${inBad?"bad":""}"><h3>Source</h3><div class="big">${fmtRate(inp.bitrate)}</div>
+      <div class="sub">${esc(inp.url||"")}</div>
+      <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}</div></div>
+    <div class="arrow">›</div>
+    <div class="node"><h3>Processing</h3><div class="sub" style="font-size:14px;color:var(--fg)">${proc}</div>
+      <div class="sub">${xs.length ? `${xs.reduce((a,s)=>a+(s.frames_out||0),0)} frames out · ${slack!=null&&slack<1e9?`${(slack/1000).toFixed(1)} s to spare`:""}${xs.some(s=>s.failed)?` · <span class="flag bad">a transcoder failed</span>`:""}${xs.reduce((a,s)=>a+(s.input_dropped||0),0)?` · <span class="flag">${xs.reduce((a,s)=>a+(s.input_dropped||0),0)} frames dropped</span>`:""}` : (svc.streams||[]).length ? `${(svc.streams||[]).length} streams, program ${svc.number??""}` : ""}</div></div>
+    <div class="arrow">›</div>
+    <div class="node"><h3>Outputs</h3><div class="big">${fmtRate(out.bitrate)}</div>
+      <div class="sub">${esc(out.mode==="cbr"?`constant ${fmtRate(out.muxrate)}, ${(out.null_percent||0).toFixed(0)}% padding`:"variable rate")}</div>
+      <div class="sub">${outs.length} output${outs.length===1?"":"s"}${oerr?` · <span class="flag">${oerr} send errors</span>`:""}${out.late_units?` · <span class="flag">${out.late_units} late</span>`:""}${out.dropped_units?` · <span class="flag bad">${out.dropped_units} dropped</span>`:""}</div></div>`;
 }
 
-function outputsTab(c) {
+/* ---------- outputs ---------- */
+const TYPES = {
+  udp:  {label:"UDP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"],["iface","Interface (optional)",""]],
+         make:f=>`udp://${f.host}:${f.port}${f.ttl&&f.ttl!=="8"?"?ttl="+f.ttl:""}${f.iface?(f.ttl&&f.ttl!=="8"?"&":"?")+"iface="+f.iface:""}`},
+  rtp:  {label:"RTP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"]], make:f=>`rtp://${f.host}:${f.port}${f.ttl&&f.ttl!=="8"?"?ttl="+f.ttl:""}`},
+  srtc: {label:"SRT — call a receiver", fields:[["host","Receiver address",""],["port","Port","9000"],["latency","Latency (ms)","120"],["passphrase","Passphrase (optional, 10+ chars)",""],["streamid","Stream id (optional)",""]],
+         make:f=>`srt://${f.host}:${f.port}?latency=${f.latency||120}${f.passphrase?"&passphrase="+enc(f.passphrase):""}${f.streamid?"&streamid="+enc(f.streamid):""}`},
+  srtl: {label:"SRT — listen for receivers", fields:[["port","Port","9000"],["latency","Latency (ms)","120"],["passphrase","Passphrase (optional, 10+ chars)",""]],
+         make:f=>`srt://:${f.port}?latency=${f.latency||120}${f.passphrase?"&passphrase="+enc(f.passphrase):""}`},
+  ristc:{label:"RIST — call a receiver", fields:[["host","Receiver address",""],["port","Port","9100"],["buffer","Buffer (ms)","1000"],["secret","Secret (optional)",""]],
+         make:f=>`rist://${f.host}:${f.port}?buffer=${f.buffer||1000}${f.secret?"&secret="+enc(f.secret)+"&aes-type=128":""}`},
+  ristl:{label:"RIST — listen for receivers", fields:[["port","Port","9100"],["buffer","Buffer (ms)","1000"],["secret","Secret (optional)",""]],
+         make:f=>`rist://@:${f.port}?buffer=${f.buffer||1000}${f.secret?"&secret="+enc(f.secret)+"&aes-type=128":""}`},
+  rtmp: {label:"RTMP — push to a server", fields:[["host","Server",""],["port","Port","1935"],["app","Application","live"],["stream","Stream key / name",""]],
+         make:f=>`rtmp://${f.host}${f.port&&f.port!=="1935"?":"+f.port:""}/${f.app||"live"}/${f.stream}`},
+  hls:  {label:"HLS — serve to players", fields:[["segment","Segment length (s)","4"],["window","Segments in the playlist","6"],["port","Also on its own port (optional)",""],["dir","Also write to a folder (optional)",""]],
+         make:f=>`hls://${f.port?":"+f.port:""}?segment=${f.segment||4}&window=${f.window||6}${f.dir?"&dir="+enc(f.dir):""}`},
+  file: {label:"Record to a file", fields:[["path","File path","/var/recordings/channel.ts"]], make:f=>`file://${f.path}`},
+};
+const enc = s => encodeURIComponent(s);
+function outputsHtml(c) {
   const running = c.state === "running";
-  const outs = (c.outputs && c.outputs.outputs) || ((c.saved_outputs||{}).outputs||[]).map(o => Object.assign({state:"(saved; starts with the channel)"}, o));
-  const rows = outs.map(o => `<tr>
-      <td class="mono">${esc(o.id)}</td><td>${esc(o.type||"")}</td><td class="mono">${esc(o.url)}</td><td>${esc(o.state||"")}</td>
-      <td>${o.packets!=null ? `${o.packets} pkts${o.errors?`, <span style="color:var(--warn)">${o.errors} errors</span>`:""}${o.overruns?`, <span style="color:var(--bad)">${o.overruns} overruns</span>`:""}${o.rtt_ms!=null?`, rtt ${o.rtt_ms} ms`:""}${o.reconnects?`, ${o.reconnects} reconnects`:""}` : ""}</td>
-      <td>${o.saved?"saved":""}</td>
-      <td>${running ? `<button class="danger" onclick="delOutput('${esc(c.name)}','${esc(o.id)}')">Remove</button>` : ""}</td></tr>`).join("");
-  const hls = outs.find(o => o.type === "hls");
-  return `
-    <div class="panel">
-    <div class="toolbar"><h2 style="margin:0">Outputs</h2><div class="sp"></div>
-      <button class="primary" onclick="addOutput('${esc(c.name)}')" ${running?"":"disabled title='start the channel first'"}>Add output</button></div>
-    <table><thead><tr><th>Id</th><th>Type</th><th>URL</th><th>State</th><th>Counters</th><th></th><th></th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="7" class="small">No outputs.</td></tr>`}</tbody></table>
-    ${hls ? `<p class="small">HLS through this server: <a href="/hls/${esc(c.name)}/index.m3u8" target="_blank">/hls/${esc(c.name)}/index.m3u8</a></p>` : ""}
-    <p class="small">URL forms: <span class="mono">udp://239.1.1.1:5000?ttl=8</span> · <span class="mono">srt://host:9000</span> (caller) · <span class="mono">srt://:9000</span> (listener) · <span class="mono">rist://host:9100</span> · <span class="mono">rist://@:9100</span> (listener) · <span class="mono">rtmp://host/app/stream</span> · <span class="mono">hls://:8080?segment=4</span> · <span class="mono">/path/file.ts</span></p>
-    </div>`;
+  const outs = (c.outputs && c.outputs.outputs) || ((c.saved_outputs||{}).outputs||[]).map(o => Object.assign({state:"saved; starts with the channel"}, o));
+  const rows = outs.map(o => `<tr><td><span class="tag">${esc(o.type||o.url.split(":")[0])}</span></td><td class="mono">${esc(o.url)}</td><td>${esc(o.state||"")}</td>
+      <td style="color:var(--fg2)">${o.packets!=null ? `${o.packets.toLocaleString()} pkts${o.errors?` · <span class="warn">${o.errors} errors</span>`:""}${o.overruns?` · <span class="bad">${o.overruns} overruns</span>`:""}${o.rtt_ms!=null?` · rtt ${o.rtt_ms} ms`:""}${o.retransmitted?` · ${o.retransmitted} resent`:""}${o.reconnects?` · ${o.reconnects} reconnects`:""}` : ""}</td>
+      <td class="mono" style="color:var(--dim)">${esc(o.id)}</td>
+      <td style="text-align:right">${running ? `<button class="quiet danger" onclick="delOutput('${esc(o.id)}')">Remove</button>` : ""}</td></tr>`).join("");
+  const hls = outs.find(o => (o.type||"").startsWith("hls") || o.url.startsWith("hls"));
+  return `<header><h2>Outputs</h2><span class="hint">Added and removed while the channel runs; the others are not disturbed.</span><div class="sp"></div>
+      <button class="primary" onclick="addOutput()" ${running?"":"disabled title='Start the channel first'"}>Add output</button></header>
+    <div class="body" style="padding:0 0 4px">${rows ? `<table><thead><tr><th>Type</th><th>Where</th><th>State</th><th>Counters</th><th>Id</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No outputs yet. ${running?"Add one above.":"Start the channel, then add outputs."}</div>`}
+    ${hls ? `<div style="padding:10px 16px;color:var(--fg2)">Players open <a href="/hls/${esc(c.name)}/index.m3u8" target="_blank">http://${location.host}/hls/${esc(c.name)}/index.m3u8</a></div>` : ""}</div>`;
 }
-
-function settingsTab(c) {
-  const f = (id, label, help, input) => `<label for="${id}">${label}</label>${input || `<input id="${id}">`}${help?`<div class="help">${help}</div>`:""}`;
-  return `<div class="panel"><form class="form" onsubmit="saveChannel('${esc(c.name)}');return false">
-    ${f("input","Input","udp://[source@]group:port?iface=eth1 or rtp://; a file path for testing")}
-    ${f("program","Program","Service number to take; 0 = the first in the PAT")}
-    ${f("muxrate","Mux rate","5M, 4500k, or empty for VBR")}
-    ${f("vbr","VBR","With a mux rate: VBR capped at it", `<select id="vbr"><option value="false">no (CBR)</option><option value="true">yes</option></select>`)}
-    ${f("delay","Delay (ms)","Empty: 500, or 800 / 3000 when audio / video is transcoded")}
-    <label>Video renditions</label><div class="list" id="video"></div><div class="help">Each line is one rendition: h264:3M, 1280x720:h264:2M, hevc:2M. Empty: video copied.</div>
-    <label>Audio</label><div class="list" id="audio"></div><div class="help">aac:128k, mp2:192k, mp3:128k; PID=spec for one stream (0x103=aac:96k). Empty: copied.</div>
-    ${f("decoder","Decoder","", `<select id="decoder"><option value="">auto</option><option>nvidia</option><option>cpu</option></select>`)}
-    ${f("encoder","Encoder","", `<select id="encoder"><option value="">auto</option><option>nvidia</option><option>cpu</option></select>`)}
-    ${f("gpu","GPU","Which NVIDIA card (0, 1, ...)")}
-    ${f("preset","Preset","x264/x265: ultrafast … medium; NVENC: p1 … p7")}
-    ${f("gop","GOP (ms)","Longest gap between key frames; empty = 2000")}
-    ${f("vbv","VBV (ms)","Video decoder buffer; empty = 1000")}
-    ${f("service_name","Service name","Replaces the name in the SDT")}
-    ${f("service_provider","Provider","")}
-    ${f("enabled","Enabled","A disabled channel is not started", `<select id="enabled"><option value="true">yes</option><option value="false">no</option></select>`)}
-    <div></div><div><button class="primary" type="submit">Save</button> <span class="small">A running channel restarts with the new settings.</span></div>
-  </form></div>`;
+function addOutput() {
+  const d = $("#dlg");
+  const sel = Object.entries(TYPES).map(([k,t]) => `<option value="${k}">${t.label}</option>`).join("");
+  d.innerHTML = `<h3>Add an output</h3><div class="f"><label>Type</label><select id="o_type">${sel}</select><div id="o_fields" style="display:contents"></div>
+    <label>Will be</label><div class="urlprev" id="o_prev"></div></div><div id="o_msg" style="margin-top:10px"></div>
+    <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">Add output</button></div>`;
+  const fields = () => { const t = TYPES[$("#o_type").value]; $("#o_fields").innerHTML = t.fields.map(([k,l,ph]) => `<label>${l}</label><input data-k="${k}" value="${esc(ph)}" placeholder="${esc(ph)}">`).join(""); d.querySelectorAll("input").forEach(i => i.oninput = prev); prev(); };
+  const vals = () => { const f = {}; d.querySelectorAll("input[data-k]").forEach(i => f[i.dataset.k] = i.value.trim()); return f; };
+  const prev = () => { $("#o_prev").textContent = TYPES[$("#o_type").value].make(vals()); };
+  $("#o_type").onchange = fields; fields();
+  $("#o_go").onclick = async () => {
+    try { await api(`/api/channels/${encodeURIComponent(view.name)}/outputs`, {method:"POST", body: JSON.stringify({url: TYPES[$("#o_type").value].make(vals())})}); d.close(); schedule(200); }
+    catch(e) { $("#o_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
 }
-function listRow(id, val) { return `<div><input value="${esc(val)}"><button type="button" onclick="this.parentNode.remove()">×</button></div>`; }
-function fillList(id, arr) { const el = $("#"+id); el.innerHTML = (arr||[]).map(v => listRow(id, v)).join("") + `<div><button type="button" onclick="this.parentNode.insertAdjacentHTML('beforebegin', listRow('${id}',''))">+ add</button></div>`; }
-function fillForm(cfg) {
-  for (const k of ["input","program","muxrate","delay","gpu","preset","gop","vbv","service_name","service_provider"]) { const el = $("#"+k); if (el) el.value = cfg[k] ?? ""; }
-  $("#vbr").value = String(!!cfg.vbr); $("#enabled").value = String(cfg.enabled !== false);
-  $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || "";
-  fillList("video", cfg.video); fillList("audio", cfg.audio);
-}
-function readForm() {
-  const v = id => $("#"+id).value.trim();
-  const num = id => v(id) === "" ? undefined : Number(v(id));
-  const list = id => [...$("#"+id).querySelectorAll("input")].map(i => i.value.trim()).filter(Boolean);
-  const cfg = { input: v("input"), program: num("program"), muxrate: v("muxrate") || undefined, vbr: v("vbr") === "true",
-    delay: num("delay"), video: list("video"), audio: list("audio"), decoder: v("decoder") || undefined, encoder: v("encoder") || undefined,
-    gpu: num("gpu"), preset: v("preset") || undefined, gop: num("gop"), vbv: num("vbv"),
-    service_name: v("service_name") || undefined, service_provider: v("service_provider") || undefined, enabled: v("enabled") === "true" };
-  for (const k of Object.keys(cfg)) if (cfg[k] === undefined || (Array.isArray(cfg[k]) && !cfg[k].length)) delete cfg[k];
-  return cfg;
-}
-
-/* ---------- actions ---------- */
-async function act(name, what) {
-  try { await api(`/api/channels/${encodeURIComponent(name)}/${what}`, {method:"POST"}); } catch(e) { showMsg($("#msg"), e.message, "err"); return; }
-  schedule(400);
-}
-async function saveChannel(name) {
-  const cfg = readForm();
-  if (!cfg.input) { showMsg($("#msg"), "The input is needed.", "err"); return; }
-  try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify(cfg, null, 2) + "\n"}); showMsg($("#msg"), "Saved.", "ok"); }
-  catch(e) { showMsg($("#msg"), e.message, "err"); }
-}
-async function delChannel(name) {
-  if (!confirm(`Delete channel ${name}? It is stopped and its files removed.`)) return;
-  try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"DELETE"}); go("list"); } catch(e) { showMsg($("#msg"), e.message, "err"); }
-}
-async function delOutput(name, id) {
-  if (!confirm(`Remove output ${id}?`)) return;
-  try { await api(`/api/channels/${encodeURIComponent(name)}/outputs/${encodeURIComponent(id)}`, {method:"DELETE"}); } catch(e) { showMsg($("#msg"), e.message, "err"); return; }
+async function delOutput(id) {
+  if (!confirm(`Remove output ${id}? Receivers of it lose the stream.`)) return;
+  try { await api(`/api/channels/${encodeURIComponent(view.name)}/outputs/${encodeURIComponent(id)}`, {method:"DELETE"}); } catch(e) { showMsg(e.message, "err"); return; }
   schedule(200);
 }
-function addOutput(name) {
-  const d = $("#dlg");
-  d.innerHTML = `<h3 style="margin-top:0">Add an output to ${esc(name)}</h3>
-    <div class="form"><label>URL</label><input id="o_url" placeholder="udp://239.1.1.1:5000"><label>Id</label><input id="o_id" placeholder="(made up if empty)"></div>
-    <div id="o_msg" style="margin-top:10px"></div>
-    <div class="toolbar" style="margin-top:14px;justify-content:flex-end"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">Add</button></div>`;
-  $("#o_go").onclick = async () => {
-    try { await api(`/api/channels/${encodeURIComponent(name)}/outputs`, {method:"POST", body: JSON.stringify({url: $("#o_url").value.trim(), id: $("#o_id").value.trim()})}); d.close(); schedule(200); }
-    catch(e) { showMsg($("#o_msg"), e.message, "err"); }
-  };
-  d.showModal(); $("#o_url").focus();
+
+/* ---------- settings ---------- */
+function sel(id, opts, extra="") { return `<select id="${id}" ${extra}>${opts.map(o => Array.isArray(o) ? `<option value="${esc(o[0])}">${esc(o[1])}</option>` : `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>`; }
+function settingsHtml() {
+  return `<form onsubmit="saveChannel();return false" oninput="setDirty(true)" onchange="setDirty(true)">
+    <div class="f">
+      <label>Source</label><div class="row"><select id="in_kind" class="n" style="flex:0 0 140px" onchange="syncInput()"><option value="udp">UDP multicast</option><option value="rtp">RTP</option><option value="file">File (test)</option></select><input id="in_host" placeholder="239.5.5.5 (address)" oninput="syncInput()"><input id="in_port" class="n" placeholder="port" oninput="syncInput()"></div>
+      <div class="help">Interface: <input id="in_iface" style="width:120px;display:inline-block;padding:3px 7px" placeholder="any" oninput="syncInput()"> &nbsp; Source address for SSM: <input id="in_src" style="width:140px;display:inline-block;padding:3px 7px" placeholder="none" oninput="syncInput()"> &nbsp; <span class="mono" id="in_url"></span></div>
+      <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first.</span></div>
+      <label>Output rate</label><div class="row"><select id="muxsel" onchange="$('#muxcustom').style.display=this.value==='custom'?'':'none'">${MUX.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("")}</select><input id="muxcustom" class="n" placeholder="e.g. 4500k" style="display:none"><label style="flex:0 0 auto;display:flex;gap:6px;align-items:center"><input type="checkbox" id="vbr" style="width:auto"> peak only (VBR)</label></div>
+      <div class="help">Constant rate pads with null packets to exactly this rate (for satellite and cable). Variable sends only what there is.</div>
+    </div>
+    <h4 style="margin:22px 0 10px;font-size:14px">Video</h4>
+    <div class="f">
+      <label>Treatment</label><div><span class="choice"><button type="button" id="v_copy" onclick="setVideo(false)">Copy as is</button><button type="button" id="v_xc" onclick="setVideo(true)">Transcode</button></span></div>
+      <div id="v_rows" style="grid-column:1 / -1"></div>
+    </div>
+    <h4 style="margin:22px 0 10px;font-size:14px">Audio</h4>
+    <div class="f">
+      <label>Treatment</label><div class="row"><select id="a_codec" style="flex:0 0 220px" onchange="$('#a_rate').disabled=!this.value"><option value="">Copy as is</option><option value="aac">AAC</option><option value="mp2">MPEG-1 layer II (MP2)</option><option value="mp3">MP3</option></select><select id="a_rate" style="flex:0 0 140px">${ABR.map(r=>`<option>${r}</option>`).join("")}</select><span style="color:var(--dim)">Every audio stream of the program is treated the same.</span></div>
+    </div>
+    <h4 style="margin:22px 0 10px;font-size:14px">Hardware</h4>
+    <div class="f">
+      <label>Decode on</label>${sel("decoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
+      <label>Encode on</label>${sel("encoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
+      <label>Card</label>${sel("gpu", [["","Card 0"],["1","Card 1"],["2","Card 2"],["3","Card 3"]])}
+      <label>Speed / quality</label>${sel("preset", [["","Default (veryfast on CPU, p4 on NVIDIA)"],["ultrafast","Fastest"],["superfast","Faster"],["veryfast","Fast"],["faster","Balanced"],["medium","Better quality (CPU)"],["p1","NVIDIA p1 (fastest)"],["p3","NVIDIA p3"],["p4","NVIDIA p4"],["p5","NVIDIA p5"],["p7","NVIDIA p7 (best)"]])}
+    </div>
+    <details style="margin-top:22px"><summary style="cursor:pointer;color:var(--fg2)">Timing and service details</summary>
+    <div class="f" style="margin-top:12px">
+      <label>Delay</label><div class="row"><input id="delay" class="n" placeholder="auto"><span style="color:var(--dim)">ms of buffer between input and output. Empty: 500, or 800 / 3000 when audio / video is transcoded.</span></div>
+      <label>Key frame every</label><div class="row"><input id="gop" class="n" placeholder="2000"><span style="color:var(--dim)">ms. Sets the shortest HLS segment and how fast a player can join.</span></div>
+      <label>Video buffer</label><div class="row"><input id="vbv" class="n" placeholder="1000"><span style="color:var(--dim)">ms (VBV). Larger smooths quality, adds delay.</span></div>
+      <label>Service name</label><input id="service_name" placeholder="keep the source's">
+      <label>Provider</label><input id="service_provider" placeholder="keep the source's">
+      <label>Enabled</label><div class="row"><select id="enabled" style="flex:0 0 160px"><option value="true">Yes, run it</option><option value="false">No, keep it stopped</option></select></div>
+    </div></details>
+  </form>`;
+}
+function syncInput() {
+  const k = $("#in_kind").value, h = $("#in_host").value.trim(), p = $("#in_port").value.trim(), i = $("#in_iface").value.trim(), s = $("#in_src").value.trim();
+  const url = k === "file" ? h : `${k}://${s?s+"@":""}${h}${p?":"+p:""}${i?"?iface="+i:""}`;
+  $("#in_url").textContent = url;
+}
+function parseInput(url) {
+  const m = /^(udp|rtp):\/\/(?:([^@]+)@)?([^:?]+)(?::(\d+))?(?:\?(.*))?$/.exec(url || "");
+  if (!m) return { kind: "file", host: url || "", port: "", iface: "", src: "" };
+  const q = Object.fromEntries((m[5]||"").split("&").filter(Boolean).map(x => x.split("=")));
+  return { kind: m[1], host: m[3], port: m[4] || "", iface: q.iface || "", src: m[2] || "" };
+}
+function rendRow(spec) {
+  // spec: "WxH:codec:rate" | "codec:rate" | "codec"
+  let size = "", codec = "h264", rate = "";
+  const parts = (spec||"").split(":");
+  if (/^\d+x\d+$/.test(parts[0])) { size = parts.shift(); }
+  if (parts[0]) codec = parts[0];
+  rate = parts[1] || "";
+  const resKnown = RES.some(r => r[0] === size);
+  const rateKnown = !rate || VBR.includes(rate);
+  return `<div class="rend">
+    <div><select class="r_res" onchange="this.parentNode.querySelector('.custom').style.display=this.value==='custom'?'':'none'">${RES.map(r=>`<option value="${r[0]}" ${(resKnown?size:"custom")===r[0]?"selected":""}>${r[1]}</option>`).join("")}</select>
+      <div class="custom" style="margin-top:6px;${resKnown?"display:none":""}"><input class="r_w" placeholder="width" value="${size.split("x")[0]||""}"><span>×</span><input class="r_h" placeholder="height" value="${size.split("x")[1]||""}"></div></div>
+    <select class="r_codec"><option value="h264" ${codec==="h264"?"selected":""}>H.264</option><option value="hevc" ${codec==="hevc"?"selected":""}>HEVC / H.265</option></select>
+    <div><select class="r_rate" onchange="this.parentNode.querySelector('.r_rc').style.display=this.value==='custom'?'':'none'">${VBR.map(r=>`<option ${rate===r?"selected":""}>${r}</option>`).join("")}<option value="custom" ${rateKnown?"":"selected"}>Custom…</option></select><input class="r_rc" placeholder="e.g. 2500k" value="${rateKnown?"":esc(rate)}" style="margin-top:6px;${rateKnown?"display:none":""}"></div>
+    <button type="button" class="quiet" title="Remove this rendition" onclick="this.parentNode.remove();setDirty(true)">✕</button></div>`;
+}
+function setVideo(xc) {
+  $("#v_copy").classList.toggle("on", !xc); $("#v_xc").classList.toggle("on", xc);
+  const r = $("#v_rows");
+  if (!xc) { r.innerHTML = `<div style="color:var(--dim)">The video stream passes through untouched.</div>`; }
+  else if (!r.querySelector(".rend")) { r.innerHTML = rendHeader() + rendRow("h264:3M") + rendAdd(); }
+  setDirty(true);
+}
+const rendHeader = () => `<div class="rend" style="margin-bottom:4px;color:var(--dim);font-size:12px"><div>Resolution</div><div>Codec</div><div>Bit rate</div><div></div></div>`;
+const rendAdd = () => `<div><button type="button" class="quiet" onclick="this.parentNode.insertAdjacentHTML('beforebegin', rendRow('640x360:h264:1M'));setDirty(true)">+ Add a rendition</button> <span style="color:var(--dim);font-size:12px">Each rendition is a program of the output and a variant in HLS; key frames stay aligned.</span></div>`;
+function fillForm(cfg) {
+  const i = parseInput(cfg.input); $("#in_kind").value = i.kind; $("#in_host").value = i.host; $("#in_port").value = i.port; $("#in_iface").value = i.iface; $("#in_src").value = i.src; syncInput();
+  $("#program").value = cfg.program || "";
+  const mux = cfg.muxrate ? String(cfg.muxrate) : "";
+  if (MUX.some(m => m[0] === mux)) { $("#muxsel").value = mux; $("#muxcustom").style.display = "none"; } else { $("#muxsel").value = "custom"; $("#muxcustom").value = mux; $("#muxcustom").style.display = ""; }
+  $("#vbr").checked = !!cfg.vbr;
+  const vids = cfg.video || [];
+  $("#v_copy").classList.toggle("on", !vids.length); $("#v_xc").classList.toggle("on", !!vids.length);
+  $("#v_rows").innerHTML = vids.length ? rendHeader() + vids.map(rendRow).join("") + rendAdd() : `<div style="color:var(--dim)">The video stream passes through untouched.</div>`;
+  const a = (cfg.audio || [])[0] || ""; const ap = a.split("=").pop().split(":");
+  $("#a_codec").value = ap[0] && ["aac","mp2","mp3"].includes(ap[0]) ? ap[0] : ""; $("#a_rate").value = ap[1] && ABR.includes(ap[1]) ? ap[1] : "128k"; $("#a_rate").disabled = !$("#a_codec").value;
+  $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
+  for (const k of ["delay","gop","vbv","service_name","service_provider"]) $("#"+k).value = cfg[k] ?? "";
+  $("#enabled").value = String(cfg.enabled !== false);
+  setDirty(false);
+}
+function readForm() {
+  const v = id => $("#"+id).value.trim(), num = id => v(id) === "" ? undefined : Number(v(id));
+  const cfg = {};
+  cfg.input = $("#in_url").textContent;
+  if (num("program")) cfg.program = num("program");
+  const mux = $("#muxsel").value === "custom" ? v("muxcustom") : $("#muxsel").value; if (mux) cfg.muxrate = mux;
+  if ($("#vbr").checked && mux) cfg.vbr = true;
+  if ($("#v_xc").classList.contains("on")) {
+    cfg.video = [...$("#v_rows").querySelectorAll(".rend")].filter(r => r.querySelector(".r_res")).map(r => {
+      let size = r.querySelector(".r_res").value; if (size === "custom") size = `${r.querySelector(".r_w").value.trim()}x${r.querySelector(".r_h").value.trim()}`;
+      let rate = r.querySelector(".r_rate").value; if (rate === "custom") rate = r.querySelector(".r_rc").value.trim();
+      return `${size?size+":":""}${r.querySelector(".r_codec").value}${rate?":"+rate:""}`; });
+    if (!cfg.video.length) delete cfg.video;
+  }
+  if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
+  for (const k of ["decoder","encoder","preset","service_name","service_provider"]) if (v(k)) cfg[k] = v(k);
+  if (v("gpu")) cfg.gpu = Number(v("gpu"));
+  for (const k of ["delay","gop","vbv"]) if (num(k)) cfg[k] = num(k);
+  cfg.enabled = v("enabled") === "true";
+  return cfg;
+}
+function setDirty(d) { dirty = d; $("#savebar").classList.toggle("hidden", !d); }
+async function saveChannel() {
+  const cfg = readForm();
+  if (!cfg.input || cfg.input.endsWith("://")) { showMsg("A source address is needed.", "err"); return; }
+  for (const r of cfg.video || []) if (!/^(\d+x\d+:)?(h264|hevc)(:\S+)?$/.test(r)) { showMsg("A custom resolution needs both width and height, and a bit rate like 2500k.", "err"); return; }
+  try { await api(`/api/channels/${encodeURIComponent(view.name)}`, {method:"PUT", body: JSON.stringify(cfg, null, 2) + "\n"}); setDirty(false); showMsg("Saved." + (current && current.state === "running" ? " The channel is restarting with the new settings." : ""), "ok"); schedule(800); }
+  catch(e) { showMsg(e.message, "err"); }
+}
+async function act(what) {
+  try { await api(`/api/channels/${encodeURIComponent(view.name)}/${what}`, {method:"POST"}); } catch(e) { showMsg(e.message, "err"); return; }
+  schedule(500);
+}
+async function delChannel() {
+  if (!confirm(`Delete channel ${view.name}? It is stopped and its settings removed.`)) return;
+  try { await api(`/api/channels/${encodeURIComponent(view.name)}`, {method:"DELETE"}); dirty = false; view = {name:null}; $("#main").dataset.chan = ""; refresh(); } catch(e) { showMsg(e.message, "err"); }
 }
 function newChannel() {
   const d = $("#dlg");
-  d.innerHTML = `<h3 style="margin-top:0">New channel</h3>
-    <div class="form"><label>Name</label><input id="n_name" placeholder="letters, digits, - and _"><label>Input</label><input id="n_input" placeholder="udp://239.5.5.5:5000"></div>
-    <div id="n_msg" style="margin-top:10px"></div>
-    <div class="toolbar" style="margin-top:14px;justify-content:flex-end"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="n_go">Create</button></div>`;
+  d.innerHTML = `<h3>New channel</h3><div class="f"><label>Name</label><input id="n_name" placeholder="e.g. bet, cnn-hd (letters, digits, - and _)">
+    <label>Source</label><div class="row"><input id="n_host" placeholder="239.5.5.5"><input id="n_port" class="n" placeholder="port"></div>
+    <div class="help">A UDP multicast group and port. Everything else is set on the channel's page afterwards.</div></div>
+    <div id="n_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="n_go">Create channel</button></div>`;
   $("#n_go").onclick = async () => {
-    const name = $("#n_name").value.trim();
-    try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: $("#n_input").value.trim(), enabled: false}, null, 2)}); d.close(); tab = "settings"; go("chan", name); }
-    catch(e) { showMsg($("#n_msg"), e.message, "err"); }
+    const name = $("#n_name").value.trim(), host = $("#n_host").value.trim(), port = $("#n_port").value.trim();
+    try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: `udp://${host}${port?":"+port:""}`, enabled: false}, null, 2)}); d.close(); dirty = false; view = {name}; $("#main").dataset.chan = ""; refresh(); }
+    catch(e) { $("#n_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };
   d.showModal(); $("#n_name").focus();
 }
 
-async function render() {
+/* ---------- loop ---------- */
+async function refresh() {
   clearTimeout(timer);
-  await loadSys();
-  if (view.name === "chan") await renderChan(view.arg); else await renderList();
+  await loadAll();
+  renderRail();
+  if (view.name) await renderChan(view.name); else { $("#main").dataset.chan = ""; renderOverview(); }
+  schedule(2000);
 }
-render();
+refresh();
 </script>
 </body>
 </html>
