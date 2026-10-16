@@ -123,7 +123,7 @@ let filt = { q: "", st: "" };
 try { filt = Object.assign(filt, JSON.parse(localStorage.getItem("cc3filter") || "{}")); } catch(e) {}
 function setFilter() { filt = { q: $("#f_q").value.trim().toLowerCase(), st: $("#f_st").value }; try { localStorage.setItem("cc3filter", JSON.stringify(filt)); } catch(e) {} renderRail(); if (!view.name && view.page === "list") renderOverview(); }
 function visible(c) { return (!filt.q || c.name.toLowerCase().includes(filt.q)) && (!filt.st || health(c)[0] === filt.st); }
-function leaveOk() { if (dirty && !confirm("Leave without saving the changes?")) return false; dirty = false; return true; }
+function leaveOk() { if (dirty && !confirm("Leave without saving the changes?")) return false; dirty = false; closePreview(); return true; }
 function goList() { if (!leaveOk()) return; view = { name: null, page: "list" }; $("#main").dataset.chan = ""; refresh(); }
 function goServer() { if (!leaveOk()) return; view = { name: null, page: "server" }; $("#main").dataset.chan = ""; refresh(); }
 const prevCounters = {};   // per channel: the error counters at the last poll, to see what is still happening
@@ -190,7 +190,7 @@ function renderRail() {
       <div class="rate">${c.state==="running" ? `${fmtRate(inp.bitrate)}<br>${fmtRate(out.bitrate)}` : ""}</div></div>`;
   }).join("") || `<div class="empty">${channels.length ? "No channel matches the filter." : "No channels yet."}</div>`;
 }
-function openChannel(name) { if (!leaveOk()) return; view = { name, page: "list" }; refresh(); }
+function openChannel(name) { if (!leaveOk()) return; closePreview(); view = { name, page: "list" }; refresh(); }
 
 /* ---------- overview (no channel chosen) ---------- */
 function renderOverview() {
@@ -207,6 +207,56 @@ function renderOverview() {
 }
 
 const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${Math.floor(Date.now() / 5000)}`;
+
+/* ---------- the preview player ---------- */
+let preview = null;   // {name, temp, hls}
+function loadHls() {
+  if (window.Hls) return Promise.resolve();
+  return new Promise((ok, bad) => { const sc = document.createElement("script"); sc.src = "/hls.min.js"; sc.onload = ok; sc.onerror = () => bad(new Error("the player script did not load")); document.head.appendChild(sc); });
+}
+async function openPreview() {
+  if (!current || current.state !== "running") return;
+  const name = current.name;
+  if (preview && preview.name === name) { $("#pv").play(); return; }
+  closePreview();
+  const outs = (current.outputs && current.outputs.outputs) || [];
+  const temp = !outs.some(o => o.type === "hls");
+  try {
+    if (temp) await api(`/api/channels/${encodeURIComponent(name)}/outputs`, {method:"POST", body: JSON.stringify({url: "hls://?segment=1&window=4", id: "preview", save: false})});
+    await loadHls();
+  } catch(e) { showMsg("Preview: " + e.message, "err"); return; }
+  preview = { name, temp, hls: null };
+  $("#previewcard").style.display = ""; $("#pv_msg").style.display = "none";
+  const video = $("#pv"), url = `/hls/${encodeURIComponent(name)}/index.m3u8`;
+  $("#pv_hint").textContent = temp ? "A temporary 1-second-segment output, removed when closed · a few seconds behind the air" : "The channel's own HLS output · a few seconds behind the air";
+  if (Hls.isSupported()) {
+    const hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 10, manifestLoadingRetryDelay: 1000, levelLoadingRetryDelay: 1000, fragLoadingRetryDelay: 1000 });
+    preview.hls = hls;
+    hls.on(Hls.Events.ERROR, (ev, data) => {
+      if (!data.fatal) return;
+      const m = $("#pv_msg");
+      m.style.display = "";
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && /codec|bufferAppend|incompatible/i.test(data.details || "")) m.textContent = "This browser cannot decode this channel's video (HEVC needs Chrome or Edge on Windows with the HEVC extension, or Safari). An H.264 rendition would play everywhere.";
+      else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { m.textContent = "Waiting for the first segments…"; setTimeout(() => { if (preview && preview.hls === hls) hls.loadSource(url); }, 2000); }
+      else m.textContent = "Playback failed: " + (data.details || data.type);
+    });
+    hls.loadSource(url); hls.attachMedia(video);
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+  } else {
+    $("#pv_msg").style.display = ""; $("#pv_msg").textContent = "This browser cannot play HLS.";
+  }
+  renderChan(name);
+}
+function closePreview() {
+  if (!preview) return;
+  const p = preview; preview = null;
+  try { if (p.hls) p.hls.destroy(); } catch(e) {}
+  const v = $("#pv"); if (v) { v.pause(); v.removeAttribute("src"); v.load(); }
+  const card = $("#previewcard"); if (card) card.style.display = "none";
+  if (p.temp) api(`/api/channels/${encodeURIComponent(p.name)}/outputs/preview`, {method:"DELETE"}).catch(() => {});
+}
+window.addEventListener("beforeunload", () => { if (preview && preview.temp) navigator.sendBeacon && fetch(`/api/channels/${encodeURIComponent(preview.name)}/outputs/preview`, {method:"DELETE", keepalive: true}).catch(() => {}); });
 
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
@@ -250,6 +300,7 @@ async function renderChan(name) {
         <span id="hbtns"></span></div>
       <div id="msg"></div>
       <div class="path" id="path"></div>
+      <section class="card" id="previewcard" style="display:none"><header><h2>Preview</h2><span class="hint" id="pv_hint">A few seconds behind the air</span><div class="sp"></div><button class="quiet" onclick="closePreview()">Close</button></header><div class="body" style="padding:0;background:#000"><video id="pv" controls autoplay muted playsinline style="width:100%;max-height:60vh;display:block"></video><div id="pv_msg" style="padding:8px 14px;color:var(--warn);display:none"></div></div></section>
       <section class="card" id="outputs"></section>
       <section class="card" id="settingscard"><header><h2>Settings</h2><span class="hint">A running channel restarts when settings are saved.</span></header><div class="body" id="settings">${settingsHtml()}</div></section>
       <section class="card ${logOpen?"":"collapsed"}" id="logcard"><header><h2>Log</h2><span class="hint">The last lines this channel wrote</span><div class="sp"></div><button class="quiet tog" onclick="logOpen=!logOpen;this.closest('section').classList.toggle('collapsed')">${logOpen?"Hide":"Show"}</button></header><div class="body" style="padding:0"><pre class="log" id="log"></pre></div></section>
@@ -259,9 +310,10 @@ async function renderChan(name) {
   const [h, why] = health(c);
   $("#hlamp").className = "lamp " + h;
   $("#hstate").innerHTML = `${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? ` · <span class="bad">${esc(c.why)}</span>` : ""}${running && h === "warn" ? ` · <span class="warn">${esc(why)}</span>` : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}`;
-  $("#hbtns").innerHTML = `<button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button> <button class="danger quiet" onclick="delChannel()">Delete</button>`;
+  $("#hbtns").innerHTML = `<button onclick="openPreview()" ${running?"":"disabled"} ${preview?"class='primary'":""}>Preview</button> <button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button> <button class="danger quiet" onclick="delChannel()">Delete</button>`;
   $("#path").innerHTML = pathHtml(c);
   $("#outputs").innerHTML = outputsHtml(c);
+  if (!preview && running && ((c.outputs && c.outputs.outputs) || []).some(o => o.id === "preview") && !c._pvclean) { c._pvclean = true; api(`/api/channels/${encodeURIComponent(c.name)}/outputs/preview`, {method:"DELETE"}).catch(() => {}); }
   $("#log").textContent = (c.log||[]).join("\n") || "(nothing yet)";
   renderRail();
 }

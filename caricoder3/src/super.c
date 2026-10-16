@@ -72,6 +72,8 @@
 
 extern const unsigned char gui_html[];
 extern const unsigned int gui_html_len;
+extern const unsigned char gui_hls_js[];       /* hls.js, Apache-2.0 (gui/hls.js.LICENSE) */
+extern const unsigned int gui_hls_js_len;
 
 enum chan_state { CH_STOPPED, CH_STARTING, CH_RUNNING, CH_STOPPING, CH_FAILED };
 
@@ -903,6 +905,17 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         }
         return;
     }
+    if (!strcmp(p, "/hls.min.js")) {
+        resp->status = 200;
+        resp->type = "application/javascript";
+        resp->body = malloc(gui_hls_js_len);
+        if (resp->body) {
+            memcpy(resp->body, gui_hls_js, gui_hls_js_len);
+            resp->body_len = gui_hls_js_len;
+        }
+        snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: max-age=86400\r\n");
+        return;
+    }
     if (!strcmp(p, "/api/system")) {
         char *out = NULL;
         size_t len = 0;
@@ -1254,8 +1267,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 free(doc);
                 return;
             }
-            snprintf(reqline, sizeof(reqline), "{\"cmd\": \"add-output\", \"url\": %s, \"id\": %s, \"save\": true}",
-                     json_quote(url, q2, sizeof(q2)), json_quote(id, q3, sizeof(q3)));
+            snprintf(reqline, sizeof(reqline), "{\"cmd\": \"add-output\", \"url\": %s, \"id\": %s, \"save\": %s}",
+                     json_quote(url, q2, sizeof(q2)), json_quote(id, q3, sizeof(q3)),
+                     json_get_bool(doc, root, "save", true) ? "true" : "false");
             free(doc);
             {
                 struct chan tmp;

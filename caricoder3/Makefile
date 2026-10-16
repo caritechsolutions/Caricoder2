@@ -106,11 +106,13 @@ SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/source.c src/thum
 OBJ      = $(SRC:src/%.c=build/rel/%.o) build/rel/gui_html.o
 OBJ_ASAN = $(SRC:src/%.c=build/asan/%.o) build/asan/gui_html.o
 
-# The GUI, one HTML file, built into the binary.
-build/gui_html.c: gui/index.html
+# The GUI, one HTML file plus the hls.js player, built into the binary.
+build/gui_html.c: gui/index.html gui/hls.min.js
 	@mkdir -p build
 	@( echo 'const unsigned char gui_html[] = {'; od -An -tx1 -v gui/index.html | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g'; \
-	   echo '};'; echo "const unsigned int gui_html_len = $$(wc -c < gui/index.html);" ) > $@
+	   echo '};'; echo "const unsigned int gui_html_len = $$(wc -c < gui/index.html);"; \
+	   echo 'const unsigned char gui_hls_js[] = {'; od -An -tx1 -v gui/hls.min.js | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g'; \
+	   echo '};'; echo "const unsigned int gui_hls_js_len = $$(wc -c < gui/hls.min.js);" ) > $@
 build/rel/gui_html.o: build/gui_html.c
 	@mkdir -p build/rel
 	$(CC) -c -o $@ $<

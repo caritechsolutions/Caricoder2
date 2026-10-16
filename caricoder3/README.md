@@ -307,6 +307,12 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
   settings form with "Scan source…", the log; a Server page with CPU,
   memory, the NVIDIA cards (through `nvidia-smi`) and the network
   interfaces, sampled every two seconds.
+- A **Preview** button on each running channel plays it in the page
+  (hls.js, built in, Apache-2.0): the channel's own HLS output when it
+  has one, otherwise a temporary `hls://?segment=1` output added for the
+  session and removed on close. The picture is 3–4 s behind the air.
+  HEVC plays where the browser decodes it (Chrome/Edge on Windows with
+  the HEVC extension, Safari); elsewhere an H.264 rendition is needed.
 - `/api/...` — the same, as JSON (see below)
 - `/hls/NAME/index.m3u8` — every channel's HLS output, through one port
 
@@ -363,7 +369,7 @@ The API (basic auth, JSON in and out):
 | `PUT /api/channels/NAME` | create or replace the channel (body: the JSON above) |
 | `DELETE /api/channels/NAME` | stop it and remove its files |
 | `POST /api/channels/NAME/start`, `/stop`, `/restart` | |
-| `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "..."}`: add an output, saved |
+| `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "...", "save": true}`: add an output (`"save": false` for one that should not survive a restart) |
 | `DELETE /api/channels/NAME/outputs/ID` | remove one |
 | `GET /api/channels/NAME/log` | the last lines it wrote |
 | `GET /api/channels/NAME/thumb.jpg` | a picture of the channel, up to 5 s old (320 wide) |
