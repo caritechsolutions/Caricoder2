@@ -98,7 +98,7 @@ CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
        src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
        src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_selftest.c
-SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/probe.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
+SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/probe.c src/sysstat.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
 
 # The first rule below is the GUI's, so the default goal is named here.
 .DEFAULT_GOAL := all

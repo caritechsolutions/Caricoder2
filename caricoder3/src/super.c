@@ -60,6 +60,7 @@
 #include "json.h"
 #include "log.h"
 #include "sink.h"
+#include "sysstat.h"
 
 #define CHANNELS_MAX    64
 #define LOG_LINES       200
@@ -892,8 +893,10 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                    "\"running\": %d, \"port\": %d, \"channels_dir\": ",
                 CC3_VERSION, json_quote(host, q, sizeof(q)), (double)(clock_now_ns() - s->t_start) / 1e9,
                 s->n, running, s->port);
-        fprintf(f, "%s, \"backends\": ", json_quote(s->channels_dir, q, sizeof(q)));
+        fprintf(f, "%s, \"system\": ", json_quote(s->channels_dir, q, sizeof(q)));
         pthread_mutex_unlock(&s->lock);
+        sysstat_json(f);
+        fprintf(f, ", \"backends\": ");
         {
             char *b = NULL, *qb = malloc(16384);
             size_t bl = 0;
@@ -1368,6 +1371,7 @@ int super_main(int argc, char **argv)
     sigaction(SIGHUP, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    sysstat_start();
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);
@@ -1411,6 +1415,7 @@ int super_main(int argc, char **argv)
     }
     pthread_mutex_unlock(&s.lock);
     http_stop(s.http);
+    sysstat_stop();
     for (int i = 0; i < s.n; i++)
         free(s.ch[i].cfg);
     log_info("stopped");
