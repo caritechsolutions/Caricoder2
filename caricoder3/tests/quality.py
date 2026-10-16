@@ -118,6 +118,66 @@ def measure(src_raw, out_raw, size, fps, log_dir):
     return res
 
 
+def pairs_at(spts, opts, offset, period, limit):
+    """Frame pairs (source index, output index) with out_pts = src_pts + offset."""
+    smap = {}
+    for i, t in enumerate(spts):
+        if t is not None:
+            smap[int(round(t / period))] = i
+    pairs = []
+    for j, t in enumerate(opts):
+        if t is None:
+            continue
+        i = smap.get(int(round((t - offset) / period)))
+        if i is not None:
+            pairs.append((i, j))
+            if len(pairs) >= limit:
+                break
+    return pairs
+
+
+def match_frames(src, si, out, oi, spts, opts, size, fps, work, limit):
+    """
+    Which source frame is which output frame? caricoder3 keeps the PTS,
+    but a channel that has absorbed a source restart carries a constant
+    offset on its time line, so the offset is found first (the most
+    common out - in difference), and then, because an offset of a whole
+    number of frames would match every frame to a neighbour just as
+    well, the shift that makes the pictures agree best is chosen by
+    comparing a few frames.
+    """
+    period = 1.0 / fps
+    # the common offset, to the millisecond
+    hist = {}
+    s_sorted = [t for t in spts if t is not None]
+    for t in [x for x in opts if x is not None][::max(1, len(opts) // 50)]:
+        for u in s_sorted[::max(1, len(s_sorted) // 50)]:
+            d = round(t - u, 3)
+            hist[d] = hist.get(d, 0) + 1
+    if not hist:
+        return []
+    base = max(hist, key=hist.get)
+    best, best_score = None, -1.0
+    for k in range(-3, 4):
+        off = base + k * period
+        pairs = pairs_at(spts, opts, off, period, 400)
+        if len(pairs) < 10:
+            continue
+        sample = pairs[len(pairs) // 4::max(1, len(pairs) // 8)][:6]
+        s_raw = os.path.join(work, "probe_s.yuv")
+        o_raw = os.path.join(work, "probe_o.yuv")
+        decode_raw(src, si, size, s_raw, {i for i, _ in sample})
+        decode_raw(out, oi, size, o_raw, {j for _, j in sample})
+        m = measure(s_raw, o_raw, size, fps, work)
+        vals = [v for v in m["psnr"] if v != float("inf")] or [99.0]
+        score = sum(vals) / len(vals)
+        if score > best_score:
+            best, best_score = off, score
+    if best is None:
+        return []
+    return pairs_at(spts, opts, best, period, limit)
+
+
 def bitrate(path, stream_index):
     """Bit rate of one stream from its packets (bits per second of PTS)."""
     p = run(["ffprobe", "-v", "error", "-select_streams", f"{stream_index}", "-show_packets",
@@ -212,22 +272,9 @@ def main():
             fps = eval(ov.get("avg_frame_rate", "25/1").replace("/", "/1.0/")) if "/" in ov.get("avg_frame_rate", "") else 25
             spts = frame_pts(src, sv["index"])
             opts = frame_pts(out, ov["index"])
-            smap = {}
-            for i, t in enumerate(spts):
-                if t is not None:
-                    smap[round(t, 3)] = i
-            pairs = []
-            for j, t in enumerate(opts):
-                if t is None:
-                    continue
-                i = smap.get(round(t, 3))
-                if i is None:
-                    continue
-                pairs.append((i, j))
-                if len(pairs) >= a.max_frames:
-                    break
+            pairs = match_frames(src, sv["index"], out, ov["index"], spts, opts, size, fps, work, a.max_frames)
             if len(pairs) < 10:
-                die(f"only {len(pairs)} frames of the output have a matching PTS in the source "
+                die(f"only {len(pairs)} frames of the output could be matched to the source "
                     f"(source {len(spts)} frames, output {len(opts)}); are these the same content?")
             s_raw = os.path.join(work, f"src_{size}.yuv")
             o_raw = os.path.join(work, f"out_{size}.yuv")
