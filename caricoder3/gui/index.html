@@ -199,14 +199,15 @@ function renderOverview() {
     const what = (svc.streams||[]).map(s => s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : `${s.codec||""} copy`).join(", ");
     const outs = (c.outputs && c.outputs.outputs) || [];
     const [h, why] = health(c);
-    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td class="thumbcell">${c.state==="running" ? `<img class="thumb" src="${thumbUrl(c.name)}" alt="" onerror="this.style.visibility='hidden'">` : `<div class="thumb off"></div>`}</td><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
+    return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
   const counts = { ok:0, warn:0, bad:0, off:0 }; channels.forEach(c => counts[health(c)[0]]++);
   $("#main").innerHTML = `<div class="head"><h1>Channels</h1><span class="state">${channels.length ? `${counts.ok} fine · ${counts.warn} with trouble · ${counts.bad} failed · ${counts.off} stopped${shown.length !== channels.length ? ` · showing ${shown.length} of ${channels.length}` : ""}` : ""}</span><div class="sp"></div></div>
-    <section class="card"><table><thead><tr><th></th><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="8" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
+    <section class="card"><table><thead><tr><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="7" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
 }
 
-const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${Math.floor(Date.now() / 10000)}`;
+let thumbStamp = 0;   // fixed when a channel page is opened: the picture is fetched once, not refreshed
+const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${thumbStamp}`;
 
 /* ---------- the preview player ---------- */
 let preview = null;   // {name, temp, hls}
@@ -310,6 +311,7 @@ async function renderChan(name) {
   const formHtml = $("#settings") ? null : settingsHtml();   // keep the form while editing
   if (!$("#main .head") || $("#main").dataset.chan !== name) {
     $("#main").dataset.chan = name;
+    thumbStamp = Date.now();
     $("#main").innerHTML = `
       <a class="back" onclick="goList()">‹ All channels</a>
       <div class="head"><h1><span class="lamp" id="hlamp"></span>${esc(c.name)}</h1><span class="state" id="hstate"></span><div class="sp"></div>
