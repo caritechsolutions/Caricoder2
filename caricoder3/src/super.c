@@ -1230,7 +1230,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             resp->type = "image/jpeg";
             resp->body = data;
             resp->body_len = len;
-            snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: no-store\r\n");
+            /* the GUI asks with a 10 s cache key; a redraw in between must not refetch */
+            snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: max-age=10\r\n");
             return;
         } else if (!strcmp(rest, "log")) {
             char *out = NULL;

@@ -206,7 +206,7 @@ function renderOverview() {
     <tbody>${rows || `<tr><td colspan="8" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
 }
 
-const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${Math.floor(Date.now() / 5000)}`;
+const thumbUrl = name => `/api/channels/${encodeURIComponent(name)}/thumb.jpg?t=${Math.floor(Date.now() / 10000)}`;
 
 /* ---------- the preview player ---------- */
 let preview = null;   // {name, temp, hls}
@@ -226,8 +226,24 @@ async function openPreview() {
     await loadHls();
   } catch(e) { showMsg("Preview: " + e.message, "err"); return; }
   preview = { name, temp, hls: null };
-  $("#previewcard").style.display = ""; $("#pv_msg").style.display = "none";
+  $("#previewcard").style.display = ""; $("#pv_msg").style.display = ""; $("#pv_msg").textContent = "Waiting for the first segments…";
   const video = $("#pv"), url = `/hls/${encodeURIComponent(name)}/index.m3u8`;
+  // a fresh output has no segments for a few seconds: the player is started once two are listed
+  const mine = preview;
+  let have = false;
+  for (let i = 0; i < 90 && preview === mine; i++) {
+    try {
+      const master = await (await fetch(url, {cache: "no-store"})).text();
+      // one rendition: index.m3u8 is the media playlist itself; several: it lists them
+      const first = master.includes("#EXTINF") ? null : master.split("\n").map(l => l.trim()).find(l => l && !l.startsWith("#"));
+      const media = first ? await (await fetch(url.replace(/index\.m3u8$/, first), {cache: "no-store"})).text() : master;
+      if ((media.match(/#EXTINF/g) || []).length >= 2) { have = true; break; }
+    } catch(e) {}
+    await sleep(500);
+  }
+  if (preview !== mine) return;
+  if (!have) { $("#pv_msg").textContent = "No segments after 45 s: the channel is not producing video (see its log)."; return; }
+  $("#pv_msg").style.display = "none";
   $("#pv_hint").textContent = temp ? "A temporary 1-second-segment output, removed when closed · a few seconds behind the air" : "The channel's own HLS output · a few seconds behind the air";
   if (Hls.isSupported()) {
     const hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 10, manifestLoadingRetryDelay: 1000, levelLoadingRetryDelay: 1000, fragLoadingRetryDelay: 1000 });
@@ -236,7 +252,7 @@ async function openPreview() {
       if (!data.fatal) return;
       const m = $("#pv_msg");
       m.style.display = "";
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && /codec|bufferAppend|incompatible/i.test(data.details || "")) m.textContent = "This browser cannot decode this channel's video (HEVC needs Chrome or Edge on Windows with the HEVC extension, or Safari). An H.264 rendition would play everywhere.";
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && /codec|bufferAppend|incompatible/i.test(data.details || "")) m.textContent = "This browser cannot decode this channel (" + ((data.error && data.error.message) || data.details) + "). HEVC plays in Chrome/Edge on Windows with the HEVC extension and in Safari; H.264 + AAC plays everywhere.";
       else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { m.textContent = "Waiting for the first segments…"; setTimeout(() => { if (preview && preview.hls === hls) hls.loadSource(url); }, 2000); }
       else m.textContent = "Playback failed: " + (data.details || data.type);
     });
