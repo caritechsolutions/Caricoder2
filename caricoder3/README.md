@@ -307,12 +307,22 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
   settings form with "Scan source…", the log; a Server page with CPU,
   memory, the NVIDIA cards (through `nvidia-smi`) and the network
   interfaces, sampled every two seconds.
-- A **Preview** button on each running channel plays it in the page
-  (hls.js, built in, Apache-2.0): the channel's own HLS output when it
-  has one, otherwise a temporary `hls://?segment=10` output added for the
-  session and removed on close. The picture is about 30 s behind the air.
-  HEVC plays where the browser decodes it (Chrome/Edge on Windows with
-  the HEVC extension, Safari); elsewhere an H.264 rendition is needed.
+- The **player** sits in the Source box of a channel, with the channel's
+  snapshot as its poster (hls.js, built in, Apache-2.0). Play starts the
+  *preview*: a separate small process makes the channel into 426x240
+  H.264 at 300 kb/s with one AAC track, in 1 s HLS segments, so it starts
+  in a few seconds and plays in any browser. When the channel has several
+  audio tracks a list picks the one heard (the preview restarts with it).
+  The preview reads a multicast input itself; for any other input it
+  reads a loopback copy of the channel's output (a hidden `pvtap`
+  output). It stops when the player stops, when the page is left, or
+  after a minute without requests. **Watch original** plays the channel's
+  own stream instead: its HLS output when it has one, otherwise a
+  temporary `hls://?segment=10` output (about 30 s behind the air; HEVC
+  plays only where the browser decodes it).
+- The **Streams** card lists the input and output streams (kind, codec,
+  size, language, rate, PID) beside a graph of the input and output bit
+  rates over the last two minutes.
 - `/api/...` — the same, as JSON (see below)
 - `/hls/NAME/index.m3u8` — every channel's HLS output, through one port
 
@@ -365,13 +375,15 @@ The API (basic auth, JSON in and out):
 | `GET /api/system` | version, host, uptime, channels, what this build can do, and `system`: CPU, memory, GPUs, interfaces |
 | `POST /api/probe` | `{"url": "...", "seconds": 3, "program": 0}`: what is in a source (runs `caricoder3 probe`; up to 30 s) |
 | `GET /api/channels` | every channel: state, pid, uptime, restarts, config, statistics, outputs |
-| `GET /api/channels/NAME` | the same for one, plus its last 200 log lines |
+| `GET /api/channels/NAME` | the same for one, plus its last 200 log lines, `history` (input/output bit rate every 2 s, last 2 min) and `preview` (running, uptime, drop) |
 | `PUT /api/channels/NAME` | create or replace the channel (body: the JSON above) |
 | `DELETE /api/channels/NAME` | stop it and remove its files |
 | `POST /api/channels/NAME/start`, `/stop`, `/restart` | |
 | `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "...", "save": true}`: add an output (`"save": false` for one that should not survive a restart) |
 | `DELETE /api/channels/NAME/outputs/ID` | remove one |
 | `GET /api/channels/NAME/log` | the last lines it wrote |
+| `POST /api/channels/NAME/preview` | `{"drop": [pid, ...]}`: start the preview (or restart it leaving out other streams); answers `{"url": "/hls/NAME.preview/index.m3u8"}` |
+| `DELETE /api/channels/NAME/preview` | stop it |
 | `GET /api/channels/NAME/thumb.jpg` | a picture of the channel, up to 5 s old (320 wide) |
 | `GET /hls/NAME/...` | the channel's HLS output (no password) |
 

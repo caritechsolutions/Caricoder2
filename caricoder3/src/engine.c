@@ -50,6 +50,8 @@
 
 struct engine {
     struct engine_cfg cfg;
+    uint64_t pid_in_bytes[8192];    /* PES bytes per PID: from the input, to the mux */
+    uint64_t pid_out_bytes[8192];
     struct demux *dmx;
     struct mux *mux;
     stc_t delay;
@@ -139,6 +141,7 @@ static void deliver(struct engine *e, struct es_unit *u)
     int n = 0;
 
     if (e->xc_mode[u->pid] == STREAM_COPY) {
+        e->pid_out_bytes[u->pid & 0x1FFF] += u->len;
         mux_push(e->mux, u);
         return;
     }
@@ -185,6 +188,7 @@ static void on_xcode_out(void *opaque, struct es_unit *u)
             x = e->xc_list[k];
     if (x && now != NOPTS)
         xcode_note_slack(x, u->t0 - now, u->pts);
+    e->pid_out_bytes[u->pid & 0x1FFF] += u->len;
     mux_push(e->mux, u);
     if (live)
         pthread_mutex_unlock(&e->lock);
@@ -728,6 +732,7 @@ static void on_unit(void *opaque, struct es_unit *u)
     if (thumb_enabled() && u->pid == e->thumb_pid && e->thumb_codec != CODEC_NONE)
         thumb_tap_unit(u, e->thumb_codec);  /* a copied video stream: decoded for the thumbnail now and then */
     pthread_mutex_lock(&e->lock);
+    e->pid_in_bytes[u->pid & 0x1FFF] += u->len;
     if (!e->cfg.live) {
         stc_t t1;
 
@@ -1179,12 +1184,19 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
         out->clock_ppm = pll_ppm(&e->pll);
         out->clock_jitter_us = e->pll.jitter / 27.0;
     }
-    if (e->have_prog)
+    if (e->have_prog) {
         out->prog = e->prog;
+        for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++) {
+            out->es_in_bytes[i] = e->pid_in_bytes[e->prog.es[i].pid & 0x1FFF];
+            out->es_out_bytes[i] = e->pid_out_bytes[e->prog.es[i].pid & 0x1FFF];
+        }
+    }
     out->n_prog = e->n_prog;
     out->n_xc = e->n_xc;
-    for (int k = 0; k < e->n_xc; k++)
+    for (int k = 0; k < e->n_xc; k++) {
         xcode_get_stats(e->xc_list[k], &out->xc[k]);
+        out->xc_out_bytes[k] = e->pid_out_bytes[out->xc[k].out_pid & 0x1FFF];
+    }
     out->xc_orphans = e->xc_orphans;
     pthread_mutex_unlock(&e->lock);
 }

@@ -220,12 +220,53 @@ static void json_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* What a stream is, for the GUI: video, audio, subtitles, teletext, data; and its language. */
+static const char *es_kind(const struct program *p, int idx, char *lang, size_t langlen)
+{
+    int st = p->es[idx].stream_type;
+    const uint8_t *d = p->blob + p->es[idx].desc_off;
+    int n = p->es[idx].desc_len;
+
+    lang[0] = 0;
+    for (int i = 0; i + 2 <= n; ) {
+        int tag = d[i], dl = d[i + 1];
+
+        if (i + 2 + dl > n)
+            break;
+        if (tag == 0x0A && dl >= 3)
+            snprintf(lang, langlen, "%.3s", (const char *)d + i + 2);
+        i += 2 + dl;
+    }
+    switch (st) {
+    case 0x01: case 0x02: case 0x10: case 0x1B: case 0x24: return "video";
+    case 0x03: case 0x04: case 0x0F: case 0x11: case 0x81: case 0x87: return "audio";
+    case 0x06:
+        if (program_es_has_desc(p, idx, 0x6A, NULL) || program_es_has_desc(p, idx, 0x7A, NULL) ||
+            program_es_has_desc(p, idx, 0x05, "AC-3"))
+            return "audio";
+        if (program_es_has_desc(p, idx, 0x59, NULL))
+            return "subtitles";
+        if (program_es_has_desc(p, idx, 0x56, NULL) || program_es_has_desc(p, idx, 0x46, NULL))
+            return "teletext";
+        return "data";
+    default: return "data";
+    }
+}
+
 struct rates {
     double in_bps, out_bps, null_pct;
     double uptime;
     int64_t input_age_ms;       /* -1 when not applicable */
     uint64_t rx_overflow, rx_truncated, send_errors;
+    const struct engine_stats *prev;    /* the previous sample, for per-stream rates; NULL in a file run */
+    double dt;
 };
+
+/* bits per second of a byte counter between two samples; -1 when unknown */
+static double rate_of(uint64_t now, uint64_t was, double dt)
+{
+    return dt > 0 && now >= was ? (double)(now - was) * 8.0 / dt : -1;
+}
 
 static void stats_json(struct ctx *c, const struct engine_stats *st,
                        const struct rates *r, FILE *f)
@@ -314,9 +355,34 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
                 if (st->xc[j].pid == in_pid && st->xc[j].out_pid == in_pid)
                     x = &st->xc[j];
         }
-        fprintf(f, "%s\n      {\"pid\": %u, \"stream_type\": %u, \"codec\": ",
-                n_out++ ? "," : "", x ? x->out_pid : in_pid, st->prog.es[i].stream_type);
+        {
+            char lang[8];
+            const char *kind = es_kind(&st->prog, i, lang, sizeof(lang));
+
+            fprintf(f, "%s\n      {\"pid\": %u, \"in_pid\": %u, \"stream_type\": %u, \"kind\": \"%s\", \"language\": ",
+                    n_out++ ? "," : "", x ? x->out_pid : in_pid, in_pid, st->prog.es[i].stream_type, kind);
+            json_str(f, lang);
+            fprintf(f, ", \"codec\": ");
+        }
         json_str(f, stream_type_name(st->prog.es[i].stream_type));
+        if (r->prev && r->prev->have_program) {
+            /* the same stream in the previous sample */
+            int pi = -1, pk = -1;
+
+            for (int j = 0; j < r->prev->prog.n_es; j++)
+                if (r->prev->prog.es[j].pid == in_pid)
+                    pi = j;
+            if (x)
+                for (int j = 0; j < r->prev->n_xc; j++)
+                    if (r->prev->xc[j].out_pid == x->out_pid)
+                        pk = j;
+            if (pi >= 0 && k < 0)
+                fprintf(f, ", \"bitrate_in\": %.0f", rate_of(st->es_in_bytes[i], r->prev->es_in_bytes[pi], r->dt));
+            if (!x && pi >= 0)
+                fprintf(f, ", \"bitrate\": %.0f", rate_of(st->es_out_bytes[i], r->prev->es_out_bytes[pi], r->dt));
+            else if (x && pk >= 0)
+                fprintf(f, ", \"bitrate\": %.0f", rate_of(st->xc_out_bytes[k >= 0 ? k : (int)(x - st->xc)], r->prev->xc_out_bytes[pk], r->dt));
+        }
         if (!x) {
             fprintf(f, ", \"mode\": \"copy\"}");
             continue;
@@ -717,6 +783,8 @@ static int run_live(struct options *o, struct ctx *c)
             r.null_pct = 100.0 * (double)(st.out.nulls - prev.out.nulls) /
                          (double)(st.out.packets - prev.out.packets);
         r.input_age_ms = last_rx ? (now - last_rx) / 1000000 : -1;
+        r.prev = &prev;
+        r.dt = dt;
         {
             struct source_stats ss;
 

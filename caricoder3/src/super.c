@@ -49,6 +49,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -67,6 +69,9 @@
 #define LOG_LINES       200
 #define LOG_LINE_MAX    240
 #define STOP_GRACE_MS   6000
+#define HIST_N          60                  /* samples kept */
+#define HIST_STEP_S     2
+#define PREVIEW_IDLE_S  60                  /* no request for this long: the preview stops */
 #define DEFAULT_PORT    8550
 #define DEFAULT_CONFIG  "/etc/caricoder3/caricoder3.json"
 
@@ -93,6 +98,22 @@ struct chan {
     int log_n, log_head;
     char log_part[LOG_LINE_MAX];
     int log_part_len;
+
+    /* the last two minutes of bit rates, a sample every HIST_STEP_S */
+    float hist_in[HIST_N], hist_out[HIST_N];
+    int hist_n, hist_head;
+    int64_t hist_last_ns;
+
+    /* the preview: a small H.264 copy of the channel for the GUI's player,
+     * made by a child process while someone watches */
+    pid_t pv_pid;
+    int pv_log_fd;
+    int64_t pv_started_ns, pv_last_hit_ns;
+    char pv_drop[128];                      /* the --drop list it runs with */
+    char pv_why[120];
+    bool pv_restart;                        /* start again with pv_next once the old one is gone */
+    bool pv_tap;                            /* the channel has the "pvtap" output for it */
+    char pv_next[128];
 };
 
 struct super {
@@ -544,6 +565,247 @@ static void chan_reap(struct super *s, struct chan *c, int status)
 }
 
 /* Once around: logs, exits, restarts, stop timeouts. Called with the lock. */
+static char *chan_stats(struct super *s, struct chan *c);
+
+/* One bit-rate sample from the channel's statistics file. */
+static void chan_sample(struct super *s, struct chan *c, int64_t now)
+{
+    char *st;
+    static struct json_doc doc;             /* main thread only */
+    char err[100];
+    int root, in, out;
+    float bi = 0, bo = 0;
+
+    if (c->state != CH_RUNNING || now - c->hist_last_ns < (int64_t)HIST_STEP_S * 1000000000LL)
+        return;
+    c->hist_last_ns = now;
+    st = chan_stats(s, c);
+    if (!st)
+        return;
+    root = json_parse(&doc, st, err, sizeof(err));
+    free(st);
+    if (root < 0)
+        return;
+    in = json_get(&doc, root, "input");
+    out = json_get(&doc, root, "output");
+    if (in >= 0)
+        bi = (float)json_get_num(&doc, in, "bitrate", 0);
+    if (out >= 0)
+        bo = (float)json_get_num(&doc, out, "bitrate", 0);
+    {
+        int k = (c->hist_head + c->hist_n) % HIST_N;
+
+        if (c->hist_n == HIST_N)
+            c->hist_head = (c->hist_head + 1) % HIST_N;
+        else
+            c->hist_n++;
+        c->hist_in[k] = bi;
+        c->hist_out[k] = bo;
+    }
+}
+
+static char *chan_ctl(struct super *s, struct chan *c, const char *request);
+
+/* The loopback output the preview reads when it cannot share the channel's
+ * input, removed with the preview. */
+static void preview_untap(struct super *s, struct chan *c)
+{
+    if (c->pv_tap) {
+        c->pv_tap = false;
+        if (c->state == CH_RUNNING)
+            free(chan_ctl(s, c, "{\"cmd\": \"remove-output\", \"id\": \"pvtap\"}"));
+    }
+}
+
+/* A multicast UDP/RTP input can be joined by a second receiver; a unicast
+ * port cannot (the kernel hands each datagram to one socket), nor can an
+ * SRT/RIST link. */
+static bool input_shareable(const char *url)
+{
+    const char *h;
+    char host[64];
+    size_t n;
+    struct in_addr a;
+
+    if (strncmp(url, "udp://", 6) && strncmp(url, "rtp://", 6))
+        return false;
+    h = url + 6;
+    if (*h == '@')
+        h++;
+    if (*h == '[')
+        return !strncasecmp(h + 1, "ff", 2);
+    n = strcspn(h, ":/?");
+    if (n == 0 || n >= sizeof(host))
+        return false;
+    memcpy(host, h, n);
+    host[n] = 0;
+    return inet_pton(AF_INET, host, &a) == 1 && IN_MULTICAST(ntohl(a.s_addr));
+}
+
+static void preview_stop(struct chan *c)
+{
+    if (c->pv_pid > 0) {
+        kill(c->pv_pid, SIGTERM);
+        log_info("channel %s: preview stopped", c->name);
+    }
+}
+
+static void preview_reap(struct super *s, struct chan *c)
+{
+    int status;
+
+    if (c->pv_pid > 0 && waitpid(c->pv_pid, &status, WNOHANG) == c->pv_pid) {
+        if (c->pv_log_fd >= 0) {
+            /* its last words, for the API */
+            char buf[512];
+            ssize_t r = read(c->pv_log_fd, buf, sizeof(buf) - 1);
+
+            if (r > 0) {
+                buf[r] = 0;
+                snprintf(c->pv_why, sizeof(c->pv_why), "%.119s", buf);
+            }
+            close(c->pv_log_fd);
+            c->pv_log_fd = -1;
+        }
+        c->pv_pid = 0;
+        preview_untap(s, c);
+    }
+}
+
+/*
+ * The preview process: the channel's source (its UDP input, or its first
+ * UDP output when the input is a link only one process can hold) made
+ * into 426x240 H.264 at 300 kb/s with AAC, served as HLS with 1 s
+ * segments on run_dir/NAME.preview.http. `drop` names the audio streams
+ * to leave out, so the player hears one.
+ */
+static bool preview_start(struct super *s, struct chan *c, const char *drop, char *err, size_t errlen)
+{
+    static struct json_doc doc;             /* under the supervisor's lock */
+    char e[200];
+    int root, a;
+    const char *input;
+    char src[SINK_URL_MAX] = "";
+    int program = 0;
+    char *argv[40];
+    char store[8][SINK_URL_MAX];
+    int n = 0, k = 0, pfd[2];
+    pid_t pid;
+
+    if (c->state != CH_RUNNING) {
+        snprintf(err, errlen, "the channel is not running");
+        return false;
+    }
+    if (!c->cfg || (root = json_parse(&doc, c->cfg, e, sizeof(e))) < 0 || !(input = json_get_str(&doc, root, "input", NULL))) {
+        snprintf(err, errlen, "no input in the channel's config");
+        return false;
+    }
+    if (input_shareable(input)) {
+        snprintf(src, sizeof(src), "%s", input);
+        program = (int)json_get_num(&doc, root, "program", 0);
+    } else {
+        /* the channel sends a copy of its output to a free loopback port */
+        struct sockaddr_in sa;
+        socklen_t sl = sizeof(sa);
+        int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        char req[300], *reply;
+
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (fd < 0 || bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 ||
+            getsockname(fd, (struct sockaddr *)&sa, &sl) < 0) {
+            if (fd >= 0)
+                close(fd);
+            snprintf(err, errlen, "no loopback port for the preview: %s", strerror(errno));
+            return false;
+        }
+        close(fd);
+        snprintf(src, sizeof(src), "udp://127.0.0.1:%u", ntohs(sa.sin_port));
+        free(chan_ctl(s, c, "{\"cmd\": \"remove-output\", \"id\": \"pvtap\"}"));
+        snprintf(req, sizeof(req), "{\"cmd\": \"add-output\", \"url\": \"%s\", \"id\": \"pvtap\", \"save\": false}", src);
+        reply = chan_ctl(s, c, req);
+        if (!reply || !strstr(reply, "\"ok\": true")) {
+            snprintf(err, errlen, "the channel did not take the preview's output%s%.100s", reply ? ": " : "", reply ? reply : "");
+            free(reply);
+            return false;
+        }
+        free(reply);
+        c->pv_tap = true;
+    }
+#define ARGS(str) do { argv[n++] = (char *)(str); } while (0)
+#define ARG(fmt, ...) do { snprintf(store[k], sizeof(store[k]), fmt, __VA_ARGS__); argv[n++] = store[k++]; } while (0)
+    ARGS(s->binary);
+    ARGS("-i");
+    ARG("%s", src);
+    if (program > 0)
+        ARG("--program=%d", program);
+    if (drop && drop[0])
+        ARG("--drop=%s", drop);
+    ARGS("--video");
+    ARGS("426x240:h264:300k");
+    ARGS("--audio");
+    ARGS("aac:64k");
+    ARGS("--gop");
+    ARGS("1000");
+    ARGS("--preset");
+    ARGS("veryfast");
+    ARGS("--delay");                        /* not the 3 s a channel keeps: quicker to start, */
+    ARGS("1500");                           /* and a small picture encodes in far less */
+    ARGS("--vbv");
+    ARGS("500");
+    a = (int)json_get_num(&doc, root, "gpu", -1);
+    if (a >= 0)
+        ARG("--gpu=%d", a);
+    ARGS("--name");
+    ARG("%s.preview", c->name);
+    ARGS("--run-dir");
+    ARGS(s->run_dir);
+    ARGS("-o");
+    ARGS("hls://?segment=1&window=5");
+    ARGS("--stats-interval");
+    ARGS("0");
+    ARGS("-q");
+    argv[n] = NULL;
+#undef ARGS
+#undef ARG
+    if (pipe2(pfd, O_CLOEXEC | O_NONBLOCK) < 0) {
+        snprintf(err, errlen, "pipe: %s", strerror(errno));
+        preview_untap(s, c);
+        return false;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        snprintf(err, errlen, "fork: %s", strerror(errno));
+        preview_untap(s, c);
+        return false;
+    }
+    if (pid == 0) {
+        sigset_t set;
+
+        sigemptyset(&set);
+        sigprocmask(SIG_SETMASK, &set, NULL);
+        signal(SIGHUP, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        dup2(pfd[1], 2);
+        close(pfd[1]);
+        close(pfd[0]);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    c->pv_pid = pid;
+    c->pv_log_fd = pfd[0];
+    c->pv_started_ns = c->pv_last_hit_ns = clock_now_ns();
+    snprintf(c->pv_drop, sizeof(c->pv_drop), "%s", drop ? drop : "");
+    c->pv_why[0] = 0;
+    log_info("channel %s: preview started (pid %d) from %s", c->name, (int)pid, src);
+    return true;
+}
+
 static void tick(struct super *s)
 {
     int64_t now = clock_now_ns();
@@ -555,6 +817,24 @@ static void tick(struct super *s)
         chan_read_log(c);
         if (c->pid > 0 && waitpid(c->pid, &status, WNOHANG) == c->pid)
             chan_reap(s, c, status);
+        chan_sample(s, c, now);
+        preview_reap(s, c);
+        if (c->pv_pid <= 0 && c->pv_restart) {
+            char e[200];
+
+            c->pv_restart = false;
+            if (c->state == CH_RUNNING && !preview_start(s, c, c->pv_next, e, sizeof(e)))
+                snprintf(c->pv_why, sizeof(c->pv_why), "%.119s", e);
+        }
+        if (c->pv_pid > 0 && (c->state != CH_RUNNING ||
+                              now - c->pv_last_hit_ns > (int64_t)PREVIEW_IDLE_S * 1000000000LL))
+            preview_stop(c);
+        if (c->pv_log_fd >= 0 && c->pv_pid > 0) {
+            char buf[4096];                 /* the preview's log is not kept, only drained */
+
+            while (read(c->pv_log_fd, buf, sizeof(buf)) > 0)
+                ;
+        }
         if (c->state == CH_STOPPING && now - c->stop_asked_ns > STOP_GRACE_MS * 1000000LL) {
             log_warn("channel %s: did not stop in %d s, killing it", c->name, STOP_GRACE_MS / 1000);
             kill(c->pid, SIGKILL);
@@ -619,6 +899,7 @@ static void scan_channels(struct super *s)
             memset(c, 0, sizeof(*c));
             snprintf(c->name, sizeof(c->name), "%s", name);
             c->log_fd = -1;
+            c->pv_log_fd = -1;
             c->state = CH_STOPPED;
         }
         if (!c->cfg || strcmp(c->cfg, text)) {
@@ -744,6 +1025,12 @@ struct chan_view {
     char why[160];
     char *cfg;
     char *log;                              /* JSON array text, or NULL */
+    float hist_in[HIST_N], hist_out[HIST_N];
+    int hist_n;
+    bool pv_running;
+    char pv_drop[128];
+    char pv_why[120];
+    double pv_uptime;
 };
 
 static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
@@ -759,6 +1046,15 @@ static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
     v->restarts = c->restarts;
     snprintf(v->why, sizeof(v->why), "%s", c->why);
     v->cfg = c->cfg ? strdup(c->cfg) : NULL;
+    for (int i = 0; i < c->hist_n; i++) {
+        v->hist_in[i] = c->hist_in[(c->hist_head + i) % HIST_N];
+        v->hist_out[i] = c->hist_out[(c->hist_head + i) % HIST_N];
+    }
+    v->hist_n = c->hist_n;
+    v->pv_running = c->pv_pid > 0;
+    v->pv_uptime = c->pv_pid > 0 ? (double)(now - c->pv_started_ns) / 1e9 : 0;
+    snprintf(v->pv_drop, sizeof(v->pv_drop), "%s", c->pv_drop);
+    snprintf(v->pv_why, sizeof(v->pv_why), "%s", c->pv_why);
     if (with_log) {
         char *out = NULL;
         size_t len = 0;
@@ -813,8 +1109,19 @@ static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, 
             free(text);
         }
     }
-    if (full)
+    if (full) {
+        fprintf(f, ", \"history\": {\"step_s\": %d, \"in\": [", HIST_STEP_S);
+        for (int i = 0; i < v->hist_n; i++)
+            fprintf(f, "%s%.0f", i ? "," : "", (double)v->hist_in[i]);
+        fprintf(f, "], \"out\": [");
+        for (int i = 0; i < v->hist_n; i++)
+            fprintf(f, "%s%.0f", i ? "," : "", (double)v->hist_out[i]);
+        fprintf(f, "]}, \"preview\": {\"running\": %s, \"uptime\": %.0f, \"drop\": ",
+                v->pv_running ? "true" : "false", v->pv_uptime);
+        fprintf(f, "%s, \"why\": ", json_quote(v->pv_drop, q, sizeof(q)));
+        fprintf(f, "%s}", json_quote(v->pv_why, q, sizeof(q)));
         fprintf(f, ", \"log\": %s", v->log ? v->log : "[]");
+    }
     fprintf(f, "}");
 }
 
@@ -841,11 +1148,30 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
     }
     memcpy(name, p, nl);
     name[nl] = 0;
-    if (!name_ok(name)) {
-        resp->status = 404;
-        return;
+    {
+        /* NAME.preview: the preview process's own HLS; the request keeps it alive */
+        size_t l = strlen(name);
+        bool preview = l > 8 && !strcmp(name + l - 8, ".preview");
+
+        if (preview)
+            name[l - 8] = 0;
+        if (!name_ok(name)) {
+            resp->status = 404;
+            return;
+        }
+        if (preview) {
+            struct chan *c;
+
+            pthread_mutex_lock(&s->lock);
+            c = find_chan(s, name);
+            if (c)
+                c->pv_last_hit_ns = clock_now_ns();
+            pthread_mutex_unlock(&s->lock);
+            snprintf(path, sizeof(path), "%.400s/%s.preview.http", s->run_dir, name);
+        } else {
+            snprintf(path, sizeof(path), "%.400s/%s.http", s->run_dir, name);
+        }
     }
-    snprintf(path, sizeof(path), "%.400s/%s.http", s->run_dir, name);
     fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
@@ -856,7 +1182,10 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
         api_error(resp, 503, "that channel has no HLS output running");
         return;
     }
-    snprintf(line, sizeof(line), "GET %.900s%s%.900s HTTP/1.1\r\nHost: caricoder3\r\n\r\n",
+    /* one request per connection: without "close" the channel keeps the
+     * connection for the next request, and this copy loop would wait for
+     * its idle timeout before the player got the end of the response */
+    snprintf(line, sizeof(line), "GET %.900s%s%.900s HTTP/1.1\r\nHost: caricoder3\r\nConnection: close\r\n\r\n",
              req->path, req->query[0] ? "?" : "", req->query);
     if (http_send(fd, line, strlen(line))) {
         char buf[65536];
@@ -1213,6 +1542,44 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             else if (c->state != CH_STOPPING)
                 chan_start(s, c);
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+        } else if (!strcmp(rest, "preview") && !strcmp(req->method, "POST")) {
+            /* {"drop": [pid, ...]}: start (or restart with another audio) */
+            struct json_doc *doc = malloc(sizeof(*doc));
+            int root = doc ? json_parse(doc, req->body && req->body[0] ? req->body : "{}", err, sizeof(err)) : -1;
+            char drop[128] = "";
+            size_t o = 0;
+            int a = root >= 0 ? json_get(doc, root, "drop") : -1;
+            bool ok = true;
+
+            if (a >= 0 && doc->node[a].type == JSON_ARRAY)
+                for (int j = doc->node[a].first_child; j >= 0; j = doc->node[j].next)
+                    if (doc->node[j].type == JSON_NUMBER && o + 8 < sizeof(drop))
+                        o += (size_t)snprintf(drop + o, sizeof(drop) - o, "%s%d", o ? "," : "", (int)doc->node[j].num);
+            free(doc);
+            if (c->pv_pid > 0 && strcmp(drop, c->pv_drop)) {
+                /* another audio: stopped, and started again once it is gone */
+                preview_stop(c);
+                c->pv_restart = true;
+                snprintf(c->pv_next, sizeof(c->pv_next), "%s", drop);
+                c->pv_last_hit_ns = clock_now_ns();
+            } else if (c->pv_pid <= 0) {
+                ok = preview_start(s, c, drop, err, sizeof(err));
+            } else {
+                c->pv_last_hit_ns = clock_now_ns();
+            }
+            pthread_mutex_unlock(&s->lock);
+            if (!ok)
+                api_error(resp, 409, err);
+            else
+                http_resp_printf(resp, 200, "application/json",
+                                 "{\"ok\": true, \"url\": \"/hls/%s.preview/index.m3u8\"}\n", c->name);
+            return;
+        } else if (!strcmp(rest, "preview") && !strcmp(req->method, "DELETE")) {
+            c->pv_restart = false;
+            preview_stop(c);
+            pthread_mutex_unlock(&s->lock);
+            http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+            return;
         } else if (!strcmp(rest, "thumb.jpg")) {
             char tpath[600];
             size_t len = 0;

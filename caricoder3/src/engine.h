@@ -52,6 +52,11 @@ struct engine_stats {
     int      n_xc;
     struct xcode_stats xc[MAX_ES];
     uint64_t xc_orphans;
+    /* PES bytes so far, for per-stream bit rates: by the program's stream
+     * index (in, and out when copied or the first rendition), and by
+     * transcoder index (out) */
+    uint64_t es_in_bytes[MAX_ES], es_out_bytes[MAX_ES];
+    uint64_t xc_out_bytes[MAX_ES];
 };
 
 struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,

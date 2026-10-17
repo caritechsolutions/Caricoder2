@@ -2490,6 +2490,17 @@ def supervisor_api():
         box = {}
 
         def gate(t):
+            if t >= 1.5 and "pv_start" not in box:
+                # the preview: a unicast input, so it reads a loopback copy of the output
+                box["pv_start"] = api("/api/channels/t1/preview", "POST", {"drop": []})
+            if t >= 10.0 and "pv_pl" not in box:
+                t0 = time.time()
+                box["pv_pl"] = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1.preview/index.m3u8", timeout=5).read().decode()
+                box["pv_pl_s"] = time.time() - t0
+                seg = [l for l in box["pv_pl"].split("\n") if l.endswith(".ts")]
+                if seg:
+                    box["pv_seg"] = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1.preview/" + seg[-1], timeout=5).read()
+                box["pv_chan"] = api("/api/channels/t1")[1]["channel"]
             if t >= 7.0 and "pl" not in box:
                 r = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1/index.m3u8", timeout=5)
                 box["pl"] = r.read().decode()
@@ -2516,8 +2527,24 @@ def supervisor_api():
              any(x["kind"] == "audio" and x.get("sample_rate") == 48000 for x in pj["programs"][0]["streams"]),
              f"/api/probe: {code} {pj}")
         c = box["running"]
-        need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["hls"],
+        need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["hls", "pvtap"],
              f"running channel: in {c['stats']['input']['bitrate']}, outputs {c['outputs']}")
+        ss = c["stats"]["service"]["streams"]
+        need(all(x.get("bitrate", 0) > 0 and x.get("bitrate_in", 0) > 0 for x in ss) and
+             {x["kind"] for x in ss} == {"video", "audio"}, f"per-stream rates and kinds: {ss}")
+        need(len(c["history"]["in"]) >= 2 and max(c["history"]["in"]) > 1e6, f"history: {c['history']}")
+        code, j = box.get("pv_start", (0, None))
+        need(code == 200 and j["url"] == "/hls/t1.preview/index.m3u8", f"preview start: {code} {j}")
+        pc = box.get("pv_chan") or {}
+        need(pc.get("preview", {}).get("running"), f"preview state: {pc.get('preview')}")
+        need(box.get("pv_seg") and len(box["pv_seg"]) > 20 * TS and box["pv_pl"].count("#EXTINF") >= 3,
+             f"preview HLS: {box.get('pv_pl')}")
+        need(box["pv_pl_s"] < 1.0, f"a proxied playlist took {box['pv_pl_s']:.1f} s")
+        code, j = api("/api/channels/t1/preview", "DELETE")
+        time.sleep(1.5)
+        code, j = api("/api/channels/t1")
+        need(not j["channel"]["preview"]["running"] and [o["id"] for o in j["channel"]["outputs"]["outputs"]] == ["hls"],
+             f"after the preview stopped: {j['channel']['preview']}, outputs {j['channel']['outputs']}")
         # stop, start, config change -> restart, delete
         code, j = api("/api/channels/t1/stop", "POST")
         time.sleep(1.5)
@@ -2558,8 +2585,8 @@ def supervisor_api():
             raise Fail("the supervisor did not stop")
     need(sup.returncode == 0, f"supervisor exit {sup.returncode}\n{log[-800:]}")
     need(not [l for l in log.splitlines() if "channel t1" in l and "did not stop" in l], "a channel had to be killed")
-    return "created, ran, HLS proxied, stopped, started, restarted on a config change and after a crash, deleted; " \
-           "GUI served; password required"
+    return "created, ran, HLS proxied, preview made and stopped, stopped, started, restarted on a config change " \
+           "and after a crash, deleted; GUI served; password required"
 
 
 @test
