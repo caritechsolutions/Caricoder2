@@ -309,8 +309,8 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
   interfaces, sampled every two seconds.
 - A **Preview** button on each running channel plays it in the page
   (hls.js, built in, Apache-2.0): the channel's own HLS output when it
-  has one, otherwise a temporary `hls://?segment=1` output added for the
-  session and removed on close. The picture is 3–4 s behind the air.
+  has one, otherwise a temporary `hls://?segment=2` output added for the
+  session and removed on close. The picture is about 6 s behind the air.
   HEVC plays where the browser decodes it (Chrome/Edge on Windows with
   the HEVC extension, Safari); elsewhere an H.264 rendition is needed.
 - `/api/...` — the same, as JSON (see below)

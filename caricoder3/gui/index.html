@@ -222,7 +222,7 @@ async function openPreview() {
   const outs = (current.outputs && current.outputs.outputs) || [];
   const temp = !outs.some(o => o.type === "hls");
   try {
-    if (temp) await api(`/api/channels/${encodeURIComponent(name)}/outputs`, {method:"POST", body: JSON.stringify({url: "hls://?segment=1&window=4", id: "preview", save: false})});
+    if (temp) await api(`/api/channels/${encodeURIComponent(name)}/outputs`, {method:"POST", body: JSON.stringify({url: "hls://?segment=2&window=6", id: "preview", save: false})});
     await loadHls();
   } catch(e) { showMsg("Preview: " + e.message, "err"); return; }
   preview = { name, temp, hls: null };
@@ -244,9 +244,9 @@ async function openPreview() {
   if (preview !== mine) return;
   if (!have) { $("#pv_msg").textContent = "No segments after 45 s: the channel is not producing video (see its log)."; return; }
   $("#pv_msg").style.display = "none";
-  $("#pv_hint").textContent = temp ? "A temporary 1-second-segment output, removed when closed · a few seconds behind the air" : "The channel's own HLS output · a few seconds behind the air";
+  $("#pv_hint").textContent = temp ? "A temporary HLS output, removed when closed · about 6 s behind the air" : "The channel's own HLS output · a few segments behind the air";
   if (Hls.isSupported()) {
-    const hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 10, manifestLoadingRetryDelay: 1000, levelLoadingRetryDelay: 1000, fragLoadingRetryDelay: 1000 });
+    const hls = new Hls({ liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 8, maxBufferLength: 20, maxMaxBufferLength: 30, manifestLoadingRetryDelay: 1000, levelLoadingRetryDelay: 1000, fragLoadingRetryDelay: 1000 });
     preview.hls = hls;
     hls.on(Hls.Events.ERROR, (ev, data) => {
       if (!data.fatal) return;
