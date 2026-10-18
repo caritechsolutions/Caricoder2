@@ -126,9 +126,20 @@ static bool table_update(struct psi_table *t, psi_build_fn build,
         memcmp(t->ref, ref, (size_t)ref_len) == 0)
         return false;
 
-    if (!t->present)
-        t->version = in_version & 0x1F;
-    else if ((in_version & 0x1F) != t->version)
+    if (!t->present) {
+        /* The first table of this run: its version comes from the source's
+         * and from the content (the CRC of the version-0 build), so that a
+         * restart with other content (settings saved: another stream
+         * order, other PIDs, another name) sends another version, and
+         * receivers already tuned read the new table. The same content
+         * gives the same version again. */
+        uint32_t crc = (uint32_t)ref[ref_len - 4] << 24 | (uint32_t)ref[ref_len - 3] << 16 |
+                       (uint32_t)ref[ref_len - 2] << 8 | ref[ref_len - 1];
+
+        crc ^= crc >> 15;
+        crc ^= crc >> 7;
+        t->version = (int)((uint32_t)in_version + crc) & 0x1F;
+    } else if ((in_version & 0x1F) != t->version)
         t->version = in_version & 0x1F;
     else
         t->version = (t->version + 1) & 0x1F;
