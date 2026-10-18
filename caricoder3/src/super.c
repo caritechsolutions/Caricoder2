@@ -398,6 +398,9 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "vbv", 0);
         if (v > 0)
             ARG("--vbv=%d", (int)v);
+        v = json_get_num(&doc, root, "bframes", -1);
+        if (v >= 0)
+            ARG("--bframes=%d", (int)v);
         v = json_get_num(&doc, root, "pcr_interval", 0);
         if (v > 0)
             ARG("--pcr-interval=%d", (int)v);
@@ -473,6 +476,7 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     {
         static const char *const strs[][2] = {
             { "decoder", "--decoder=%s" }, { "encoder", "--encoder=%s" }, { "preset", "--preset=%s" },
+            { "profile", "--profile=%s" },
             { "service_name", "--service-name=%s" }, { "service_provider", "--service-provider=%s" },
         };
 

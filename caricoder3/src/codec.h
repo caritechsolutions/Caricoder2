@@ -175,6 +175,8 @@ struct venc_cfg {
     int  vbv_ms;                /* decoder buffer, as time at `bitrate` */
     int  gop_ms;                /* longest distance between key frames */
     const char *preset;         /* backend's own name for speed, or NULL */
+    int  bframes;               /* B-frames between references; -1: the backend's own */
+    const char *profile;        /* "baseline", "main", "high", "main10"; NULL: the backend's own */
     int  gpu;
     void *cuda_ctx;             /* frames will arrive in this CUDA context */
 };

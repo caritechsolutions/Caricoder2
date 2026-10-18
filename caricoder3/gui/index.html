@@ -604,12 +604,14 @@ function settingsHtml() {
     <div class="f">
       <label>Treatment</label><div class="row"><select id="a_codec" style="flex:0 0 220px" onchange="$('#a_rate').disabled=!this.value"><option value="">Copy as is</option><option value="aac">AAC</option><option value="mp2">MPEG-1 layer II (MP2)</option><option value="mp3">MP3</option></select><select id="a_rate" style="flex:0 0 140px">${ABR.map(r=>`<option>${r}</option>`).join("")}</select><span style="color:var(--dim)">Every audio stream of the program is treated the same.</span></div>
     </div>
-    <h4 style="margin:22px 0 10px;font-size:14px">Hardware</h4>
+    <h4 style="margin:22px 0 10px;font-size:14px">Hardware and encoding</h4>
     <div class="f">
       <label>Decode on</label>${sel("decoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Encode on</label>${sel("encoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Card</label>${sel("gpu", [["","Card 0"],["1","Card 1"],["2","Card 2"],["3","Card 3"]])}
       <label>Speed / quality</label>${sel("preset", [["","Default (veryfast on CPU, p4 on NVIDIA)"],["ultrafast","Fastest"],["superfast","Faster"],["veryfast","Fast"],["faster","Balanced"],["medium","Better quality (CPU)"],["p1","NVIDIA p1 (fastest)"],["p3","NVIDIA p3"],["p4","NVIDIA p4"],["p5","NVIDIA p5"],["p7","NVIDIA p7 (best)"]])}
+      <label>B-frames</label><div class="row">${sel("bframes", [["","Encoder's choice"],["0","None (for receivers that cannot take them)"],["1","1"],["2","2"],["3","3"],["4","4"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">The NVIDIA card does as many as it can (Pascal: none in H.265).</span></div>
+      <label>Profile</label><div class="row">${sel("profile", [["","Encoder's choice (H.264 high, H.265 as the source)"],["high","H.264 High"],["main","Main (H.264 Main; H.265 Main, 8 bits)"],["baseline","H.264 Baseline (no B-frames)"],["main10","H.265 Main 10"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">Older set-top boxes may need Main, or Baseline.</span></div>
     </div>
     <details style="margin-top:22px"><summary style="cursor:pointer;color:var(--fg2)">Timing and service details</summary>
     <div class="f" style="margin-top:12px">
@@ -719,6 +721,7 @@ function fillForm(cfg) {
   const a = (cfg.audio || [])[0] || ""; const ap = a.split("=").pop().split(":");
   $("#a_codec").value = ap[0] && ["aac","mp2","mp3"].includes(ap[0]) ? ap[0] : ""; $("#a_rate").value = ap[1] && ABR.includes(ap[1]) ? ap[1] : "128k"; $("#a_rate").disabled = !$("#a_codec").value;
   $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
+  $("#bframes").value = cfg.bframes != null ? String(cfg.bframes) : ""; $("#profile").value = cfg.profile || "";
   for (const k of ["delay","gop","vbv","service_name","service_provider","service_id","ts_id","onid","pmt_pid"]) $("#"+k).value = cfg[k] ?? "";
   $("#pcr_mode").value = cfg.pcr_pid === "video" ? "video" : cfg.pcr_pid ? "pid" : "";
   $("#pcr_pid").value = typeof cfg.pcr_pid === "number" ? cfg.pcr_pid : ""; $("#pcr_pid").style.display = $("#pcr_mode").value === "pid" ? "" : "none";
@@ -843,7 +846,8 @@ function readForm() {
     if (!cfg.video.length) delete cfg.video;
   }
   if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
-  for (const k of ["decoder","encoder","preset","service_name","service_provider"]) if (v(k)) cfg[k] = v(k);
+  for (const k of ["decoder","encoder","preset","profile","service_name","service_provider"]) if (v(k)) cfg[k] = v(k);
+  if (v("bframes") !== "") cfg.bframes = Number(v("bframes"));
   if (v("gpu")) cfg.gpu = Number(v("gpu"));
   for (const k of ["delay","gop","vbv"]) if (num(k)) cfg[k] = num(k);
   for (const k of ["service_id","ts_id","onid","pmt_pid"]) { const n = pidNum(v(k)); if (n !== undefined) cfg[k] = n; }

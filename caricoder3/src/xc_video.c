@@ -179,7 +179,7 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
     c.height = f->height;
     /* H.264 goes out at 8 bits whatever comes in: that is what receivers
      * take. H.265 keeps the depth of the source. */
-    c.depth = v->cfg.out == CODEC_HEVC ? f->depth : 8;
+    c.depth = v->cfg.out == CODEC_HEVC && !(v->cfg.profile && !strcmp(v->cfg.profile, "main")) ? f->depth : 8;
     c.fps_num = f->fps_num > 0 && f->fps_den > 0 ? f->fps_num : 25;
     c.fps_den = f->fps_num > 0 && f->fps_den > 0 ? f->fps_den : 1;
     if ((double)c.fps_num / c.fps_den < 5 || (double)c.fps_num / c.fps_den > 240) {
@@ -210,6 +210,8 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
     c.vbv_ms = v->vbv_ms;
     c.gop_ms = v->cfg.gop_ms > 0 ? v->cfg.gop_ms : DEFAULT_GOP_MS;
     c.preset = v->cfg.preset;
+    c.bframes = v->cfg.bframes;
+    c.profile = v->cfg.profile;
     c.gpu = v->cfg.gpu;
     c.cuda_ctx = f->cuda_ctx;
 
@@ -729,7 +731,8 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
         /* H.264 goes out at 8 bits (see encoder_open). */
         struct vdec_cfg dc = { .codec = cfg->in, .width = cfg->width, .height = cfg->height,
                                .gpu = cfg->gpu, .fit = cfg->fit, .want_cuda = v->want_cuda,
-                               .only_8bit = cfg->out == CODEC_H264 };
+                               .only_8bit = cfg->out == CODEC_H264 ||
+                                            (cfg->profile && !strcmp(cfg->profile, "main")) };
         const struct codec_backend *b =
             codec_find(CODEC_VIDEO, CODEC_DECODER, cfg->in, cfg->decoder, skip);
 

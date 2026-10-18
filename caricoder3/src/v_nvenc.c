@@ -361,10 +361,19 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     conf.gopLength = (uint32_t)gop;
     /* B-frames (H.264 only on this generation): see the top of this file. */
     e->bframes = 0;
-    if (cfg->codec == CODEC_H264 && BFRAMES_H264 > 0) {
-        int most = cap(e, codec, NV_ENC_CAPS_NUM_MAX_BFRAMES);
+    {
+        int want = cfg->bframes >= 0 ? cfg->bframes : cfg->codec == CODEC_H264 ? BFRAMES_H264 : 0;
 
-        e->bframes = most < BFRAMES_H264 ? most : BFRAMES_H264;
+        if (cfg->profile && !strcmp(cfg->profile, "baseline"))
+            want = 0;
+        if (want > 0) {
+            int most = cap(e, codec, NV_ENC_CAPS_NUM_MAX_BFRAMES);
+
+            e->bframes = most < want ? most : want;
+            if (e->bframes < want)
+                log_info("nvenc: %d B-frame(s) asked for, the card does %d in %s", want, most > 0 ? most : 0,
+                         cfg->codec == CODEC_H264 ? "H.264" : "HEVC");
+        }
     }
     conf.frameIntervalP = (int32_t)(e->bframes + 1);
     e->frame90 = (int64_t)(90000.0 / fps + 0.5);
@@ -380,7 +389,9 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     if (cfg->codec == CODEC_H264) {
         NV_ENC_CONFIG_H264 *h = &conf.encodeCodecConfig.h264Config;
 
-        conf.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+        conf.profileGUID = cfg->profile && !strcmp(cfg->profile, "baseline") ? NV_ENC_H264_PROFILE_BASELINE_GUID
+                         : cfg->profile && !strcmp(cfg->profile, "main") ? NV_ENC_H264_PROFILE_MAIN_GUID
+                         : NV_ENC_H264_PROFILE_HIGH_GUID;
         h->idrPeriod = (uint32_t)gop;
         h->repeatSPSPPS = 1;                /* parameter sets with every key frame */
         h->outputAUD = 1;                   /* a delimiter on every access unit */

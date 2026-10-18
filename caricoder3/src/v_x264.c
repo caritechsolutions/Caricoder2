@@ -107,9 +107,16 @@ static void *x4_open(const struct venc_cfg *cfg, char *err, size_t errlen)
 
     p.pf_log = x4_log;
     p.i_log_level = X264_LOG_WARNING;
-    if (x264_param_apply_profile(&p, cfg->depth > 8 ? "high10" : "high") < 0) {
-        snprintf(err, errlen, "x264 would not take the profile");
-        return NULL;
+    if (cfg->bframes >= 0)
+        p.i_bframe = cfg->bframes;
+    {
+        /* baseline has no B-frames: x264 takes them out itself */
+        const char *prof = cfg->depth > 8 ? "high10" : cfg->profile && strcmp(cfg->profile, "main10") ? cfg->profile : "high";
+
+        if (x264_param_apply_profile(&p, prof) < 0) {
+            snprintf(err, errlen, "x264 would not take the profile '%s'", prof);
+            return NULL;
+        }
     }
 
     e = calloc(1, sizeof(*e));

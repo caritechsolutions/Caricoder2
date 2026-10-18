@@ -373,7 +373,8 @@ A channel file holds what the command line would, for example
 ```
 
 Keys: `input`, `backup_inputs` (list), `switch_after`, `retry_primary`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
-`audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `gop`, `vbv`,
+`audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `bframes` (0–4),
+`profile` (`baseline`, `main`, `high`; `main10`), `gop`, `vbv`,
 `pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
 `service_id`, `ts_id`, `onid`, `pmt_pid`, `pcr_pid` (a PID, or `"video"`),
 `remap` (`{"256": 481, ...}`: input PID to output PID), `order` (input

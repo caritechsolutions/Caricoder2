@@ -111,6 +111,7 @@ static void fill_cfg(struct venc_cfg *c, enum codec_id codec, int w, int h, int 
                      int gpu, void *cuda_ctx, bool interlaced)
 {
     memset(c, 0, sizeof(*c));
+    c->bframes = -1;
     c->codec = codec;
     c->width = w;
     c->height = h;

@@ -95,6 +95,12 @@ static void *x5_open(const struct venc_cfg *cfg, char *err, size_t errlen)
         p->vui.bEnableVideoFullRangeFlag = 1;
     }
     p->logLevel = X265_LOG_NONE;
+    if (cfg->bframes >= 0)
+        p->bframes = cfg->bframes;
+    if (cfg->profile && api->param_apply_profile(p, cfg->depth > 8 ? "main10" : "main") < 0) {
+        snprintf(err, errlen, "x265 would not take the profile");
+        goto fail;
+    }
 
     e->h = api->encoder_open(p);
     if (!e->h) {

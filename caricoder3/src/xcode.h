@@ -44,6 +44,8 @@ struct xcode_cfg {
     int  gpu;
     int  vbv_ms, gop_ms;
     const char *preset;
+    int bframes;                /* -1: the encoder's own choice */
+    const char *profile;        /* NULL: the encoder's own choice */
 };
 
 struct xcode_stats {

@@ -933,6 +933,11 @@ static void usage(FILE *f)
 "      --encoder WHERE      video encoding on: auto, nvidia or cpu (default auto)\n"
 "      --gpu N              which NVIDIA card (default 0)\n"
 "      --preset NAME        encoder speed, in the encoder's own words\n"
+"      --bframes N          B-frames between references, 0 to 4 (default: the\n"
+"                           encoder's; 0 for receivers that cannot take them)\n"
+"      --profile NAME       H.264: baseline, main or high (default high);\n"
+"                           H.265: main (8 bits, a 10-bit source converted) or\n"
+"                           main10 (default: as the source)\n"
 "                           (x264/x265: ultrafast ... medium; nvenc: p1 ... p7)\n"
 "      --gop MS             longest gap between key frames (default 2000)\n"
 "      --vbv MS             video decoder buffer as time (default 1000)\n"
@@ -999,7 +1004,7 @@ enum {
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
-    OPT_INPUT_LABEL, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
+    OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1075,6 +1080,8 @@ int main(int argc, char **argv)
         { "encoder", required_argument, 0, OPT_ENCODER },
         { "gpu", required_argument, 0, OPT_GPU },
         { "preset", required_argument, 0, OPT_PRESET },
+        { "bframes", required_argument, 0, OPT_BFRAMES },
+        { "profile", required_argument, 0, OPT_PROFILE },
         { "gop", required_argument, 0, OPT_GOP },
         { "vbv", required_argument, 0, OPT_VBV },
         { "gpu-test", no_argument, 0, OPT_GPU_TEST },
@@ -1115,6 +1122,7 @@ int main(int argc, char **argv)
     o.eng.mux.sdt_interval_ms = 500;
     o.eng.mux.max_late_ms = 1000;
     o.eng.ts_id = -1;
+    o.eng.bframes = -1;
     o.eng.onid = -1;
 
     while ((opt = getopt_long(argc, argv, "i:o:p:r:d:vqVh", longopts, NULL)) != -1) {
@@ -1285,6 +1293,25 @@ int main(int argc, char **argv)
             break;
         case OPT_GPU: o.eng.gpu = atoi(optarg); break;
         case OPT_PRESET: o.eng.preset = optarg; break;
+        case OPT_BFRAMES: {
+            char *end;
+            long b = strtol(optarg, &end, 10);
+
+            if (end == optarg || *end || b < 0 || b > 4) {
+                fprintf(stderr, "--bframes: 0 to 4\n");
+                return 2;
+            }
+            o.eng.bframes = (int)b;
+            break;
+        }
+        case OPT_PROFILE:
+            if (strcmp(optarg, "baseline") && strcmp(optarg, "main") && strcmp(optarg, "high") &&
+                strcmp(optarg, "main10")) {
+                fprintf(stderr, "--profile: baseline, main or high (H.264), main or main10 (H.265)\n");
+                return 2;
+            }
+            o.eng.profile = optarg;
+            break;
         case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;
         case OPT_VBV: o.eng.vbv_ms = atoi(optarg); break;
         case OPT_GPU_TEST: gpu_test = true; break;

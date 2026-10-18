@@ -27,6 +27,8 @@ struct engine_cfg {
     int  gpu;                           /* NVIDIA card to use */
     int  vbv_ms, gop_ms;                /* 0: defaults */
     const char *preset;
+    int bframes;                        /* -1: the encoder's own */
+    const char *profile;                /* baseline, main, high, main10; NULL: the encoder's own */
 
     /* Streams of the service left out of the output (by input PID). */
     uint16_t drop[MAX_ES];

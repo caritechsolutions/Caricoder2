@@ -3414,6 +3414,40 @@ def xc_video_sizes_follow_shape():
 
 
 @test
+def xc_video_bframes_profile():
+    """--bframes and --profile: H.264 high/main/baseline, B-frames on and off; H.265 main from a 10-bit source."""
+    skip = xc_ready("libavcodec", "x264", "x265")
+    if skip:
+        return skip
+    src = w("xc_bp.ts")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25", "-t", "3",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1M", "-f", "mpegts", src], check=True)
+    src10 = w("xc_bp10.ts")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25", "-t", "3",
+                    "-pix_fmt", "yuv420p10le", "-c:v", "libx265", "-x265-params", "log-level=none", "-b:v", "1M",
+                    "-f", "mpegts", src10], check=True)
+
+    def look(path):
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=profile,pix_fmt",
+                            "-of", "csv=p=0", path], capture_output=True, text=True)
+        f = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
+                            "frame=pict_type", "-of", "csv=p=0", path], capture_output=True, text=True)
+        prof = p.stdout.splitlines()[0].split(",")
+        return prof[0], prof[1], f.stdout.split().count("B")
+    cases = [(src, "h264", [], "High", True), (src, "h264", ["--bframes", "0"], "High", False),
+             (src, "h264", ["--profile", "main"], "Main", True), (src, "h264", ["--profile", "baseline"], "Constrained Baseline", False),
+             (src, "hevc", ["--bframes", "0"], "Main", False), (src10, "hevc", ["--profile", "main"], "Main", None)]
+    for s_, codec, opts, prof, bf in cases:
+        out = w("xc_bp_out.ts")
+        run_file(s_, out, "--video", f"{codec}:800k", *opts)
+        p, fmt, nb = look(out)
+        need(p == prof and (bf is None or (nb > 0) == bf), f"{codec} {opts}: profile {p}, {nb} B-frames")
+        if s_ is src10:
+            need(fmt == "yuv420p", f"H.265 main from 10 bits: {fmt}")
+    return f"{len(cases)} profile/B-frame settings as asked; H.265 main makes 8 bits of a 10-bit source"
+
+
+@test
 def thumbnails_copy_and_transcode():
     """--thumb: a JPEG of the picture, from the transcoder's decoder and, on a copied stream, a decoded key frame."""
     skip = xc_ready("libavcodec", "x264")
