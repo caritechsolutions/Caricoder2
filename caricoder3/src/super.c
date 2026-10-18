@@ -65,7 +65,8 @@
 #include "sink.h"
 #include "sysstat.h"
 
-#define CHANNELS_MAX    64
+#define CHANNELS_MAX    256
+#define SHARES_MAX      32
 #define LOG_LINES       200
 #define LOG_LINE_MAX    240
 #define STOP_GRACE_MS   6000
@@ -114,6 +115,26 @@ struct chan {
     bool pv_restart;                        /* start again with pv_next once the old one is gone */
     bool pv_tap;                            /* the channel has the "pvtap" output for it */
     char pv_next[128];
+
+    /* a shared input: the channel reads its program from the share's
+     * reader on this loopback port (0 = reads its input itself) */
+    uint32_t sh_hash;                       /* of cfg, when the fields below were worked out */
+    bool sh_able;                           /* its input is UDP/RTP and sharing is not turned off */
+    char sh_url[512];
+    int sh_program;
+    int share_port;
+};
+
+/* One reader of an input that several channels take programs from
+ * (caricoder3 share): the input is read once. */
+struct share {
+    bool used;
+    char url[512];
+    pid_t pid;
+    int64_t next_start_ns;
+    int restarts;
+    bool stopping;                          /* asked to end: nobody uses it */
+    char *cfg_text;                         /* the outputs it was last given */
 };
 
 struct super {
@@ -129,6 +150,7 @@ struct super {
     pthread_mutex_t lock;                   /* channels, from the web threads */
     struct chan ch[CHANNELS_MAX];
     int n;
+    struct share sh[SHARES_MAX];
     struct http_server *http;
 };
 
@@ -292,6 +314,8 @@ static void chan_log_line(struct chan *c, const char *line)
     snprintf(c->log[slot], LOG_LINE_MAX, "%s", line);
 }
 
+static void chan_share_prepare(struct super *s, struct chan *c);
+
 /* Builds the command line from the channel's JSON. Returns the number
  * of arguments, -1 with a reason. */
 static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char *err, size_t errlen)
@@ -314,7 +338,15 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     }
     ARGS(s->binary);
     ARGS("-i");
-    ARG("%s", input);
+    chan_share_prepare(s, c);
+    if (c->share_port) {
+        /* its program, from the share's reader */
+        ARG("udp://127.0.0.1:%d", c->share_port);
+        ARGS("--input-label");
+        ARG("%s", input);
+    } else {
+        ARG("%s", input);
+    }
     {
         /* "backup_inputs": ["udp://...", ...]: tried in turn when the input gives nothing */
         int a = json_get(&doc, root, "backup_inputs");
@@ -844,9 +876,198 @@ static bool preview_start(struct super *s, struct chan *c, const char *drop, cha
     return true;
 }
 
+/* ---- shared inputs ---------------------------------------------------------- */
+
+static uint32_t text_hash(const char *t)
+{
+    uint32_t h = 5381;
+
+    for (; t && *t; t++)
+        h = h * 33 + (uint8_t)*t;
+    return h;
+}
+
+/* Works out (again, when the file changed) whether the channel takes its
+ * input through a share, and gives it a loopback port when it does. */
+static void chan_share_prepare(struct super *s, struct chan *c)
+{
+    uint32_t h = text_hash(c->cfg);
+
+    if (h != c->sh_hash || !c->sh_hash) {
+        static struct json_doc doc;
+        char e[200];
+        int root = c->cfg ? json_parse(&doc, c->cfg, e, sizeof(e)) : -1;
+        const char *in = root >= 0 ? json_get_str(&doc, root, "input", "") : "";
+
+        c->sh_hash = h ? h : 1;
+        c->sh_able = root >= 0 && (!strncmp(in, "udp://", 6) || !strncmp(in, "rtp://", 6)) &&
+                     json_get_bool(&doc, root, "share_input", true);
+        snprintf(c->sh_url, sizeof(c->sh_url), "%s", c->sh_able ? in : "");
+        c->sh_program = root >= 0 ? (int)json_get_num(&doc, root, "program", 0) : 0;
+    }
+    if (!c->sh_able) {
+        c->share_port = 0;
+        return;
+    }
+    if (c->share_port == 0) {
+        /* a free loopback port, kept for as long as the channel shares */
+        struct sockaddr_in sa;
+        socklen_t sl = sizeof(sa);
+        int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (fd >= 0 && bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+            getsockname(fd, (struct sockaddr *)&sa, &sl) == 0)
+            c->share_port = ntohs(sa.sin_port);
+        if (fd >= 0)
+            close(fd);
+        for (int i = 0; i < s->n; i++)
+            if (&s->ch[i] != c && s->ch[i].share_port == c->share_port)
+                c->share_port = 0;          /* taken by another: tried again next time */
+    }
+}
+
+static void share_stats_path(const struct super *s, int k, char *path, size_t len)
+{
+    snprintf(path, len, "%.400s/share-%d.json", s->run_dir, k);
+}
+
+/* One reader per input in use by channels that share; each told the
+ * programs and ports it serves; started, told of changes (SIGHUP),
+ * started again when it dies, stopped when nobody needs it. */
+static void shares_update(struct super *s, int64_t now)
+{
+    for (int k = 0; k < SHARES_MAX; k++) {
+        struct share *sh = &s->sh[k];
+        int status;
+
+        if (sh->pid > 0 && waitpid(sh->pid, &status, WNOHANG) == sh->pid) {
+            if (!sh->stopping) {
+                log_warn("shared input %s: reader ended (%s %d), starting it again", sh->url,
+                         WIFSIGNALED(status) ? "signal" : "status",
+                         WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status));
+                sh->restarts++;
+                sh->next_start_ns = now + 1000000000LL;
+            }
+            sh->pid = 0;
+            sh->stopping = false;
+            free(sh->cfg_text);             /* the next one is given its outputs afresh */
+            sh->cfg_text = NULL;
+        }
+    }
+    /* the inputs wanted */
+    for (int i = 0; i < s->n; i++) {
+        struct chan *c = &s->ch[i];
+        bool found = false;
+        int free_k = -1;
+
+        if (!c->share_port || !(c->want || c->pid > 0))
+            continue;
+        for (int k = 0; k < SHARES_MAX; k++) {
+            if (s->sh[k].used && !strcmp(s->sh[k].url, c->sh_url))
+                found = true;
+            if (!s->sh[k].used && s->sh[k].pid <= 0 && free_k < 0)
+                free_k = k;
+        }
+        if (!found && free_k >= 0) {
+            memset(&s->sh[free_k], 0, sizeof(s->sh[free_k]));
+            s->sh[free_k].used = true;
+            snprintf(s->sh[free_k].url, sizeof(s->sh[free_k].url), "%s", c->sh_url);
+        } else if (!found) {
+            log_err("channel %s: no room for another shared input (%d at most)", c->name, SHARES_MAX);
+        }
+    }
+    for (int k = 0; k < SHARES_MAX; k++) {
+        struct share *sh = &s->sh[k];
+        char *text = NULL, path[600], q[1100];
+        size_t len = 0;
+        FILE *f;
+        int n = 0;
+
+        if (!sh->used)
+            continue;
+        f = open_memstream(&text, &len);
+        if (!f)
+            continue;
+        fprintf(f, "{\"input\": %s, \"outputs\": [", json_quote(sh->url, q, sizeof(q)));
+        for (int i = 0; i < s->n; i++) {
+            const struct chan *c = &s->ch[i];
+
+            if (c->share_port && (c->want || c->pid > 0) && !strcmp(c->sh_url, sh->url))
+                fprintf(f, "%s\n  {\"program\": %d, \"port\": %d, \"channel\": %s}", n++ ? "," : "",
+                        c->sh_program, c->share_port, json_quote(c->name, q, sizeof(q)));
+        }
+        fprintf(f, "\n]}\n");
+        fclose(f);
+        if (n == 0) {
+            /* nobody left: stopped, and the slot freed once it is gone */
+            if (sh->pid > 0 && !sh->stopping) {
+                log_info("shared input %s: no channel uses it, stopping its reader", sh->url);
+                kill(sh->pid, SIGTERM);
+                sh->stopping = true;
+            } else if (sh->pid <= 0) {
+                char st[600];
+
+                share_stats_path(s, k, st, sizeof(st));
+                unlink(st);
+                free(sh->cfg_text);
+                sh->cfg_text = NULL;
+                sh->used = false;
+            }
+            free(text);
+            continue;
+        }
+        if (sh->stopping)
+            continue;                       /* wanted again: started anew once the old one is gone */
+        snprintf(path, sizeof(path), "%.400s/share-%d.cfg.json", s->run_dir, k);
+        if (!sh->cfg_text || strcmp(sh->cfg_text, text)) {
+            FILE *w = fopen(path, "w");
+
+            if (w) {
+                fputs(text, w);
+                fclose(w);
+            }
+            free(sh->cfg_text);
+            sh->cfg_text = text;
+            text = NULL;
+            if (sh->pid > 0)
+                kill(sh->pid, SIGHUP);
+        }
+        free(text);
+        if (sh->pid <= 0 && now >= sh->next_start_ns) {
+            char stats[600];
+            pid_t pid;
+
+            share_stats_path(s, k, stats, sizeof(stats));
+            pid = fork();
+            if (pid == 0) {
+                sigset_t set;
+
+                sigemptyset(&set);
+                sigprocmask(SIG_SETMASK, &set, NULL);
+                signal(SIGHUP, SIG_DFL);
+                signal(SIGINT, SIG_DFL);
+                signal(SIGTERM, SIG_DFL);
+                execl(s->binary, s->binary, "share", "--config", path, "--stats-file", stats, (char *)NULL);
+                _exit(127);
+            }
+            if (pid > 0) {
+                sh->pid = pid;
+                log_info("shared input %s: reader started (pid %d) for %d channel(s)", sh->url, (int)pid, n);
+            }
+        }
+    }
+}
+
 static void tick(struct super *s)
 {
     int64_t now = clock_now_ns();
+
+    for (int i = 0; i < s->n; i++)
+        chan_share_prepare(s, &s->ch[i]);
+    shares_update(s, now);
 
     for (int i = 0; i < s->n; i++) {
         struct chan *c = &s->ch[i];
@@ -1300,7 +1521,30 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                    "\"running\": %d, \"port\": %d, \"channels_dir\": ",
                 CC3_VERSION, json_quote(host, q, sizeof(q)), (double)(clock_now_ns() - s->t_start) / 1e9,
                 s->n, running, s->port);
-        fprintf(f, "%s, \"system\": ", json_quote(s->channels_dir, q, sizeof(q)));
+        fprintf(f, "%s, \"shares\": [", json_quote(s->channels_dir, q, sizeof(q)));
+        {
+            /* the shared inputs: who uses them, and the reader's own stats */
+            int n_sh = 0;
+
+            for (int k = 0; k < SHARES_MAX; k++) {
+                const struct share *sh = &s->sh[k];
+                char path[600], *st;
+                int users = 0;
+
+                if (!sh->used)
+                    continue;
+                for (int i = 0; i < s->n; i++)
+                    users += s->ch[i].share_port && (s->ch[i].want || s->ch[i].pid > 0) &&
+                             !strcmp(s->ch[i].sh_url, sh->url);
+                share_stats_path(s, k, path, sizeof(path));
+                st = read_file(path, NULL);
+                fprintf(f, "%s{\"url\": %s, \"running\": %s, \"channels\": %d, \"restarts\": %d, \"reader\": %s}",
+                        n_sh++ ? ", " : "", json_quote(sh->url, q, sizeof(q)), sh->pid > 0 ? "true" : "false",
+                        users, sh->restarts, st && st[0] == '{' ? st : "null");
+                free(st);
+            }
+        }
+        fprintf(f, "], \"system\": ");
         pthread_mutex_unlock(&s->lock);
         sysstat_json(f);
         fprintf(f, ", \"backends\": ");
@@ -1873,6 +2117,8 @@ int super_main(int argc, char **argv)
         tick(&s);
         for (int i = 0; i < s.n; i++)
             any |= s.ch[i].pid > 0;
+        for (int j = 0; j < SHARES_MAX; j++)
+            any |= s.sh[j].pid > 0;
         if (!any)
             break;
         pthread_mutex_unlock(&s.lock);

@@ -2623,6 +2623,111 @@ def supervisor_api():
 
 
 @test
+def supervisor_shared_input():
+    """Channels on one input share a reader: the input is read once, each channel gets its program; the reader follows them."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super_share")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin = _port[0] + 1, _port[0] + 2
+    o1, o2 = _port[0] + 3, _port[0] + 4
+    _port[0] += 6
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1"}, open(cfg, "w"))
+    src = synth("syn_mpts", mpts=True)
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.7)
+        # a unicast input: without the reader only one of the two could have it
+        for name, prog in (("s1", 1650), ("s2", 2000)):
+            code, j = api(f"/api/channels/{name}", "PUT", {"input": f"udp://127.0.0.1:{pin}", "program": prog, "enabled": True})
+            need(code == 200, f"create {name}: {code} {j}")
+        time.sleep(1.5)
+        for name, op in (("s1", o1), ("s2", o2)):
+            code, j = api(f"/api/channels/{name}/outputs", "POST", {"url": f"udp://127.0.0.1:{op}", "save": False})
+            need(code == 200, f"output {name}: {code} {j}")
+        rx = {}
+        import threading
+
+        def capture(op, key):
+            import socket
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sk.bind(("127.0.0.1", op))
+            sk.settimeout(0.5)
+            data = bytearray()
+            t_end = time.time() + 9
+            while time.time() < t_end:
+                try:
+                    data += sk.recv(2048)
+                except OSError:
+                    pass
+            sk.close()
+            rx[key] = bytes(data)
+        th = [threading.Thread(target=capture, args=(o1, "s1")), threading.Thread(target=capture, args=(o2, "s2"))]
+        for t in th:
+            t.start()
+        box = {}
+
+        def gate(t):
+            if t >= 6.0 and "sys" not in box:
+                box["sys"] = api("/api/system")[1]
+                box["s1"] = api("/api/channels/s1")[1]["channel"]
+            return True
+        p = Player("127.0.0.1", pin)
+        p.play(src, gate=gate)
+        p.close()
+        for t in th:
+            t.join()
+        shares = box["sys"]["shares"]
+        need(len(shares) == 1 and shares[0]["channels"] == 2 and shares[0]["running"], f"shares: {shares}")
+        rd = shares[0]["reader"]
+        need(rd and all(o["pmt_seen"] and o["packets"] > 500 for o in rd["outputs"]), f"reader: {rd}")
+        inp = box["s1"]["stats"]["input"]
+        need(inp["shared"] and inp["url"] == f"udp://127.0.0.1:{pin}" and inp["cc_errors"] == 0, f"s1 input: {inp}")
+        for name, prog in (("s1", 1650), ("s2", 2000)):
+            path = w(f"share_{name}.ts")
+            open(path, "wb").write(rx[name])
+            a = Analysis(path)
+            need(a.pat and prog in a.pat["programs"] and len(a.pat["programs"]) == 1 and a.pmt and a.pmt["program"] == prog,
+                 f"{name}: PAT {a.pat}, PMT {a.pmt and a.pmt.get('program')}")
+            need(sum(a.cc_errors.values()) == 0 and len(rx[name]) > 200 * TS, f"{name}: {len(rx[name])} bytes, CC {a.cc_errors}")
+        # one channel goes: the reader stays for the other; both go: it stops
+        api("/api/channels/s2", "DELETE")
+        time.sleep(1.0)
+        sh = api("/api/system")[1]["shares"]
+        need(len(sh) == 1 and sh[0]["channels"] == 1 and sh[0]["running"], f"after one left: {sh}")
+        api("/api/channels/s1", "DELETE")
+        time.sleep(1.5)
+        sh = api("/api/system")[1]["shares"]
+        need(sh == [], f"after both left: {sh}")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            _, log = sup.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+            _, log = sup.communicate()
+            raise Fail("the supervisor did not stop")
+    need(sup.returncode == 0, f"supervisor exit {sup.returncode}\n{log[-800:]}")
+    need("reader ended" not in log, "a reader died:\n" + log[-800:])
+    return "2 channels on one unicast input through one reader, each its own program, CC clean; reader kept for one, stopped for none"
+
+
+@test
 def live_systemd_watchdog():
     """Reports READY and keeps petting the systemd watchdog while healthy."""
     import socket

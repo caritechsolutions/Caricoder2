@@ -323,6 +323,18 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
 - The **Streams** card lists the input and output streams (kind, codec,
   size, language, rate, PID) beside a graph of the input and output bit
   rates over the last two minutes.
+- **Shared inputs.** Channels whose input is the same UDP/RTP URL (an
+  MPTS that 30 channels take programs from, say) do not each read it:
+  the supervisor runs one reader per input (`caricoder3 share`), which
+  joins it once and sends every channel only its program (PAT, SDT, its
+  PMT and that PMT's PIDs) over a loopback port. Channels added and
+  removed change the reader without a gap for the others; a reader that
+  dies is started again in a second; the last channel gone stops it. A
+  unicast input can feed several channels this way too. Backup sources
+  are read by the channel itself, as before. `"share_input": false` on a
+  channel makes it read its input itself (for a unicast input that others
+  share, that takes the input from them). The Server page lists the
+  shared inputs, their rate and channels.
 - `/api/...` — the same, as JSON (see below)
 - `/hls/NAME/index.m3u8` — every channel's HLS output, through one port
 
@@ -357,7 +369,7 @@ Keys: `input`, `backup_inputs` (list), `switch_after`, `retry_primary`, `program
 `service_id`, `ts_id`, `onid`, `pmt_pid`, `pcr_pid` (a PID, or `"video"`),
 `remap` (`{"256": 481, ...}`: input PID to output PID), `order` (input
 PIDs in the order the PMT lists them; receivers play the first audio),
-`extra_args` (list, passed as they are), `enabled`. The output's
+`share_input` (default true), `extra_args` (list, passed as they are), `enabled`. The output's
 identifiers are set in the GUI under "Timing and service details"; a PID
 not asked for that meets one that is moves to the next free PID (logged). The channel's outputs
 live next to it in `vacation.outputs.json`, which the channel itself

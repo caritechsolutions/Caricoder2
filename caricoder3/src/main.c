@@ -53,6 +53,7 @@ static atomic_int g_hup = 0;             /* SIGHUP: re-read the config file */
 
 struct options {
     const char *input;                      /* the primary (inputs[0]) */
+    const char *input_label;                /* what the primary is called in the stats (a shared input: the real one) */
     const char *inputs[SOURCES_MAX];
     int n_input;
     int switch_ms, retry_s;                 /* failover: see source.h */
@@ -285,7 +286,10 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
     if (c->src)
         sources_stats(c->src, &ss);
     fprintf(f, "  \"input\": {\n    \"url\": ");
-    json_str(f, c->src ? sources_url(c->src, ss.active) : o->input);
+    json_str(f, o->input_label && ss.active == 0 ? o->input_label :
+                c->src ? sources_url(c->src, ss.active) : o->input);
+    if (o->input_label)
+        fprintf(f, ",\n    \"shared\": %s", ss.active == 0 ? "true" : "false");
     if (c->src) {
         fprintf(f, ",\n    \"active\": %d,\n    \"switches\": %llu,\n    \"sources\": ",
                 ss.active, (unsigned long long)ss.switches);
@@ -688,6 +692,7 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
 /* `caricoder3 ctl SOCKET|NAME cmd [args]`: the command-line client. */
 int super_main(int argc, char **argv);      /* super.c */
 int probe_main(int argc, char **argv);      /* probe.c */
+int share_main(int argc, char **argv);      /* share.c */
 
 static int ctl_main(int argc, char **argv)
 {
@@ -990,7 +995,7 @@ enum {
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
-    OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
+    OPT_INPUT_LABEL, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1050,6 +1055,7 @@ int main(int argc, char **argv)
         { "audio", required_argument, 0, OPT_AUDIO },
         { "drop", required_argument, 0, OPT_DROP },
         { "remap", required_argument, 0, OPT_REMAP },
+        { "input-label", required_argument, 0, OPT_INPUT_LABEL },
         { "order", required_argument, 0, OPT_ORDER },
         { "pmt-pid", required_argument, 0, OPT_PMT_PID },
         { "pcr-pid", required_argument, 0, OPT_PCR_PID },
@@ -1093,6 +1099,8 @@ int main(int argc, char **argv)
         return super_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "probe"))
         return probe_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "share"))
+        return share_main(argc, argv);
 
     memset(&o, 0, sizeof(o));
     memset(&c, 0, sizeof(c));
@@ -1197,6 +1205,7 @@ int main(int argc, char **argv)
             }
             break;
         }
+        case OPT_INPUT_LABEL: o.input_label = optarg; break;
         case OPT_REMAP:
             /* IN=OUT[,IN=OUT...]: input PID -> output PID */
             for (const char *p = optarg; *p; ) {
