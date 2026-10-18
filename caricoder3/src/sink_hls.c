@@ -827,7 +827,8 @@ static void reply(const struct client *c, int code, const char *type, const char
                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
                      "Access-Control-Allow-Origin: *\r\nCache-Control: %s\r\nConnection: %s\r\n%s\r\n",
                      code, code == 200 ? "OK" : code == 404 ? "Not Found" : "Bad Request", type, len,
-                     strstr(type, "mpegurl") ? "no-cache" : "max-age=60",
+                     "no-store",            /* live: a chunk is never played twice, and a restarted
+                                             * output reuses the names (seg0.ts...) */
                      c->keep ? "keep-alive" : "close", extra ? extra : "");
 
     if (send_bytes_until(fd, hdr, (size_t)n, c->deadline))
