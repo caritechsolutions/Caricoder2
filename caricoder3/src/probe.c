@@ -678,7 +678,7 @@ static void report(struct probe *p, FILE *f, const char *url, double seconds, bo
 static void usage(FILE *f)
 {
     fprintf(f, "Usage: caricoder3 probe URL [--seconds N] [--program N]\n"
-               "  URL       udp://, rtp://, srt://, rist:// as for --input, or a .ts file\n"
+               "  URL       udp://, rtp://, srt://, rist://, http:// as for --input, or a .ts file\n"
                "  --seconds how long to listen (default 3)\n"
                "  --program report this service only\n"
                "Prints JSON: programs, streams, rates, picture and sound formats.\n");

@@ -2123,6 +2123,45 @@ def live_input_srt_sender_restart():
     return f"sender replaced at 3 s: {link['reconnects']} reconnect, {got}/{orig} PES through"
 
 
+def _http_sender(*opts):
+    def start(udp_port, port):
+        return subprocess.Popen([sys.executable, os.path.join(HERE, "http_relay.py"), str(udp_port), str(port), *opts],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return start
+
+
+@test
+def live_input_http_chunked():
+    """HTTP input: a chunked body through a redirect; the server's 2 s backlog is skipped, the clock not disturbed."""
+    st, log, out, src = _input_run("http://127.0.0.1:{port}/redirect", _http_sender("--hold", "2"), "in_http_chunked",
+                                   duration=10.0)
+    link = st["input"]["link"]
+    need(link["transport"] == "http" and link["connected"], f"link: {link}")
+    need(st["clock"]["discontinuities"] == 0 and st["output"]["dropped_units"] == 0,
+         f"clock {st['clock']}, dropped {st['output']['dropped_units']}")
+    must_pass(out, cbr=True)
+    must_match(src, out, subset=True)
+    got = sum(len(v) for v in Analysis(out).pes.values())
+    orig = sum(len(v) for v in Analysis(src).pes.values())
+    need(got > orig // 2, f"only {got} of {orig} PES")
+    return f"redirect followed, backlog skipped, no discontinuity, {got}/{orig} PES (the 2 s backlog and the start left out)"
+
+
+@test
+def live_input_http_reconnect():
+    """HTTP input: a plain body; the server drops the connection; the input connects again and goes on."""
+    st, log, out, src = _input_run("http://127.0.0.1:{port}/live", _http_sender("--plain", "--drop-after", "2"),
+                                   "in_http_reconnect", duration=10.0)
+    link = st["input"]["link"]
+    need(link["connected"] and link["reconnects"] >= 1, f"link: {link}")
+    must_pass(out, cbr=True, allow_late=True)       # as across any outage
+    must_match(src, out, subset=True)
+    got = sum(len(v) for v in Analysis(out).pes.values())
+    orig = sum(len(v) for v in Analysis(src).pes.values())
+    need(got > orig * 0.6, f"only {got} of {orig} PES through the reconnect")
+    return f"dropped at 2 s, {link['reconnects']} reconnect, {got}/{orig} PES through"
+
+
 @test
 def live_input_rist_listener():
     """RIST input listening; ristsender calls in."""

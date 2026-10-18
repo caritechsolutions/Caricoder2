@@ -95,7 +95,7 @@ bool sources_add(struct sources *s, const char *url, char *err, size_t errlen)
         return false;
     }
     if (!input_is_live(url)) {
-        snprintf(err, errlen, "%s: a source is udp://, rtp://, srt:// or rist://", url);
+        snprintf(err, errlen, "%s: a source is udp://, rtp://, srt://, rist:// or http://", url);
         return false;
     }
     if (strlen(url) >= SINK_URL_MAX) {

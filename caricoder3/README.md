@@ -25,6 +25,7 @@ rest of this repository.
 | 5c | RTMP push (H.264 + AAC) | done, tested against ffmpeg as the server; not yet against a public RTMP service |
 | 6 | HLS packager as an output (TS segments, master playlist for renditions, served by the process, optional directory) | done, tested; played by ffmpeg's HLS client |
 | 7 | Supervisor (`caricoder3 serve`): runs the channels, REST API, GUI on port 8550, HLS for every channel on that port | done, tested; side-by-side run against Flussonic not done |
+| 9 | Shared inputs (one reader per MPTS, `caricoder3 share`); HTTP TS input; output PIDs, PMT order, PMT/PCR PID, service/TS/network ids; preview player (300k H.264, audio choice), stream info and bit-rate graph | done, tested in the lab (2026-10-18); shared inputs and preview running on transcoder2 |
 | 8 | SRT and RIST inputs; MPEG-2 video decode; `caricoder3 probe` and "Scan source" in the GUI with stream selection (`--drop`); server page (CPU, memory, GPU, interfaces); list filter | done, tested in the lab (2026-10-16); not yet run on transcoder2 |
 
 Picture quality has been measured on real streams with `tests/quality.py`
@@ -162,6 +163,14 @@ once the first has been silent for a second (an encoder that restarts
 and pushes again gets in without waiting for a timeout). The link's
 state, RTT, recovered and lost packets and reconnects are in the
 statistics (`input.link`) and on the channel's Source card.
+
+An HTTP source, `http://host[:port]/path` (`http://user:pass@host/...`
+for basic authentication), pulls a TS stream from a server such as
+Flussonic's `http://SERVER/NAME/mpegts`: plain or chunked, redirects
+followed. The burst of buffered stream a server starts with is skipped
+(until the PCR moves at the speed of the clock, at most 10 s), so the
+channel starts at the live edge; when the connection ends, breaks or is
+silent for 5 s it connects again after a second. Not HTTPS.
 
 ### What is in a source
 

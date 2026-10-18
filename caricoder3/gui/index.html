@@ -623,13 +623,14 @@ function settingsHtml() {
     </div></details>
   </form>`;
 }
-const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["file","File (test)"]];
-const OWN_PARAMS = { udp: ["iface"], rtp: ["iface"], srtl: ["latency","passphrase","mode"], srtc: ["latency","passphrase","mode"], ristl: ["secret","aes-type","buffer"], ristc: ["secret","aes-type","buffer"] };
+const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["http","HTTP — pull a TS stream"],["file","File (test)"]];
+const OWN_PARAMS = { http: [], file: [], udp: ["iface"], rtp: ["iface"], srtl: ["latency","passphrase","mode"], srtc: ["latency","passphrase","mode"], ristl: ["secret","aes-type","buffer"], ristc: ["secret","aes-type","buffer"] };
 function inputUrl(v) {
   const q = [];
   const rest = () => { const r = v.extra ? v.extra.split("&").filter(Boolean) : []; return q.concat(r); };   // parameters the form does not own are kept
   switch (v.kind) {
   case "file": return v.host;
+  case "http": return v.host ? "http://" + v.host.replace(/^http:\/\//, "") : "";
   case "udp": case "rtp":
     if (v.iface) q.push("iface=" + v.iface);
     return `${v.kind}://${v.src?v.src+"@":""}${v.host}${v.port?":"+v.port:""}${rest().length?"?"+rest().join("&"):""}`;
@@ -656,11 +657,13 @@ function syncInput() {
   $("#in_udp").style.display = (k === "udp" || k === "rtp") ? "" : "none";
   $("#in_srt").style.display = (k === "srtl" || k === "srtc") ? "" : "none";
   $("#in_rist").style.display = (k === "ristl" || k === "ristc") ? "" : "none";
-  $("#in_host").placeholder = k === "file" ? "/path/to/file.ts" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "ristl" || k === "srtl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
+  $("#in_port").style.display = k === "http" || k === "file" ? "none" : "";
+  $("#in_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : k === "file" ? "/path/to/file.ts" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "ristl" || k === "srtl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
   $("#in_url").textContent = inputUrl(v);
 }
 function parseInput(url) {
   const r = { kind: "file", host: url || "", port: "", iface: "", src: "", latency: "", pass: "", secret: "", buffer: "", extra: "" };
+  if (/^http:\/\//.test(url || "")) { r.kind = "http"; r.host = url.slice(7); return r; }
   const m = /^(udp|rtp|srt|rist):\/\/(@?)(?:([^@\/?:]+)@)?([^:?]*)(?::(\d+))?(?:\?(.*))?$/.exec(url || "");
   if (!m) return r;
   const parts = (m[6]||"").split("&").filter(Boolean);
@@ -762,7 +765,7 @@ function addBackup() {
     return inputUrl(v); };
   const prev = () => { $("#b_prev").textContent = make(); };
   d.querySelectorAll("input,select").forEach(i => { i.oninput = prev; i.onchange = prev; }); prev();
-  $("#b_go").onclick = () => { const u = make(); if (!u || /:\s*$|:\?/.test(u) || !/:\d+/.test(u)) { alert("Address and port are needed."); return; } backups.push(u); showBackups(); setDirty(true); d.close(); };
+  $("#b_go").onclick = () => { const u = make(); if (!u || (!/^http:\/\/./.test(u) && (/:\s*$|:\?/.test(u) || !/:\d+/.test(u)))) { alert("Address and port are needed."); return; } backups.push(u); showBackups(); setDirty(true); d.close(); };
   d.showModal();
 }
 const dropNames = {};   // pid -> "audio spa AC-3", from the last scan, for the Streams line
