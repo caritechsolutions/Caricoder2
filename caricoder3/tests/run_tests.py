@@ -165,6 +165,39 @@ def file_drop_streams():
 
 
 @test
+def file_output_ids():
+    """--remap, --order, --pmt-pid, --pcr-pid, --service-id, --ts-id, --onid: the output's identifiers as asked, content unchanged."""
+    src = synth("syn")
+    out = w("ids.ts")
+    st = run_file(src, out, "-r", "4M", "--remap", "1651=481,1652=0x1E2", "--order", "1653,1651",
+                  "--pmt-pid", "4000", "--pcr-pid", "600", "--service-id", "1840", "--ts-id", "77", "--onid", "99")
+    must_pass(out, cbr=True)
+    a = Analysis(out)
+    b = Analysis(src)
+    order = [e["pid"] for e in a.pmt["streams"]]
+    need(order == [1653, 481, 482, 0x1FF0], f"PMT order {order}")
+    need(a.pmt_pid == 4000 and a.pmt["pcr_pid"] == 600 and a.pmt["program"] == 1840, f"PMT PID {a.pmt_pid}, PMT {a.pmt}")
+    need(a.pat["ts_id"] == 77 and a.pat["programs"] == {1840: 4000}, f"PAT {a.pat}")
+    need(a.pid_packets.get(600, 0) > 100 and len(a.pcrs) > 100, f"PCR-only PID: {a.pid_packets.get(600)} packets")
+    need(1651 not in a.pid_packets and 1652 not in a.pid_packets, "the old PIDs still have packets")
+    for old, new in ((1651, 481), (1652, 482), (1653, 1653)):
+        got = [p.get("sha_nots") for p in a.pes.get(new, [])]
+        want = [p.get("sha_nots") for p in b.pes.get(old, [])]
+        need(got and got == want, f"PID {old} -> {new}: content differs ({len(got)} vs {len(want)} PES)")
+    sv = st["service"]
+    need((sv["number"], sv["ts_id"], sv["pmt_pid"], sv["pcr_pid"]) == (1840, 77, 4000, 600) and
+         [x["pid"] for x in sv["streams"]] == [1653, 481, 482, 0x1FF0] and
+         [x["in_pid"] for x in sv["streams"]] == [1653, 1651, 1652, 0x1FF0], f"stats: {sv}")
+    # PCR on the video, and a PID asked for that an untouched stream had: that one moves
+    out2 = w("ids2.ts")
+    run_file(src, out2, "-r", "4M", "--remap", "1651=1652", "--pcr-pid", "video")
+    a2 = Analysis(out2)
+    pids = [e["pid"] for e in a2.pmt["streams"]]
+    need(pids[0] == 1652 and a2.pmt["pcr_pid"] == 1652 and len(set(pids)) == len(pids), f"collision: {pids}, PCR {a2.pmt['pcr_pid']}")
+    return "PIDs, order, PMT PID, PCR-only PID, service/TS/network ids as asked; a clashing PID moved"
+
+
+@test
 def probe_file_and_live():
     """caricoder3 probe: programs, streams, formats and rates, from a file and from UDP."""
     src = synth("syn_mpts", mpts=True)

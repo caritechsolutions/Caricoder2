@@ -52,6 +52,9 @@ struct engine {
     struct engine_cfg cfg;
     uint64_t pid_in_bytes[8192];    /* PES bytes per PID: from the input, to the mux */
     uint64_t pid_out_bytes[8192];
+    uint16_t out_pid[8192];         /* inside PID (the input's, or a rendition's) -> the
+                                     * output's; identity unless remapped */
+    struct program out_prog;        /* the first program as sent, for the stats */
     struct demux *dmx;
     struct mux *mux;
     stc_t delay;
@@ -142,6 +145,7 @@ static void deliver(struct engine *e, struct es_unit *u)
 
     if (e->xc_mode[u->pid] == STREAM_COPY) {
         e->pid_out_bytes[u->pid & 0x1FFF] += u->len;
+        u->pid = e->out_pid[u->pid & 0x1FFF];
         mux_push(e->mux, u);
         return;
     }
@@ -189,6 +193,7 @@ static void on_xcode_out(void *opaque, struct es_unit *u)
     if (x && now != NOPTS)
         xcode_note_slack(x, u->t0 - now, u->pts);
     e->pid_out_bytes[u->pid & 0x1FFF] += u->len;
+    u->pid = e->out_pid[u->pid & 0x1FFF];
     mux_push(e->mux, u);
     if (live)
         pthread_mutex_unlock(&e->lock);
@@ -561,6 +566,144 @@ static bool dropped(const struct engine *e, uint16_t pid)
     return false;
 }
 
+/*
+ * The output's own identifiers (--remap, --order, --pmt-pid, --pcr-pid):
+ * puts the streams of every program in the order asked for (the same
+ * permutation for all: renditions are copies of the first), then writes
+ * `out[]`, the programs as sent, and `map[]`, inside PID -> output PID.
+ * A PID nobody asked for that lands on one somebody did is moved to a
+ * free one. `perm[i]` is the inside index of the i-th stream sent.
+ */
+static void output_ids(const struct engine *e, struct program *np, int n_prog,
+                       struct program *out, uint16_t *map, int *perm)
+{
+    const struct engine_cfg *cfg = &e->cfg;
+    bool used[8192], asked[8192];
+    int n = np[0].n_es;
+    uint16_t pcr;
+
+    /* the order */
+    for (int i = 0; i < n; i++)
+        perm[i] = i;
+    if (cfg->n_order) {
+        int k = 0;
+        bool placed[MAX_ES] = { false };
+
+        for (int j = 0; j < cfg->n_order; j++)
+            for (int i = 0; i < n; i++)
+                if (!placed[i] && np[0].es[i].pid == cfg->order[j]) {
+                    perm[k++] = i;
+                    placed[i] = true;
+                }
+        for (int i = 0; i < n; i++)
+            if (!placed[i])
+                perm[k++] = i;
+        for (int q = 0; q < n_prog; q++) {
+            struct es_info es[MAX_ES];
+
+            for (int i = 0; i < n; i++)
+                es[i] = np[q].es[perm[i]];
+            memcpy(np[q].es, es, sizeof(es[0]) * (size_t)n);
+        }
+    }
+
+    /* the PIDs asked for */
+    for (int i = 0; i < 8192; i++)
+        map[i] = (uint16_t)i;
+    memset(used, 0, sizeof(used));
+    memset(asked, 0, sizeof(asked));
+    for (int j = 0; j < cfg->n_remap; j++)
+        for (int i = 0; i < n; i++)
+            if (np[0].es[i].pid == cfg->remap[j].in) {
+                map[cfg->remap[j].in] = cfg->remap[j].out;
+                asked[cfg->remap[j].out] = true;
+            }
+    if (cfg->pmt_pid > 0)
+        asked[cfg->pmt_pid] = true;
+    if (cfg->pcr_pid > 0)
+        asked[cfg->pcr_pid] = true;
+    for (int i = 0; i < 0x20; i++)
+        used[i] = true;
+    used[PID_NULL] = true;
+    for (int i = 0; i < 8192; i++)
+        if (asked[i])
+            used[i] = true;
+
+    /* everything else keeps its PID unless that is taken */
+    for (int q = 0; q < n_prog; q++)
+        for (int i = 0; i < n; i++) {
+            uint16_t in = np[q].es[i].pid;
+            bool mine = false;
+
+            for (int j = 0; j < cfg->n_remap; j++)
+                mine |= cfg->remap[j].in == in && map[in] == cfg->remap[j].out;
+            if (mine || (q > 0 && in == np[0].es[i].pid))
+                continue;                   /* asked for, or shared with the first program */
+            if (used[map[in]]) {
+                uint16_t pid = map[in];
+
+                do
+                    pid = pid + 1 >= PID_NULL ? 0x20 : (uint16_t)(pid + 1);
+                while (used[pid] && pid != map[in]);
+                log_warn("PID 0x%04X: its PID is taken (by a PID asked for, or a stream moved for one); sent on 0x%04X", in, pid);
+                map[in] = pid;
+            }
+            used[map[in]] = true;
+        }
+
+    /* the clock */
+    pcr = map[np[0].pcr_pid & 0x1FFF];
+    if (cfg->pcr_pid > 0) {
+        pcr = (uint16_t)cfg->pcr_pid;
+    } else if (cfg->pcr_pid < 0) {
+        for (int i = 0; i < n; i++) {
+            int st = np[0].es[i].stream_type;
+
+            if (st == 0x01 || st == 0x02 || st == 0x10 || st == 0x1B || st == 0x24) {
+                pcr = map[np[0].es[i].pid];
+                break;
+            }
+        }
+    } else if (np[0].pcr_pid != PID_NULL) {
+        bool on_stream = false;
+
+        for (int i = 0; i < n; i++)
+            on_stream |= np[0].es[i].pid == np[0].pcr_pid;
+        if (!on_stream) {
+            /* the source's PCR-only PID: kept, unless a stream now has it */
+            while (used[pcr])
+                pcr = pcr + 1 >= PID_NULL ? 0x20 : (uint16_t)(pcr + 1);
+            used[pcr] = true;
+        }
+    }
+
+    for (int q = 0; q < n_prog; q++) {
+        out[q] = np[q];
+        for (int i = 0; i < n; i++)
+            out[q].es[i].pid = map[np[q].es[i].pid];
+        if (np[q].pcr_pid != PID_NULL)
+            out[q].pcr_pid = pcr;
+    }
+    /* the PMTs: the first where asked; any that now meets a stream or
+     * the clock moves */
+    if (cfg->pmt_pid > 0)
+        out[0].pmt_pid = (uint16_t)cfg->pmt_pid;
+    used[pcr] = true;
+    for (int q = 0; q < n_prog; q++) {
+        if (q == 0 && cfg->pmt_pid > 0)
+            continue;
+        if (used[out[q].pmt_pid] || (q > 0 && out[q].pmt_pid == out[0].pmt_pid)) {
+            uint16_t pid = out[q].pmt_pid;
+
+            do
+                pid = pid + 1 >= PID_NULL ? 0x20 : (uint16_t)(pid + 1);
+            while (used[pid]);
+            out[q].pmt_pid = pid;
+        }
+        used[out[q].pmt_pid] = true;
+    }
+}
+
 static void on_program(void *opaque, const struct program *p)
 {
     struct engine *e = opaque;
@@ -569,6 +712,14 @@ static void on_program(void *opaque, const struct program *p)
     int n_prog = 1;
 
     program_set_service(&named, e->cfg.service_provider, e->cfg.service_name);
+    if (e->cfg.service_id > 0)
+        named.number = (uint16_t)e->cfg.service_id;
+    if (e->cfg.ts_id >= 0)
+        named.ts_id = (uint16_t)e->cfg.ts_id;
+    if (e->cfg.onid >= 0)
+        named.onid = (uint16_t)e->cfg.onid;
+    if (e->cfg.pmt_pid > 0)
+        named.pmt_pid = (uint16_t)e->cfg.pmt_pid;   /* so renditions keep clear of it */
     /* The streams left out go before anything is planned for them. The
      * PCR PID stays as it is: the mux writes PCRs of its own on it, which
      * needs no packets of the input's. */
@@ -586,18 +737,24 @@ static void on_program(void *opaque, const struct program *p)
         np[0] = named;
     thumb_source(e, &named);
 
+    static struct program onp[MAX_PROGRAMS];    /* the programs as sent */
+    static uint16_t map[8192];
+    int perm[MAX_ES];
     bool same_streams;
 
+    output_ids(e, np, n_prog, onp, map, perm);
     pthread_mutex_lock(&e->lock);
-    same_streams = e->have_prog && e->prog.pmt_pid == np[0].pmt_pid &&
-                   e->prog.pcr_pid == np[0].pcr_pid && e->prog.n_es == np[0].n_es &&
-                   memcmp(e->prog.es, np[0].es, sizeof(np[0].es)) == 0 &&
+    same_streams = e->have_prog && e->out_prog.pmt_pid == onp[0].pmt_pid &&
+                   e->out_prog.pcr_pid == onp[0].pcr_pid && e->out_prog.n_es == onp[0].n_es &&
+                   memcmp(e->out_prog.es, onp[0].es, sizeof(onp[0].es)) == 0 &&
                    e->n_prog == n_prog;
-    mux_set_programs(e->mux, np, n_prog);
+    mux_set_programs(e->mux, onp, n_prog);
     e->prog = np[0];
+    e->out_prog = onp[0];
+    memcpy(e->out_pid, map, sizeof(e->out_pid));
     e->n_prog = n_prog;
     for (int k = 0; k < n_prog; k++)
-        e->prog_pmt_pid[k] = np[k].pmt_pid;
+        e->prog_pmt_pid[k] = onp[k].pmt_pid;
     e->have_prog = true;
     pthread_mutex_unlock(&e->lock);
 
@@ -621,19 +778,23 @@ static void on_program(void *opaque, const struct program *p)
     }
     for (int k = 0; k < n_prog; k++) {
         log_info("service %u: PMT PID 0x%04X, PCR PID 0x%04X, %d stream(s)%s",
-                 np[k].number, np[k].pmt_pid, np[k].pcr_pid, np[k].n_es,
+                 onp[k].number, onp[k].pmt_pid, onp[k].pcr_pid, onp[k].n_es,
                  k ? " (further rendition)" : "");
-        for (int i = 0; i < np[k].n_es; i++) {
-            bool xc = e->xc_mode[p->es[i].pid] == STREAM_TRANSCODE;
+        for (int i = 0; i < onp[k].n_es; i++) {
+            const struct es_info *src = &named.es[perm[i]];
+            bool xc = e->xc_mode[src->pid] == STREAM_TRANSCODE;
 
             if (xc)
                 log_info("  PID 0x%04X  type 0x%02X  %s  [transcoded from %s on PID 0x%04X]",
-                         np[k].es[i].pid, np[k].es[i].stream_type,
-                         stream_type_name(np[k].es[i].stream_type),
-                         stream_type_name(p->es[i].stream_type), p->es[i].pid);
+                         onp[k].es[i].pid, onp[k].es[i].stream_type,
+                         stream_type_name(onp[k].es[i].stream_type),
+                         stream_type_name(src->stream_type), src->pid);
+            else if (onp[k].es[i].pid != src->pid)
+                log_info("  PID 0x%04X  type 0x%02X  %s  [copy of PID 0x%04X]", onp[k].es[i].pid,
+                         onp[k].es[i].stream_type, stream_type_name(onp[k].es[i].stream_type), src->pid);
             else
-                log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", np[k].es[i].pid,
-                         np[k].es[i].stream_type, stream_type_name(np[k].es[i].stream_type));
+                log_info("  PID 0x%04X  type 0x%02X  %s  [copy]", onp[k].es[i].pid,
+                         onp[k].es[i].stream_type, stream_type_name(onp[k].es[i].stream_type));
         }
     }
     if (np[0].pcr_pid == PID_NULL)
@@ -1186,6 +1347,12 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
     }
     if (e->have_prog) {
         out->prog = e->prog;
+        out->out_number = e->out_prog.number;
+        out->out_ts_id = e->out_prog.ts_id;
+        out->out_pmt_pid = e->out_prog.pmt_pid;
+        out->out_pcr_pid = e->out_prog.pcr_pid;
+        for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++)
+            out->es_out_pid[i] = e->out_pid[e->prog.es[i].pid & 0x1FFF];
         for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++) {
             out->es_in_bytes[i] = e->pid_in_bytes[e->prog.es[i].pid & 0x1FFF];
             out->es_out_bytes[i] = e->pid_out_bytes[e->prog.es[i].pid & 0x1FFF];
@@ -1196,6 +1363,7 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
     for (int k = 0; k < e->n_xc; k++) {
         xcode_get_stats(e->xc_list[k], &out->xc[k]);
         out->xc_out_bytes[k] = e->pid_out_bytes[out->xc[k].out_pid & 0x1FFF];
+        out->xc_out_pid[k] = e->out_pid[out->xc[k].out_pid & 0x1FFF];
     }
     out->xc_orphans = e->xc_orphans;
     pthread_mutex_unlock(&e->lock);
@@ -1210,6 +1378,8 @@ struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,
     if (!e)
         return NULL;
     e->cfg = *cfg;
+    for (int i = 0; i < 8192; i++)
+        e->out_pid[i] = (uint16_t)i;
     e->delay = cfg->delay_ms * STC_PER_MS;
     pthread_mutex_init(&e->lock, NULL);
     e->sbuf = malloc(SBUF_SIZE);

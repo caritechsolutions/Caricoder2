@@ -31,6 +31,18 @@ struct engine_cfg {
     /* Streams of the service left out of the output (by input PID). */
     uint16_t drop[MAX_ES];
     int  n_drop;
+
+    /* The output's identifiers. All by input PID; unset ones keep the
+     * source's (or, for renditions, the automatic) values. */
+    struct { uint16_t in, out; } remap[MAX_ES];  /* stream PIDs */
+    int  n_remap;
+    uint16_t order[MAX_ES];     /* input PIDs in the order the PMT lists them; others after */
+    int  n_order;
+    int  service_id;            /* program number; 0 = keep */
+    int  ts_id, onid;           /* -1 = keep */
+    int  pmt_pid;               /* 0 = keep */
+    int  pcr_pid;               /* 0 = keep, -1 = on the (first) video, else this output PID
+                                 * (a stream's PID, or a PCR-only PID of its own) */
 };
 
 struct engine_stats {
@@ -57,6 +69,9 @@ struct engine_stats {
      * transcoder index (out) */
     uint64_t es_in_bytes[MAX_ES], es_out_bytes[MAX_ES];
     uint64_t xc_out_bytes[MAX_ES];
+    /* What the output calls things: by stream index and transcoder index */
+    uint16_t es_out_pid[MAX_ES], xc_out_pid[MAX_ES];
+    uint16_t out_number, out_ts_id, out_pmt_pid, out_pcr_pid;
 };
 
 struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,

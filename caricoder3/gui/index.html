@@ -105,6 +105,7 @@ dialog h3 { margin:0 0 14px; font-size:17px } dialog .actions { display:flex; ju
 svg.graph { width:100%; height:auto; display:block } svg.graph .grid line { stroke:var(--line); stroke-width:1 } svg.graph .grid text { fill:var(--dim); font-size:10.5px; font-family:inherit }
 svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.graph .gin { stroke:var(--air) } svg.graph .gout { stroke:var(--ok) }
 .big-thumb { width:100%; height:auto; aspect-ratio:16/9; object-fit:contain; margin-bottom:8px; background:#0d1216 }
+.pidt { width:auto; min-width:60% } .pidt td, .pidt th { padding:4px 10px } .pidt button { padding:2px 8px }
 .tag { display:inline-block; padding:1px 7px; border-radius:4px; background:var(--panel2); color:var(--fg2); font-size:12px }
 .warn { color:var(--warn) } .bad { color:var(--bad) }
 @media (max-width:900px) { body { flex-direction:column } nav { width:auto; height:auto; position:static; max-height:40vh } .path { grid-template-columns:1fr } .path .arrow { transform:rotate(90deg); height:20px } .f { grid-template-columns:1fr } .f .help { grid-column:1 } }
@@ -609,6 +610,10 @@ function settingsHtml() {
       <label>Video buffer</label><div class="row"><input id="vbv" class="n" placeholder="1000"><span style="color:var(--dim)">ms (VBV). Larger smooths quality, adds delay.</span></div>
       <label>Service name</label><input id="service_name" placeholder="keep the source's">
       <label>Provider</label><input id="service_provider" placeholder="keep the source's">
+      <label>Service number</label><div class="row"><input id="service_id" class="n" placeholder="source's"><span style="color:var(--dim);flex:0 0 auto">TS id</span><input id="ts_id" class="n" placeholder="source's"><span style="color:var(--dim);flex:0 0 auto">Network id</span><input id="onid" class="n" placeholder="source's"><span style="color:var(--dim)">Program number in PAT/PMT/SDT, transport stream id and original network id.</span></div>
+      <label>PMT PID</label><div class="row"><input id="pmt_pid" class="n" placeholder="source's"><span style="color:var(--dim)">PIDs in decimal (481) or hex (0x1E1).</span></div>
+      <label>PCR</label><div class="row"><select id="pcr_mode" style="flex:0 0 220px" onchange="$('#pcr_pid').style.display=this.value==='pid'?'':'none'"><option value="">As in the source</option><option value="video">On the video PID</option><option value="pid">On this PID…</option></select><input id="pcr_pid" class="n" placeholder="e.g. 600" style="display:none"><span style="color:var(--dim)">A stream's output PID puts it on that stream; any other PID carries the PCR alone.</span></div>
+      <label>Output streams</label><div><div id="pidrows"></div><div class="help" style="margin-top:6px">The order is the order of the PMT: a receiver plays the first audio it finds. Output PID empty keeps the input's. Extra renditions keep automatic PIDs.</div></div>
       <label>Enabled</label><div class="row"><select id="enabled" style="flex:0 0 160px"><option value="true">Yes, run it</option><option value="false">No, keep it stopped</option></select></div>
     </div></details>
   </form>`;
@@ -703,10 +708,40 @@ function fillForm(cfg) {
   const a = (cfg.audio || [])[0] || ""; const ap = a.split("=").pop().split(":");
   $("#a_codec").value = ap[0] && ["aac","mp2","mp3"].includes(ap[0]) ? ap[0] : ""; $("#a_rate").value = ap[1] && ABR.includes(ap[1]) ? ap[1] : "128k"; $("#a_rate").disabled = !$("#a_codec").value;
   $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
-  for (const k of ["delay","gop","vbv","service_name","service_provider"]) $("#"+k).value = cfg[k] ?? "";
+  for (const k of ["delay","gop","vbv","service_name","service_provider","service_id","ts_id","onid","pmt_pid"]) $("#"+k).value = cfg[k] ?? "";
+  $("#pcr_mode").value = cfg.pcr_pid === "video" ? "video" : cfg.pcr_pid ? "pid" : "";
+  $("#pcr_pid").value = typeof cfg.pcr_pid === "number" ? cfg.pcr_pid : ""; $("#pcr_pid").style.display = $("#pcr_mode").value === "pid" ? "" : "none";
+  pidRowsBuild(cfg);
   $("#enabled").value = String(cfg.enabled !== false);
   setDirty(false);
 }
+/* The output streams table: one row per stream of the program, by input
+ * PID, in output order; each may get an output PID. */
+let pidRows = [], pidOrdered = false, lastScanStreams = null;
+function pidRowsBuild(cfg) {
+  const remap = cfg.remap || {}, order = cfg.order || [], drop = new Set(cfg.drop || []);
+  const live = (((current || {}).stats || {}).service || {}).streams;
+  let rows = [];
+  if (live && live.length) rows = live.filter(x => !x.from_pid).map(x => ({ in: x.in_pid, label: `${x.kind || "data"} ${codecLabel(x, true)}${x.language ? " " + x.language.toUpperCase() : ""}` }));
+  else if (lastScanStreams) rows = lastScanStreams.filter(x => !drop.has(x.pid)).map(x => ({ in: x.pid, label: `${x.kind} ${(x.codec || x.type_name || "").toUpperCase()}${x.language ? " " + x.language.toUpperCase() : ""}` }));
+  for (const k of Object.keys(remap).map(Number).concat(order)) if (!rows.some(r => r.in === k) && !drop.has(k)) rows.push({ in: k, label: "(not in the source right now)" });
+  if (order.length) rows.sort((a, b) => { const ia = order.indexOf(a.in), ib = order.indexOf(b.in); return (ia < 0 ? 1e9 : ia) - (ib < 0 ? 1e9 : ib); });
+  for (const r of rows) r.out = remap[r.in] ?? "";
+  pidRows = rows; pidOrdered = order.length > 0;
+  showPidRows();
+}
+function showPidRows() {
+  const el = $("#pidrows"); if (!el) return;
+  if (!pidRows.length) { el.innerHTML = `<div style="color:var(--dim)">The streams are listed once the channel runs, or after "Scan source…". <button type="button" class="quiet" onclick="pidRowsBuild(readForm())">List them</button></div>`; return; }
+  el.innerHTML = `<table class="pidt"><thead><tr><th>Order</th><th>Input PID</th><th>Stream</th><th>Output PID</th></tr></thead><tbody>${pidRows.map((r, i) => `<tr>
+      <td style="white-space:nowrap"><button type="button" class="quiet" ${i ? "" : "disabled"} onclick="movePid(${i},-1)" title="Earlier">↑</button><button type="button" class="quiet" ${i < pidRows.length - 1 ? "" : "disabled"} onclick="movePid(${i},1)" title="Later">↓</button></td>
+      <td class="mono">${r.in}</td><td>${esc(r.label)}</td>
+      <td><input class="n pidout" data-i="${i}" value="${esc(r.out)}" placeholder="${r.in}" style="width:100px" oninput="pidRows[${i}].out=this.value.trim()"></td></tr>`).join("")}</tbody></table>
+    <div style="margin-top:6px"><button type="button" class="quiet" onclick="pidRowsBuild(readForm())">Refresh the list</button>${pidOrdered ? ` <button type="button" class="quiet" onclick="pidOrdered=false;pidRowsBuild(Object.assign(readForm(),{order:[]}));setDirty(true)">Clear the order</button>` : ""}</div>`;
+}
+function movePid(i, d) { const r = pidRows.splice(i, 1)[0]; pidRows.splice(i + d, 0, r); pidOrdered = true; showPidRows(); setDirty(true); }
+const pidNum = t => { if (t === "" || t == null) return undefined; const n = /^0x/i.test(String(t)) ? parseInt(t, 16) : Number(t); return Number.isInteger(n) ? n : NaN; };
+
 let backups = [];
 function showBackups() {
   $("#backups").innerHTML = backups.map((u, i) => `<div class="row" style="margin-bottom:6px"><span class="mono" style="flex:1">${esc(u)}</span><button type="button" class="quiet" style="flex:0 0 auto" onclick="backups.splice(${i},1);showBackups();setDirty(true)">Remove</button></div>`).join("");
@@ -773,7 +808,9 @@ async function scanSource() {
     if (off.length === prog.streams.length) { showMsg("At least one stream has to stay.", "err"); return; }
     $("#program").value = sel;
     for (const x of prog.streams) dropNames[x.pid] = `${x.kind}${x.language ? " " + x.language : ""} ${(x.codec || x.type_name).toUpperCase()}`;
-    $("#drop").value = off.join(","); showDrop(); setDirty(true); d.close();
+    $("#drop").value = off.join(","); showDrop();
+    lastScanStreams = prog.streams; if (!((((current || {}).stats || {}).service || {}).streams || []).length) pidRowsBuild(readForm());
+    setDirty(true); d.close();
   };
 }
 function readForm() {
@@ -798,6 +835,13 @@ function readForm() {
   for (const k of ["decoder","encoder","preset","service_name","service_provider"]) if (v(k)) cfg[k] = v(k);
   if (v("gpu")) cfg.gpu = Number(v("gpu"));
   for (const k of ["delay","gop","vbv"]) if (num(k)) cfg[k] = num(k);
+  for (const k of ["service_id","ts_id","onid","pmt_pid"]) { const n = pidNum(v(k)); if (n !== undefined) cfg[k] = n; }
+  if (v("pcr_mode") === "video") cfg.pcr_pid = "video";
+  else if (v("pcr_mode") === "pid" && v("pcr_pid") !== "") cfg.pcr_pid = pidNum(v("pcr_pid"));
+  const remap = {};
+  for (const r of pidRows) { const n = pidNum(r.out); if (n !== undefined && n !== r.in) remap[r.in] = n; }
+  if (Object.keys(remap).length) cfg.remap = remap;
+  if (pidOrdered && pidRows.length) cfg.order = pidRows.map(r => r.in);
   cfg.enabled = v("enabled") === "true";
   return cfg;
 }
@@ -808,6 +852,15 @@ async function saveChannel() {
   if (/^(srt|rist):\/\/[^?]*:(\?|$)/.test(cfg.input)) { showMsg("The SRT or RIST port is needed.", "err"); return; }
   if (/passphrase=[^&]{1,9}(&|$)/.test(cfg.input)) { showMsg("An SRT passphrase is 10 characters or more.", "err"); return; }
   for (const r of cfg.video || []) if (!/^(\d+x\d+:)?(h264|hevc)(:\S+)?$/.test(r)) { showMsg("A custom resolution needs both width and height, and a bit rate like 2500k.", "err"); return; }
+  {
+    const bad = (k, lo, hi) => cfg[k] !== undefined && cfg[k] !== "video" && !(Number.isInteger(cfg[k]) && cfg[k] >= lo && cfg[k] <= hi);
+    if (bad("service_id", 1, 65535) || bad("ts_id", 0, 65535) || bad("onid", 0, 65535)) { showMsg("Service number 1–65535; TS id and network id 0–65535.", "err"); return; }
+    if (bad("pmt_pid", 32, 8190) || bad("pcr_pid", 32, 8190) || Object.values(cfg.remap || {}).some(p => !(Number.isInteger(p) && p >= 32 && p <= 8190))) { showMsg("Output PIDs are 32–8190 (0x20–0x1FFE).", "err"); return; }
+    const outs = pidRows.map(r => pidNum(r.out) ?? r.in);
+    if (new Set(outs).size !== outs.length) { showMsg("Two streams have the same output PID.", "err"); return; }
+    if (cfg.pmt_pid !== undefined && outs.includes(cfg.pmt_pid)) { showMsg("The PMT PID is also a stream's PID.", "err"); return; }
+    if (cfg.pmt_pid !== undefined && cfg.pcr_pid === cfg.pmt_pid) { showMsg("The PCR and the PMT cannot share a PID.", "err"); return; }
+  }
   try { await api(`/api/channels/${encodeURIComponent(view.name)}`, {method:"PUT", body: JSON.stringify(cfg, null, 2) + "\n"}); setDirty(false); showMsg("Saved." + (current && current.state === "running" ? " The channel is restarting with the new settings." : ""), "ok"); schedule(800); }
   catch(e) { showMsg(e.message, "err"); }
 }

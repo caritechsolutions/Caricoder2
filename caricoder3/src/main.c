@@ -335,7 +335,7 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
                "    \"pmt_pid\": %u,\n    \"pcr_pid\": %u,\n    \"changes\": %llu,\n"
                "    \"programs\": %d,\n"
                "    \"streams\": [",
-            st->prog.number, st->prog.ts_id, st->prog.pmt_pid, st->prog.pcr_pid,
+            st->out_number, st->out_ts_id, st->out_pmt_pid, st->out_pcr_pid,
             (unsigned long long)st->in.program_changes, st->n_prog);
     /* One entry per input stream, and after it one per further rendition
      * of that stream (its own output PID). */
@@ -360,7 +360,8 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
             const char *kind = es_kind(&st->prog, i, lang, sizeof(lang));
 
             fprintf(f, "%s\n      {\"pid\": %u, \"in_pid\": %u, \"stream_type\": %u, \"kind\": \"%s\", \"language\": ",
-                    n_out++ ? "," : "", x ? x->out_pid : in_pid, in_pid, st->prog.es[i].stream_type, kind);
+                    n_out++ ? "," : "", k >= 0 ? st->xc_out_pid[k] : st->es_out_pid[i], in_pid,
+                    st->prog.es[i].stream_type, kind);
             json_str(f, lang);
             fprintf(f, ", \"codec\": ");
         }
@@ -931,6 +932,14 @@ static void usage(FILE *f)
 "      --sdt-interval MS    default 500\n"
 "      --service-name TEXT  replace the service name in the SDT\n"
 "      --service-provider TEXT\n"
+"      --service-id N       the output's program number (default: the source's)\n"
+"      --ts-id N, --onid N  transport stream id / original network id (PAT, SDT)\n"
+"      --pmt-pid PID        the output's PMT PID (default: the source's)\n"
+"      --pcr-pid PID|video  where the PCR goes: video, a stream's output PID, or a\n"
+"                           PID of its own (default: as in the source)\n"
+"      --remap IN=OUT[,..]  send input PID IN as PID OUT (decimal or 0x hex)\n"
+"      --order PID[,PID..]  input PIDs in the order the PMT lists them (a\n"
+"                           receiver takes the first audio); others follow\n"
 "      --stats-file PATH    JSON statistics, rewritten every second\n"
 "      --thumb PATH         a JPEG of the picture, 320 wide, rewritten every\n"
 "      --thumb-interval S   S seconds (default 5)\n"
@@ -981,7 +990,31 @@ enum {
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
+    OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
 };
+
+/* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
+static bool parse_out_pid(const char *s, char **end, int *pid)
+{
+    long v = strtol(s, end, 0);
+
+    if (*end == s || v < 0x20 || v > 0x1FFE)
+        return false;
+    *pid = (int)v;
+    return true;
+}
+
+/* A 16-bit number (service, transport stream, network id). */
+static bool parse_u16(const char *s, int lo, int *out)
+{
+    char *end;
+    long v = strtol(s, &end, 0);
+
+    if (end == s || *end || v < lo || v > 0xFFFF)
+        return false;
+    *out = (int)v;
+    return true;
+}
 
 static bool parse_where(const char *s, enum codec_where *out)
 {
@@ -1016,6 +1049,13 @@ int main(int argc, char **argv)
         { "backends", no_argument, 0, OPT_BACKENDS },
         { "audio", required_argument, 0, OPT_AUDIO },
         { "drop", required_argument, 0, OPT_DROP },
+        { "remap", required_argument, 0, OPT_REMAP },
+        { "order", required_argument, 0, OPT_ORDER },
+        { "pmt-pid", required_argument, 0, OPT_PMT_PID },
+        { "pcr-pid", required_argument, 0, OPT_PCR_PID },
+        { "service-id", required_argument, 0, OPT_SERVICE_ID },
+        { "ts-id", required_argument, 0, OPT_TS_ID },
+        { "onid", required_argument, 0, OPT_ONID },
         { "switch-after", required_argument, 0, OPT_SWITCH_AFTER },
         { "thumb", required_argument, 0, OPT_THUMB },
         { "thumb-interval", required_argument, 0, OPT_THUMB_INTERVAL },
@@ -1062,6 +1102,8 @@ int main(int argc, char **argv)
     o.eng.mux.psi_interval_ms = 100;
     o.eng.mux.sdt_interval_ms = 500;
     o.eng.mux.max_late_ms = 1000;
+    o.eng.ts_id = -1;
+    o.eng.onid = -1;
 
     while ((opt = getopt_long(argc, argv, "i:o:p:r:d:vqVh", longopts, NULL)) != -1) {
         switch (opt) {
@@ -1155,6 +1197,79 @@ int main(int argc, char **argv)
             }
             break;
         }
+        case OPT_REMAP:
+            /* IN=OUT[,IN=OUT...]: input PID -> output PID */
+            for (const char *p = optarg; *p; ) {
+                char *end;
+                long in = strtol(p, &end, 0);
+                int out;
+
+                if (end == p || *end != '=' || in < 0x10 || in > 0x1FFE ||
+                    !parse_out_pid(end + 1, &end, &out) || (*end && *end != ',')) {
+                    fprintf(stderr, "--remap: IN=OUT pairs of PIDs (output 0x20..0x1FFE), separated by commas\n");
+                    return 2;
+                }
+                for (int j = 0; j < o.eng.n_remap; j++)
+                    if (o.eng.remap[j].out == out || o.eng.remap[j].in == in) {
+                        fprintf(stderr, "--remap: PID %ld or %d given twice\n", in, out);
+                        return 2;
+                    }
+                if (o.eng.n_remap >= MAX_ES) {
+                    fprintf(stderr, "--remap: too many PIDs\n");
+                    return 2;
+                }
+                o.eng.remap[o.eng.n_remap].in = (uint16_t)in;
+                o.eng.remap[o.eng.n_remap++].out = (uint16_t)out;
+                p = *end == ',' ? end + 1 : end;
+            }
+            break;
+        case OPT_ORDER:
+            /* PID[,PID...]: input PIDs in the order the PMT lists them */
+            for (const char *p = optarg; *p; ) {
+                char *end;
+                long pid = strtol(p, &end, 0);
+
+                if (end == p || pid < 0x10 || pid > 0x1FFE || (*end && *end != ',') || o.eng.n_order >= MAX_ES) {
+                    fprintf(stderr, "--order: input PIDs separated by commas\n");
+                    return 2;
+                }
+                o.eng.order[o.eng.n_order++] = (uint16_t)pid;
+                p = *end == ',' ? end + 1 : end;
+            }
+            break;
+        case OPT_PMT_PID: {
+            char *end;
+
+            if (!parse_out_pid(optarg, &end, &o.eng.pmt_pid) || *end) {
+                fprintf(stderr, "--pmt-pid: a PID 0x20..0x1FFE\n");
+                return 2;
+            }
+            break;
+        }
+        case OPT_PCR_PID: {
+            char *end;
+
+            if (!strcmp(optarg, "video"))
+                o.eng.pcr_pid = -1;
+            else if (!parse_out_pid(optarg, &end, &o.eng.pcr_pid) || *end) {
+                fprintf(stderr, "--pcr-pid: video, or an output PID 0x20..0x1FFE\n");
+                return 2;
+            }
+            break;
+        }
+        case OPT_SERVICE_ID:
+            if (!parse_u16(optarg, 1, &o.eng.service_id)) {
+                fprintf(stderr, "--service-id: 1..65535\n");
+                return 2;
+            }
+            break;
+        case OPT_TS_ID:
+        case OPT_ONID:
+            if (!parse_u16(optarg, 0, opt == OPT_TS_ID ? &o.eng.ts_id : &o.eng.onid)) {
+                fprintf(stderr, "--%s: 0..65535\n", opt == OPT_TS_ID ? "ts-id" : "onid");
+                return 2;
+            }
+            break;
         case OPT_GPU: o.eng.gpu = atoi(optarg); break;
         case OPT_PRESET: o.eng.preset = optarg; break;
         case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;
@@ -1169,6 +1284,20 @@ int main(int argc, char **argv)
     }
     if (gpu_test)
         return nv_selftest(stdout, o.eng.gpu);
+    {
+        /* the output's PIDs must not meet */
+        int pmt = o.eng.pmt_pid, pcr = o.eng.pcr_pid;
+
+        for (int j = 0; j < o.eng.n_remap; j++)
+            if (pmt && o.eng.remap[j].out == pmt) {
+                fprintf(stderr, "--pmt-pid %d is also a stream's PID in --remap\n", pmt);
+                return 2;
+            }
+        if (pmt && pcr == pmt) {
+            fprintf(stderr, "--pcr-pid and --pmt-pid cannot be the same PID\n");
+            return 2;
+        }
+    }
     if (!o.input || (!o.n_output && !o.config) || optind < argc) {
         usage(stderr);
         return 2;

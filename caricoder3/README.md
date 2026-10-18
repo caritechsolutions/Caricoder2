@@ -354,7 +354,12 @@ A channel file holds what the command line would, for example
 Keys: `input`, `backup_inputs` (list), `switch_after`, `retry_primary`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
 `audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `gop`, `vbv`,
 `pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
-`extra_args` (list, passed as they are), `enabled`. The channel's outputs
+`service_id`, `ts_id`, `onid`, `pmt_pid`, `pcr_pid` (a PID, or `"video"`),
+`remap` (`{"256": 481, ...}`: input PID to output PID), `order` (input
+PIDs in the order the PMT lists them; receivers play the first audio),
+`extra_args` (list, passed as they are), `enabled`. The output's
+identifiers are set in the GUI under "Timing and service details"; a PID
+not asked for that meets one that is moves to the next free PID (logged). The channel's outputs
 live next to it in `vacation.outputs.json`, which the channel itself
 reads and writes (the `--config` file), so an output added in the GUI
 survives a restart. The supervisor re-reads the directory on `SIGHUP`

@@ -297,10 +297,10 @@ static void chan_log_line(struct chan *c, const char *line)
 static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char *err, size_t errlen)
 {
     static struct json_doc doc;            /* under the supervisor's lock */
-    static char store[64][512];
+    static char store[96][512];
     int root, n = 0, k = 0;
     const char *input;
-#define ARG(fmt, ...) do { if (n + 1 >= max || k >= 64) goto full; \
+#define ARG(fmt, ...) do { if (n + 1 >= max || k >= 96) goto full; \
         snprintf(store[k], sizeof(store[k]), fmt, __VA_ARGS__); argv[n++] = store[k++]; } while (0)
 #define ARGS(str) do { if (n + 1 >= max) goto full; argv[n++] = (char *)(str); } while (0)
 
@@ -399,6 +399,44 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
             if (list[0])
                 ARG("--drop=%s", list);
         }
+        {
+            /* the output's identifiers:
+             * "remap": {"256": 481, ...} (input PID -> output PID), "order": [258, 256, 257],
+             * "pmt_pid": 4096, "pcr_pid": 481 or "video", "service_id", "ts_id", "onid" */
+            int a = json_get(&doc, root, "remap");
+            char list[512] = "";
+            size_t o = 0;
+
+            if (a >= 0 && doc.node[a].type == JSON_OBJECT)
+                for (int j = doc.node[a].first_child; j >= 0; j = doc.node[j].next)
+                    if (doc.node[j].type == JSON_NUMBER && doc.node[j].key && o + 16 < sizeof(list))
+                        o += (size_t)snprintf(list + o, sizeof(list) - o, "%s%ld=%d", o ? "," : "",
+                                              strtol(doc.node[j].key, NULL, 0), (int)doc.node[j].num);
+            if (list[0])
+                ARG("--remap=%s", list);
+            a = json_get(&doc, root, "order");
+            list[0] = 0;
+            o = 0;
+            if (a >= 0 && doc.node[a].type == JSON_ARRAY)
+                for (int j = doc.node[a].first_child; j >= 0; j = doc.node[j].next)
+                    if (doc.node[j].type == JSON_NUMBER && o + 8 < sizeof(list))
+                        o += (size_t)snprintf(list + o, sizeof(list) - o, "%s%d", o ? "," : "", (int)doc.node[j].num);
+            if (list[0])
+                ARG("--order=%s", list);
+            static const char *const ids[][2] = {
+                { "pmt_pid", "--pmt-pid=%d" }, { "service_id", "--service-id=%d" },
+                { "ts_id", "--ts-id=%d" }, { "onid", "--onid=%d" }, { "pcr_pid", "--pcr-pid=%d" },
+            };
+            for (size_t j = 0; j < sizeof(ids) / sizeof(ids[0]); j++) {
+                int nd = json_get(&doc, root, ids[j][0]);
+
+                if (nd >= 0 && doc.node[nd].type == JSON_NUMBER)
+                    ARG(ids[j][1], (int)doc.node[nd].num);
+                else if (nd >= 0 && doc.node[nd].type == JSON_STRING && !strcmp(ids[j][0], "pcr_pid") &&
+                         !strcmp(doc.node[nd].str, "video"))
+                    ARGS("--pcr-pid=video");
+            }
+        }
     }
     {
         static const char *const strs[][2] = {
@@ -438,12 +476,12 @@ full:
 
 static void chan_start(struct super *s, struct chan *c)
 {
-    char *argv[80];
+    char *argv[120];
     char err[200];
     int pfd[2];
     pid_t pid;
 
-    if (chan_argv(s, c, argv, 80, err, sizeof(err)) < 0) {
+    if (chan_argv(s, c, argv, 120, err, sizeof(err)) < 0) {
         snprintf(c->why, sizeof(c->why), "config: %.140s", err);
         c->state = CH_FAILED;
         c->want = false;
