@@ -883,12 +883,23 @@ async function delChannel() {
 function newChannel() {
   const d = $("#dlg");
   d.innerHTML = `<h3>New channel</h3><div class="f"><label>Name</label><input id="n_name" placeholder="e.g. bet, cnn-hd (letters, digits, - and _)">
+    <label>Source type</label><select id="n_kind">${IN_KINDS.filter(k => k[0] !== "file").map(k => `<option value="${k[0]}">${k[1]}</option>`).join("")}</select>
     <label>Source</label><div class="row"><input id="n_host" placeholder="239.5.5.5"><input id="n_port" class="n" placeholder="port"></div>
-    <div class="help">A UDP multicast group and port. Everything else is set on the channel's page afterwards.</div></div>
+    <label>Will be</label><div class="urlprev" id="n_prev"></div>
+    <div class="help">Everything else (program, backups, passphrases, transcoding) is set on the channel's page afterwards.</div></div>
     <div id="n_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="n_go">Create channel</button></div>`;
+  const nUrl = () => inputUrl({ kind: $("#n_kind").value, host: $("#n_host").value.trim(), port: $("#n_port").value.trim(), iface: "", src: "", latency: "", pass: "", secret: "", buffer: "", aes: "", extra: "" });
+  const nSync = () => {
+    const k = $("#n_kind").value;
+    $("#n_port").style.display = k === "http" ? "none" : "";
+    $("#n_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "srtl" || k === "ristl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
+    $("#n_prev").textContent = nUrl();
+  };
+  d.querySelectorAll("#n_kind,#n_host,#n_port").forEach(i => { i.oninput = nSync; i.onchange = nSync; }); nSync();
   $("#n_go").onclick = async () => {
-    const name = $("#n_name").value.trim(), host = $("#n_host").value.trim(), port = $("#n_port").value.trim();
-    try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: `udp://${host}${port?":"+port:""}`, enabled: false}, null, 2)}); d.close(); dirty = false; view = {name, page:"list"}; $("#main").dataset.chan = ""; refresh(); }
+    const name = $("#n_name").value.trim(), k = $("#n_kind").value, url = nUrl();
+    if (k === "http" ? !$("#n_host").value.trim() : !$("#n_port").value.trim() || (!$("#n_host").value.trim() && !["srtl","ristl"].includes(k))) { $("#n_msg").innerHTML = `<div class="msg err">${k === "http" ? "The address is needed." : "Address and port are needed."}</div>`; return; }
+    try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: url, enabled: false}, null, 2)}); d.close(); dirty = false; view = {name, page:"list"}; $("#main").dataset.chan = ""; refresh(); }
     catch(e) { $("#n_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };
   d.showModal(); $("#n_name").focus();
