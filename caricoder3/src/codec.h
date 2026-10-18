@@ -119,6 +119,13 @@ struct vframe {
     void    *cuda_ctx;          /* CUDA: the context the surface lives in */
 };
 
+/* The picture size to make from a source of src_w x src_h shown at
+ * dar_num:dar_den (0: square pixels): want_w x want_h as asked, either
+ * side -1 to follow the source's shape, or with `fit` the largest that
+ * fits the box with the shape kept. 0 x 0: as the source. Even sizes. */
+void video_size(int want_w, int want_h, bool fit, int src_w, int src_h, int dar_num, int dar_den,
+                int *w, int *h);
+
 struct vdec_cfg {
     enum codec_id codec;
     int  width, height;         /* pictures wanted at this size (0: as coded).
@@ -126,6 +133,7 @@ struct vdec_cfg {
                                  * itself; a CPU decoder may ignore it, the
                                  * pipeline scales then. */
     int  gpu;                   /* card index for a hardware decoder */
+    bool fit;                   /* width x height is a box (see video_size) */
     bool want_cuda;             /* leave frames on the card if possible */
     bool only_8bit;             /* the encoder takes 8 bits only: a hardware
                                  * decoder converts 10-bit video itself (a CPU

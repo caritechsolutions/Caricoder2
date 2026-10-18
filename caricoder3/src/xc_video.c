@@ -25,6 +25,7 @@
  * the time each unit had to spare ("slack"), which says how far --delay
  * could come down, or that it must go up.
  */
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -187,6 +188,11 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
     }
     c.sar_num = f->sar_num;
     c.sar_den = f->sar_den;
+    /* A size rounded to even numbers leaves pixels a hair off square
+     * (854x480 at 16:9 is 1280:1281): called square, as players expect. */
+    if (c.sar_num > 0 && c.sar_den > 0 && c.sar_num != c.sar_den &&
+        fabs((double)c.sar_num / c.sar_den - 1.0) < 0.005)
+        c.sar_num = c.sar_den = 1;
     c.interlaced = f->interlaced;
     c.tff = f->tff;
     c.primaries = f->primaries;
@@ -437,9 +443,8 @@ static void scale_plane(const uint8_t *src, int sstride, int sw, int sh, bool wi
 }
 
 /* The picture at the rendition's size, deinterlaced if it was two fields. */
-static bool scale_picture(struct vxc *v, const struct vframe *in, struct vframe *out)
+static bool scale_picture(struct vxc *v, const struct vframe *in, struct vframe *out, int dw, int dh)
 {
-    int dw = v->cfg.width, dh = v->cfg.height;
     int cw = (dw + 1) / 2, ch = (dh + 1) / 2;
     int bps = in->depth > 8 ? 2 : 1;
     size_t need = ((size_t)dw * dh + 2 * (size_t)cw * ch) * (size_t)bps;
@@ -505,11 +510,17 @@ static void picture_in(struct vxc *v, const struct vframe *in)
     if (v->cfg.first_rendition)
         thumb_offer(in);
     /* Another size wanted and the decoder did not make it: scaled here. */
-    if (f.mem == VMEM_CPU && v->cfg.width > 0 && v->cfg.height > 0 &&
-        (f.width != v->cfg.width || f.height != v->cfg.height)) {
-        if (!scale_picture(v, &f, &tmp))
-            return;
-        f = tmp;
+    if (f.mem == VMEM_CPU && (v->cfg.width || v->cfg.height)) {
+        int tw, th;
+
+        video_size(v->cfg.width, v->cfg.height, v->cfg.fit, f.width, f.height,
+                   f.sar_num > 0 && f.sar_den > 0 ? f.width * f.sar_num : 0,
+                   f.sar_num > 0 && f.sar_den > 0 ? f.height * f.sar_den : 0, &tw, &th);
+        if (f.width != tw || f.height != th) {
+            if (!scale_picture(v, &f, &tmp, tw, th))
+                return;
+            f = tmp;
+        }
     }
     if (v->ectx && format_changed(v, &f)) {
         log_info("PID 0x%04X: the picture format changed", v->cfg.pid);
@@ -584,7 +595,8 @@ static void drain_decoder(struct vxc *v)
  * it will not open; then the object stays whole but has no decoder. */
 static bool decoder_to_cpu(struct vxc *v)
 {
-    struct vdec_cfg dc = { v->cfg.in, v->cfg.width, v->cfg.height, v->cfg.gpu, false, false };
+    struct vdec_cfg dc = { .codec = v->cfg.in, .width = v->cfg.width, .height = v->cfg.height,
+                           .gpu = v->cfg.gpu, .fit = v->cfg.fit };
     const struct codec_backend *b =
         codec_find(CODEC_VIDEO, CODEC_DECODER, v->cfg.in, WHERE_CPU, 0);
     char err[160] = "";
@@ -715,8 +727,9 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
     /* The decoder asked for, or the best that opens. */
     for (int skip = 0; !v->dctx; skip++) {
         /* H.264 goes out at 8 bits (see encoder_open). */
-        struct vdec_cfg dc = { cfg->in, cfg->width, cfg->height, cfg->gpu, v->want_cuda,
-                               cfg->out == CODEC_H264 };
+        struct vdec_cfg dc = { .codec = cfg->in, .width = cfg->width, .height = cfg->height,
+                               .gpu = cfg->gpu, .fit = cfg->fit, .want_cuda = v->want_cuda,
+                               .only_8bit = cfg->out == CODEC_H264 };
         const struct codec_backend *b =
             codec_find(CODEC_VIDEO, CODEC_DECODER, cfg->in, cfg->decoder, skip);
 

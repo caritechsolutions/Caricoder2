@@ -131,7 +131,10 @@ const fmtRate = b => !b ? "—" : b >= 1e6 ? (b/1e6).toFixed(2)+" Mb/s" : b >= 1
 const fmtUp = s => { s = Math.floor(s||0); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${s%60}s`; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const RES = [["", "Same as source"], ["1920x1080","1080p (1920 × 1080)"], ["1280x720","720p (1280 × 720)"], ["960x540","540p (960 × 540)"], ["854x480","480p (854 × 480)"], ["640x360","360p (640 × 360)"], ["426x240","240p (426 × 240)"], ["custom","Custom…"]];
+const RES = [["", "Same as source"],
+  ["-1x1080","1080 high, width from the source's shape"], ["-1x720","720 high, width from the source's shape"], ["-1x540","540 high, width from the source's shape"], ["-1x480","480 high, width from the source's shape"], ["-1x360","360 high, width from the source's shape"], ["-1x240","240 high, width from the source's shape"],
+  ["1920x1080:fit","Fit inside 1920 × 1080"], ["1280x720:fit","Fit inside 1280 × 720"], ["854x480:fit","Fit inside 854 × 480"],
+  ["1920x1080","Exactly 1920 × 1080"], ["1280x720","Exactly 1280 × 720"], ["960x540","Exactly 960 × 540"], ["854x480","Exactly 854 × 480"], ["640x360","Exactly 640 × 360"], ["426x240","Exactly 426 × 240"], ["custom","Custom…"]];
 const VBR = ["400k","600k","800k","1M","1.5M","2M","2.5M","3M","4M","5M","6M","8M","10M","12M"];
 const ABR = ["64k","96k","128k","160k","192k","256k","320k","384k"];
 const MUX = [["", "Variable (no padding)"], ["2M","2 Mb/s"],["3M","3 Mb/s"],["4M","4 Mb/s"],["5M","5 Mb/s"],["6M","6 Mb/s"],["8M","8 Mb/s"],["10M","10 Mb/s"],["12M","12 Mb/s"],["15M","15 Mb/s"],["20M","20 Mb/s"],["custom","Custom…"]];
@@ -679,14 +682,14 @@ function rendRow(spec) {
   // spec: "WxH:codec:rate" | "codec:rate" | "codec"
   let size = "", codec = "h264", rate = "";
   const parts = (spec||"").split(":");
-  if (/^\d+x\d+$/.test(parts[0])) { size = parts.shift(); }
+  if (/^-?\d+x-?\d+$/.test(parts[0])) { size = parts.shift(); if (parts[0] === "fit") { size += ":fit"; parts.shift(); } }
   if (parts[0]) codec = parts[0];
   rate = parts[1] || "";
   const resKnown = RES.some(r => r[0] === size);
   const rateKnown = !rate || VBR.includes(rate);
   return `<div class="rend">
     <div><select class="r_res" onchange="this.parentNode.querySelector('.custom').style.display=this.value==='custom'?'':'none'">${RES.map(r=>`<option value="${r[0]}" ${(resKnown?size:"custom")===r[0]?"selected":""}>${r[1]}</option>`).join("")}</select>
-      <div class="custom" style="margin-top:6px;${resKnown?"display:none":""}"><input class="r_w" placeholder="width" value="${size.split("x")[0]||""}"><span>×</span><input class="r_h" placeholder="height" value="${size.split("x")[1]||""}"></div></div>
+      <div class="custom" style="margin-top:6px;${resKnown?"display:none":""}"><input class="r_w" placeholder="width" title="-1: from the source's shape" value="${size.split(":")[0].split("x")[0]||""}"><span>×</span><input class="r_h" placeholder="height" title="-1: from the source's shape" value="${(size.split(":")[0].split("x")[1])||""}"><label style="display:flex;gap:4px;align-items:center;color:var(--dim)"><input type="checkbox" class="r_fit" style="width:auto" ${size.endsWith(":fit")?"checked":""}> fit</label></div></div>
     <select class="r_codec"><option value="h264" ${codec==="h264"?"selected":""}>H.264</option><option value="hevc" ${codec==="hevc"?"selected":""}>HEVC / H.265</option></select>
     <div><select class="r_rate" onchange="this.parentNode.querySelector('.r_rc').style.display=this.value==='custom'?'':'none'">${VBR.map(r=>`<option ${rate===r?"selected":""}>${r}</option>`).join("")}<option value="custom" ${rateKnown?"":"selected"}>Custom…</option></select><input class="r_rc" placeholder="e.g. 2500k" value="${rateKnown?"":esc(rate)}" style="margin-top:6px;${rateKnown?"display:none":""}"></div>
     <button type="button" class="quiet" title="Remove this rendition" onclick="this.parentNode.remove();setDirty(true)">✕</button></div>`;
@@ -834,7 +837,7 @@ function readForm() {
   if ($("#vbr").checked && mux) cfg.vbr = true;
   if ($("#v_xc").classList.contains("on")) {
     cfg.video = [...$("#v_rows").querySelectorAll(".rend")].filter(r => r.querySelector(".r_res")).map(r => {
-      let size = r.querySelector(".r_res").value; if (size === "custom") size = `${r.querySelector(".r_w").value.trim()}x${r.querySelector(".r_h").value.trim()}`;
+      let size = r.querySelector(".r_res").value; if (size === "custom") size = `${r.querySelector(".r_w").value.trim()}x${r.querySelector(".r_h").value.trim()}${r.querySelector(".r_fit").checked ? ":fit" : ""}`;
       let rate = r.querySelector(".r_rate").value; if (rate === "custom") rate = r.querySelector(".r_rc").value.trim();
       return `${size?size+":":""}${r.querySelector(".r_codec").value}${rate?":"+rate:""}`; });
     if (!cfg.video.length) delete cfg.video;
@@ -859,7 +862,7 @@ async function saveChannel() {
   if (!cfg.input || cfg.input.endsWith("://")) { showMsg("A source address is needed.", "err"); return; }
   if (/^(srt|rist):\/\/[^?]*:(\?|$)/.test(cfg.input)) { showMsg("The SRT or RIST port is needed.", "err"); return; }
   if (/passphrase=[^&]{1,9}(&|$)/.test(cfg.input)) { showMsg("An SRT passphrase is 10 characters or more.", "err"); return; }
-  for (const r of cfg.video || []) if (!/^(\d+x\d+:)?(h264|hevc)(:\S+)?$/.test(r)) { showMsg("A custom resolution needs both width and height, and a bit rate like 2500k.", "err"); return; }
+  for (const r of cfg.video || []) if (!/^((\d+|-1)x(\d+|-1)(:fit)?:)?(h264|hevc)(:\S+)?$/.test(r) || /^-1x-1/.test(r) || /-1[^:]*:fit/.test(r)) { showMsg("A custom size needs a width and a height (one of them -1 to follow the source's shape; fit needs both), and a bit rate like 2500k.", "err"); return; }
   {
     const bad = (k, lo, hi) => cfg[k] !== undefined && cfg[k] !== "video" && !(Number.isInteger(cfg[k]) && cfg[k] >= lo && cfg[k] <= hi);
     if (bad("service_id", 1, 65535) || bad("ts_id", 0, 65535) || bad("onid", 0, 65535)) { showMsg("Service number 1–65535; TS id and network id 0–65535.", "err"); return; }

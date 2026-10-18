@@ -448,8 +448,16 @@ transcoder of its own with its own decoder (the card's decoder scales as
 it decodes; on the CPU an area-averaging scaler follows libavcodec), so
 three renditions decode the source three times. Interlaced sources come
 out progressive in a scaled rendition, at one frame per source frame.
-The packager (HLS/DASH) is a later stage; ffmpeg's packager on the output
-is the reference meanwhile.
+
+A size may leave one side to the source's display shape: `-1x720` is 720
+high and as wide as the shape asks (an anamorphic 960x720 shown 16:9
+becomes 1280x720, a 4:3 one 960x720), `1280x-1` the other way round, and
+`1280x720:fit` the largest picture with the source's shape that fits in
+the box. The shape comes from the source's own signalling (the aspect
+ratio in its video), and the output carries its shape the same way: a
+scaled picture's pixels are made square when the shape allows, within
+half a percent. The GUI's resolution list offers these; the SDT names
+such a rendition "Channel 720p".
 
 **Video.** In: H.264, H.265. Out: H.264, H.265. Picture size, frame rate,
 pixel shape, field order and colour description are kept, and followed

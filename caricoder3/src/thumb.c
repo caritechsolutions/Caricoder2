@@ -566,7 +566,7 @@ void thumb_tap_unit(const struct es_unit *u, enum codec_id codec)
         tap.dec = NULL;
     }
     if (!tap.dec) {
-        struct vdec_cfg dc = { codec, 0, 0, 0, false, false };
+        struct vdec_cfg dc = { .codec = codec };
         char err[160];
 
         tap.backend = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_CPU, 0);

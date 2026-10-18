@@ -33,7 +33,8 @@ struct nvd {
     CUvideodecoder dec;
     enum codec_id codec;
     bool only_8bit;
-    int want_w, want_h;             /* pictures asked for at this size (0: as coded) */
+    int want_w, want_h;             /* pictures asked for at this size (0: as coded; -1: see video_size) */
+    bool want_fit;
     bool scaled;                    /* the card scales (and deinterlaces) */
 
     CUVIDEOFORMAT fmt;
@@ -102,10 +103,16 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
     /* Another size wanted: the card's own scaler makes it, and an
      * interlaced source is deinterlaced on the way (a scaled picture is a
      * progressive one: a rendition for OTT). */
-    d->scaled = d->want_w > 0 && d->want_h > 0 && (d->want_w != w || d->want_h != h);
-    if (d->scaled) {
-        w = d->want_w;
-        h = d->want_h;
+    if (d->want_w || d->want_h) {
+        int tw, th;
+
+        video_size(d->want_w, d->want_h, d->want_fit, w, h, f->display_aspect_ratio.x,
+                   f->display_aspect_ratio.y, &tw, &th);
+        d->scaled = tw != w || th != h;
+        w = tw;
+        h = th;
+    } else {
+        d->scaled = false;
     }
 
     /* The same format again (parameter sets are repeated with every key
@@ -227,6 +234,7 @@ static void *nvd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
     d->only_8bit = cfg->only_8bit;
     d->want_w = cfg->width;
     d->want_h = cfg->height;
+    d->want_fit = cfg->fit;
     d->ctx = nv_ctx_get(cfg->gpu, err, errlen);
     if (!d->ctx) {
         free(d);

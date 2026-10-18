@@ -192,15 +192,20 @@ bool xcode_parse_spec(const char *s, bool video, struct xcode_spec *out,
     }
     if ((rate = strchr(codec, ':')) != NULL)
         *rate++ = 0;
-    /* A size in front of the codec: WxH. */
+    /* A size in front of the codec: WxH, -1xH or Wx-1 (that side follows
+     * the source's shape), and ":fit" after it for a box the picture fits
+     * in with its shape kept. */
     if (video && strchr(codec, 'x') && rate) {
         char *x = NULL;
         long w = strtol(codec, &x, 10), h = 0;
+        bool ok;
 
         if (x && *x == 'x')
             h = strtol(x + 1, &x, 10);
-        if (!x || *x || w < 64 || w > 8192 || h < 64 || h > 8192 || (w & 1) || (h & 1)) {
-            snprintf(err, errlen, "'%s': the size must be WxH, even, 64 to 8192", s);
+        ok = x && !*x && (w == -1 || (w >= 64 && w <= 8192 && !(w & 1))) &&
+             (h == -1 || (h >= 64 && h <= 8192 && !(h & 1))) && !(w == -1 && h == -1);
+        if (!ok) {
+            snprintf(err, errlen, "'%s': the size must be WxH (even, 64 to 8192), -1xH or Wx-1", s);
             return false;
         }
         out->width = (int)w;
@@ -208,6 +213,20 @@ bool xcode_parse_spec(const char *s, bool video, struct xcode_spec *out,
         codec = rate;
         if ((rate = strchr(codec, ':')) != NULL)
             *rate++ = 0;
+        if (!strcmp(codec, "fit")) {
+            if (w < 0 || h < 0) {
+                snprintf(err, errlen, "'%s': fit needs a box, WxH", s);
+                return false;
+            }
+            out->fit = true;
+            if (!rate) {
+                snprintf(err, errlen, "'%s': a codec is needed after fit", s);
+                return false;
+            }
+            codec = rate;
+            if ((rate = strchr(codec, ':')) != NULL)
+                *rate++ = 0;
+        }
     }
 
     if (!strcmp(codec, "copy"))

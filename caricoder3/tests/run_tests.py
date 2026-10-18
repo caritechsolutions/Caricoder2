@@ -3381,6 +3381,39 @@ def xc_video_mpeg2_in():
 
 
 @test
+def xc_video_sizes_follow_shape():
+    """-1xH, Wx-1 and WxH:fit: the size follows the source's display shape (an anamorphic 960x720 shown 16:9, a 4:3 one)."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    ana, sq = w("xc_ana.ts"), w("xc_sq43.ts")
+    for path, sar in ((ana, "4/3"), (sq, "1")):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=960x720:rate=25", "-t", "3",
+                        "-vf", f"setsar={sar}", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "2M", "-f", "mpegts", path],
+                       check=True)
+
+    def shape(path):
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+                            "stream=width,height,sample_aspect_ratio", "-of", "csv=p=0", path],
+                           capture_output=True, text=True)
+        return [tuple(l.split(",")) for l in p.stdout.split()]
+    cases = [(ana, "-1x720", ("1280", "720", "1:1")), (ana, "1280x-1", ("1280", "720", "1:1")),
+             (ana, "-1x480", ("854", "480", "1:1")), (ana, "1280x720:fit", ("1280", "720", "1:1")),
+             (sq, "1280x720:fit", ("960", "720", "1:1")), (sq, "-1x480", ("640", "480", "1:1")),
+             (ana, "640x360", ("640", "360", "1:1"))]
+    for src, size, want in cases:
+        out = w("xc_size.ts")
+        run_file(src, out, "--video", f"{size}:h264:800k")
+        got = shape(out)
+        need(got and got[0] == want, f"{os.path.basename(src)} at {size}: {got}, expected {want}")
+    out = w("xc_size_ladder.ts")
+    st = run_file(ana, out, "--video", "h264:1M", "--video", "-1x720:h264:800k", "--video", "-1x480:h264:500k")
+    sizes = [x.get("size") for x in st["service"]["streams"] if x["kind"] == "video"]
+    need(sizes == ["960x720", "1280x720", "854x480"], f"ladder: {sizes}")
+    return f"{len(cases)} sizes as the display shape says; a ladder 960x720 (16:9) / 1280x720 / 854x480"
+
+
+@test
 def thumbnails_copy_and_transcode():
     """--thumb: a JPEG of the picture, from the transcoder's decoder and, on a copied stream, a decoded key frame."""
     skip = xc_ready("libavcodec", "x264")

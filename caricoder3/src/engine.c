@@ -352,6 +352,7 @@ static int plan_stream(struct engine *e, const struct program *p, int idx,
         if (video) {
             c->width = s->width;
             c->height = s->height;
+            c->fit = s->fit;
             c->decoder = e->cfg.decoder;
             c->encoder = e->cfg.encoder;
             c->gpu = e->cfg.gpu;
@@ -406,7 +407,7 @@ static int update_xcodes(struct engine *e, const struct program *p, struct progr
     int want_idx[MAX_ES], want_k[MAX_ES];
     uint16_t claimed[MAX_ES];
     int n_want = 0, n_claimed = 0, n_gone = 0, n_keep = 0, n_prog = 1;
-    char name[SERVICE_TEXT_MAX + 16], base[SERVICE_TEXT_MAX + 1];
+    char name[SERVICE_TEXT_MAX + 32], base[SERVICE_TEXT_MAX + 1];
 
     np[0] = *p;
     for (int i = 0; i < p->n_es && n_want < MAX_ES; i++) {
@@ -520,8 +521,11 @@ static int update_xcodes(struct engine *e, const struct program *p, struct progr
         } else if (k < n_prog) {
             announce(&np[k], idx, want[i].out);
             np[k].es[idx].pid = want[i].out_pid;
-            if (want[i].width > 0) {
-                snprintf(name, sizeof(name), "%s %dx%d", base, want[i].width, want[i].height);
+            if (want[i].width > 0 && want[i].height > 0 && !want[i].fit) {
+                snprintf(name, sizeof(name), "%.100s %dx%d", base, want[i].width, want[i].height);
+                program_set_service(&np[k], NULL, name);
+            } else if (want[i].height > 0) {
+                snprintf(name, sizeof(name), "%.100s %dp", base, want[i].height);
                 program_set_service(&np[k], NULL, name);
             }
         }

@@ -25,7 +25,9 @@ struct xcode_spec {
     int  pid;                   /* 0: every stream of this kind */
     enum codec_id codec;        /* CODEC_NONE: copy */
     int  bitrate;               /* bits per second, 0: a sensible default */
-    int  width, height;         /* video: picture size, 0: as the source */
+    int  width, height;         /* video: picture size, 0: as the source; -1 on one
+                                 * side: that side follows the source's shape */
+    bool fit;                   /* video: inside width x height, the source's shape kept */
 };
 
 struct xcode_cfg {
@@ -36,7 +38,8 @@ struct xcode_cfg {
     enum codec_id in, out;
     int  bitrate;
     /* video only */
-    int  width, height;         /* 0: as the source */
+    int  width, height;         /* 0: as the source; -1: follows the shape (see xcode_spec) */
+    bool fit;
     enum codec_where decoder, encoder;
     int  gpu;
     int  vbv_ms, gop_ms;

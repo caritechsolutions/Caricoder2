@@ -195,3 +195,33 @@ void codec_list(FILE *f)
                 why[0] ? ": " : "", why);
     }
 }
+
+void video_size(int want_w, int want_h, bool fit, int src_w, int src_h, int dar_num, int dar_den,
+                int *w, int *h)
+{
+    double dar = dar_num > 0 && dar_den > 0 ? (double)dar_num / dar_den
+               : src_h > 0 ? (double)src_w / src_h : 16.0 / 9.0;
+    double ww = want_w, hh = want_h;
+
+    if (want_w == 0 && want_h == 0) {
+        *w = src_w;
+        *h = src_h;
+        return;
+    }
+    if (fit && want_w > 0 && want_h > 0) {
+        if (dar >= (double)want_w / want_h)
+            hh = want_w / dar;
+        else
+            ww = want_h * dar;
+    } else if (want_w < 0 && want_h > 0) {
+        ww = want_h * dar;
+    } else if (want_h < 0 && want_w > 0) {
+        hh = want_w / dar;
+    }
+    *w = 2 * (int)(ww / 2 + 0.5);
+    *h = 2 * (int)(hh / 2 + 0.5);
+    if (*w < 16)
+        *w = 16;
+    if (*h < 16)
+        *h = 16;
+}
