@@ -7,8 +7,7 @@ them as more is known; keep each fact on its own line.
 
 - Two caricoder3 transcoders today.
 - Transcoder 1: does most of the live work while transcoder 2 is used for
-  development. IP given as 192.168.110.42 (to be confirmed: the same as
-  transcoder 2 below; earlier notes had Flussonic on 192.168.110.41).
+  development. IP 192.168.110.41.
 - Transcoder 2: 192.168.110.42, hostname transcoder2.
 - Each has two NVIDIA Tesla P40 cards and the same twin CPUs (72 cores
   reported on transcoder 2).
