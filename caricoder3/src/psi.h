@@ -122,4 +122,8 @@ void program_remove_es(struct program *p, int idx);
 
 const char *stream_type_name(int stream_type);
 
+/* What stream `idx` is: "video", "audio", "subtitles", "teletext" or
+ * "data"; `lang` gets its ISO 639 language ("" if none). */
+const char *program_es_kind(const struct program *p, int idx, char *lang, size_t langlen);
+
 #endif

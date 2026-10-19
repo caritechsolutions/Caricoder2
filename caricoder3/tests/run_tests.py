@@ -165,6 +165,45 @@ def file_drop_streams():
 
 
 @test
+def file_follows_pid_change():
+    """The source moves its streams and PMT to other PIDs mid-run: settings still apply, the output keeps its PIDs; remembered for the next run."""
+    a = synth("follow_a", duration=4.0)
+    pb = gen_ts.default_program(base_pid=2400)
+    b = synth("follow_b", duration=4.0, pcr_base=14.0, programs=[pb])
+    both = write(w("follow_ab.ts"), read(a) + read(b))
+    sfile = w("follow.streams")
+    if os.path.exists(sfile):
+        os.remove(sfile)
+    out = w("follow_out.ts")
+    # settings by the first PIDs: AC-3 (1653) left out, the AAC (1652) sent as 500
+    st = run_file(both, out, "-r", "4M", "--streams-file", sfile, "--drop", "1653", "--remap", "1652=500")
+    must_pass(out, cbr=True)
+    o, ia, ib = Analysis(out), Analysis(a), Analysis(b)
+    pids = sorted(o.pid_packets)
+    need(not ({2401, 2402, 2403} & set(o.pid_packets)) and 1653 not in o.pid_packets,
+         f"the source's new PIDs or the dropped stream reached the output: {pids}")
+    need(o.pmt_pid == 1650, f"output PMT PID {o.pmt_pid}")
+    want_v = len(ia.pes.get(1651, [])) + len(ib.pes.get(2401, []))
+    want_a = len(ia.pes.get(1652, [])) + len(ib.pes.get(2402, []))
+    got_v, got_a = len(o.pes.get(1651, [])), len(o.pes.get(500, []))
+    need(got_v >= want_v - 2 and got_a >= want_a - 2, f"video {got_v}/{want_v}, audio {got_a}/{want_a} PES")
+    kept = read(sfile).decode()
+    need("0x0674 0x0962" in kept and "pmt 0x0672 0x0960" in kept, f"streams file:\n{kept}")
+    srcs = {x["pid"]: x.get("src_pid") for x in st["service"]["streams"]}
+    need(srcs.get(500) == 2402, f"stats do not say where the source has it now: {st['service']['streams']}")
+    # the next run starts on the new PIDs only: the file says what they were
+    out2 = w("follow_out2.ts")
+    run_file(b, out2, "-r", "4M", "--streams-file", sfile, "--drop", "1653", "--remap", "1652=500")
+    o2 = Analysis(out2)
+    need(sorted(o2.pid_packets) == pids, f"restart: {sorted(o2.pid_packets)}, before {pids}")
+    # and without the file it follows the source as before
+    out3 = w("follow_out3.ts")
+    run_file(b, out3, "-r", "4M")
+    need(2402 in Analysis(out3).pid_packets, "without a streams file the source's PIDs should pass")
+    return f"video {got_v}/{want_v}, audio {got_a}/{want_a} PES across the change; output PIDs {pids} in both runs"
+
+
+@test
 def file_output_ids():
     """--remap, --order, --pmt-pid, --pcr-pid, --service-id, --ts-id, --onid: the output's identifiers as asked, content unchanged."""
     src = synth("syn")
@@ -352,7 +391,7 @@ def file_pmt_change():
 
 @test
 def file_pid_changes_hands():
-    """PMT moves onto the old video PID and video onto the old PMT PID."""
+    """PMT moves onto the old video PID and video onto the old PMT PID: the output keeps its layout, video carried throughout."""
     pa = gen_ts.default_program(sections=False)
     pb = gen_ts.default_program(sections=False)
     pb["pmt_pid"], pb["streams"][0]["pid"] = pa["streams"][0]["pid"], pa["pmt_pid"]
@@ -363,9 +402,10 @@ def file_pid_changes_hands():
     run_file(src, w("swap_out.ts"), "-r", "4M")
     rep = must_pass(w("swap_out.ts"), cbr=True, allow_late=True)
     out = Analysis(w("swap_out.ts"))
-    need(out.pmt_pid == 1651 and out.pmt["pcr_pid"] == 1650, "new layout not followed")
-    need(len(out.pes.get(1650, [])) > 40, "video not carried on its new PID")
-    return f"continuity unbroken on both PIDs ({rep['cc_errors']} CC errors)"
+    need(out.pmt_pid == 1650 and out.pmt["pcr_pid"] == 1651, f"layout changed: PMT {out.pmt_pid}, PCR {out.pmt['pcr_pid']}")
+    va, vb = len(Analysis(a).pes.get(1651, [])), len(Analysis(b).pes.get(1650, []))
+    need(len(out.pes.get(1651, [])) >= va + vb - 2 and 1650 not in out.pes, f"video {len(out.pes.get(1651, []))} of {va + vb} PES on 1651")
+    return f"layout kept, all video on its PID, {rep['cc_errors']} CC errors"
 
 
 @test
@@ -987,6 +1027,34 @@ def live_rtp_input():
     need(st["input"]["rtp"] is True, "RTP not detected")
     need(st["input"]["cc_errors"] == 0, "continuity errors")
     return "RTP detected, output conformant"
+
+
+@test
+def live_stream_without_data():
+    """A stream the PMT lists stops arriving while the rest goes on: said once, and once when it is back."""
+    src = synth("live_src", duration=10.0)
+    data = read(src)
+    n = len(data) // 188
+    keep = bytearray()
+    for i in range(n):
+        pkt = data[i * 188:(i + 1) * 188]
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == 1652 and 0.25 * n <= i < 0.85 * n:
+            continue
+        keep += pkt
+    gap = write(w("live_nodata_src.ts"), bytes(keep))
+    seen = {}
+
+    def feed(p):
+        p.play(gap, at={5.0: lambda: seen.update(st=json.load(open(w("live_nodata.ts.json"))))})
+    st, cap, log = live(feed, "-r", "4M", capture_name="live_nodata.ts")
+    warn = [l for l in log.splitlines() if "no data for" in l]
+    back = [l for l in log.splitlines() if "data again" in l]
+    need(len(warn) == 1 and "0x0674" in warn[0] and "audio eng" in warn[0], f"warnings: {warn or log[-600:]}")
+    need(len(back) == 1 and "0x0674" in back[0], f"back: {back}")
+    mid = {x["pid"]: x.get("idle_ms") for x in seen["st"]["service"]["streams"]}
+    need(mid.get(1652, 0) > 1500 and mid.get(1651, 9999) < 1000, f"idle_ms mid-gap: {mid}")
+    return f"{warn[0].split('  ')[-1].strip()}; then: {back[0].split('  ')[-1].strip()}"
 
 
 @test

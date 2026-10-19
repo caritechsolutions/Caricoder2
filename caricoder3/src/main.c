@@ -221,39 +221,6 @@ static void json_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
-/* What a stream is, for the GUI: video, audio, subtitles, teletext, data; and its language. */
-static const char *es_kind(const struct program *p, int idx, char *lang, size_t langlen)
-{
-    int st = p->es[idx].stream_type;
-    const uint8_t *d = p->blob + p->es[idx].desc_off;
-    int n = p->es[idx].desc_len;
-
-    lang[0] = 0;
-    for (int i = 0; i + 2 <= n; ) {
-        int tag = d[i], dl = d[i + 1];
-
-        if (i + 2 + dl > n)
-            break;
-        if (tag == 0x0A && dl >= 3)
-            snprintf(lang, langlen, "%.3s", (const char *)d + i + 2);
-        i += 2 + dl;
-    }
-    switch (st) {
-    case 0x01: case 0x02: case 0x10: case 0x1B: case 0x24: return "video";
-    case 0x03: case 0x04: case 0x0F: case 0x11: case 0x81: case 0x87: return "audio";
-    case 0x06:
-        if (program_es_has_desc(p, idx, 0x6A, NULL) || program_es_has_desc(p, idx, 0x7A, NULL) ||
-            program_es_has_desc(p, idx, 0x05, "AC-3"))
-            return "audio";
-        if (program_es_has_desc(p, idx, 0x59, NULL))
-            return "subtitles";
-        if (program_es_has_desc(p, idx, 0x56, NULL) || program_es_has_desc(p, idx, 0x46, NULL))
-            return "teletext";
-        return "data";
-    default: return "data";
-    }
-}
-
 struct rates {
     double in_bps, out_bps, null_pct;
     double uptime;
@@ -267,6 +234,52 @@ struct rates {
 static double rate_of(uint64_t now, uint64_t was, double dt)
 {
     return dt > 0 && now >= was ? (double)(now - was) * 8.0 / dt : -1;
+}
+
+/* A video or audio stream the PMT lists but nothing of which arrives, while
+ * the input itself does: said once when it starts and once when it ends. */
+#define IDLE_WARN_MS 5000
+static void idle_check(const struct engine_stats *st, int64_t input_age_ms)
+{
+    static uint16_t quiet[MAX_ES];
+    static int n_quiet;
+    bool flowing = input_age_ms >= 0 && input_age_ms < 1000;
+
+    for (int i = 0; st->have_program && i < st->prog.n_es; i++) {
+        char lang[8];
+        const char *kind = program_es_kind(&st->prog, i, lang, sizeof(lang));
+        uint16_t pid = st->prog.es[i].pid;
+        int q = -1;
+
+        if (strcmp(kind, "video") && strcmp(kind, "audio"))
+            continue;
+        for (int k = 0; k < n_quiet; k++)
+            if (quiet[k] == pid)
+                q = k;
+        if (q < 0 && flowing && st->es_idle_ms[i] >= IDLE_WARN_MS && n_quiet < MAX_ES) {
+            quiet[n_quiet++] = pid;
+            if (st->es_src_pid[i] != pid)
+                log_warn("PID 0x%04X (%s%s%s, in the source on 0x%04X): in the PMT, but no data for %lld s",
+                         pid, kind, lang[0] ? " " : "", lang, st->es_src_pid[i], (long long)st->es_idle_ms[i] / 1000);
+            else
+                log_warn("PID 0x%04X (%s%s%s): in the PMT, but no data for %lld s", pid, kind,
+                         lang[0] ? " " : "", lang, (long long)st->es_idle_ms[i] / 1000);
+        } else if (q >= 0 && st->es_idle_ms[i] >= 0 && st->es_idle_ms[i] < 1000) {
+            log_info("PID 0x%04X (%s%s%s): data again", pid, kind, lang[0] ? " " : "", lang);
+            quiet[q] = quiet[--n_quiet];
+        }
+    }
+    /* streams that left the PMT while quiet are no longer watched */
+    for (int k = 0; k < n_quiet; ) {
+        bool there = false;
+
+        for (int i = 0; st->have_program && i < st->prog.n_es; i++)
+            there |= st->prog.es[i].pid == quiet[k];
+        if (there)
+            k++;
+        else
+            quiet[k] = quiet[--n_quiet];
+    }
 }
 
 static void stats_json(struct ctx *c, const struct engine_stats *st,
@@ -361,12 +374,16 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
         }
         {
             char lang[8];
-            const char *kind = es_kind(&st->prog, i, lang, sizeof(lang));
+            const char *kind = program_es_kind(&st->prog, i, lang, sizeof(lang));
 
             fprintf(f, "%s\n      {\"pid\": %u, \"in_pid\": %u, \"stream_type\": %u, \"kind\": \"%s\", \"language\": ",
                     n_out++ ? "," : "", k >= 0 ? st->xc_out_pid[k] : st->es_out_pid[i], in_pid,
                     st->prog.es[i].stream_type, kind);
             json_str(f, lang);
+            if (st->es_src_pid[i] && st->es_src_pid[i] != in_pid)
+                fprintf(f, ", \"src_pid\": %u", st->es_src_pid[i]);
+            if (k < 0 && st->es_idle_ms[i] >= 0)
+                fprintf(f, ", \"idle_ms\": %lld", (long long)st->es_idle_ms[i]);
             fprintf(f, ", \"codec\": ");
         }
         json_str(f, stream_type_name(st->prog.es[i].stream_type));
@@ -837,6 +854,7 @@ static int run_live(struct options *o, struct ctx *c)
         }
         r.send_errors = sinks_errors(&c->sinks);
         write_stats(c, &st, &r);
+        idle_check(&st, r.input_age_ms);
 
         if (atomic_exchange(&g_hup, 0) && o->config) {
             char e[300];
@@ -991,6 +1009,9 @@ static void usage(FILE *f)
 "      --remap IN=OUT[,..]  send input PID IN as PID OUT (decimal or 0x hex)\n"
 "      --order PID[,PID..]  input PIDs in the order the PMT lists them (a\n"
 "                           receiver takes the first audio); others follow\n"
+"      --streams-file PATH  remember the source's streams here: when the source\n"
+"                           moves one to another PID it keeps its PID, settings\n"
+"                           and output PID (default: learnt each run)\n"
 "      --stats-file PATH    JSON statistics, rewritten every second\n"
 "      --thumb PATH         a JPEG of the picture, 320 wide, rewritten every\n"
 "      --thumb-interval S   S seconds (default 5)\n"
@@ -1041,7 +1062,7 @@ enum {
     OPT_AUDIO, OPT_VIDEO, OPT_DECODER, OPT_ENCODER, OPT_GPU, OPT_PRESET, OPT_DROP,
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
-    OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
+    OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1102,6 +1123,7 @@ int main(int argc, char **argv)
         { "drop", required_argument, 0, OPT_DROP },
         { "remap", required_argument, 0, OPT_REMAP },
         { "input-label", required_argument, 0, OPT_INPUT_LABEL },
+        { "streams-file", required_argument, 0, OPT_STREAMS_FILE },
         { "order", required_argument, 0, OPT_ORDER },
         { "pmt-pid", required_argument, 0, OPT_PMT_PID },
         { "pcr-pid", required_argument, 0, OPT_PCR_PID },
@@ -1255,6 +1277,7 @@ int main(int argc, char **argv)
             break;
         }
         case OPT_INPUT_LABEL: o.input_label = optarg; break;
+        case OPT_STREAMS_FILE: o.eng.streams_file = optarg; break;
         case OPT_REMAP:
             /* IN=OUT[,IN=OUT...]: input PID -> output PID */
             for (const char *p = optarg; *p; ) {

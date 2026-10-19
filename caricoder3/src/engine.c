@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "clock.h"
+#include "follow.h"
 #include "log.h"
 #include "thumb.h"
 #include "xcode.h"
@@ -55,6 +56,11 @@ struct engine {
     uint16_t out_pid[8192];         /* inside PID (the input's, or a rendition's) -> the
                                      * output's; identity unless remapped */
     struct program out_prog;        /* the first program as sent, for the stats */
+    /* the source's PIDs: input thread only (alias), under the lock (src_of, last_ns) */
+    struct follow follow;
+    uint16_t alias[8192];           /* source PID -> inside PID */
+    uint16_t src_of[8192];          /* inside PID -> source PID */
+    int64_t pid_last_ns[8192];      /* inside PID: when a unit of it last arrived */
     struct demux *dmx;
     struct mux *mux;
     stc_t delay;
@@ -715,7 +721,35 @@ static void on_program(void *opaque, const struct program *p)
     struct engine *e = opaque;
     struct program named = *p;
     static struct program np[MAX_PROGRAMS];     /* input thread only; large */
+    static uint16_t src_tmp[8192];
+    uint16_t pinned[4 * MAX_ES + 12];
+    int n_pinned = 0;
     int n_prog = 1;
+
+    /* The source's PIDs as they were first seen: settings name those. */
+    for (int i = 0; i < e->cfg.n_drop; i++)
+        pinned[n_pinned++] = e->cfg.drop[i];
+    for (int i = 0; i < e->cfg.n_remap; i++)
+        pinned[n_pinned++] = e->cfg.remap[i].in;
+    for (int i = 0; i < e->cfg.n_order; i++)
+        pinned[n_pinned++] = e->cfg.order[i];
+    for (int i = 0; i < e->cfg.n_audio; i++)
+        if (e->cfg.audio[i].pid > 0)
+            pinned[n_pinned++] = (uint16_t)e->cfg.audio[i].pid;
+    for (int i = 0; i < e->cfg.n_video; i++)
+        if (e->cfg.video[i].pid > 0)
+            pinned[n_pinned++] = (uint16_t)e->cfg.video[i].pid;
+    follow_apply(&e->follow, &named, e->alias, src_tmp, pinned, n_pinned);
+    {
+        int64_t now = e->cfg.live ? clock_now_ns() : 0;
+
+        pthread_mutex_lock(&e->lock);
+        memcpy(e->src_of, src_tmp, sizeof(e->src_of));
+        for (int i = 0; i < named.n_es; i++)
+            if (!e->pid_last_ns[named.es[i].pid])
+                e->pid_last_ns[named.es[i].pid] = now;
+        pthread_mutex_unlock(&e->lock);
+    }
 
     program_set_service(&named, e->cfg.service_provider, e->cfg.service_name);
     if (e->cfg.service_id > 0)
@@ -892,6 +926,7 @@ static void on_unit(void *opaque, struct es_unit *u)
 {
     struct engine *e = opaque;
 
+    u->pid = e->alias[u->pid & 0x1FFF];
     if (e->cfg.n_drop && dropped(e, u->pid)) {
         free(u);
         return;
@@ -900,6 +935,8 @@ static void on_unit(void *opaque, struct es_unit *u)
         thumb_tap_unit(u, e->thumb_codec);  /* a copied video stream: decoded for the thumbnail now and then */
     pthread_mutex_lock(&e->lock);
     e->pid_in_bytes[u->pid & 0x1FFF] += u->len;
+    if (e->cfg.live)
+        e->pid_last_ns[u->pid & 0x1FFF] = e->rx_ns ? e->rx_ns : clock_now_ns();
     if (!e->cfg.live) {
         stc_t t1;
 
@@ -1357,8 +1394,15 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
         out->out_ts_id = e->out_prog.ts_id;
         out->out_pmt_pid = e->out_prog.pmt_pid;
         out->out_pcr_pid = e->out_prog.pcr_pid;
-        for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++)
-            out->es_out_pid[i] = e->out_pid[e->prog.es[i].pid & 0x1FFF];
+        int64_t now = e->cfg.live ? clock_now_ns() : 0;
+
+        for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++) {
+            uint16_t pid = e->prog.es[i].pid & 0x1FFF;
+
+            out->es_out_pid[i] = e->out_pid[pid];
+            out->es_src_pid[i] = e->src_of[pid];
+            out->es_idle_ms[i] = e->cfg.live && e->pid_last_ns[pid] ? (now - e->pid_last_ns[pid]) / 1000000 : -1;
+        }
         for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++) {
             out->es_in_bytes[i] = e->pid_in_bytes[e->prog.es[i].pid & 0x1FFF];
             out->es_out_bytes[i] = e->pid_out_bytes[e->prog.es[i].pid & 0x1FFF];
@@ -1385,7 +1429,8 @@ struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,
         return NULL;
     e->cfg = *cfg;
     for (int i = 0; i < 8192; i++)
-        e->out_pid[i] = (uint16_t)i;
+        e->out_pid[i] = e->alias[i] = e->src_of[i] = (uint16_t)i;
+    follow_init(&e->follow, cfg->streams_file);
     e->delay = cfg->delay_ms * STC_PER_MS;
     pthread_mutex_init(&e->lock, NULL);
     e->sbuf = malloc(SBUF_SIZE);

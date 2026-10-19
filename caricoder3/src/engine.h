@@ -45,6 +45,10 @@ struct engine_cfg {
     int  pmt_pid;               /* 0 = keep */
     int  pcr_pid;               /* 0 = keep, -1 = on the (first) video, else this output PID
                                  * (a stream's PID, or a PCR-only PID of its own) */
+
+    /* Where what was learnt about the source's PIDs is kept (follow.h);
+     * NULL: nothing kept, learnt again each run. */
+    const char *streams_file;
 };
 
 struct engine_stats {
@@ -73,6 +77,11 @@ struct engine_stats {
     uint64_t xc_out_bytes[MAX_ES];
     /* What the output calls things: by stream index and transcoder index */
     uint16_t es_out_pid[MAX_ES], xc_out_pid[MAX_ES];
+    /* by stream index: the PID the source has it on now (the inside PID,
+     * prog.es[].pid, is the one it had when first seen), and how long
+     * since anything of it arrived (live; -1 unknown) */
+    uint16_t es_src_pid[MAX_ES];
+    int64_t es_idle_ms[MAX_ES];
     uint16_t out_number, out_ts_id, out_pmt_pid, out_pcr_pid;
 };
 

@@ -634,6 +634,21 @@ random-access flag on key frames.
   whole and counted, never forwarded damaged.
 - A table that is malformed, even with a correct CRC, is ignored and
   counted; the last good one stays in force.
+- If the source moves its streams to other PIDs (the provider rebuilt the
+  multiplex), each stream is recognised by what it is (video, audio,
+  language, its place among streams of that kind) and keeps the PID it
+  had: the channel's settings, which name the old PIDs, still apply, and
+  the output's PIDs do not change. The PMT and a PCR-only PID are kept
+  the same way. It is logged ("source PIDs changed: audio eng moved from
+  PID 0x0101 to 0x0102; kept as 0x0101"), and the GUI shows the source's
+  PID next to the old one. Under the supervisor what was learnt is kept
+  in `channels/NAME.streams`, so a channel started after the change still
+  knows; delete that file (with the channel stopped) to have the channel
+  take the source as it is now. A stream on a PID the settings name is
+  always taken as that stream.
+- A video or audio stream the PMT lists but nothing of which arrives
+  while the rest does is reported once after 5 s, and again when it is
+  back; the GUI marks it "no data".
 
 ### Delay
 

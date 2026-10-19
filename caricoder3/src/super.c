@@ -406,6 +406,8 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARGS(s->run_dir);
     ARGS("--config");
     ARG("%.400s/%s.outputs.json", s->channels_dir, c->name);
+    ARGS("--streams-file");
+    ARG("%.400s/%s.streams", s->channels_dir, c->name);
     ARGS("--stats-file");
     ARG("%.400s/%s.json", s->run_dir, c->name);
     ARGS("--thumb");
@@ -2059,6 +2061,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             chan_stop(s, c);
             unlink(path);
             snprintf(opath, sizeof(opath), "%s/%s.outputs.json", s->channels_dir, name);
+            unlink(opath);
+            snprintf(opath, sizeof(opath), "%s/%s.streams", s->channels_dir, name);
             unlink(opath);
             free(c->cfg);
             c->cfg = NULL;

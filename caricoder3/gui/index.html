@@ -406,7 +406,9 @@ function mediaLine(s, input) {
   if (!input && s.size) bits.push(s.size);
   if (s.language) bits.push(s.language.toUpperCase());
   const what = `<b class="k-${esc(s.kind || "data")}">${esc(s.kind || "data")}</b> ${esc(bits.join(" "))}`;
-  return `<div class="sline">${what}<span>${rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">pid ${input ? s.in_pid : s.pid}</span></div>`;
+  const quiet = input && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio");
+  const pid = input && s.src_pid ? `<span title="The source moved this stream from PID ${s.in_pid}; settings and output stay on ${s.in_pid}">pid ${s.src_pid} <span class="warn">(was ${s.in_pid})</span></span>` : `pid ${input ? s.in_pid : s.pid}`;
+  return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span></div>`;
 }
 function mediaHtml(c) {
   const ss = ((c.stats || {}).service || {}).streams || [];

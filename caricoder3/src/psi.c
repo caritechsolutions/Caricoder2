@@ -4,6 +4,7 @@
  */
 #include "psi.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ---- section reassembly --------------------------------------------- */
@@ -549,5 +550,38 @@ const char *stream_type_name(int st)
     case 0x86: return "SCTE-35";
     case 0x87: return "E-AC-3";
     default:   return "other";
+    }
+}
+
+/* What a stream is, for the GUI: video, audio, subtitles, teletext, data; and its language. */
+const char *program_es_kind(const struct program *p, int idx, char *lang, size_t langlen)
+{
+    int st = p->es[idx].stream_type;
+    const uint8_t *d = p->blob + p->es[idx].desc_off;
+    int n = p->es[idx].desc_len;
+
+    lang[0] = 0;
+    for (int i = 0; i + 2 <= n; ) {
+        int tag = d[i], dl = d[i + 1];
+
+        if (i + 2 + dl > n)
+            break;
+        if (tag == 0x0A && dl >= 3)
+            snprintf(lang, langlen, "%.3s", (const char *)d + i + 2);
+        i += 2 + dl;
+    }
+    switch (st) {
+    case 0x01: case 0x02: case 0x10: case 0x1B: case 0x24: return "video";
+    case 0x03: case 0x04: case 0x0F: case 0x11: case 0x81: case 0x87: return "audio";
+    case 0x06:
+        if (program_es_has_desc(p, idx, 0x6A, NULL) || program_es_has_desc(p, idx, 0x7A, NULL) ||
+            program_es_has_desc(p, idx, 0x05, "AC-3"))
+            return "audio";
+        if (program_es_has_desc(p, idx, 0x59, NULL))
+            return "subtitles";
+        if (program_es_has_desc(p, idx, 0x56, NULL) || program_es_has_desc(p, idx, 0x46, NULL))
+            return "teletext";
+        return "data";
+    default: return "data";
     }
 }
