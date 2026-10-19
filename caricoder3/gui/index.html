@@ -104,6 +104,10 @@ dialog h3 { margin:0 0 14px; font-size:17px } dialog .actions { display:flex; ju
 .legend { display:flex; gap:16px; align-items:center; font-size:12.5px; margin-bottom:4px } .legend i { display:inline-block; width:14px; height:3px; border-radius:2px; vertical-align:middle; margin-right:6px } .legend .li i { background:var(--air) } .legend .lo i { background:var(--ok) } .legend .hint { color:var(--dim); margin-left:auto }
 svg.graph { width:100%; height:auto; display:block } svg.graph .grid line { stroke:var(--line); stroke-width:1 } svg.graph .grid text { fill:var(--dim); font-size:10.5px; font-family:inherit }
 svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.graph .gin { stroke:var(--air) } svg.graph .gout { stroke:var(--ok) }
+svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
+.legend .gin-l i { background:var(--air) } .legend .gout-l i { background:var(--ok) } .legend .gdec-l i { background:var(--acc) } .legend .gg2-l i { background:#c58cf0 } .legend .gg3-l i { background:#6fd3e0 }
+.evwrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:var(--r) } table.evt td { padding:5px 10px; font-size:13px; vertical-align:top } table.evt td.mono { white-space:nowrap; color:var(--fg2) }
+tr.lv-warn td:last-child { color:var(--warn) } tr.lv-error td:last-child { color:var(--bad) }
 .big-thumb { width:100%; height:auto; aspect-ratio:16/9; object-fit:contain; margin-bottom:8px; background:#0d1216 }
 .pidt { width:auto; min-width:60% } .pidt td, .pidt th { padding:4px 10px } .pidt button { padding:2px 8px }
 .tag { display:inline-block; padding:1px 7px; border-radius:4px; background:var(--panel2); color:var(--fg2); font-size:12px }
@@ -425,6 +429,92 @@ function graphHtml(h) {
     <svg class="graph" viewBox="0 0 ${W} ${H}" role="img" aria-label="Input and output bit rate"><g class="grid">${grid}</g>${line(inn, "gin")}${line(out, "gout")}</svg>`;
 }
 
+/* ---------- history (the record on disk) ---------- */
+const RANGES = [["1h", 3600, "1 h"], ["6h", 21600, "6 h"], ["24h", 86400, "24 h"], ["7d", 604800, "7 days"], ["30d", 2592000, "30 days"]];
+let histRange = "24h", histData = null, histEvents = null, histFor = "", histAt = 0;
+try { histRange = localStorage.getItem("cc3range") || "24h"; } catch(e) {}
+const fmtTime = (t, span) => { const d = new Date(t * 1000); const hm = d.toTimeString().slice(0, 5);
+  return span > 2 * 86400 ? `${d.getDate()}/${d.getMonth() + 1} ${span > 8 * 86400 ? "" : hm}`.trim() : hm; };
+const fmtWhen = t => { const d = new Date(t * 1000), now = new Date(); const day = d.toDateString() === now.toDateString() ? "" : `${d.getDate()}/${d.getMonth() + 1} `; return day + d.toTimeString().slice(0, 8); };
+/* A time graph: series [{v: [...], cls, label}] over rows' times; `marks`
+ * (times with trouble) as red ticks, `gaps` (time spans not running) shaded. */
+function timeGraph(ts, series, from, to, opts = {}) {
+  const W = 900, H = opts.h || 190, L = 64, R = 10, T = 10, B = 24;
+  const all = series.flatMap(s => s.v).filter(v => v != null);
+  const max = opts.max || niceMax(Math.max(1, ...all) * 1.1);
+  const x = t => L + (W - L - R) * (t - from) / Math.max(1, to - from);
+  const y = v => T + (H - T - B) * (1 - Math.min(v, max) / max);
+  const fmt = opts.fmt || (v => fmtRate(v));
+  let grid = "";
+  for (let k = 0; k <= 4; k++) { const v = max * k / 4; grid += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v ? fmt(v) : "0"}</text>`; }
+  for (let k = 0; k <= 5; k++) { const t = from + (to - from) * k / 5; grid += `<text x="${x(t)}" y="${H - 6}" text-anchor="${k ? k < 5 ? "middle" : "end" : "start"}">${fmtTime(t, to - from)}</text>`; }
+  const gaps = (opts.gaps || []).map(([a, b]) => `<rect class="gap" x="${x(a).toFixed(1)}" y="${T}" width="${Math.max(1, x(b) - x(a)).toFixed(1)}" height="${H - T - B}"/>`).join("");
+  const marks = (opts.marks || []).map(t => `<line class="mark" x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="${H - B - 8}" y2="${H - B}"/>`).join("");
+  const lines = series.map(s => { const pts = []; ts.forEach((t, i) => { if (s.v[i] != null) pts.push(`${x(t).toFixed(1)},${y(s.v[i]).toFixed(1)}`); }); return pts.length > 1 ? `<polyline class="${s.cls}" points="${pts.join(" ")}"/>` : ""; }).join("");
+  return `<svg class="graph" viewBox="0 0 ${W} ${H}" role="img"><g class="grid">${grid}</g>${gaps}${lines}${marks}</svg>`;
+}
+function rangeButtons(onclick) { return `<span class="choice">${RANGES.map(r => `<button type="button" class="${histRange === r[0] ? "on" : ""}" onclick="${onclick}('${r[0]}')">${r[2]}</button>`).join("")}</span>`; }
+function eventRows(evs, withChan) {
+  if (!evs || !evs.length) return `<div class="empty" style="padding:16px">Nothing recorded in this time.</div>`;
+  return `<table class="evt"><tbody>${evs.map(e => `<tr class="lv-${esc(e.level)}"><td class="mono">${fmtWhen(e.t)}</td>${withChan ? `<td>${e.channel ? `<a onclick="openChannel('${esc(e.channel)}')">${esc(e.channel)}</a>` : `<span style="color:var(--dim)">server</span>`}</td>` : ""}<td><span class="tag">${esc(e.kind)}</span></td><td>${esc(e.text)}</td></tr>`).join("")}</tbody></table>`;
+}
+async function loadChanHistory(name, force) {
+  const span = RANGES.find(r => r[0] === histRange)[1], key = name + "/" + histRange;
+  if (!force && histFor === key && Date.now() - histAt < 60000) return;
+  histFor = key; histAt = Date.now();
+  const to = Math.floor(Date.now() / 1000), from = to - span;
+  try {
+    const [h, e] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`)]);
+    histData = Object.assign(h, { from, to }); histEvents = e.events;
+  } catch(err) { histData = { error: err.message }; histEvents = null; }
+  if (current && current.name === name) renderChanHistory();
+}
+function setRange(r) { histRange = r; try { localStorage.setItem("cc3range", r); } catch(e) {} histFor = ""; if (view.page === "server" && !view.name) loadServerHistory(true); else if (current) loadChanHistory(current.name, true); }
+function renderChanHistory() {
+  const el = $("#histbody"); if (!el) return;
+  $("#histrange").innerHTML = rangeButtons("setRange");
+  if (!histData) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  if (histData.error) { el.innerHTML = `<div class="empty">${esc(histData.error)}</div>`; return; }
+  const rows = histData.rows || [], ts = rows.map(r => r[0] + histData.step / 2);
+  const kb = i => rows.map(r => r[i] * 1000);
+  const marks = rows.filter(r => r[5] || r[7] || r[8] || r[9]).map(r => r[0] + histData.step / 2);
+  const gaps = rows.filter(r => r[13] < histData.step / 2).map(r => [r[0], r[0] + histData.step]);
+  const sum = i => rows.reduce((a, r) => a + r[i], 0);
+  const totals = [["CC errors", sum(5)], ["socket overflows", sum(6)], ["dropped", sum(7)], ["late", sum(8)], ["lost on the link", sum(9)], ["source switches", sum(10)], ["restarts", sum(11)]].filter(x => x[1]);
+  const upPct = rows.length ? 100 * sum(13) / (rows.length * histData.step) : 0;
+  el.innerHTML = `<div class="legend"><span class="li"><i></i>In</span><span class="lo"><i></i>Out</span><span><i style="background:var(--bad);width:3px;height:10px"></i>trouble</span><span><i style="background:#2c3640;height:10px"></i>not running</span><span class="hint">running ${upPct.toFixed(upPct > 99.9 || upPct < 1 ? 0 : 1)}% of the time · ${totals.length ? totals.map(x => `${x[1].toLocaleString()} ${x[0]}`).join(" · ") : "no errors"}</span></div>
+    ${timeGraph(ts, [{ v: kb(1), cls: "gin" }, { v: kb(3), cls: "gout" }], histData.from, histData.to, { marks, gaps })}
+    <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
+}
+let srvHist = null, srvEvents = null, srvHistAt = 0;
+async function loadServerHistory(force) {
+  if (!force && Date.now() - srvHistAt < 60000) return;
+  srvHistAt = Date.now();
+  const span = RANGES.find(r => r[0] === histRange)[1], to = Math.floor(Date.now() / 1000), from = to - span;
+  try {
+    const [m, e] = await Promise.all([api(`/api/history/server?metric=${encodeURIComponent("*")}&from=${from}&to=${to + 1}`), api(`/api/events?from=${from}&to=${to + 1}&limit=300`)]);
+    srvHist = Object.assign(m, { from, to }); srvEvents = e.events;
+  } catch(err) { srvHist = { error: err.message }; srvEvents = null; }
+  if (view.page === "server" && !view.name) renderServerHistory();
+}
+function renderServerHistory() {
+  const el = $("#srvhist"); if (!el) return;
+  $("#histrange").innerHTML = rangeButtons("setRange");
+  if (!srvHist) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  if (srvHist.error) { el.innerHTML = `<div class="empty">${esc(srvHist.error)}</div>`; return; }
+  const S = srvHist.series || {}, names = Object.keys(S);
+  const ts = (S["cpu.percent"] || []).map(p => p[0] + srvHist.step / 2);
+  const at = (name, i = 1) => { const m = new Map((S[name] || []).map(p => [p[0] + srvHist.step / 2, p[i]])); return ts.map(t => m.has(t) ? m.get(t) : null); };
+  const gpus = [...new Set(names.filter(n => /^gpu\d+\.util$/.test(n)).map(n => n.split(".")[0]))];
+  const series = [{ v: at("cpu.percent"), cls: "gin", label: "CPU" }].concat(gpus.flatMap((g, k) => [{ v: at(g + ".encoder"), cls: k ? "gg2" : "gout", label: g + " encoder" }, { v: at(g + ".decoder"), cls: k ? "gg3" : "gdec", label: g + " decoder" }]));
+  const pct = v => v.toFixed(0) + "%";
+  const nics = [...new Set(names.filter(n => /^net\..+\.rx_drop$/.test(n)).map(n => n.slice(4, -8)))];
+  const drops = nics.map(n => [n, (S[`net.${n}.rx_drop`] || []).reduce((a, p) => a + p[1] * (srvHist.step / 10), 0)]).filter(d => d[1] > 0);
+  el.innerHTML = `<div class="legend">${series.map(s => `<span class="${s.cls}-l"><i></i>${esc(s.label)}</span>`).join("")}<span class="hint">${drops.length ? drops.map(d => `${esc(d[0])}: about ${Math.round(d[1]).toLocaleString()} packets dropped`).join(" · ") : "no packets dropped by the network cards"}</span></div>
+    ${timeGraph(ts, series, srvHist.from, srvHist.to, { max: 100, fmt: pct })}
+    <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events (all channels and the server)</h4><div class="evwrap">${eventRows(srvEvents, true)}</div>`;
+}
+
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
 const barCls = p => p >= 90 ? "bad" : p >= 75 ? "warn" : "";
@@ -444,6 +534,7 @@ function renderServer() {
       ${gpus.map(g => `<div class="box"><h4>GPU ${g.index} · ${esc(g.name)}</h4><div class="big">${g.util >= 0 ? g.util + "%" : "—"}</div><div class="sub">encoder ${g.encoder >= 0 ? g.encoder + "%" : "—"} · decoder ${g.decoder >= 0 ? g.decoder + "%" : "—"}${g.mem_total > 0 ? ` · memory ${g.mem_used} of ${g.mem_total} MB` : ""}${g.temp >= 0 ? ` · ${g.temp} °C` : ""}${g.power >= 0 ? ` · ${g.power} W` : ""}</div><div class="bar"><i class="${barCls(Math.max(g.util||0, g.encoder||0, g.decoder||0))}" style="width:${Math.max(0, g.util||0)}%"></i></div></div>`).join("")}
       ${!gpus.length ? `<div class="box"><h4>GPU</h4><div class="big" style="font-size:16px;font-weight:400;color:var(--dim)">${st.nvidia_smi ? esc(st.gpu_error || "no card reported") : "no nvidia-smi on this machine"}</div></div>` : ""}
     </div></div></section>
+    ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>
       <table><thead><tr><th>Interface</th><th>State</th><th>Receive</th><th>Transmit</th><th>Packets in / out</th><th>Errors in / out</th><th>Dropped in / out</th></tr></thead><tbody>
       ${ifs.map(i => `<tr><td class="mono">${esc(i.name)}</td><td>${i.up ? "up" : "<span class='bad'>down</span>"}${i.speed_mbps > 0 ? ` · ${i.speed_mbps >= 1000 ? (i.speed_mbps / 1000) + " Gb/s" : i.speed_mbps + " Mb/s"}` : ""}</td><td>${fmtRate(i.rx_bps)}</td><td>${fmtRate(i.tx_bps)}</td><td>${i.rx_packets.toLocaleString()} / ${i.tx_packets.toLocaleString()}</td><td>${i.rx_errors || i.tx_errors ? `<span class="warn">${i.rx_errors} / ${i.tx_errors}</span>` : "0 / 0"}</td><td>${i.rx_dropped || i.tx_dropped ? `<span class="warn">${i.rx_dropped} / ${i.tx_dropped}</span>` : "0 / 0"}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No interfaces reported.</td></tr>`}
@@ -454,6 +545,7 @@ function renderServer() {
         return `<tr><td class="mono">${esc(x.url)}</td><td>${x.running ? "running" : "<span class='bad'>not running</span>"}${x.restarts ? ` · ${x.restarts} restart${x.restarts > 1 ? "s" : ""}` : ""}</td><td>${fmtRate(r.bitrate)}</td><td>${x.channels}${missing ? ` <span class="warn">(${missing} program${missing > 1 ? "s" : ""} not found in it)</span>` : ""}</td><td>${r.socket_overflow ? `<span class="warn">${r.socket_overflow}</span>` : "0"}</td></tr>`; }).join("") || `<tr><td colspan="5" class="empty">No channel reads a UDP or RTP input right now.</td></tr>`}
       </tbody></table></section>
     <section class="card"><header><h2>This build</h2><span class="hint">Codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:var(--r);max-height:none">${esc(sys.backends || "")}</pre></div></section>`;
+  if (sys.history) { renderServerHistory(); loadServerHistory(); }
 }
 
 /* ---------- a channel ---------- */
@@ -478,6 +570,7 @@ async function renderChan(name) {
             <button id="pv_over" class="pvplay" onclick="pvPlay('preview')" title="Play the preview" aria-label="Play the preview"></button><div id="pv_msg" class="pvmsg" style="display:none"></div></div>
           <div class="pvctl" id="pvctl"></div><div id="src_info"></div></div>
         <div class="arrow">›</div><div class="node" id="n_proc"></div><div class="arrow">›</div><div class="node" id="n_out"></div></div>
+      <section class="card" id="histcard"><header><h2>History</h2><span class="hint">Kept on this server: detail 3 days, minutes 30 days, hours a year</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="histbody"></div></section>
       <section class="card" id="streamscard"><header><h2>Streams</h2><span class="hint">What comes in and what goes out, with each stream's rate</span></header><div class="body"><div class="streams"><div id="mediainfo"></div><div id="bwgraph"></div></div></div></section>
       <section class="card" id="outputs"></section>
       <section class="card" id="settingscard"><header><h2>Settings</h2><span class="hint">A running channel restarts when settings are saved.</span></header><div class="body" id="settings">${settingsHtml()}</div></section>
@@ -496,6 +589,8 @@ async function renderChan(name) {
   if (!running && pv) pvStop(false);
   renderPvCtl(c);
   $("#mediainfo").innerHTML = mediaHtml(c); $("#bwgraph").innerHTML = graphHtml(c.history);
+  if (sys && sys.history) { if (!$("#histbody").innerHTML) renderChanHistory(); loadChanHistory(c.name); }
+  else { $("#histcard").style.display = "none"; }
   $("#outputs").innerHTML = outputsHtml(c);
   if (!pv && running && ((c.outputs && c.outputs.outputs) || []).some(o => o.id === "preview") && !c._pvclean) { c._pvclean = true; api(`/api/channels/${encodeURIComponent(c.name)}/outputs/preview`, {method:"DELETE"}).catch(() => {}); }
   $("#log").textContent = (c.log||[]).join("\n") || "(nothing yet)";

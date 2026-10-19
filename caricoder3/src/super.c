@@ -38,6 +38,7 @@
  * itself reads and writes (--config), so outputs added while it runs
  * survive a restart.
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -64,6 +65,9 @@
 #include "log.h"
 #include "sink.h"
 #include "sysstat.h"
+#include "history.h"
+
+#include <stdarg.h>
 
 #define CHANNELS_MAX    256
 #define SHARES_MAX      32
@@ -123,6 +127,19 @@ struct chan {
     char sh_url[512];
     int sh_program;
     int share_port;
+
+    /* the record: the 2 s samples summed up into 10 s rows */
+    double h_in_sum, h_out_sum;
+    int h_n;
+    int64_t h_cc, h_ovf, h_drop, h_late, h_lost, h_sw;      /* counters at the last row */
+    int64_t c_cc, c_ovf, c_drop, c_late, c_lost, c_sw;      /* as last read */
+    int h_restarts;
+    bool h_have;                            /* the counters above are from this run */
+    bool h_no_input, h_backup;              /* as last seen: for the events */
+    int h_active;
+    int64_t h_ev_last;                      /* last warning from its log that was kept */
+    char h_ev_text[160];
+    int h_ev_repeats;
 };
 
 /* One reader of an input that several channels take programs from
@@ -145,6 +162,9 @@ struct super {
     char run_dir[512];
     char password[80];
     char binary[512];
+    char history_path[512];                 /* the record (history.h); "" = none */
+    int history_max_mb;
+    int64_t hist_last_s;                    /* wall clock of the last 10 s row */
     int64_t t_start;
 
     pthread_mutex_t lock;                   /* channels, from the web threads */
@@ -245,15 +265,16 @@ static void make_password(char *out, size_t len)
 
 static void save_system_config(struct super *s)
 {
-    char text[2048], q[4][600], err[200];
+    char text[3072], q[5][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
-             "  \"run_dir\": %s,\n  \"password\": %s\n}\n",
+             "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
              json_quote(s->channels_dir, q[1], sizeof(q[1])),
              json_quote(s->run_dir, q[2], sizeof(q[2])),
-             json_quote(s->password, q[3], sizeof(q[3])));
+             json_quote(s->password, q[3], sizeof(q[3])),
+             json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb);
     if (!write_file(s->config_path, text, err, sizeof(err)))
         log_err("config: %s", err);
 }
@@ -269,6 +290,8 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     snprintf(s->channels_dir, sizeof(s->channels_dir), "/etc/caricoder3/channels");
     snprintf(s->run_dir, sizeof(s->run_dir), "/run/caricoder3");
     s->password[0] = 0;
+    snprintf(s->history_path, sizeof(s->history_path), "/var/lib/caricoder3/history.db");
+    s->history_max_mb = 2048;
     if (!text) {
         if (errno != ENOENT) {
             snprintf(err, errlen, "%.200s: %s", s->config_path, strerror(errno));
@@ -286,11 +309,30 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
              json_get_str(&doc, root, "channels_dir", "/etc/caricoder3/channels"));
     snprintf(s->run_dir, sizeof(s->run_dir), "%s", json_get_str(&doc, root, "run_dir", "/run/caricoder3"));
     snprintf(s->password, sizeof(s->password), "%s", json_get_str(&doc, root, "password", ""));
+    snprintf(s->history_path, sizeof(s->history_path), "%s",
+             json_get_str(&doc, root, "history", "/var/lib/caricoder3/history.db"));
+    s->history_max_mb = (int)json_get_num(&doc, root, "history_max_mb", 2048);
     if (s->port < 1 || s->port > 65535) {
         snprintf(err, errlen, "port must be 1..65535");
         return false;
     }
     return true;
+}
+
+/* An event for the record (history.h): `chan` NULL for the server. */
+static void ev(const char *chan, const char *level, const char *kind, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static void ev(const char *chan, const char *level, const char *kind, const char *fmt, ...)
+{
+    char text[400];
+    va_list ap;
+
+    if (!history_enabled())
+        return;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    history_event(time(NULL), chan, level, kind, text);
 }
 
 /* ---- the channel processes ------------------------------------------------------ */
@@ -523,6 +565,7 @@ static void chan_start(struct super *s, struct chan *c)
         c->want = false;
         chan_log_line(c, c->why);
         log_err("channel %s: %s", c->name, err);
+        ev(c->name, "error", "config", "%s", err);
         return;
     }
     if (pipe2(pfd, O_CLOEXEC | O_NONBLOCK) < 0) {
@@ -561,6 +604,8 @@ static void chan_start(struct super *s, struct chan *c)
     c->started_ns = clock_now_ns();
     c->why[0] = 0;
     log_info("channel %s: started (pid %d)", c->name, (int)pid);
+    ev(c->name, "info", "start", "started");
+    c->h_have = false;
 }
 
 static void chan_stop(struct super *s, struct chan *c)
@@ -574,6 +619,33 @@ static void chan_stop(struct super *s, struct chan *c)
 }
 
 /* The lines a channel wrote since last time. */
+/* A warning or error the channel wrote goes into the record too; the same
+ * line again within a minute is counted, not repeated. */
+static void chan_log_event(struct chan *c, const char *line)
+{
+    const char *lv = strlen(line) > 24 ? line + 24 : "";
+    const char *level = !strncmp(lv, "WARN", 4) ? "warn" : !strncmp(lv, "ERROR", 5) ? "error" : NULL;
+    const char *text;
+    int64_t now = time(NULL);
+
+    if (!level || !history_enabled())
+        return;
+    text = lv + 5;
+    while (*text == ' ')
+        text++;
+    if (!strcmp(text, c->h_ev_text) && now - c->h_ev_last < 60) {
+        c->h_ev_repeats++;
+        return;
+    }
+    if (c->h_ev_repeats)
+        ev(c->name, "info", "log", "(the line before %d more time%s)", c->h_ev_repeats,
+           c->h_ev_repeats > 1 ? "s" : "");
+    c->h_ev_repeats = 0;
+    snprintf(c->h_ev_text, sizeof(c->h_ev_text), "%s", text);
+    c->h_ev_last = now;
+    ev(c->name, level, "log", "%s", text);
+}
+
 static void chan_read_log(struct chan *c)
 {
     char buf[4096];
@@ -589,6 +661,7 @@ static void chan_read_log(struct chan *c)
             if (buf[i] == '\n') {
                 c->log_part[c->log_part_len] = 0;
                 chan_log_line(c, c->log_part);
+                chan_log_event(c, c->log_part);
                 fprintf(stderr, "[%s] %s\n", c->name, c->log_part);
                 c->log_part_len = 0;
             } else if (c->log_part_len < LOG_LINE_MAX - 1) {
@@ -619,6 +692,7 @@ static void chan_reap(struct super *s, struct chan *c, int status)
     if (asked || !c->want) {
         c->state = CH_STOPPED;
         log_info("channel %s: stopped", c->name);
+        ev(c->name, "info", "stop", "stopped");
         return;
     }
     /* it died on its own: back off, doubling, up to 30 s; a channel that
@@ -634,6 +708,7 @@ static void chan_reap(struct super *s, struct chan *c, int status)
         c->next_start_ns = now + wait;
         c->restarts++;
         log_warn("channel %s: %s; starting again in %lld s", c->name, c->why, (long long)(wait / 1000000000LL));
+        ev(c->name, "error", "exit", "%s; starting again in %lld s", c->why, (long long)(wait / 1000000000LL));
     }
     (void)s;
 }
@@ -666,6 +741,48 @@ static void chan_sample(struct super *s, struct chan *c, int64_t now)
         bi = (float)json_get_num(&doc, in, "bitrate", 0);
     if (out >= 0)
         bo = (float)json_get_num(&doc, out, "bitrate", 0);
+    /* for the record: rates summed until the next 10 s row, counters as
+     * they stand, and the changes worth an event */
+    if (!c->h_have) {
+        c->h_cc = c->h_ovf = c->h_drop = c->h_late = c->h_lost = c->h_sw = 0;
+        c->h_no_input = false;
+        c->h_backup = false;
+        c->h_active = 0;
+        c->h_have = true;
+    }
+    c->h_in_sum += bi;
+    c->h_out_sum += bo;
+    c->h_n++;
+    if (in >= 0) {
+        int link = json_get(&doc, in, "link");
+        double age = json_get_num(&doc, in, "last_packet_age_ms", -1);
+        double up = json_get_num(&doc, root, "uptime_s", 0);
+        bool no_input = age > 2000 || (up > 10 && bi == 0);
+        int active = (int)json_get_num(&doc, in, "active", 0);
+
+        c->c_cc = (int64_t)json_get_num(&doc, in, "cc_errors", 0);
+        c->c_ovf = (int64_t)json_get_num(&doc, in, "socket_overflow", 0);
+        c->c_sw = (int64_t)json_get_num(&doc, in, "switches", 0);
+        c->c_lost = link >= 0 ? (int64_t)json_get_num(&doc, link, "lost", 0) : 0;
+        if (no_input != c->h_no_input && (up > 5 || no_input)) {
+            if (no_input)
+                ev(c->name, "warn", "input", "no input%s", age > 0 ? " for 2 s" : "");
+            else
+                ev(c->name, "info", "input", "input back");
+            c->h_no_input = no_input;
+        }
+        if (active != c->h_active) {
+            if (active)
+                ev(c->name, "warn", "switch", "running on backup source %d", active);
+            else
+                ev(c->name, "info", "switch", "back on the main source");
+            c->h_active = active;
+        }
+    }
+    if (out >= 0) {
+        c->c_drop = (int64_t)json_get_num(&doc, out, "dropped_units", 0);
+        c->c_late = (int64_t)json_get_num(&doc, out, "late_units", 0);
+    }
     {
         int k = (c->hist_head + c->hist_n) % HIST_N;
 
@@ -949,6 +1066,7 @@ static void shares_update(struct super *s, int64_t now)
 
         if (sh->pid > 0 && waitpid(sh->pid, &status, WNOHANG) == sh->pid) {
             if (!sh->stopping) {
+                ev(NULL, "warn", "share", "shared input %s: reader ended, starting it again", sh->url);
                 log_warn("shared input %s: reader ended (%s %d), starting it again", sh->url,
                          WIFSIGNALED(status) ? "signal" : "status",
                          WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status));
@@ -1060,9 +1178,64 @@ static void shares_update(struct super *s, int64_t now)
             if (pid > 0) {
                 sh->pid = pid;
                 log_info("shared input %s: reader started (pid %d) for %d channel(s)", sh->url, (int)pid, n);
+                ev(NULL, "info", "share", "shared input %s: reader started for %d channel(s)", sh->url, n);
             }
         }
     }
+}
+
+static int64_t inc(int64_t now_v, int64_t *was)
+{
+    int64_t d = now_v >= *was ? now_v - *was : now_v;      /* a restarted channel counts from 0 */
+
+    *was = now_v;
+    return d;
+}
+
+static void metric_cb(const char *name, double v, void *op)
+{
+    history_metric(*(int64_t *)op, name, v);
+}
+
+/* Every 10 s of wall clock: a row per channel, and the server's figures. */
+static void hist_tick(struct super *s)
+{
+    int64_t t = time(NULL) / 10 * 10;
+
+    if (!history_enabled() || t == s->hist_last_s)
+        return;
+    s->hist_last_s = t;
+    for (int i = 0; i < s->n; i++) {
+        struct chan *c = &s->ch[i];
+        struct hist_chan h;
+
+        if (!c->cfg)
+            continue;
+        memset(&h, 0, sizeof(h));
+        snprintf(h.name, sizeof(h.name), "%s", c->name);
+        h.state = c->state == CH_RUNNING ? 1 : c->state == CH_FAILED ? 2 : 0;
+        if (c->h_n) {
+            h.in_bps = c->h_in_sum / c->h_n;
+            h.out_bps = c->h_out_sum / c->h_n;
+        }
+        if (h.state == 1 && c->h_have) {
+            h.cc = inc(c->c_cc, &c->h_cc);
+            h.overflow = inc(c->c_ovf, &c->h_ovf);
+            h.dropped = inc(c->c_drop, &c->h_drop);
+            h.late = inc(c->c_late, &c->h_late);
+            h.lost = inc(c->c_lost, &c->h_lost);
+            h.switches = inc(c->c_sw, &c->h_sw);
+        }
+        h.restarts = c->restarts > c->h_restarts ? c->restarts - c->h_restarts : 0;
+        c->h_restarts = c->restarts;
+        h.health = h.state == 2 ? 2
+                 : h.state == 1 && (c->h_no_input || c->h_active || h.cc || h.overflow || h.dropped || h.late ||
+                                    h.lost) ? 1 : 0;
+        history_chan(t, &h);
+        c->h_in_sum = c->h_out_sum = 0;
+        c->h_n = 0;
+    }
+    sysstat_metrics(metric_cb, &t);
 }
 
 static void tick(struct super *s)
@@ -1072,6 +1245,7 @@ static void tick(struct super *s)
     for (int i = 0; i < s->n; i++)
         chan_share_prepare(s, &s->ch[i]);
     shares_update(s, now);
+    hist_tick(s);
 
     for (int i = 0; i < s->n; i++) {
         struct chan *c = &s->ch[i];
@@ -1100,6 +1274,7 @@ static void tick(struct super *s)
         }
         if (c->state == CH_STOPPING && now - c->stop_asked_ns > STOP_GRACE_MS * 1000000LL) {
             log_warn("channel %s: did not stop in %d s, killing it", c->name, STOP_GRACE_MS / 1000);
+            ev(c->name, "warn", "stop", "did not stop in %d s, killed", STOP_GRACE_MS / 1000);
             kill(c->pid, SIGKILL);
             c->stop_asked_ns = now;
         }
@@ -1164,6 +1339,7 @@ static void scan_channels(struct super *s)
             c->log_fd = -1;
             c->pv_log_fd = -1;
             c->state = CH_STOPPED;
+            ev(name, "info", "create", "channel added");
         }
         if (!c->cfg || strcmp(c->cfg, text)) {
             bool changed = c->cfg != NULL;
@@ -1174,6 +1350,7 @@ static void scan_channels(struct super *s)
             c->want = c->enabled;
             if (changed && c->state == CH_RUNNING) {
                 log_info("channel %s: config changed, restarting", c->name);
+                ev(c->name, "info", "config", "settings changed, restarting");
                 chan_stop(s, c);
             }
         } else {
@@ -1188,6 +1365,7 @@ static void scan_channels(struct super *s)
             struct chan *c = &s->ch[i];
 
             log_info("channel %s: its file is gone, stopping", c->name);
+            ev(c->name, "info", "delete", "channel removed");
             c->want = false;
             chan_stop(s, c);
             free(c->cfg);
@@ -1472,6 +1650,35 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
     close(fd);
 }
 
+/* name=value from a query string, %-decoded; false when absent. */
+static bool query_param(const char *query, const char *name, char *out, size_t len)
+{
+    size_t nl = strlen(name);
+
+    for (const char *p = query; p && *p; ) {
+        const char *amp = strchr(p, '&'), *end = amp ? amp : p + strlen(p);
+
+        if ((size_t)(end - p) > nl && !strncmp(p, name, nl) && p[nl] == '=') {
+            size_t o = 0;
+
+            for (const char *q = p + nl + 1; q < end && o + 1 < len; q++) {
+                if (*q == '%' && q + 2 < end + 1 && isxdigit((unsigned char)q[1]) && isxdigit((unsigned char)q[2])) {
+                    char hex[3] = { q[1], q[2], 0 };
+
+                    out[o++] = (char)strtol(hex, NULL, 16);
+                    q += 2;
+                } else {
+                    out[o++] = *q == '+' ? ' ' : *q;
+                }
+            }
+            out[o] = 0;
+            return true;
+        }
+        p = amp ? amp + 1 : NULL;
+    }
+    return false;
+}
+
 static void handle(void *opaque, const struct http_req *req, struct http_resp *resp)
 {
     struct super *s = opaque;
@@ -1506,6 +1713,54 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             resp->body_len = gui_hls_js_len;
         }
         snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: max-age=86400\r\n");
+        return;
+    }
+    if (!strcmp(p, "/api/events") || !strcmp(p, "/api/history/server") ||
+        (!strncmp(p, "/api/channels/", 14) && strlen(p) > 22 && !strcmp(p + strlen(p) - 8, "/history"))) {
+        /* ?from=&to= (unix seconds; default the last 24 h), &channel= / &metric= / &limit= */
+        char v[128], chan[64] = "";
+        int64_t now = time(NULL), from = now - 86400, to = now + 1;
+        int limit = 500;
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+        bool ok;
+
+        if (query_param(req->query, "from", v, sizeof(v)))
+            from = strtoll(v, NULL, 10);
+        if (query_param(req->query, "to", v, sizeof(v)))
+            to = strtoll(v, NULL, 10);
+        if (query_param(req->query, "limit", v, sizeof(v)))
+            limit = atoi(v) > 0 && atoi(v) <= 5000 ? atoi(v) : 500;
+        if (to <= from)
+            to = from + 1;
+        if (!history_enabled()) {
+            api_error(resp, 503, "no history is kept (see the Server page)");
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        if (!strcmp(p, "/api/events")) {
+            bool has = query_param(req->query, "channel", chan, sizeof(chan));
+
+            ok = history_query_events(f, has ? chan : NULL, from, to, limit);
+        } else if (!strcmp(p, "/api/history/server")) {
+            ok = history_query_metrics(f, query_param(req->query, "metric", v, sizeof(v)) ? v : "*", from, to);
+        } else {
+            snprintf(chan, sizeof(chan), "%.*s", (int)(strlen(p) - 22), p + 14);
+            ok = history_query_chan(f, chan, from, to);
+        }
+        fclose(f);
+        if (!ok) {
+            free(out);
+            api_error(resp, 500, "the history could not be read");
+            return;
+        }
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
         return;
     }
     if (!strcmp(p, "/api/system")) {
@@ -1548,7 +1803,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 free(st);
             }
         }
-        fprintf(f, "], \"system\": ");
+        fprintf(f, "], \"history\": ");
+        history_info(f);
+        fprintf(f, ", \"system\": ");
         pthread_mutex_unlock(&s->lock);
         sysstat_json(f);
         fprintf(f, ", \"backends\": ");
@@ -1807,6 +2064,7 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             c->cfg = NULL;
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
         } else if (!strcmp(rest, "start") && !strcmp(req->method, "POST")) {
+            ev(c->name, "info", "user", "start asked for");
             c->want = true;
             c->restarts = 0;
             c->next_start_ns = 0;
@@ -1814,12 +2072,14 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 chan_start(s, c);
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
         } else if (!strcmp(rest, "stop") && !strcmp(req->method, "POST")) {
+            ev(c->name, "info", "user", "stop asked for");
             c->want = false;
             chan_stop(s, c);
             if (c->state == CH_FAILED)
                 c->state = CH_STOPPED;
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
         } else if (!strcmp(rest, "restart") && !strcmp(req->method, "POST")) {
+            ev(c->name, "info", "user", "restart asked for");
             c->want = true;
             c->restarts = 0;
             c->next_start_ns = 0;
@@ -1906,7 +2166,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             struct json_doc *doc = malloc(sizeof(*doc));
             int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
             const char *url, *id;
-            char reqline[1400], q2[600], q3[200], *reply;
+            char reqline[1400], q2[600], q3[200], *reply, evname[64], evurl[512];
+            bool quiet;
 
             if (root < 0 || !(url = json_get_str(doc, root, "url", NULL))) {
                 pthread_mutex_unlock(&s->lock);
@@ -1915,6 +2176,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 return;
             }
             id = json_get_str(doc, root, "id", "");
+            quiet = !strcmp(id, "preview");         /* the player's own, not worth an event */
+            snprintf(evname, sizeof(evname), "%s", c->name);
+            snprintf(evurl, sizeof(evurl), "%s", url);
             if (c->state != CH_RUNNING) {
                 pthread_mutex_unlock(&s->lock);
                 api_error(resp, 409, "the channel is not running; start it, then add outputs");
@@ -1935,6 +2199,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             }
             if (reply) {
                 http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
+                if (!quiet && strstr(reply, "\"ok\": true"))
+                    ev(evname, "info", "output", "output added: %s", evurl);
                 free(reply);
             } else {
                 api_error(resp, 502, "the channel did not answer");
@@ -1969,6 +2235,7 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             reply = chan_ctl(s, &tmp, reqline);
             if (reply) {
                 http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
+                if (strstr(reply, "\"ok\": true")) ev(tmp.name, "info", "output", "output %s changed", rest + 8);
                 free(reply);
             } else {
                 api_error(resp, 502, "the channel did not answer");
@@ -1991,6 +2258,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             reply = chan_ctl(s, &tmp, reqline);
             if (reply) {
                 http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
+                if (strstr(reply, "\"ok\": true") && strcmp(rest + 8, "preview"))
+                    ev(tmp.name, "info", "output", "output %s removed", rest + 8);
                 free(reply);
             } else {
                 api_error(resp, 502, "the channel did not answer");
@@ -2120,6 +2389,14 @@ int super_main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     sysstat_start();
+    if (s.history_path[0] && strcmp(s.history_path, "none")) {
+        char herr[300];
+
+        if (!history_open(s.history_path, s.history_max_mb, herr, sizeof(herr)))
+            log_warn("history: %s", herr);
+        else
+            ev(NULL, "info", "server", "supervisor started (caricoder3 %s)", CC3_VERSION);
+    }
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);
@@ -2165,6 +2442,8 @@ int super_main(int argc, char **argv)
     }
     pthread_mutex_unlock(&s.lock);
     http_stop(s.http);
+    ev(NULL, "info", "server", "supervisor stopped");
+    history_close();
     sysstat_stop();
     for (int i = 0; i < s.n; i++)
         free(s.ch[i].cfg);

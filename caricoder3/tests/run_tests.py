@@ -2671,6 +2671,41 @@ def supervisor_api():
 
 
 @test
+def history_keeps_to_its_cap():
+    """The supervisor's record (SQLite): 3 days of 120 channels into a 16 MB cap stays under it, summed into minutes and hours."""
+    import sqlite3
+    if subprocess.run(["pkg-config", "--exists", "sqlite3"]).returncode != 0:
+        return "SKIPPED: no libsqlite3-dev"
+    exe = w("history_cap")
+    r = subprocess.run(["gcc", "-O1", "-DHAVE_SQLITE", "-o", exe, os.path.join(HERE, "history_cap.c"),
+                        os.path.join(HERE, "..", "src", "history.c"), os.path.join(HERE, "..", "src", "log.c"),
+                        "-lsqlite3", "-lpthread"], capture_output=True, text=True)
+    need(r.returncode == 0, f"build: {r.stderr[-500:]}")
+    db = w("history_cap.db")
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(db + suffix):
+            os.unlink(db + suffix)
+    r = subprocess.run([exe, db, "16", "3"], capture_output=True, text=True, timeout=600)
+    need(r.returncode == 0, f"run: {r.stderr[-500:]}")
+    size = os.path.getsize(db) + (os.path.getsize(db + "-wal") if os.path.exists(db + "-wal") else 0)
+    need(size <= 16 * 1048576, f"{size / 1048576:.1f} MB, over the 16 MB cap")
+    con = sqlite3.connect(db)
+    n10, t10 = con.execute("SELECT COUNT(*), MIN(t) FROM s10").fetchone()
+    n60 = con.execute("SELECT COUNT(*) FROM s60").fetchone()[0]
+    n3600, t3600 = con.execute("SELECT COUNT(*), MIN(t) FROM s3600").fetchone()
+    up = con.execute("SELECT MAX(up) FROM s3600").fetchone()[0]
+    ev = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    con.close()
+    need(n10 > 0 and n60 > 0 and n3600 > 0, f"rows: 10 s {n10}, minutes {n60}, hours {n3600}")
+    need(up == 3600, f"an hour of a channel running counts {up} s")
+    need(t3600 < time.time() - 2.5 * 86400, "the hours did not reach back")
+    need(t10 > time.time() - 2.5 * 86400, "the oldest detail did not go first under the cap")
+    need(ev > 50, f"only {ev} events kept: they should go last")
+    return f"{size / 1048576:.1f} MB of 16; detail back {(time.time() - t10) / 3600:.0f} h, hours back " \
+           f"{(time.time() - t3600) / 86400:.1f} days, {ev} events"
+
+
+@test
 def supervisor_shared_input():
     """Channels on one input share a reader: the input is read once, each channel gets its program; the reader follows them."""
     import base64

@@ -15,5 +15,10 @@ void sysstat_start(void);
 void sysstat_stop(void);
 /* {"cpu": {...}, "memory": {...}, "gpus": [...], "interfaces": [...]} */
 void sysstat_json(FILE *f);
+/* The latest figures one by one, for the record: cpu.percent, load.1,
+ * mem.used_pct, gpuN.util/encoder/decoder/mem_mb/temp_c/power_w,
+ * net.IF.rx_mbps/tx_mbps, and net.IF.rx_drop/rx_err as increments since
+ * the previous call. Nothing before the first sample. */
+void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op);
 
 #endif

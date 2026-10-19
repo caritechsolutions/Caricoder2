@@ -407,3 +407,62 @@ void sysstat_json(FILE *f)
     }
     fprintf(f, "]}");
 }
+
+void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op)
+{
+    static struct { char name[32]; uint64_t drop, err; } prev[IFACES_MAX];
+    static int n_prev;
+    struct sample s;
+    char name[96];
+
+    pthread_mutex_lock(&lock);
+    s = cur;
+    pthread_mutex_unlock(&lock);
+    if (!s.when_ns)
+        return;
+    cb("cpu.percent", s.cpu_pct, op);
+    cb("load.1", s.load1, op);
+    if (s.mem_total)
+        cb("mem.used_pct", 100.0 * (double)(s.mem_total - s.mem_available) / (double)s.mem_total, op);
+    for (int i = 0; i < s.n_gpus; i++) {
+        const struct gpu *g = &s.gpus[i];
+        const struct { const char *k; int v; } f[] = {
+            { "util", g->util }, { "encoder", g->enc }, { "decoder", g->dec }, { "mem_mb", g->mem_used },
+            { "temp_c", g->temp }, { "power_w", g->power },
+        };
+
+        for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++)
+            if (f[k].v >= 0) {
+                snprintf(name, sizeof(name), "gpu%d.%s", g->index, f[k].k);
+                cb(name, f[k].v, op);
+            }
+    }
+    for (int i = 0; i < s.n_ifs; i++) {
+        const struct iface *n = &s.ifs[i];
+        int p = -1;
+
+        if (!strcmp(n->name, "lo"))
+            continue;
+        snprintf(name, sizeof(name), "net.%s.rx_mbps", n->name);
+        cb(name, n->rx_bps / 1e6, op);
+        snprintf(name, sizeof(name), "net.%s.tx_mbps", n->name);
+        cb(name, n->tx_bps / 1e6, op);
+        for (int j = 0; j < n_prev; j++)
+            if (!strcmp(prev[j].name, n->name))
+                p = j;
+        if (p < 0 && n_prev < IFACES_MAX) {
+            p = n_prev++;
+            snprintf(prev[p].name, sizeof(prev[p].name), "%s", n->name);
+            prev[p].drop = n->rx_drop;
+            prev[p].err = n->rx_err;
+        }
+        if (p >= 0) {
+            snprintf(name, sizeof(name), "net.%s.rx_drop", n->name);
+            cb(name, (double)(n->rx_drop >= prev[p].drop ? n->rx_drop - prev[p].drop : 0), op);
+            snprintf(name, sizeof(name), "net.%s.rx_err", n->name);
+            cb(name, (double)(n->rx_err >= prev[p].err ? n->rx_err - prev[p].err : 0), op);
+            prev[p].drop = n->rx_drop;
+            prev[p].err = n->rx_err;
+        }
+    }
+}

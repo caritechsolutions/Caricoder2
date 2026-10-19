@@ -414,6 +414,26 @@ The API (basic auth, JSON in and out):
 | `DELETE /api/channels/NAME/preview` | stop it |
 | `GET /api/channels/NAME/thumb.jpg` | a picture of the channel, up to 5 s old (320 wide) |
 | `GET /hls/NAME/...` | the channel's HLS output (no password) |
+| `GET /api/channels/NAME/history?from=&to=` | the record on disk (default the last 24 h): `rows` of `[t, in_kbps, in_max_kbps, out_kbps, out_max_kbps, cc, overflow, dropped, late, lost, switches, restarts, health, up_s]`, about 720 of them, 10 s, 1 min or 1 h apiece by span |
+| `GET /api/history/server?metric=cpu*&from=&to=` | the server's: `cpu.percent`, `load.1`, `mem.used_pct`, `gpuN.util/encoder/decoder/mem_mb/temp_c/power_w`, `net.IF.rx_mbps/tx_mbps/rx_drop/rx_err`; a name or a prefix ending in `*` |
+| `GET /api/events?channel=&from=&to=&limit=` | what happened, newest first (no `channel`: everything) |
+
+### History and events
+
+The supervisor keeps a record in one SQLite file (`"history"` in its
+config, default `/var/lib/caricoder3/history.db`; `"none"` turns it
+off): every 10 s each channel's rates and error counts and the server's
+CPU, memory, GPU and network figures, summed up per minute and per hour;
+and an event log: starts, stops, failures, input lost and back, switches
+to a backup source, warnings and errors the channels wrote (the same
+line again within a minute is counted, not repeated), and changes made
+in the GUI. Detail is kept 3 days, minutes 30 days, hours and events a
+year. The file never grows past `"history_max_mb"` (default 2048; 120
+channels take about 42 MB a day): when it would, the oldest detail goes
+first and events last. The GUI shows it in a History card on each
+channel and on the Server page (1 h to 30 days). The on-server AI
+technician, when it comes, will read it too. Built without
+`libsqlite3-dev`, none is kept.
 
 ## Transcoding
 
