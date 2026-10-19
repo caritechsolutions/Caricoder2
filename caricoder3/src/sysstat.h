@@ -19,6 +19,7 @@ void sysstat_json(FILE *f);
  * mem.used_pct, gpuN.util/encoder/decoder/mem_mb/temp_c/power_w,
  * net.IF.rx_mbps/tx_mbps, and net.IF.rx_drop/rx_err as increments since
  * the previous call. Nothing before the first sample. */
+double sysstat_cpu_percent(void);        /* -1: not sampled yet */
 void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op);
 
 #endif

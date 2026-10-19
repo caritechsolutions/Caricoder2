@@ -68,6 +68,7 @@
 #include "history.h"
 #include "watchdog.h"
 #include "disk.h"
+#include "peer.h"
 
 #include <stdarg.h>
 
@@ -231,6 +232,12 @@ struct super {
     struct job jobs[JOBS_MAX];
     char probe_url[8][512];                 /* sources probed lately, not again for a minute */
     int64_t probe_t[8];
+
+    /* the other transcoders (peer.h) */
+    char name[64];                          /* what this one is called to them */
+    char peer_key[128];
+    struct peer_conf peers[PEERS_MAX];
+    int n_peers;
 };
 
 static volatile sig_atomic_t g_stop, g_hup;
@@ -346,18 +353,36 @@ static void make_password(char *out, size_t len)
 
 static void save_system_config(struct super *s)
 {
-    char text[4096], q[6][600], err[200];
+    char text[16384], q[8][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
              "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
-             "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s\n}\n",
+             "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s,\n"
+             "  \"name\": %s,\n  \"peer_key\": %s\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
              json_quote(s->channels_dir, q[1], sizeof(q[1])),
              json_quote(s->run_dir, q[2], sizeof(q[2])),
              json_quote(s->password, q[3], sizeof(q[3])),
              json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb,
-             json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false");
+             json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false",
+             json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])));
+    {
+        /* the peers, before the closing brace */
+        size_t n = strlen(text);
+        char pq[2][600];
+
+        if (n > 3) {
+            size_t at = n - 3;
+
+            at += (size_t)snprintf(text + at, sizeof(text) - at, ",\n  \"peers\": [");
+            for (int i = 0; i < s->n_peers && at < sizeof(text) - 700; i++)
+                at += (size_t)snprintf(text + at, sizeof(text) - at, "%s{\"name\": %s, \"url\": %s}", i ? ", " : "",
+                                       json_quote(s->peers[i].name, pq[0], sizeof(pq[0])),
+                                       json_quote(s->peers[i].url, pq[1], sizeof(pq[1])));
+            snprintf(text + at, sizeof(text) - at, "]\n}\n");
+        }
+    }
     {
         /* the watchdog's limits, before the closing brace */
         struct wd_limits L;
@@ -396,6 +421,10 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     snprintf(s->evidence_dir, sizeof(s->evidence_dir), "/var/lib/caricoder3/evidence");
     s->evidence_max_mb = 4096;
     s->evidence_auto = true;
+    if (gethostname(s->name, sizeof(s->name) - 1) != 0)
+        snprintf(s->name, sizeof(s->name), "caricoder3");
+    s->peer_key[0] = 0;
+    s->n_peers = 0;
     if (!text) {
         if (errno != ENOENT) {
             snprintf(err, errlen, "%.200s: %s", s->config_path, strerror(errno));
@@ -420,6 +449,22 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
              json_get_str(&doc, root, "evidence", "/var/lib/caricoder3/evidence"));
     s->evidence_max_mb = (int)json_get_num(&doc, root, "evidence_max_mb", 4096);
     s->evidence_auto = json_get_bool(&doc, root, "evidence_auto", true);
+    snprintf(s->name, sizeof(s->name), "%s", json_get_str(&doc, root, "name", s->name));
+    snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(&doc, root, "peer_key", ""));
+    {
+        int a = json_get(&doc, root, "peers");
+
+        s->n_peers = 0;
+        for (int j = a >= 0 ? doc.node[a].first_child : -1; j >= 0 && s->n_peers < PEERS_MAX; j = doc.node[j].next) {
+            const char *u = json_get_str(&doc, j, "url", "");
+
+            if (!*u)
+                continue;
+            snprintf(s->peers[s->n_peers].name, sizeof(s->peers[0].name), "%s", json_get_str(&doc, j, "name", u));
+            snprintf(s->peers[s->n_peers].url, sizeof(s->peers[0].url), "%s", u);
+            s->n_peers++;
+        }
+    }
     {
         struct wd_limits L;
 
@@ -2065,10 +2110,244 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
         }
         if (!tool_probe(s, chan, url, 0, 3, false, id, err, sizeof(err)))
             log_info("evidence for %s: %s", chan ? chan : url, err);
+        {
+            /* and from another place: the peers on the same network */
+            char why[200];
+
+            if (chan)
+                snprintf(why, sizeof(why), "My channel %.60s lost its input", chan);
+            else
+                snprintf(why, sizeof(why), "Several of my channels lost their input at once");
+            peer_ask_check(url, program, 3, id, why);
+        }
         break;
     default:
         break;
     }
+}
+
+/* ---- the peers: answering them, and telling ours about them ------------------------- */
+
+static void api_error(struct http_resp *resp, int status, const char *msg);
+
+/* A probe run here and waited for (a peer's question): its JSON, malloc'd. */
+static char *probe_sync(struct super *s, const char *url, int program, int seconds)
+{
+    int pfd[2];
+    pid_t pid;
+    char secs[16], prog[16];
+    char *argv[] = { s->binary, "probe", (char *)url, "--seconds", secs, program > 0 ? "--program" : NULL, prog, NULL };
+    char *buf = NULL;
+    size_t len = 0, cap = 0;
+    int64_t deadline = clock_now_ns() + (int64_t)(seconds + 12) * 1000000000LL;
+
+    snprintf(secs, sizeof(secs), "%d", seconds);
+    snprintf(prog, sizeof(prog), "%d", program);
+    if (pipe2(pfd, O_CLOEXEC) < 0)
+        return NULL;
+    pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return NULL;
+    }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+
+        dup2(pfd[1], 1);
+        if (nul >= 0)
+            dup2(nul, 2), dup2(nul, 0);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    for (;;) {
+        struct pollfd p = { .fd = pfd[0], .events = POLLIN };
+        int64_t left = (deadline - clock_now_ns()) / 1000000;
+        ssize_t r;
+
+        if (left <= 0 || poll(&p, 1, (int)left) <= 0)
+            break;
+        if (len + 4096 + 1 > cap) {
+            char *nb = realloc(buf, cap ? cap * 2 : 16384);
+
+            if (!nb)
+                break;
+            buf = nb;
+            cap = cap ? cap * 2 : 16384;
+        }
+        r = read(pfd[0], buf + len, cap - len - 1);
+        if (r <= 0)
+            break;
+        len += (size_t)r;
+    }
+    close(pfd[0]);
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    if (buf)
+        buf[len] = 0;
+    return buf;
+}
+
+static bool peer_authorized(struct super *s, const struct http_req *req)
+{
+    size_t n = strlen(s->peer_key);
+    const char *k = req->auth + 9;
+    unsigned diff = 0;
+
+    if (!n || strncmp(req->auth, "CC3-Peer ", 9) || strlen(k) != n)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        diff |= (unsigned)(k[i] ^ s->peer_key[i]);
+    return diff == 0;
+}
+
+/* /api/peer/...: what another transcoder may ask (with the shared key) */
+static void handle_peer(struct super *s, const struct http_req *req, struct http_resp *resp, const char *p)
+{
+    char q[300], qq[700];
+
+    if (!strcmp(p, "/api/peer/hello")) {
+        int running = 0, open_n = 0;
+        struct wd_limits L;
+        char *w = NULL;
+        size_t wl = 0;
+        FILE *wf = open_memstream(&w, &wl);
+        double cpu = sysstat_cpu_percent();
+
+        if (wf) {
+            wd_state_json(wf, time(NULL));
+            fclose(wf);
+        }
+        for (const char *x = w; x && (x = strstr(x, "\"incident\": ")); x += 12)
+            open_n += atoi(x + 12) > 0;
+        free(w);
+        wd_get_limits(&L);
+        pthread_mutex_lock(&s->lock);
+        for (int i = 0; i < s->n; i++)
+            running += s->ch[i].state == CH_RUNNING;
+        http_resp_printf(resp, 200, "application/json",
+                         "{\"ok\": true, \"name\": %s, \"version\": \"%s\", \"uptime_s\": %lld, \"channels\": %d, "
+                         "\"running\": %d, \"open_incidents\": %d, \"cpu\": %.0f, \"busy\": %s}\n",
+                         json_quote(s->name, q, sizeof(q)), CC3_VERSION, (long long)(time(NULL) - s->t_start), s->n,
+                         running, open_n, cpu, cpu > L.cpu_pct ? "true" : "false");
+        pthread_mutex_unlock(&s->lock);
+        return;
+    }
+    if (!strcmp(p, "/api/peer/check") && !strcmp(req->method, "POST")) {
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char err[200], url[512], from[64], why[200], say[400], *out = NULL;
+        int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
+        int program, seconds;
+        bool seen = false;
+        double bps = 0;
+        int services = 0;
+        char perr[200] = "";
+
+        if (root < 0) {
+            free(doc);
+            api_error(resp, 400, "bad request");
+            return;
+        }
+        snprintf(url, sizeof(url), "%s", json_get_str(doc, root, "url", ""));
+        snprintf(from, sizeof(from), "%s", json_get_str(doc, root, "from", "a peer"));
+        snprintf(why, sizeof(why), "%s", json_get_str(doc, root, "why", ""));
+        program = (int)json_get_num(doc, root, "program", 0);
+        seconds = (int)json_get_num(doc, root, "seconds", 3);
+        free(doc);
+        if (seconds < 1 || seconds > 10)
+            seconds = 3;
+        {
+            char text[800];
+
+            snprintf(text, sizeof(text), "%.60s asks: %.200s. Can I check %.400s from here?", from,
+                     why[0] ? why : "a problem", url);
+            history_message(time(NULL), from, "in", text, "{}", 0);
+        }
+        if (!source_readable(url)) {
+            snprintf(say, sizeof(say), "I cannot look at %.250s without taking it from whoever reads it "
+                     "(only multicast and HTTP sources can be read twice).", url);
+        } else if ((out = probe_sync(s, url, program, seconds))) {
+            static struct json_doc pd;          /* web threads: under the lock below */
+            int pr;
+
+            pthread_mutex_lock(&s->lock);
+            pr = json_parse(&pd, out, err, sizeof(err));
+            if (pr >= 0 && json_get_bool(&pd, pr, "ok", false)) {
+                int progs = json_get(&pd, pr, "programs");
+
+                bps = json_get_num(&pd, pr, "bitrate", 0);
+                for (int j = progs >= 0 ? pd.node[progs].first_child : -1; j >= 0; j = pd.node[j].next)
+                    services++;
+                seen = bps > 0;
+            } else if (pr >= 0) {
+                snprintf(perr, sizeof(perr), "%.190s", json_get_str(&pd, pr, "error", "nothing received"));
+            } else {
+                snprintf(perr, sizeof(perr), "the probe said something strange");
+            }
+            pthread_mutex_unlock(&s->lock);
+            if (seen)
+                snprintf(say, sizeof(say), "I see it here: %.1f Mb/s, %d service%s, in %d s.", bps / 1e6, services,
+                         services == 1 ? "" : "s", seconds);
+            else
+                snprintf(say, sizeof(say), "Nothing from it here either: %s.", perr[0] ? perr : "nothing received");
+        } else {
+            snprintf(say, sizeof(say), "I could not run the probe here.");
+        }
+        free(out);
+        history_message(time(NULL), from, "out", say, "{}", 0);
+        http_resp_printf(resp, 200, "application/json",
+                         "{\"ok\": true, \"seen\": %s, \"bitrate\": %.0f, \"services\": %d, \"error\": %s, \"say\": %s}\n",
+                         seen ? "true" : "false", bps, services, json_quote(perr, q, sizeof(q)),
+                         json_quote(say, qq, sizeof(qq)));
+        return;
+    }
+    if (!strcmp(p, "/api/peer/incidents")) {
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f = open_memstream(&out, &len);
+        int64_t now = time(NULL);
+
+        if (!f)
+            return;
+        if (!history_query_incidents(f, NULL, now - 86400, now + 1, true, 100))
+            fprintf(f, "{\"incidents\": []}");
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
+    api_error(resp, 404, "no such peer request");
+}
+
+/* Our peers as configured, to the peer thread. */
+static void peers_apply(struct super *s)
+{
+    peer_set(s->peers, s->n_peers, s->name, s->peer_key);
+}
+
+static void peers_json(struct super *s, FILE *f)
+{
+    struct peer_state st[PEERS_MAX];
+    int n = peer_get(st, PEERS_MAX);
+    char q[600];
+
+    fprintf(f, "{\"ok\": true, \"name\": %s, \"key_set\": %s, \"peers\": [", json_quote(s->name, q, sizeof(q)),
+            s->peer_key[0] ? "true" : "false");
+    for (int i = 0; i < n; i++) {
+        fprintf(f, "%s{\"name\": %s", i ? ", " : "", json_quote(st[i].name, q, sizeof(q)));
+        fprintf(f, ", \"url\": %s", json_quote(st[i].url, q, sizeof(q)));
+        fprintf(f, ", \"reachable\": %s, \"last_ok\": %lld, \"version\": %s", st[i].reachable ? "true" : "false",
+                (long long)st[i].last_ok, json_quote(st[i].version, q, sizeof(q)));
+        fprintf(f, ", \"host\": %s, \"channels\": %d, \"running\": %d, \"open_incidents\": %d, \"cpu\": %.0f",
+                json_quote(st[i].host, q, sizeof(q)), st[i].channels, st[i].running, st[i].open_incidents, st[i].cpu);
+        fprintf(f, ", \"error\": %s}", json_quote(st[i].error, q, sizeof(q)));
+    }
+    fprintf(f, "], \"messages\": ");
+    history_query_messages(f, 0, 60);
+    fprintf(f, "}\n");
 }
 
 /* Every 10 s: how full the disks are, the rules about it, and room made
@@ -2720,6 +2999,15 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         proxy_hls(s, req, resp);
         return;
     }
+    if (!strncmp(p, "/api/peer/", 10)) {
+        /* another transcoder, with the shared key (or a person signed in) */
+        if (!peer_authorized(s, req) && !(s->password[0] && authorized(s, req))) {
+            http_resp_text(resp, 401, "application/json", "{\"ok\": false, \"error\": \"not our key\"}\n");
+            return;
+        }
+        handle_peer(s, req, resp, p);
+        return;
+    }
     if (!authorized(s, req)) {
         snprintf(resp->extra, sizeof(resp->extra), "WWW-Authenticate: Basic realm=\"caricoder3\"\r\n");
         http_resp_text(resp, 401, "text/plain", "sign in as admin with the password from the config\n");
@@ -2912,6 +3200,17 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                     snprintf(err, sizeof(err), "probe needs \"channel\" or \"url\"");
                 else
                     ok = tool_probe(s, c ? c->name : NULL, url, program, seconds, false, incident, err, sizeof(err));
+            } else if (!strcmp(tool, "ask_peers")) {
+                char why[200];
+
+                snprintf(why, sizeof(why), "%s%.60s", c ? "Checking the source of my channel " : "Checking a source",
+                         c ? c->name : "");
+                if (!url[0])
+                    snprintf(err, sizeof(err), "ask_peers needs \"channel\" or \"url\"");
+                else if (!source_readable(url))
+                    snprintf(err, sizeof(err), "%.300s cannot be read twice (only multicast and HTTP can), so the peers cannot look at it", url);
+                else if (!(ok = peer_ask_check(url, program, seconds < 10 ? seconds : 10, incident, why) > 0))
+                    snprintf(err, sizeof(err), "no peer answers just now (see Peers on the Server page)");
             } else if (!strcmp(tool, "ping")) {
                 ok = tool_ping(s, host, seconds < 2 ? 3 : seconds > 10 ? 10 : seconds, incident, err, sizeof(err));
             } else if (!strcmp(tool, "snapshot")) {
@@ -2992,6 +3291,61 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             resp->body_len = len;
             return;
         }
+    }
+    if (!strcmp(p, "/api/peers")) {
+        /* GET: this server's name, the peers and how they are, the conversation; PUT {"name", "key", "peers"} */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+
+        if (!strcmp(req->method, "PUT")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1, a;
+
+            if (root < 0) {
+                free(doc);
+                api_error(resp, 400, doc ? err : "out of memory");
+                return;
+            }
+            pthread_mutex_lock(&s->lock);
+            if (json_get(doc, root, "name") >= 0 && *json_get_str(doc, root, "name", ""))
+                snprintf(s->name, sizeof(s->name), "%s", json_get_str(doc, root, "name", ""));
+            if (json_get(doc, root, "key") >= 0)
+                snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(doc, root, "key", ""));
+            if ((a = json_get(doc, root, "peers")) >= 0) {
+                s->n_peers = 0;
+                for (int j = doc->node[a].first_child; j >= 0 && s->n_peers < PEERS_MAX; j = doc->node[j].next) {
+                    const char *u = json_get_str(doc, j, "url", "");
+
+                    if (strncmp(u, "http://", 7))
+                        continue;
+                    snprintf(s->peers[s->n_peers].name, sizeof(s->peers[0].name), "%s", json_get_str(doc, j, "name", u + 7));
+                    snprintf(s->peers[s->n_peers].url, sizeof(s->peers[0].url), "%s", u);
+                    s->n_peers++;
+                }
+            }
+            save_system_config(s);
+            peers_apply(s);
+            pthread_mutex_unlock(&s->lock);
+            free(doc);
+            ev(NULL, "info", "user", "peers changed");
+        } else if (strcmp(req->method, "GET")) {
+            api_error(resp, 405, "GET or PUT");
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        pthread_mutex_lock(&s->lock);
+        peers_json(s, f);
+        pthread_mutex_unlock(&s->lock);
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
     }
     if (!strcmp(p, "/api/watchdog")) {
         /* GET: the limits, the rules, what is being watched now; PUT: new limits */
@@ -3681,6 +4035,7 @@ int super_main(int argc, char **argv)
     }
     wd_set_snapshot(wd_snapshot, &s);
     wd_set_on_open(on_incident, &s);
+    peers_apply(&s);
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);

@@ -70,6 +70,11 @@ int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, cons
                              const char *result, const char *file);
 /* {"evidence": [...]}, newest first; chan NULL / incident 0: any */
 bool history_query_evidence(FILE *f, const char *chan, int64_t incident, int limit);
+/* A line of the conversation with a peer: `dir` "out" (said here) or "in"
+ * (heard), `data` a JSON object. JSON array of the latest, newest first. */
+void history_message(int64_t t, const char *peer, const char *dir, const char *text, const char *data,
+                     int64_t incident);
+bool history_query_messages(FILE *f, int64_t incident, int limit);
 /* The file kept with evidence `id`. */
 bool history_evidence_file(int64_t id, char *path, size_t len);
 /* {"incident": ..., "members": [...], "evidence": [...], "events": [...]} */

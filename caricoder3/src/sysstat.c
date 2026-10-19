@@ -408,6 +408,16 @@ void sysstat_json(FILE *f)
     fprintf(f, "]}");
 }
 
+double sysstat_cpu_percent(void)
+{
+    double v;
+
+    pthread_mutex_lock(&lock);
+    v = cur.when_ns ? cur.cpu_pct : -1;
+    pthread_mutex_unlock(&lock);
+    return v;
+}
+
 void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op)
 {
     static struct { char name[32]; uint64_t drop, err; } prev[IFACES_MAX];

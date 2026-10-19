@@ -83,6 +83,17 @@ bool history_evidence_file(int64_t id, char *path, size_t len)
     (void)id; (void)path; (void)len;
     return false;
 }
+void history_message(int64_t t, const char *peer, const char *dir, const char *text, const char *data,
+                     int64_t incident)
+{
+    (void)t; (void)peer; (void)dir; (void)text; (void)data; (void)incident;
+}
+bool history_query_messages(FILE *f, int64_t incident, int limit)
+{
+    (void)incident; (void)limit;
+    fprintf(f, "[]");
+    return true;
+}
 int64_t history_bytes(void) { return 0; }
 
 #else
@@ -97,7 +108,7 @@ int64_t history_bytes(void) { return 0; }
 #define TIDY_S        600             /* retention and the cap, this often */
 #define NAMES_MAX     1024
 
-enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE };
+enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE, R_MESSAGE };
 
 struct rec {
     enum rec_type type;
@@ -178,7 +189,11 @@ static const char *const SCHEMA =
     "CREATE TABLE IF NOT EXISTS evidence (id INTEGER PRIMARY KEY, t INTEGER, incident INTEGER, chan TEXT, tool TEXT,"
     " args TEXT, result TEXT, file TEXT);"
     "CREATE INDEX IF NOT EXISTS evidence_i ON evidence (incident);"
-    "CREATE INDEX IF NOT EXISTS evidence_t ON evidence (t);";
+    "CREATE INDEX IF NOT EXISTS evidence_t ON evidence (t);"
+    /* what this server and its peers said to each other ("out": said here, "in": heard) */
+    "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, t INTEGER, peer TEXT, dir TEXT, text TEXT,"
+    " data TEXT, incident INTEGER);"
+    "CREATE INDEX IF NOT EXISTS messages_t ON messages (t);";
 
 static bool exec(sqlite3 *db, const char *sql)
 {
@@ -260,7 +275,7 @@ static int metric_id(const char *name)
 
 static void write_batch(struct rec *q, int n)
 {
-    sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL, *si = NULL, *su = NULL, *sv = NULL;
+    sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL, *si = NULL, *su = NULL, *sv = NULL, *sg = NULL;
 
     exec(H.db, "BEGIN");
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO s10 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &sc, NULL);
@@ -268,6 +283,8 @@ static void write_batch(struct rec *q, int n)
     sqlite3_prepare_v2(H.db, "INSERT INTO events (t, cid, level, kind, text) VALUES (?,?,?,?,?)", -1, &se, NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO incidents (id, t, closed, chan, rule, level, grp, summary, detail,"
                        " parent) VALUES (?,?,?,?,?,?,?,?,?,?)", -1, &si, NULL);
+    sqlite3_prepare_v2(H.db, "INSERT INTO messages (t, peer, dir, text, data, incident) VALUES (?,?,?,?,?,?)", -1, &sg,
+                       NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO evidence (id, t, incident, chan, tool, args, result, file)"
                        " VALUES (?,?,?,?,?,?,?,?)", -1, &sv, NULL);
     sqlite3_prepare_v2(H.db, "UPDATE incidents SET closed = ?, summary = COALESCE(?, summary),"
@@ -330,6 +347,18 @@ static void write_batch(struct rec *q, int n)
                 sqlite3_bind_null(si, 10);
             sqlite3_step(si);
             sqlite3_reset(si);
+        } else if (r->type == R_MESSAGE && sg) {
+            sqlite3_bind_int64(sg, 1, r->t);
+            sqlite3_bind_text(sg, 2, r->name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(sg, 3, r->kind, -1, SQLITE_STATIC);
+            sqlite3_bind_text(sg, 4, r->text ? r->text : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(sg, 5, r->detail ? r->detail : "{}", -1, SQLITE_STATIC);
+            if (r->parent)
+                sqlite3_bind_int64(sg, 6, r->parent);
+            else
+                sqlite3_bind_null(sg, 6);
+            sqlite3_step(sg);
+            sqlite3_reset(sg);
         } else if (r->type == R_EVIDENCE && sv) {
             sqlite3_bind_int64(sv, 1, r->id);
             sqlite3_bind_int64(sv, 2, r->t);
@@ -375,6 +404,7 @@ static void write_batch(struct rec *q, int n)
     sqlite3_finalize(si);
     sqlite3_finalize(su);
     sqlite3_finalize(sv);
+    sqlite3_finalize(sg);
     exec(H.db, "COMMIT");
 }
 
@@ -468,7 +498,8 @@ static int64_t oldest(const char *table)
  * tenth of what is left at a time. */
 static void tidy(int64_t now)
 {
-    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "events", "incidents", "evidence" };
+    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "events", "messages", "incidents",
+                                         "evidence" };
     int64_t before;
 
     exec(H.db, "PRAGMA wal_checkpoint(TRUNCATE)");  /* the log folded in: the size is the file's */
@@ -483,6 +514,7 @@ static void tidy(int64_t now)
     delete_before("events", now - KEEP_EVENTS);
     delete_before("incidents", now - KEEP_EVENTS);
     delete_before("evidence", now - KEEP_EVENTS);
+    delete_before("messages", now - KEEP_EVENTS);
     for (int round = 0; round < 40 && db_bytes() > H.cap * 9 / 10; round++) {
         bool did = false;
 
@@ -787,6 +819,24 @@ int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, cons
     r.text = strdup(file ? file : "");
     push(&r);
     return r.id;
+}
+
+void history_message(int64_t t, const char *peer, const char *dir, const char *text, const char *data,
+                     int64_t incident)
+{
+    struct rec r;
+
+    if (!H.on)
+        return;
+    memset(&r, 0, sizeof(r));
+    r.type = R_MESSAGE;
+    r.t = t;
+    r.parent = incident;
+    snprintf(r.name, sizeof(r.name), "%s", peer ? peer : "");
+    snprintf(r.kind, sizeof(r.kind), "%s", dir);
+    r.text = strdup(text ? text : "");
+    r.detail = strdup(data && *data == '{' ? data : "{}");
+    push(&r);
 }
 
 void history_incident_update(int64_t id, int64_t closed, const char *summary, const char *detail, int64_t parent)
@@ -1096,6 +1146,48 @@ bool history_query_evidence(FILE *f, const char *chan, int64_t incident, int lim
         evidence_row(f, st);
     }
     fprintf(f, "]}");
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return true;
+}
+
+bool history_query_messages(FILE *f, int64_t incident, int limit)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+
+    if (!db)
+        return false;
+    if (sqlite3_prepare_v2(db, incident ? "SELECT t, peer, dir, text, data, incident FROM messages WHERE incident = ?"
+                                          " ORDER BY t DESC, id DESC LIMIT ?"
+                                        : "SELECT t, peer, dir, text, data, incident FROM messages"
+                                          " ORDER BY t DESC, id DESC LIMIT ?", -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    if (incident) {
+        sqlite3_bind_int64(st, 1, incident);
+        sqlite3_bind_int(st, 2, limit);
+    } else {
+        sqlite3_bind_int(st, 1, limit);
+    }
+    fprintf(f, "[");
+    for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+        const char *d = (const char *)sqlite3_column_text(st, 4);
+
+        fprintf(f, "%s\n{\"t\": %lld, \"peer\": ", n ? "," : "", (long long)sqlite3_column_int64(st, 0));
+        jstr(f, (const char *)sqlite3_column_text(st, 1));
+        fprintf(f, ", \"dir\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 2));
+        fprintf(f, ", \"text\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 3));
+        fprintf(f, ", \"data\": %s, \"incident\": ", d && *d == '{' ? d : "{}");
+        if (sqlite3_column_type(st, 5) == SQLITE_NULL)
+            fprintf(f, "null}");
+        else
+            fprintf(f, "%lld}", (long long)sqlite3_column_int64(st, 5));
+    }
+    fprintf(f, "]");
     sqlite3_finalize(st);
     sqlite3_close(db);
     return true;

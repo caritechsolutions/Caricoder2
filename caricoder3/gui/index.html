@@ -108,6 +108,7 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gtip .tt { color:var(--fg2); margin-bottom:2px } .gtip b { font-weight:500; margin-left:auto; padding-left:14px } .gtip div { display:flex; align-items:center; gap:6px } .gtip i { width:10px; height:3px; border-radius:2px; display:inline-block }
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
 .stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
+table.chat tr.out td:last-child { color:var(--fg2) } table.chat td:nth-child(2) { white-space:nowrap } .ok { color:var(--ok) }
 img.evpic { max-width:240px; border-radius:6px; display:block } table.evtab td { vertical-align:top } .tools { display:flex; gap:6px; flex-wrap:wrap; align-items:center } .tools .toolnote { font-size:12px; margin-left:6px }
 svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
 svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
@@ -729,6 +730,9 @@ function evidenceList(list) {
       }
       if (file) body += ` <a href="${file}">download (${fmtBytes(e.file_bytes)})</a>`;
       else if (e.tool === "record") body += ` <span class="dim">no file (or it is gone)</span>`;
+    } else if (e.tool === "peer_check") {
+      what = `Asked ${esc(a.peer || "a peer")}`;
+      body = r.ok ? `<span class="${r.seen ? "ok" : "bad"}">${esc(r.say || (r.seen ? "sees it" : "does not see it"))}</span>` : `<span class="bad">${esc(r.error || "no answer")}</span>`;
     } else if (e.tool === "ping") {
       what = `Ping ${esc(a.host || "")}`;
       body = r.error ? `<span class="bad">${esc(r.error)}</span>` : r.loss_pct < 0 ? `<span class="bad">no answer</span>` : `${r.loss_pct}% lost · ${r.rtt_avg_ms >= 0 ? r.rtt_avg_ms.toFixed(1) + " ms average" : "—"}`;
@@ -741,7 +745,7 @@ async function runTool(tool, body, after) {
   try {
     if (tool === "ping" && !body.host) { const h = prompt("Ping which host or address?", "192.168.110."); if (!h) return; body.host = h.trim(); }
     await api(`/api/tools/${tool}`, { method: "POST", body: JSON.stringify(body) });
-    const wait = tool === "record" ? (body.seconds || 20) * 1000 + 4000 : tool === "probe" ? 7000 : tool === "ping" ? 6000 : 800;
+    const wait = tool === "record" ? (body.seconds || 20) * 1000 + 4000 : tool === "probe" ? 7000 : tool === "ask_peers" ? 9000 : tool === "ping" ? 6000 : 800;
     toolNote(`${tool === "record" ? "Recording" : tool === "probe" ? "Probing" : tool === "ping" ? "Pinging" : "Keeping the picture"}… it shows here when done${wait > 2000 ? ` (about ${Math.round(wait / 1000)} s)` : ""}.`);
     setTimeout(() => { toolNote(""); after && after(); }, wait);
   } catch(e) { alert(e.message); }
@@ -749,7 +753,48 @@ async function runTool(tool, body, after) {
 function toolNote(t) { document.querySelectorAll(".toolnote").forEach(n => n.textContent = t); }
 function toolButtons(chan, incident) {
   const b = (tool, label, extra) => `<button type="button" onclick='runTool("${tool}", ${JSON.stringify(Object.assign({ channel: chan || undefined, incident: incident || undefined }, extra || {}))}, ${incident ? `() => openIncident(${incident})` : `() => { histFor = ""; loadChanHistory(${JSON.stringify(chan)}, true); }`})'>${label}</button>`;
-  return `<span class="tools">${chan ? b("record", "Record 20 s", { seconds: 20 }) + b("snapshot", "Keep the picture") + b("probe", "Probe the source", { seconds: 3 }) : ""}${b("ping", "Ping…")}<span class="toolnote dim"></span></span>`;
+  return `<span class="tools">${chan ? b("record", "Record 20 s", { seconds: 20 }) + b("snapshot", "Keep the picture") + b("probe", "Probe the source", { seconds: 3 }) + b("ask_peers", "Ask the other transcoders", { seconds: 3 }) : ""}${b("ping", "Ping…")}<span class="toolnote dim"></span></span>`;
+}
+
+/* ---------- the other transcoders ---------- */
+let peersInfo = null, peersAt = 0;
+async function loadPeers(force) {
+  if (!force && Date.now() - peersAt < 10000) return;
+  peersAt = Date.now();
+  try { peersInfo = await api("/api/peers"); } catch(e) { peersInfo = { error: e.message }; }
+  if (view.page === "server" && !view.name) renderServer();
+}
+function conversation(msgs) {
+  if (!msgs || !msgs.length) return `<div class="empty" style="padding:6px">Nothing said yet.</div>`;
+  return `<table class="evt chat"><tbody>${msgs.map(m => `<tr class="${m.dir}"><td class="mono">${fmtWhen(m.t)}</td><td>${m.dir === "out" ? `<span class="dim">to</span> ${esc(m.peer)}` : `<b>${esc(m.peer)}</b>`}</td><td>${esc(m.text)}${m.incident ? ` <a onclick="openIncident(${m.incident})">incident</a>` : ""}</td></tr>`).join("")}</tbody></table>`;
+}
+function peersCard() {
+  if (!peersInfo) { loadPeers(); return ""; }
+  if (peersInfo.error) return `<section class="card"><header><h2>Peers</h2></header><div class="body"><div class="msg err">${esc(peersInfo.error)}</div></div></section>`;
+  const P = peersInfo, now = Date.now() / 1000;
+  const rows = P.peers.map(p => `<tr><td><span class="lamp ${p.reachable ? "ok" : "bad"}"></span> ${esc(p.name)}</td><td class="mono">${esc(p.url)}</td>
+    <td>${p.reachable ? `caricoder3 ${esc(p.version)} · ${p.running} of ${p.channels} channels running · CPU ${p.cpu >= 0 ? p.cpu + "%" : "—"}${p.open_incidents ? ` · <span class="bad">${p.open_incidents} problem${p.open_incidents > 1 ? "s" : ""} open</span>` : ""}` : `<span class="bad">${esc(p.error || "not answering")}</span>${p.last_ok ? ` <span class="dim">(last heard ${fmtDur(Math.round(now - p.last_ok))} ago)</span>` : ""}`}</td></tr>`).join("");
+  return `<section class="card"><header><h2>Peers</h2><span class="hint">This server is <b>${esc(P.name)}</b> to them${P.key_set ? "" : ' · <span class="warn">no shared key set: peers cannot ask it anything</span>'}; when a source is lost, they are asked whether they see it</span><div class="sp"></div><button onclick="editPeers()">Change</button></header>
+    ${P.peers.length ? `<table><tbody>${rows}</tbody></table>` : `<div class="body"><div class="empty" style="padding:6px">No peers yet. "Change" adds the other transcoders (http://address:8550) and the key you give all of them.</div></div>`}
+    <div class="body"><h4 class="sub4" style="margin-top:0">Conversation</h4><div class="evwrap" style="max-height:300px">${conversation(P.messages)}</div></div></section>`;
+}
+function editPeers() {
+  const d = $("#dlg"), P = peersInfo || { name: "", peers: [] };
+  d.innerHTML = `<h3>Peers</h3><div class="f"><label>This server's name</label><input id="p_name" value="${esc(P.name)}">
+    <label>Shared key</label><input id="p_key" type="password" placeholder="${P.key_set ? "(set; leave empty to keep)" : "the same on every transcoder"}">
+    <label>Peers</label><textarea id="p_list" rows="5" placeholder="transcoder1 http://192.168.110.41:8550">${esc(P.peers.map(p => `${p.name} ${p.url}`).join("\n"))}</textarea></div>
+    <div class="help">One a line: a name and its address. Every transcoder needs the others in its list and the same key.</div>
+    <div id="p_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="p_go">Save</button></div>`;
+  $("#p_go").onclick = async () => {
+    const peers = $("#p_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return m.length > 1 ? { name: m[0], url: m[1] } : { name: m[0].replace(/^https?:\/\//, ""), url: m[0] }; });
+    const bad = peers.find(p => !/^http:\/\/[^\s/]+(:\d+)?\/?$/.test(p.url));
+    if (bad) { $("#p_msg").innerHTML = `<div class="msg err">Not an address like http://192.168.110.41:8550: ${esc(bad.url)}</div>`; return; }
+    const body = { name: $("#p_name").value.trim(), peers };
+    if ($("#p_key").value) body.key = $("#p_key").value;
+    try { peersInfo = await api("/api/peers", { method: "PUT", body: JSON.stringify(body) }); d.close(); setTimeout(() => loadPeers(true), 1500); renderServer(); }
+    catch(e) { $("#p_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
 }
 
 /* ---------- the server ---------- */
@@ -773,6 +818,7 @@ function renderServer() {
     </div></div></section>
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     ${watchdogCard()}
+    ${peersCard()}
     ${disksCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>
       <table><thead><tr><th>Interface</th><th>State</th><th>Receive</th><th>Transmit</th><th>Packets in / out</th><th>Errors in / out</th><th>Dropped in / out</th></tr></thead><tbody>
@@ -785,6 +831,7 @@ function renderServer() {
       </tbody></table></section>
     <section class="card"><header><h2>This build</h2><span class="hint">Codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:var(--r);max-height:none">${esc(sys.backends || "")}</pre></div></section>`;
   if (sys.history) { renderServerHistory(); loadServerHistory(); loadWatchdog(); }
+  loadPeers();
 }
 
 /* ---------- a channel ---------- */

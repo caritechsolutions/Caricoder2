@@ -2993,7 +2993,12 @@ def supervisor_evidence():
         need(code == 400, f"a unicast source was probed beside its channel: {code}")
         for t in th:
             t.join()
-        time.sleep(8)
+        # the recording began when the incident opened (about 10 s in) and lasts 20 s
+        for _ in range(30):
+            time.sleep(1)
+            code, j = api("/api/evidence?channel=m1")
+            if any(e["tool"] == "record" for e in (j or {}).get("evidence", [])):
+                break
         code, j = api("/api/incidents?channel=m1")
         black = [x for x in j["incidents"] if x["rule"] == "black" and x["channel"] == "m1"]
         need(black, f"no black incident: {[x['rule'] for x in j['incidents']]}")
@@ -3022,6 +3027,82 @@ def supervisor_evidence():
             sup.kill()
     return f"black: picture {tools['picture']['file_bytes'] // 1024} kB + source {rec['file_bytes'] // 1024} kB; " \
            f"u1 output {urec[0]['file_bytes'] // 1024} kB; ping {ping[0]['result'].get('rtt_avg_ms', ping[0]['result'].get('error'))}"
+
+
+@test
+def supervisor_peers():
+    """Two transcoders as peers: hello with the shared key; asked by hand, the other sees the source; when it is lost, the incident asks the other, which does not see it either; a wrong key is refused."""
+    import base64
+    import threading
+    import urllib.request
+    import urllib.error
+    pa, pb, pm = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    sups, roots = [], {}
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(port, path, method="GET", body=None, headers=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=headers or auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=15) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    try:
+        for name, port, other in (("tB", pb, pa), ("tA", pa, pb)):     # B first: A's first hello finds it
+            root = w(f"super_peer_{name}")
+            shutil.rmtree(root, ignore_errors=True)
+            os.makedirs(os.path.join(root, "channels"))
+            os.makedirs(os.path.join(root, "run"))
+            cfg = os.path.join(root, "caricoder3.json")
+            json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+                       "run_dir": os.path.join(root, "run"), "password": "testpass1",
+                       "history": os.path.join(root, "history.db"), "evidence": os.path.join(root, "evidence"),
+                       "name": name, "peer_key": "shared-secret-1",
+                       "peers": [{"name": "tB" if name == "tA" else "tA", "url": f"http://127.0.0.1:{other}"}],
+                       "watchdog": {"min_s": 5, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
+                      open(cfg, "w"))
+            sups.append(subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True))
+            time.sleep(0.6)
+        code, j = api(pa, "/api/channels/m1", "PUT", {"input": f"udp://239.255.10.5:{pm}", "enabled": True})
+        need(code == 200, f"create: {code}")
+        code, j = api(pb, "/api/peer/hello", headers={"Authorization": "CC3-Peer wrong"})
+        need(code == 401, f"a wrong key was taken: {code}")
+        code, j = api(pb, "/api/peer/hello", headers={"Authorization": "CC3-Peer shared-secret-1"})
+        need(code == 200 and j["name"] == "tB", f"hello: {code} {j}")
+        time.sleep(1.5)
+        code, j = api(pa, "/api/peers")
+        need(j["peers"][0]["reachable"] and j["peers"][0]["host"] == "tB", f"A's peers: {j['peers']}")
+        pl = Player("239.255.10.5", pm)
+        box = {}
+        th = threading.Thread(target=lambda: pl.play(synth("live_src", duration=10.0), stop_after=9,
+                                                     at={3.0: lambda: box.update(r=api(pa, "/api/tools/ask_peers", "POST", {"channel": "m1"}))}))
+        th.start()
+        th.join()
+        need(box.get("r", (0,))[0] == 200, f"ask by hand: {box.get('r')}")
+        time.sleep(16)
+        code, j = api(pa, "/api/peers")
+        texts = [m["text"] for m in j["messages"]]
+        need(any("I see it here" in t for t in texts), f"conversation: {texts}")
+        need(any("Nothing from it here either" in t for t in texts), f"conversation: {texts}")
+        code, inc = api(pa, "/api/incidents?channel=m1")
+        lost = [x for x in inc["incidents"] if x["rule"] == "no_input"]
+        need(lost, f"no incident: {inc}")
+        code, one = api(pa, f"/api/incidents/{lost[0]['id']}")
+        pc = [e for e in one["evidence"] if e["tool"] == "peer_check"]
+        need(pc and pc[0]["result"]["ok"] and not pc[0]["result"]["seen"], f"peer evidence: {one['evidence']}")
+        code, jb = api(pb, "/api/peers")
+        need(any("asks" in m["text"] for m in jb["messages"]), f"B's side: {[m['text'] for m in jb['messages']]}")
+    finally:
+        for p in sups:
+            p.send_signal(signal.SIGTERM)
+        for p in sups:
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+    return f"{len(texts)} lines of conversation; by hand: \"{next(t for t in texts if 'I see it' in t)}\"; lost: \"{next(t for t in texts if 'Nothing from it' in t)}\""
 
 
 @test
