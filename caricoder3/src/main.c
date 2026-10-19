@@ -39,6 +39,7 @@
 #include "sink.h"
 #include "source.h"
 #include "thumb.h"
+#include "watch.h"
 #include "udp.h"
 
 #define RX_SIZE         16384
@@ -282,6 +283,59 @@ static void idle_check(const struct engine_stats *st, int64_t input_age_ms)
     }
 }
 
+/* Black or frozen picture, silent audio: said once it has lasted
+ * CONTENT_WARN_MS, and once when it ends. */
+#define CONTENT_WARN_MS 10000
+static void content_check(const struct engine_stats *st)
+{
+    static bool black, frozen;
+    static uint16_t silent[WATCH_AUDIO_MAX];
+    static int n_silent;
+    struct watch_stats ws;
+
+    watch_get(&ws);
+    if (ws.have_picture && ws.picture_age_ms < 30000) {
+        if (!black && ws.black_ms >= CONTENT_WARN_MS) {
+            black = true;
+            log_warn("picture: black for %lld s", (long long)ws.black_ms / 1000);
+        } else if (black && !ws.black_ms) {
+            black = false;
+            log_info("picture: no longer black");
+        }
+        if (!frozen && ws.frozen_ms >= CONTENT_WARN_MS) {
+            frozen = true;
+            log_warn("picture: frozen (unchanged) for %lld s", (long long)ws.frozen_ms / 1000);
+        } else if (frozen && !ws.frozen_ms) {
+            frozen = false;
+            log_info("picture: moving again");
+        }
+    }
+    for (int i = 0; i < ws.n_audio; i++) {
+        const struct watch_audio *a = &ws.audio[i];
+        int q = -1;
+        char what[48] = "audio";
+
+        for (int k = 0; k < n_silent; k++)
+            if (silent[k] == a->pid)
+                q = k;
+        for (int j = 0; st->have_program && j < st->prog.n_es; j++)
+            if (st->prog.es[j].pid == a->pid) {
+                char lang[8];
+
+                program_es_kind(&st->prog, j, lang, sizeof(lang));
+                snprintf(what, sizeof(what), "audio%s%s", lang[0] ? " " : "", lang);
+            }
+        if (q < 0 && a->silent_ms >= CONTENT_WARN_MS && n_silent < WATCH_AUDIO_MAX) {
+            silent[n_silent++] = a->pid;
+            log_warn("PID 0x%04X (%s): silent for %lld s (peak %.0f dBFS)", a->pid, what,
+                     (long long)a->silent_ms / 1000, a->peak_db);
+        } else if (q >= 0 && a->measured && !a->silent_ms) {
+            log_info("PID 0x%04X (%s): sound again (%.0f dBFS)", a->pid, what, a->level_db);
+            silent[q] = silent[--n_silent];
+        }
+    }
+}
+
 static void stats_json(struct ctx *c, const struct engine_stats *st,
                        const struct rates *r, FILE *f)
 {
@@ -433,6 +487,27 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
         fprintf(f, "}");
     }
     fprintf(f, "\n    ]\n  },\n");
+    {
+        /* what the picture and the sound look like (watch.h) */
+        struct watch_stats ws;
+
+        watch_get(&ws);
+        fprintf(f, "  \"content\": {");
+        if (ws.have_picture)
+            fprintf(f, "\n    \"picture\": {\"age_ms\": %lld, \"luma\": %.1f, \"change\": %.2f, "
+                       "\"black_ms\": %lld, \"frozen_ms\": %lld},",
+                    (long long)ws.picture_age_ms, ws.luma, ws.change, (long long)ws.black_ms,
+                    (long long)ws.frozen_ms);
+        fprintf(f, "\n    \"audio\": [");
+        for (int i = 0, n = 0; i < ws.n_audio; i++) {
+            if (!ws.audio[i].measured)
+                continue;
+            fprintf(f, "%s{\"pid\": %u, \"level_db\": %.1f, \"peak_db\": %.1f, \"silent_ms\": %lld}",
+                    n++ ? ", " : "", ws.audio[i].pid, ws.audio[i].level_db, ws.audio[i].peak_db,
+                    (long long)ws.audio[i].silent_ms);
+        }
+        fprintf(f, "]\n  },\n");
+    }
 
     fprintf(f, "  \"clock\": {\n    \"locked\": %s,\n    \"drift_ppm\": %.2f,\n"
                "    \"jitter_us\": %.1f,\n    \"ts_offset_ms\": %.3f,\n"
@@ -855,6 +930,7 @@ static int run_live(struct options *o, struct ctx *c)
         r.send_errors = sinks_errors(&c->sinks);
         write_stats(c, &st, &r);
         idle_check(&st, r.input_age_ms);
+        content_check(&st);
 
         if (atomic_exchange(&g_hup, 0) && o->config) {
             char e[300];

@@ -649,6 +649,14 @@ random-access flag on key frames.
 - A video or audio stream the PMT lists but nothing of which arrives
   while the rest does is reported once after 5 s, and again when it is
   back; the GUI marks it "no data".
+- The content is watched: a picture that is black, or does not change
+  at all, for 10 s, and an audio stream that is silent (peaks under
+  -60 dBFS) for 10 s, are reported once and again when they end, and
+  shown on the channel. The picture is looked at when a thumbnail is
+  made (every 2 s under the supervisor; on a channel that copies its
+  video, one key frame is decoded on the CPU for it). Each audio stream
+  is decoded on the CPU one second in every three. A still that is meant
+  to be still (a slate, a menu) counts as frozen too.
 
 ### Delay
 

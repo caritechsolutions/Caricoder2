@@ -19,6 +19,7 @@
 
 #include "log.h"
 #include "thumb.h"
+#include "watch.h"
 #include "xcode.h"
 
 #ifdef HAVE_NVIDIA
@@ -446,6 +447,7 @@ static void make_from_cpu(const struct vframe *f)
     U = malloc((size_t)tw * th / 4);
     V = malloc((size_t)tw * th / 4);
     if (Y && U && V && shrink(f, tw, th, Y, U, V)) {
+        watch_picture(Y, tw, th);
         len = thumb_jpeg(Y, tw, U, tw / 2, V, tw / 2, tw, th, THUMB_QUALITY, &jpeg);
         if (len)
             write_file(jpeg, len);

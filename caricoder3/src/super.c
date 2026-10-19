@@ -412,6 +412,8 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARG("%.400s/%s.json", s->run_dir, c->name);
     ARGS("--thumb");
     ARG("%.400s/%s.jpg", s->run_dir, c->name);
+    ARGS("--thumb-interval");       /* the picture is watched at this rate too (watch.h) */
+    ARGS("2");
     ARGS("--stats-interval");
     ARGS("60");
     {

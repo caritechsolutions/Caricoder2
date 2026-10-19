@@ -160,6 +160,22 @@ function health(c) {
   if (c._health) return c._health;        /* once per poll, so rail and page agree */
   return c._health = healthOf(c);
 }
+/* black / frozen picture, silent audio, streams without data: as the channel says (10 s and more) */
+function contentFaults(st) {
+  const ct = st.content || {}, pic = ct.picture, out = [];
+  if (pic && pic.age_ms < 30000) {
+    if (pic.black_ms >= 10000) out.push(`picture black ${Math.round(pic.black_ms / 1000)} s`);
+    if (pic.frozen_ms >= 10000) out.push(`picture frozen ${Math.round(pic.frozen_ms / 1000)} s`);
+  }
+  const ss = (st.service || {}).streams || [];
+  for (const a of ct.audio || []) if (a.silent_ms >= 10000) {
+    const s = ss.find(x => x.in_pid === a.pid && !x.from_pid);
+    out.push(`audio${s && s.language ? " " + s.language.toUpperCase() : ""} silent ${Math.round(a.silent_ms / 1000)} s`);
+  }
+  for (const s of ss) if (!s.from_pid && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio"))
+    out.push(`${s.kind}${s.language ? " " + s.language.toUpperCase() : ""} has no data`);
+  return out;
+}
 function healthOf(c) {
   if (c.state === "failed") return ["bad", c.why || "failed"];
   if (c.state !== "running") return ["off", c.state];
@@ -181,6 +197,7 @@ function healthOf(c) {
   if (now.drop > was.drop || now.xdrop > was.xdrop) why.push("dropping");
   if (now.late > was.late) why.push("running late");
   if (now.send > was.send) why.push("send errors");
+  contentFaults(st).forEach(f => why.push(f));
   return why.length ? ["warn", why.join(", ")] : ["ok", "healthy"];
 }
 
@@ -443,7 +460,7 @@ const fmtWhen = t => { const d = new Date(t * 1000), now = new Date(); const day
 function timeGraph(ts, series, from, to, opts = {}) {
   const W = 900, H = opts.h || 190, L = 64, R = 10, T = 10, B = 24;
   const all = series.flatMap(s => s.v).filter(v => v != null);
-  const max = opts.max || niceMax(Math.max(1, ...all) * 1.1);
+  const max = opts.max || niceMax(Math.max(opts.fmt ? 1 : 1e6, ...all) * 1.1);
   const x = t => L + (W - L - R) * (t - from) / Math.max(1, to - from);
   const y = v => T + (H - T - B) * (1 - Math.min(v, max) / max);
   const fmt = opts.fmt || (v => fmtRate(v));
@@ -613,7 +630,7 @@ function pathParts(c) {
     src: `<div class="big">${fmtRate(inp.bitrate)}</div>
       <div class="sub">${esc(inp.url||"")}${inp.shared ? ` <span class="tag" title="Read once for all the channels on this input">shared</span>` : ""}${(inp.sources||[]).length > 1 ? ` <span class="${inp.active ? "flag" : ""}">· source ${inp.active + 1} of ${inp.sources.length}${inp.active ? " (a backup)" : ""}</span>${inp.switches ? ` · ${inp.switches} switch${inp.switches > 1 ? "es" : ""}` : ""}` : ""}</div>
       ${inp.link ? `<div class="sub">${inp.link.transport.toUpperCase()} ${inp.link.connected ? esc(inp.link.state) : `<span class="flag ${st.uptime_s > 10 ? "bad" : ""}">${esc(inp.link.state)}</span>`}${inp.link.connected && inp.link.rtt_ms ? ` · RTT ${inp.link.rtt_ms.toFixed(1)} ms` : ""}${inp.link.recovered ? ` · ${inp.link.recovered} recovered` : ""}${inp.link.lost ? ` · <span class="flag">${inp.link.lost} lost</span>` : ""}${inp.link.reconnects ? ` · ${inp.link.reconnects} reconnects` : ""}</div>` : ""}
-      <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}</div>`,
+      <div class="sub">${inBad ? `<span class="flag bad">no input for ${inp.last_packet_age_ms>=0?(inp.last_packet_age_ms/1000).toFixed(0)+" s":"a while"}</span>` : `clock ${clk.locked?"locked":"<span class='flag'>not locked</span>"} · ${(clk.drift_ppm||0).toFixed(1)} ppm`}${inp.cc_errors?` · <span class="flag">${inp.cc_errors} CC errors</span>`:""}${inp.socket_overflow?` · <span class="flag bad">${inp.socket_overflow} socket overflows</span>`:""}${contentFaults(st).map(f => ` · <span class="flag bad">${esc(f)}</span>`).join("")}</div>`,
     proc: `<h3>Processing</h3><div class="sub" style="font-size:14px;color:var(--fg)">${proc}</div>
       <div class="sub">${xs.length ? `${xs.reduce((a,s)=>a+(s.frames_out||0),0)} frames out · ${slack!=null&&slack<1e9?`${(slack/1000).toFixed(1)} s to spare`:""}${xs.some(s=>s.failed)?` · <span class="flag bad">a transcoder failed</span>`:""}${xs.reduce((a,s)=>a+(s.input_dropped||0),0)?` · <span class="flag">${xs.reduce((a,s)=>a+(s.input_dropped||0),0)} frames dropped</span>`:""}` : (svc.streams||[]).length ? `${(svc.streams||[]).length} streams, program ${svc.number??""}` : ""}</div>`,
     out: `<h3>Outputs</h3><div class="big">${fmtRate(out.bitrate)}</div>

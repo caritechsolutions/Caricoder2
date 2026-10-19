@@ -1057,6 +1057,49 @@ def live_stream_without_data():
     return f"{warn[0].split('  ')[-1].strip()}; then: {back[0].split('  ')[-1].strip()}"
 
 
+def _content_faults_src():
+    """Real H.264 + AAC: moving 4 s, black and silent 16 s, moving 4 s, a still picture 16 s, moving 4 s."""
+    src = w("content_faults.ts")
+    if os.path.exists(src):
+        return src
+    v = ("testsrc2=size=320x240:rate=25:d=4[v0];color=black:size=320x240:rate=25:d=16[v1];"
+         "testsrc2=size=320x240:rate=25:d=4[v2];color=0x608090:size=320x240:rate=25:d=16[v3];"
+         "testsrc2=size=320x240:rate=25:d=4[v4];"
+         "sine=f=800:sample_rate=48000:d=4[a0];anullsrc=r=48000:cl=mono:d=16[a1];"
+         "sine=f=800:sample_rate=48000:d=4[a2];sine=f=500:sample_rate=48000:d=16[a3];"
+         "sine=f=800:sample_rate=48000:d=4[a4];"
+         "[v0][a0][v1][a1][v2][a2][v3][a3][v4][a4]concat=n=5:v=1:a=1[v][a]")
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-filter_complex", v,
+                        "-map", "[v]", "-map", "[a]", "-pix_fmt", "yuv420p", "-g", "25",
+                        "-c:v", "libx264", "-preset", "veryfast", "-b:v", "800k",
+                        "-c:a", "aac", "-b:a", "96k", "-f", "mpegts", "-muxrate", "1500k", src],
+                       capture_output=True, text=True)
+    return None if p.returncode else src
+
+
+@test
+def live_content_faults():
+    """Black picture, silent audio and a frozen picture are each reported once after 10 s, and when they end."""
+    src = _content_faults_src()
+    if not src:
+        return "SKIPPED: this ffmpeg cannot make the test stream"
+    st, cap, log = live(lambda p: p.play(src), "--thumb", w("content.jpg"), "--thumb-interval", "1",
+                        capture_name="live_content.ts", tail=2.0)
+    lines = log.splitlines()
+    pick = lambda s: [l for l in lines if s in l]
+    black, unblack = pick("picture: black for"), pick("no longer black")
+    frozen, moving = pick("picture: frozen"), pick("moving again")
+    silent, sound = pick("silent for"), pick("sound again")
+    need(len(black) == 1 and len(unblack) == 1, f"black: {black} / {unblack}; content {st.get('content')}")
+    need(len(frozen) == 1 and len(moving) == 1, f"frozen: {frozen} / {moving}")
+    need(len(silent) == 1 and len(sound) == 1, f"silent: {silent} / {sound}\n{log[-1500:]}")
+    order = [lines.index(x[0]) for x in (black, unblack, frozen, moving)]
+    need(order == sorted(order), "reported out of order")
+    need(lines.index(silent[0]) < lines.index(sound[0]) < lines.index(frozen[0]), "silence not where it was")
+    need("content" in st and st["content"]["audio"], f"no content stats: {st.get('content')}")
+    return "black, silent and frozen each said once after 10 s and once at the end"
+
+
 @test
 def live_input_outage():
     """Input vanishes for 3 s: the output never stops and resumes cleanly."""

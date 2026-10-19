@@ -30,6 +30,7 @@
 #include "follow.h"
 #include "log.h"
 #include "thumb.h"
+#include "watch.h"
 #include "xcode.h"
 
 #define RESYNC_LIMIT    (STC_HZ / 5)    /* live: PCR this far off the model ... */
@@ -61,6 +62,7 @@ struct engine {
     uint16_t alias[8192];           /* source PID -> inside PID */
     uint16_t src_of[8192];          /* inside PID -> source PID */
     int64_t pid_last_ns[8192];      /* inside PID: when a unit of it last arrived */
+    uint8_t acodec[8192];           /* inside PID: an audio stream's coding (watch.h), input thread */
     struct demux *dmx;
     struct mux *mux;
     stc_t delay;
@@ -749,6 +751,13 @@ static void on_program(void *opaque, const struct program *p)
             if (!e->pid_last_ns[named.es[i].pid])
                 e->pid_last_ns[named.es[i].pid] = now;
         pthread_mutex_unlock(&e->lock);
+        memset(e->acodec, 0, sizeof(e->acodec));
+        for (int i = 0; i < named.n_es; i++) {
+            char lang[8];
+
+            if (!strcmp(program_es_kind(&named, i, lang, sizeof(lang)), "audio"))
+                e->acodec[named.es[i].pid] = (uint8_t)xcode_input_codec(&named, i);
+        }
     }
 
     program_set_service(&named, e->cfg.service_provider, e->cfg.service_name);
@@ -931,6 +940,8 @@ static void on_unit(void *opaque, struct es_unit *u)
         free(u);
         return;
     }
+    if (e->cfg.live && e->acodec[u->pid & 0x1FFF] != CODEC_NONE)
+        watch_audio_unit(u->pid, (enum codec_id)e->acodec[u->pid & 0x1FFF], u->data, u->len);
     if (thumb_enabled() && u->pid == e->thumb_pid && e->thumb_codec != CODEC_NONE)
         thumb_tap_unit(u, e->thumb_codec);  /* a copied video stream: decoded for the thumbnail now and then */
     pthread_mutex_lock(&e->lock);
