@@ -286,7 +286,7 @@ static void idle_check(const struct engine_stats *st, int64_t input_age_ms)
 /* Black or frozen picture, silent audio: said once it has lasted
  * CONTENT_WARN_MS, and once when it ends. */
 #define CONTENT_WARN_MS 10000
-static void content_check(const struct engine_stats *st)
+static void content_check(const struct engine_stats *st, int64_t input_age_ms)
 {
     static bool black, frozen;
     static uint16_t silent[WATCH_AUDIO_MAX];
@@ -294,6 +294,8 @@ static void content_check(const struct engine_stats *st)
     struct watch_stats ws;
 
     watch_get(&ws);
+    if (input_age_ms < 0 || input_age_ms >= 1000)
+        return;                     /* no input: the last picture and sound are not news */
     if (ws.have_picture && ws.picture_age_ms < 30000) {
         if (!black && ws.black_ms >= CONTENT_WARN_MS) {
             black = true;
@@ -930,7 +932,7 @@ static int run_live(struct options *o, struct ctx *c)
         r.send_errors = sinks_errors(&c->sinks);
         write_stats(c, &st, &r);
         idle_check(&st, r.input_age_ms);
-        content_check(&st);
+        content_check(&st, r.input_age_ms);
 
         if (atomic_exchange(&g_hup, 0) && o->config) {
             char e[300];

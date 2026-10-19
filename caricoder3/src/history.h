@@ -48,6 +48,20 @@ void history_resummarise(int64_t since);
 bool history_query_chan(FILE *f, const char *chan, int64_t from, int64_t to);
 bool history_query_metrics(FILE *f, const char *metric, int64_t from, int64_t to);
 bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, int limit);
+/* Incidents: a problem from its start to its end. Opening one returns its
+ * id (0 when no record is kept); `parent` (0 none) is the source's
+ * incident a channel's belongs to. `detail` is a JSON object. An update
+ * sets `closed` (0: still open) and `parent`; a NULL summary or detail is
+ * left as it was. */
+int64_t history_incident_open(int64_t t, const char *chan, const char *rule, const char *level,
+                              const char *grp, const char *summary, const char *detail, int64_t parent);
+void history_incident_update(int64_t id, int64_t closed, const char *summary, const char *detail, int64_t parent);
+/* {"incidents": [...]}: overlapping the span, open ones first; for a
+ * channel, its own and the source's it belongs to */
+bool history_query_incidents(FILE *f, const char *chan, int64_t from, int64_t to, bool open_only, int limit);
+/* {"incident": ..., "members": [...], "events": [...]} */
+bool history_query_incident(FILE *f, int64_t id, int64_t now);
+
 /* {"path": ..., "bytes": ..., "cap_bytes": ..., "oldest": ...} */
 void history_info(FILE *f);
 

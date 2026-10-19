@@ -45,6 +45,26 @@ bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, i
     return false;
 }
 void history_info(FILE *f) { fprintf(f, "null"); }
+int64_t history_incident_open(int64_t t, const char *chan, const char *rule, const char *level,
+                              const char *grp, const char *summary, const char *detail, int64_t parent)
+{
+    (void)t; (void)chan; (void)rule; (void)level; (void)grp; (void)summary; (void)detail; (void)parent;
+    return 0;
+}
+void history_incident_update(int64_t id, int64_t closed, const char *summary, const char *detail, int64_t parent)
+{
+    (void)id; (void)closed; (void)summary; (void)detail; (void)parent;
+}
+bool history_query_incidents(FILE *f, const char *chan, int64_t from, int64_t to, bool open_only, int limit)
+{
+    (void)f; (void)chan; (void)from; (void)to; (void)open_only; (void)limit;
+    return false;
+}
+bool history_query_incident(FILE *f, int64_t id, int64_t now)
+{
+    (void)f; (void)id; (void)now;
+    return false;
+}
 void history_resummarise(int64_t since) { (void)since; }
 
 #else
@@ -59,7 +79,7 @@ void history_resummarise(int64_t since) { (void)since; }
 #define TIDY_S        600             /* retention and the cap, this often */
 #define NAMES_MAX     1024
 
-enum rec_type { R_CHAN, R_METRIC, R_EVENT };
+enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE };
 
 struct rec {
     enum rec_type type;
@@ -68,7 +88,10 @@ struct rec {
     char name[96];                  /* R_METRIC: metric; R_EVENT: channel ("" = server) */
     double v;
     char level[8], kind[32];
-    char *text;                     /* R_EVENT, malloc'd */
+    char *text;                     /* R_EVENT; R_INC_*: the summary. malloc'd */
+    /* incidents: name = channel, kind = rule, text = summary */
+    int64_t id, parent, closed;
+    char *detail, *grp;             /* malloc'd */
 };
 
 static struct {
@@ -89,6 +112,7 @@ static struct {
     int chan_ids[NAMES_MAX], n_chan;
     char met_names[NAMES_MAX][96];
     int met_ids[NAMES_MAX], n_met;
+    int64_t next_incident;
 } H = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
 static const char *const SCHEMA =
@@ -122,7 +146,15 @@ static const char *const SCHEMA =
     "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, t INTEGER, cid INTEGER, level TEXT, kind TEXT,"
     " text TEXT);"
     "CREATE INDEX IF NOT EXISTS events_t ON events (t);"
-    "CREATE INDEX IF NOT EXISTS events_c ON events (cid, t);";
+    "CREATE INDEX IF NOT EXISTS events_c ON events (cid, t);"
+    /* problems, from when they began (t) to when they ended (closed; NULL while open);
+     * a channel's may belong to one of the source's (parent); the verdict is a person's */
+    "CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, t INTEGER, closed INTEGER, chan TEXT,"
+    " rule TEXT, level TEXT, grp TEXT, summary TEXT, detail TEXT, parent INTEGER, verdict TEXT, note TEXT,"
+    " verdict_t INTEGER);"
+    "CREATE INDEX IF NOT EXISTS incidents_t ON incidents (t);"
+    "CREATE INDEX IF NOT EXISTS incidents_c ON incidents (chan, t);"
+    "CREATE INDEX IF NOT EXISTS incidents_p ON incidents (parent);";
 
 static bool exec(sqlite3 *db, const char *sql)
 {
@@ -204,12 +236,16 @@ static int metric_id(const char *name)
 
 static void write_batch(struct rec *q, int n)
 {
-    sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL;
+    sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL, *si = NULL, *su = NULL;
 
     exec(H.db, "BEGIN");
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO s10 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &sc, NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO m10 VALUES (?,?,?)", -1, &sm, NULL);
     sqlite3_prepare_v2(H.db, "INSERT INTO events (t, cid, level, kind, text) VALUES (?,?,?,?,?)", -1, &se, NULL);
+    sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO incidents (id, t, closed, chan, rule, level, grp, summary, detail,"
+                       " parent) VALUES (?,?,?,?,?,?,?,?,?,?)", -1, &si, NULL);
+    sqlite3_prepare_v2(H.db, "UPDATE incidents SET closed = ?, summary = COALESCE(?, summary),"
+                       " detail = COALESCE(?, detail), parent = ? WHERE id = ?", -1, &su, NULL);
     for (int i = 0; i < n; i++) {
         struct rec *r = &q[i];
 
@@ -246,11 +282,55 @@ static void write_batch(struct rec *q, int n)
             sqlite3_bind_text(se, 5, r->text ? r->text : "", -1, SQLITE_STATIC);
             sqlite3_step(se);
             sqlite3_reset(se);
+        } else if (r->type == R_INC_OPEN && si) {
+            sqlite3_bind_int64(si, 1, r->id);
+            sqlite3_bind_int64(si, 2, r->t);
+            if (r->closed)
+                sqlite3_bind_int64(si, 3, r->closed);
+            else
+                sqlite3_bind_null(si, 3);
+            if (r->name[0])
+                sqlite3_bind_text(si, 4, r->name, -1, SQLITE_STATIC);
+            else
+                sqlite3_bind_null(si, 4);
+            sqlite3_bind_text(si, 5, r->kind, -1, SQLITE_STATIC);
+            sqlite3_bind_text(si, 6, r->level, -1, SQLITE_STATIC);
+            sqlite3_bind_text(si, 7, r->grp ? r->grp : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(si, 8, r->text ? r->text : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(si, 9, r->detail ? r->detail : "{}", -1, SQLITE_STATIC);
+            if (r->parent)
+                sqlite3_bind_int64(si, 10, r->parent);
+            else
+                sqlite3_bind_null(si, 10);
+            sqlite3_step(si);
+            sqlite3_reset(si);
+        } else if (r->type == R_INC_UPDATE && su) {
+            if (r->closed)
+                sqlite3_bind_int64(su, 1, r->closed);
+            else
+                sqlite3_bind_null(su, 1);
+            if (r->text)
+                sqlite3_bind_text(su, 2, r->text, -1, SQLITE_STATIC);
+            else
+                sqlite3_bind_null(su, 2);
+            if (r->detail)
+                sqlite3_bind_text(su, 3, r->detail, -1, SQLITE_STATIC);
+            else
+                sqlite3_bind_null(su, 3);
+            if (r->parent)
+                sqlite3_bind_int64(su, 4, r->parent);
+            else
+                sqlite3_bind_null(su, 4);
+            sqlite3_bind_int64(su, 5, r->id);
+            sqlite3_step(su);
+            sqlite3_reset(su);
         }
     }
     sqlite3_finalize(sc);
     sqlite3_finalize(sm);
     sqlite3_finalize(se);
+    sqlite3_finalize(si);
+    sqlite3_finalize(su);
     exec(H.db, "COMMIT");
 }
 
@@ -344,7 +424,7 @@ static int64_t oldest(const char *table)
  * tenth of what is left at a time. */
 static void tidy(int64_t now)
 {
-    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "events" };
+    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "events", "incidents" };
     int64_t before;
 
     exec(H.db, "PRAGMA wal_checkpoint(TRUNCATE)");  /* the log folded in: the size is the file's */
@@ -357,6 +437,7 @@ static void tidy(int64_t now)
     delete_before("s3600", now - KEEP_S3600);
     delete_before("m3600", now - KEEP_S3600);
     delete_before("events", now - KEEP_EVENTS);
+    delete_before("incidents", now - KEEP_EVENTS);
     for (int round = 0; round < 40 && db_bytes() > H.cap * 9 / 10; round++) {
         bool did = false;
 
@@ -365,7 +446,7 @@ static void tidy(int64_t now)
 
             /* the finer tables give way first, down to their last hour;
              * hours and events only when nothing finer is left to give */
-            if (t0 && (t0 < now - 3600 || (i >= 4 && i < 6) || i == 6)) {
+            if (t0 && (t0 < now - 3600 || i >= 4)) {
                 delete_before(order[i], t0 + (now - t0) / 10 + 1);
                 did = true;
             }
@@ -408,8 +489,11 @@ static void *writer(void *arg)
 
         if (n)
             write_batch(q, n);
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < n; i++) {
             free(q[i].text);
+            free(q[i].detail);
+            free(q[i].grp);
+        }
         free(q);
 
         int64_t now = time(NULL);
@@ -445,6 +529,8 @@ static void push(struct rec *r)
         H.dropped++;
         pthread_mutex_unlock(&H.lock);
         free(r->text);
+        free(r->detail);
+        free(r->grp);
         return;
     }
     if (H.qn == H.qcap) {
@@ -454,6 +540,8 @@ static void push(struct rec *r)
         if (!nq) {
             pthread_mutex_unlock(&H.lock);
             free(r->text);
+            free(r->detail);
+            free(r->grp);
             return;
         }
         H.q = nq;
@@ -491,6 +579,24 @@ bool history_open(const char *path, int max_mb, char *err, size_t errlen)
         sqlite3_close(H.db);
         H.db = NULL;
         return false;
+    }
+    /* incidents still open when the supervisor last stopped: closed then */
+    {
+        sqlite3_stmt *st;
+
+        if (sqlite3_prepare_v2(H.db, "UPDATE incidents SET closed = MAX(t, (SELECT MAX(t) FROM s10)),"
+                               " summary = summary || ' (open when the supervisor stopped)' WHERE closed IS NULL",
+                               -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+        if (sqlite3_prepare_v2(H.db, "SELECT MAX(id) FROM incidents", -1, &st, NULL) == SQLITE_OK) {
+            if (sqlite3_step(st) == SQLITE_ROW)
+                H.next_incident = sqlite3_column_int64(st, 0) + 1;
+            sqlite3_finalize(st);
+        }
+        if (H.next_incident < 1)
+            H.next_incident = 1;
     }
     H.on = true;
     H.stop = false;
@@ -568,6 +674,46 @@ void history_event(int64_t t, const char *chan, const char *level, const char *k
     snprintf(r.level, sizeof(r.level), "%s", level);
     snprintf(r.kind, sizeof(r.kind), "%s", kind);
     r.text = strdup(text ? text : "");
+    push(&r);
+}
+
+int64_t history_incident_open(int64_t t, const char *chan, const char *rule, const char *level,
+                              const char *grp, const char *summary, const char *detail, int64_t parent)
+{
+    struct rec r;
+
+    if (!H.on)
+        return 0;
+    memset(&r, 0, sizeof(r));
+    r.type = R_INC_OPEN;
+    pthread_mutex_lock(&H.lock);
+    r.id = H.next_incident++;
+    pthread_mutex_unlock(&H.lock);
+    r.t = t;
+    snprintf(r.name, sizeof(r.name), "%s", chan ? chan : "");
+    snprintf(r.kind, sizeof(r.kind), "%s", rule);
+    snprintf(r.level, sizeof(r.level), "%s", level);
+    r.grp = strdup(grp ? grp : "");
+    r.text = strdup(summary ? summary : "");
+    r.detail = strdup(detail ? detail : "{}");
+    r.parent = parent;
+    push(&r);
+    return r.id;
+}
+
+void history_incident_update(int64_t id, int64_t closed, const char *summary, const char *detail, int64_t parent)
+{
+    struct rec r;
+
+    if (!H.on || id <= 0)
+        return;
+    memset(&r, 0, sizeof(r));
+    r.type = R_INC_UPDATE;
+    r.id = id;
+    r.closed = closed;
+    r.text = summary ? strdup(summary) : NULL;
+    r.detail = detail ? strdup(detail) : NULL;
+    r.parent = parent;
     push(&r);
 }
 
@@ -756,6 +902,162 @@ bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, i
     }
     fprintf(f, "]}");
     sqlite3_finalize(st);
+    sqlite3_close(db);
+    return true;
+}
+
+static void incident_row(FILE *f, sqlite3_stmt *st)
+{
+    /* id, t, closed, chan, rule, level, grp, summary, detail, parent, verdict, note, verdict_t */
+    fprintf(f, "{\"id\": %lld, \"opened\": %lld, \"closed\": ", (long long)sqlite3_column_int64(st, 0),
+            (long long)sqlite3_column_int64(st, 1));
+    if (sqlite3_column_type(st, 2) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        fprintf(f, "%lld", (long long)sqlite3_column_int64(st, 2));
+    fprintf(f, ", \"channel\": ");
+    if (sqlite3_column_type(st, 3) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        jstr(f, (const char *)sqlite3_column_text(st, 3));
+    fprintf(f, ", \"rule\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 4));
+    fprintf(f, ", \"level\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 5));
+    fprintf(f, ", \"group\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 6));
+    fprintf(f, ", \"summary\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 7));
+    {
+        const char *d = (const char *)sqlite3_column_text(st, 8);
+
+        fprintf(f, ", \"detail\": %s", d && d[0] == '{' ? d : "{}");     /* JSON made by the supervisor */
+    }
+    fprintf(f, ", \"parent\": ");
+    if (sqlite3_column_type(st, 9) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        fprintf(f, "%lld", (long long)sqlite3_column_int64(st, 9));
+    fprintf(f, ", \"verdict\": ");
+    if (sqlite3_column_type(st, 10) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        jstr(f, (const char *)sqlite3_column_text(st, 10));
+    fprintf(f, ", \"note\": ");
+    if (sqlite3_column_type(st, 11) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        jstr(f, (const char *)sqlite3_column_text(st, 11));
+    fputc('}', f);
+}
+
+#define INC_COLS "id, t, closed, chan, rule, level, grp, summary, detail, parent, verdict, note, verdict_t"
+
+bool history_query_incidents(FILE *f, const char *chan, int64_t from, int64_t to, bool open_only, int limit)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    char sql[600];
+
+    if (!db)
+        return false;
+    /* those that overlap the span; for a channel, its own and the source's it belongs to */
+    snprintf(sql, sizeof(sql),
+             "SELECT " INC_COLS " FROM incidents WHERE t < ? AND (closed IS NULL OR closed >= ?) %s %s"
+             " ORDER BY closed IS NOT NULL, t DESC, id DESC LIMIT ?",
+             open_only ? "AND closed IS NULL" : "",
+             chan ? "AND (chan = ? OR id IN (SELECT parent FROM incidents WHERE chan = ? AND parent IS NOT NULL))"
+                  : "");
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_bind_int64(st, 1, to);
+    sqlite3_bind_int64(st, 2, from);
+    if (chan) {
+        sqlite3_bind_text(st, 3, chan, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, chan, -1, SQLITE_STATIC);
+        sqlite3_bind_int(st, 5, limit);
+    } else {
+        sqlite3_bind_int(st, 3, limit);
+    }
+    fprintf(f, "{\"incidents\": [");
+    for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+        fprintf(f, "%s\n", n ? "," : "");
+        incident_row(f, st);
+    }
+    fprintf(f, "]}");
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return true;
+}
+
+bool history_query_incident(FILE *f, int64_t id, int64_t now)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    int64_t t0 = 0, t1 = 0;
+    bool found = false;
+
+    if (!db)
+        return false;
+    if (sqlite3_prepare_v2(db, "SELECT " INC_COLS " FROM incidents WHERE id = ?", -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_bind_int64(st, 1, id);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        found = true;
+        t0 = sqlite3_column_int64(st, 1);
+        t1 = sqlite3_column_type(st, 2) == SQLITE_NULL ? now : sqlite3_column_int64(st, 2);
+        fprintf(f, "{\"incident\": ");
+        incident_row(f, st);
+    }
+    sqlite3_finalize(st);
+    if (!found) {
+        sqlite3_close(db);
+        return false;
+    }
+    /* the channels' incidents that belong to it */
+    fprintf(f, ", \"members\": [");
+    if (sqlite3_prepare_v2(db, "SELECT " INC_COLS " FROM incidents WHERE parent = ? ORDER BY t", -1, &st, NULL)
+        == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, id);
+        for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+            fprintf(f, "%s\n", n ? "," : "");
+            incident_row(f, st);
+        }
+        sqlite3_finalize(st);
+    }
+    /* what happened meanwhile, a minute either side: on its channel or its
+     * members' channels, and on the server */
+    fprintf(f, "], \"events\": [");
+    if (sqlite3_prepare_v2(db,
+            "SELECT e.t, c.name, e.level, e.kind, e.text FROM events e LEFT JOIN chans c ON c.id = e.cid"
+            " WHERE e.t >= ? AND e.t <= ? AND (e.cid IS NULL OR c.name IN"
+            " (SELECT chan FROM incidents WHERE (id = ? OR parent = ?) AND chan IS NOT NULL))"
+            " ORDER BY e.t, e.id LIMIT 400", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, t0 - 60);
+        sqlite3_bind_int64(st, 2, t1 + 60);
+        sqlite3_bind_int64(st, 3, id);
+        sqlite3_bind_int64(st, 4, id);
+        for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+            fprintf(f, "%s\n{\"t\": %lld, \"channel\": ", n ? "," : "", (long long)sqlite3_column_int64(st, 0));
+            if (sqlite3_column_type(st, 1) == SQLITE_NULL)
+                fprintf(f, "null");
+            else
+                jstr(f, (const char *)sqlite3_column_text(st, 1));
+            fprintf(f, ", \"level\": ");
+            jstr(f, (const char *)sqlite3_column_text(st, 2));
+            fprintf(f, ", \"kind\": ");
+            jstr(f, (const char *)sqlite3_column_text(st, 3));
+            fprintf(f, ", \"text\": ");
+            jstr(f, (const char *)sqlite3_column_text(st, 4));
+            fputc('}', f);
+        }
+        sqlite3_finalize(st);
+    }
+    fprintf(f, "]}");
     sqlite3_close(db);
     return true;
 }

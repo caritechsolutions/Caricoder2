@@ -586,7 +586,10 @@ void thumb_tap_unit(const struct es_unit *u, enum codec_id codec)
     tap.backend->vdec->drain(tap.dec);
     if (tap.backend->vdec->pull(tap.dec, &f) == 1 && f.mem == VMEM_CPU)
         make_from_cpu(&f);
-    tap.backend->vdec->reset(tap.dec);
+    /* A drained decoder that is only reset gives nothing for every other
+     * picture after it (libavcodec): a fresh one each time, a few ms. */
+    tap.backend->vdec->close(tap.dec);
+    tap.dec = NULL;
     tap.waiting = false;
     pthread_mutex_unlock(&tap.lock);
 }

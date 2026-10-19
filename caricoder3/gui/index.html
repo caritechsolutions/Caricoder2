@@ -108,6 +108,12 @@ svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.grap
 .legend .gin-l i { background:var(--air) } .legend .gout-l i { background:var(--ok) } .legend .gdec-l i { background:var(--acc) } .legend .gg2-l i { background:#c58cf0 } .legend .gg3-l i { background:#6fd3e0 }
 .evwrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:var(--r) } table.evt td { padding:5px 10px; font-size:13px; vertical-align:top } table.evt td.mono { white-space:nowrap; color:var(--fg2) }
 tr.lv-warn td:last-child { color:var(--warn) } tr.lv-error td:last-child { color:var(--bad) }
+table.inctab tr { cursor:pointer } table.inctab tr:hover td { background:var(--line) } table.inctab tr.child td { font-size:12px; padding-top:2px; padding-bottom:2px }
+table.inctab tr:not(.open) td:last-child { color:var(--fg2) } table.inctab td:first-child { width:18px }
+table.kv td { padding:3px 10px 3px 0; font-size:13px; vertical-align:top } table.kv td:first-child { color:var(--dim); white-space:nowrap; width:130px }
+h4.sub4 { margin:16px 0 6px; font-size:12px; font-weight:500; color:var(--dim) }
+.rulechecks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; font-size:13px } .rulechecks label { display:flex; gap:8px; align-items:center; justify-content:flex-start; text-align:left; color:var(--fg) }
+.rulechecks input { width:auto; height:auto; margin:0; flex:none } dialog { max-height:92vh; overflow:auto }
 .big-thumb { width:100%; height:auto; aspect-ratio:16/9; object-fit:contain; margin-bottom:8px; background:#0d1216 }
 .pidt { width:auto; min-width:60% } .pidt td, .pidt th { padding:4px 10px } .pidt button { padding:2px 8px }
 .tag { display:inline-block; padding:1px 7px; border-radius:4px; background:var(--panel2); color:var(--fg2); font-size:12px }
@@ -162,7 +168,8 @@ function health(c) {
 }
 /* black / frozen picture, silent audio, streams without data: as the channel says (10 s and more) */
 function contentFaults(st) {
-  const ct = st.content || {}, pic = ct.picture, out = [];
+  const ct = st.content || {}, pic = ct.picture, out = [], inp = st.input || {};
+  if (!(inp.last_packet_age_ms >= 0 && inp.last_packet_age_ms < 1000 && inp.bitrate > 0)) return out;   /* no input says it all */
   if (pic && pic.age_ms < 30000) {
     if (pic.black_ms >= 10000) out.push(`picture black ${Math.round(pic.black_ms / 1000)} s`);
     if (pic.frozen_ms >= 10000) out.push(`picture frozen ${Math.round(pic.frozen_ms / 1000)} s`);
@@ -236,6 +243,7 @@ function openChannel(name) { if (!leaveOk()) return; closePreview(); view = { na
 
 /* ---------- overview (no channel chosen) ---------- */
 function renderOverview() {
+  loadIncidents();
   const shown = channels.filter(visible);
   const rows = shown.map(c => { const st=c.stats||{}, inp=st.input||{}, out=st.output||{}, svc=st.service||{};
     const what = (svc.streams||[]).map(s => s.mode==="transcode" ? `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}` : `${s.codec||""} copy`).join(", ");
@@ -244,6 +252,7 @@ function renderOverview() {
     return `<tr onclick="openChannel('${esc(c.name)}')" style="cursor:pointer"><td><span class="lamp ${h}"></span> ${esc(c.name)}</td><td>${esc(c.state)}${h==="warn"?` <span class="warn">${esc(why)}</span>`:c.why&&c.state!=="running"?` <span class="bad">${esc(c.why)}</span>`:""}</td><td class="mono">${esc((c.config||{}).input||"")}</td><td>${c.state==="running"?fmtRate(inp.bitrate):"—"}</td><td>${c.state==="running"?fmtRate(out.bitrate):"—"}</td><td style="color:var(--fg2)">${esc(what)}</td><td>${outs.map(o=>`<span class="tag">${esc(o.type)}</span>`).join(" ")}</td></tr>`; }).join("");
   const counts = { ok:0, warn:0, bad:0, off:0 }; channels.forEach(c => counts[health(c)[0]]++);
   $("#main").innerHTML = `<div class="head"><h1>Channels</h1><span class="state">${channels.length ? `${counts.ok} fine · ${counts.warn} with trouble · ${counts.bad} failed · ${counts.off} stopped${shown.length !== channels.length ? ` · showing ${shown.length} of ${channels.length}` : ""}` : ""}</span><div class="sp"></div></div>
+    ${incidentsCard()}
     <section class="card"><table><thead><tr><th>Channel</th><th>State</th><th>Source</th><th>In</th><th>Out</th><th>Processing</th><th>Outputs</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="7" class="empty">${channels.length ? "No channel matches the filter." : "No channels yet. \"New channel\" on the left makes one: give it a name and a source, and it is ready to be set up."}</td></tr>`}</tbody></table></section>`;
 }
@@ -450,7 +459,7 @@ function graphHtml(h) {
 
 /* ---------- history (the record on disk) ---------- */
 const RANGES = [["1h", 3600, "1 h"], ["6h", 21600, "6 h"], ["24h", 86400, "24 h"], ["7d", 604800, "7 days"], ["30d", 2592000, "30 days"]];
-let histRange = "24h", histData = null, histEvents = null, histFor = "", histAt = 0;
+let histRange = "24h", histData = null, histEvents = null, histInc = null, histFor = "", histAt = 0;
 try { histRange = localStorage.getItem("cc3range") || "24h"; } catch(e) {}
 const fmtTime = (t, span) => { const d = new Date(t * 1000); const hm = d.toTimeString().slice(0, 5);
   return span > 2 * 86400 ? `${d.getDate()}/${d.getMonth() + 1} ${span > 8 * 86400 ? "" : hm}`.trim() : hm; };
@@ -483,8 +492,9 @@ async function loadChanHistory(name, force) {
   histFor = key; histAt = Date.now();
   const to = Math.floor(Date.now() / 1000), from = to - span;
   try {
-    const [h, e] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`)]);
-    histData = Object.assign(h, { from, to }); histEvents = e.events;
+    const [h, e, i] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`),
+      api(`/api/incidents?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] }))]);
+    histData = Object.assign(h, { from, to }); histEvents = e.events; histInc = i.incidents;
   } catch(err) { histData = { error: err.message }; histEvents = null; }
   if (current && current.name === name) renderChanHistory();
 }
@@ -503,6 +513,7 @@ function renderChanHistory() {
   const upPct = rows.length ? 100 * sum(13) / (rows.length * histData.step) : 0;
   el.innerHTML = `<div class="legend"><span class="li"><i></i>In</span><span class="lo"><i></i>Out</span><span><i style="background:var(--bad);width:3px;height:10px"></i>trouble</span><span><i style="background:#2c3640;height:10px"></i>not running</span><span class="hint">${rows.length ? `recorded since ${fmtWhen(rows[0][0]).slice(0, -3)}, running ${upPct.toFixed(upPct > 99.9 || upPct < 1 ? 0 : 1)}% of that` : "nothing recorded yet"} · ${totals.length ? totals.map(x => `${x[1].toLocaleString()} ${x[0]}`).join(" · ") : "no errors"}</span></div>
     ${timeGraph(ts, [{ v: kb(1), cls: "gin" }, { v: kb(3), cls: "gout" }], histData.from, histData.to, { marks, gaps })}
+    <h4 class="sub4">Incidents</h4>${histInc && histInc.length ? `<div class="evwrap" style="max-height:220px">${incTable(histInc, false)}</div>` : `<div class="empty" style="padding:6px">None in this time.</div>`}
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
 }
 let srvHist = null, srvEvents = null, srvHistAt = 0;
@@ -534,6 +545,94 @@ function renderServerHistory() {
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events (all channels and the server)</h4><div class="evwrap">${eventRows(srvEvents, true)}</div>`;
 }
 
+/* ---------- incidents (the watchdog) ---------- */
+let incAll = null, incAt = 0, wdInfo = null, wdAt = 0;
+const fmtDur = s => s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min ${s % 60 ? (s % 60) + " s" : ""}`.trim() : s < 86400 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : `${Math.floor(s / 86400)} d ${Math.round((s % 86400) / 3600)} h`;
+async function loadIncidents(force) {
+  if (!sys || !sys.history) return;
+  if (!force && Date.now() - incAt < 8000) return;
+  incAt = Date.now();
+  const to = Math.floor(Date.now() / 1000);
+  try { incAll = (await api(`/api/incidents?from=${to - 86400}&to=${to + 1}&limit=300`)).incidents; } catch(e) { incAll = null; }
+  if (!view.name && view.page === "list") renderOverview();
+}
+/* rows: the source's incidents with their channels' under them; the rest on their own */
+function incTable(list, withChan) {
+  const now = Date.now() / 1000, ids = new Set(list.map(x => x.id));
+  const top = list.filter(x => !x.parent || !ids.has(x.parent));
+  const row = (x, child) => {
+    const dur = Math.max(0, Math.round((x.closed || now) - x.opened));
+    const who = x.channel ? (withChan ? `<a onclick="event.stopPropagation();openChannel('${esc(x.channel)}')">${esc(x.channel)}</a>` : "") : `<span class="tag">source</span>`;
+    return `<tr class="inc lv-${esc(x.level)}${x.closed ? "" : " open"}${child ? " child" : ""}" onclick="openIncident(${x.id})">
+      <td><span class="lamp ${x.closed ? "off" : x.level === "error" ? "bad" : "warn"}"></span></td><td class="mono">${fmtWhen(x.opened)}</td>
+      <td>${x.closed ? fmtDur(dur) : `<b>${fmtDur(dur)}, still on</b>`}</td><td>${child ? "↳ " : ""}${who}</td><td>${esc(x.summary)}${x.verdict ? ` <span class="tag">${esc(x.verdict)}</span>` : ""}</td></tr>`;
+  };
+  return `<table class="evt inctab"><tbody>${top.map(x => row(x, false) + list.filter(y => y.parent === x.id).map(y => row(y, true)).join("")).join("")}</tbody></table>`;
+}
+function incidentsCard() {
+  if (!sys || !sys.history) return "";
+  if (!incAll) { loadIncidents(); return `<section class="card"><header><h2>Incidents</h2></header><div class="body"><div class="empty">Loading…</div></div></section>`; }
+  const open = incAll.filter(x => !x.closed && !x.parent).length;
+  return `<section class="card"><header><h2>Incidents</h2><span class="hint">${open ? `<span class="bad">${open} open</span> · ` : "none open · "}the last 24 hours; a problem that lasts is one, shorter ones are only events</span></header>
+    ${incAll.length ? `<div class="evwrap" style="border:0;border-radius:0;max-height:340px">${incTable(incAll, true)}</div>` : `<div class="body"><div class="empty" style="padding:8px">No incidents in the last 24 hours.</div></div>`}</section>`;
+}
+async function openIncident(id) {
+  const d = $("#dlg");
+  let j;
+  try { j = await api(`/api/incidents/${id}`); } catch(e) { alert(e.message); return; }
+  const x = j.incident, now = Date.now() / 1000, then = (x.detail || {}).then || {};
+  const inp = then.input || {}, svc = then.service || {}, clk = then.clock || {}, ct = then.content || {};
+  const dur = Math.round((x.closed || now) - x.opened);
+  const ev = [["Began", fmtWhen(x.opened)], ["Ended", x.closed ? fmtWhen(x.closed) : "still going on"], ["Lasted", fmtDur(dur)],
+    ["Where", x.channel ? esc(x.channel) : "the source, on several channels"], ["Source", `<span class="mono">${esc(x.group || "—")}</span>`], ["Rule", esc(x.rule)]];
+  const proof = then.input ? [["Input then", `${fmtRate(inp.bitrate)} · last packet ${inp.last_packet_age_ms >= 0 ? (inp.last_packet_age_ms / 1000).toFixed(1) + " s ago" : "—"} · ${inp.cc_errors || 0} CC errors so far`],
+    ["Clock", clk.locked ? `locked, ${(clk.drift_ppm || 0).toFixed(1)} ppm` : "not locked"],
+    ["Streams", (svc.streams || []).filter(s => !s.from_pid).map(s => `${esc(s.kind)}${s.language ? " " + esc(s.language) : ""} ${s.pid}${s.src_pid ? ` (source ${s.src_pid})` : ""}${s.idle_ms >= 5000 ? ` <span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : ""}`).join(" · ") || "—"],
+    ["Picture", ct.picture ? `brightness ${Math.round(ct.picture.luma)}, change ${ct.picture.change}${ct.picture.black_ms ? `, black ${Math.round(ct.picture.black_ms / 1000)} s` : ""}${ct.picture.frozen_ms ? `, frozen ${Math.round(ct.picture.frozen_ms / 1000)} s` : ""}` : "—"],
+    ["Sound", (ct.audio || []).map(a => `PID ${a.pid}: ${a.level_db.toFixed(0)} dBFS${a.silent_ms ? ` <span class="bad">silent ${Math.round(a.silent_ms / 1000)} s</span>` : ""}`).join(" · ") || "—"]] : [];
+  const kv = rows => `<table class="kv">${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
+  d.style.width = "860px";
+  d.innerHTML = `<h3>${esc(x.summary)}</h3>${kv(ev)}
+    ${j.members.length ? `<h4 class="sub4">Channels in it</h4>${incTable(j.members, true)}` : ""}
+    ${proof.length ? `<h4 class="sub4">What the channel reported when it began</h4>${kv(proof)}` : ""}
+    <h4 class="sub4">Events from a minute before to a minute after</h4><div class="evwrap" style="max-height:260px">${eventRows(j.events.slice().reverse(), true)}</div>
+    <div class="actions"><button onclick="document.getElementById('dlg').close();document.getElementById('dlg').style.width=''">Close</button></div>`;
+  d.showModal();
+}
+async function loadWatchdog(force) {
+  if (!force && Date.now() - wdAt < 10000) return;
+  wdAt = Date.now();
+  try { wdInfo = await api("/api/watchdog"); } catch(e) { wdInfo = { error: e.message }; }
+  if (view.page === "server" && !view.name) renderServer();
+}
+const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["clear_s", "It is over when gone for (s)"],
+  ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
+  ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
+  ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
+function watchdogCard() {
+  if (!sys || !sys.history) return "";
+  if (!wdInfo) { loadWatchdog(); return ""; }
+  if (wdInfo.error) return `<section class="card"><header><h2>Watchdog</h2></header><div class="body"><div class="msg err">${esc(wdInfo.error)}</div></div></section>`;
+  const L = wdInfo.limits, w = wdInfo.watching || {}, items = (w.items || []).filter(i => i.on || i.incident);
+  const off = wdInfo.rules.filter(r => !r.on).map(r => r.name);
+  return `<section class="card"><header><h2>Watchdog</h2><span class="hint">Incident after ${L.min_s} s, over after ${L.clear_s} s quiet · no input after ${L.no_input_s} s · ${L.cc_per_min} CC errors/min · CPU ${L.cpu_pct}% / video engine ${L.gpu_pct}% for ${L.load_s} s${off.length ? ` · off: ${esc(off.join(", "))}` : ""}</span><div class="sp"></div><button onclick="editWatchdog()">Change</button></header>
+    <div class="body">${items.length ? `<table class="evt"><tbody>${items.map(i => `<tr><td>${esc(i.subject)}</td><td>${esc(i.what || i.rule)}</td><td>${fmtDur(i.for_s)}</td><td>${i.incident ? `<a onclick="openIncident(${i.incident})">incident</a>` : `<span style="color:var(--dim)">not yet ${L.min_s} s</span>`}</td></tr>`).join("")}</tbody></table>` : `<div class="empty" style="padding:6px">Nothing wrong being watched right now.</div>`}</div></section>`;
+}
+function editWatchdog() {
+  const d = $("#dlg"), L = wdInfo.limits;
+  d.innerHTML = `<h3>Watchdog rules</h3><div class="f">${WD_FIELDS.map(([k, l]) => `<label>${l}</label><input data-w="${k}" type="number" min="0" value="${L[k]}">`).join("")}</div>
+    <h4 class="sub4">Rules in use</h4><div class="rulechecks">${wdInfo.rules.map(r => `<label><input type="checkbox" data-r="${r.id}" ${r.on ? "checked" : ""}> ${esc(r.name)}</label>`).join("")}</div>
+    <div id="w_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="w_go">Save</button></div>`;
+  $("#w_go").onclick = async () => {
+    const body = { off: [] };
+    d.querySelectorAll("[data-w]").forEach(i => body[i.dataset.w] = Number(i.value));
+    d.querySelectorAll("[data-r]").forEach(i => { if (!i.checked) body.off.push(i.dataset.r); });
+    try { wdInfo = await api("/api/watchdog", { method: "PUT", body: JSON.stringify(body) }); d.close(); renderServer(); }
+    catch(e) { $("#w_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
+}
+
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
 const barCls = p => p >= 90 ? "bad" : p >= 75 ? "warn" : "";
@@ -554,6 +653,7 @@ function renderServer() {
       ${!gpus.length ? `<div class="box"><h4>GPU</h4><div class="big" style="font-size:16px;font-weight:400;color:var(--dim)">${st.nvidia_smi ? esc(st.gpu_error || "no card reported") : "no nvidia-smi on this machine"}</div></div>` : ""}
     </div></div></section>
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
+    ${watchdogCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>
       <table><thead><tr><th>Interface</th><th>State</th><th>Receive</th><th>Transmit</th><th>Packets in / out</th><th>Errors in / out</th><th>Dropped in / out</th></tr></thead><tbody>
       ${ifs.map(i => `<tr><td class="mono">${esc(i.name)}</td><td>${i.up ? "up" : "<span class='bad'>down</span>"}${i.speed_mbps > 0 ? ` · ${i.speed_mbps >= 1000 ? (i.speed_mbps / 1000) + " Gb/s" : i.speed_mbps + " Mb/s"}` : ""}</td><td>${fmtRate(i.rx_bps)}</td><td>${fmtRate(i.tx_bps)}</td><td>${i.rx_packets.toLocaleString()} / ${i.tx_packets.toLocaleString()}</td><td>${i.rx_errors || i.tx_errors ? `<span class="warn">${i.rx_errors} / ${i.tx_errors}</span>` : "0 / 0"}</td><td>${i.rx_dropped || i.tx_dropped ? `<span class="warn">${i.rx_dropped} / ${i.tx_dropped}</span>` : "0 / 0"}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No interfaces reported.</td></tr>`}
@@ -564,7 +664,7 @@ function renderServer() {
         return `<tr><td class="mono">${esc(x.url)}</td><td>${x.running ? "running" : "<span class='bad'>not running</span>"}${x.restarts ? ` · ${x.restarts} restart${x.restarts > 1 ? "s" : ""}` : ""}</td><td>${fmtRate(r.bitrate)}</td><td>${x.channels}${missing ? ` <span class="warn">(${missing} program${missing > 1 ? "s" : ""} not found in it)</span>` : ""}</td><td>${r.socket_overflow ? `<span class="warn">${r.socket_overflow}</span>` : "0"}</td></tr>`; }).join("") || `<tr><td colspan="5" class="empty">No channel reads a UDP or RTP input right now.</td></tr>`}
       </tbody></table></section>
     <section class="card"><header><h2>This build</h2><span class="hint">Codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:var(--r);max-height:none">${esc(sys.backends || "")}</pre></div></section>`;
-  if (sys.history) { renderServerHistory(); loadServerHistory(); }
+  if (sys.history) { renderServerHistory(); loadServerHistory(); loadWatchdog(); }
 }
 
 /* ---------- a channel ---------- */

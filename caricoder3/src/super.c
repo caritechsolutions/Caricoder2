@@ -66,6 +66,7 @@
 #include "sink.h"
 #include "sysstat.h"
 #include "history.h"
+#include "watchdog.h"
 
 #include <stdarg.h>
 
@@ -140,6 +141,13 @@ struct chan {
     int64_t h_ev_last;                      /* last warning from its log that was kept */
     char h_ev_text[160];
     int h_ev_repeats;
+
+    /* the watchdog (watchdog.h): counters over the last minute, when it died */
+    struct { int64_t t, cc, loss, drop; } wd_win[40];
+    int wd_wn, wd_wh;
+    int64_t wd_died[16];
+    int wd_nd;
+    char wd_group[512];                     /* its source, for grouping */
 };
 
 /* One reader of an input that several channels take programs from
@@ -275,6 +283,24 @@ static void save_system_config(struct super *s)
              json_quote(s->run_dir, q[2], sizeof(q[2])),
              json_quote(s->password, q[3], sizeof(q[3])),
              json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb);
+    {
+        /* the watchdog's limits, before the closing brace */
+        struct wd_limits L;
+        char *wbuf = NULL;
+        size_t wlen = 0;
+        FILE *wf = open_memstream(&wbuf, &wlen);
+        size_t n = strlen(text);
+
+        wd_get_limits(&L);
+        if (wf) {
+            wd_limits_write(wf, &L);
+            fclose(wf);
+        }
+        if (wbuf && n > 3 && n + wlen + 32 < sizeof(text)) {
+            snprintf(text + n - 3, sizeof(text) - (n - 3), ",\n  \"watchdog\": %s\n}\n", wbuf);
+        }
+        free(wbuf);
+    }
     if (!write_file(s->config_path, text, err, sizeof(err)))
         log_err("config: %s", err);
 }
@@ -312,6 +338,13 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     snprintf(s->history_path, sizeof(s->history_path), "%s",
              json_get_str(&doc, root, "history", "/var/lib/caricoder3/history.db"));
     s->history_max_mb = (int)json_get_num(&doc, root, "history_max_mb", 2048);
+    {
+        struct wd_limits L;
+
+        wd_defaults(&L);
+        wd_limits_read(&doc, json_get(&doc, root, "watchdog"), &L);
+        wd_set_limits(&L);
+    }
     if (s->port < 1 || s->port > 65535) {
         snprintf(err, errlen, "port must be 1..65535");
         return false;
@@ -632,11 +665,15 @@ static void chan_log_event(struct chan *c, const char *line)
     const char *text;
     int64_t now = time(NULL);
 
-    if (!level || !history_enabled())
+    if (!level)
         return;
     text = lv + 5;
     while (*text == ' ')
         text++;
+    if (!strncmp(text, "source PIDs changed: ", 21))
+        wd_instant(now, c->name, c->wd_group, WD_PIDS, text + 21);
+    if (!history_enabled())
+        return;
     if (!strcmp(text, c->h_ev_text) && now - c->h_ev_last < 60) {
         c->h_ev_repeats++;
         return;
@@ -711,6 +748,11 @@ static void chan_reap(struct super *s, struct chan *c, int status)
             wait = 30000000000LL;
         c->next_start_ns = now + wait;
         c->restarts++;
+        if (c->wd_nd == (int)(sizeof(c->wd_died) / sizeof(c->wd_died[0]))) {
+            memmove(c->wd_died, c->wd_died + 1, sizeof(c->wd_died) - sizeof(c->wd_died[0]));
+            c->wd_nd--;
+        }
+        c->wd_died[c->wd_nd++] = time(NULL);
         log_warn("channel %s: %s; starting again in %lld s", c->name, c->why, (long long)(wait / 1000000000LL));
         ev(c->name, "error", "exit", "%s; starting again in %lld s", c->why, (long long)(wait / 1000000000LL));
     }
@@ -721,6 +763,189 @@ static void chan_reap(struct super *s, struct chan *c, int status)
 static char *chan_stats(struct super *s, struct chan *c);
 
 /* One bit-rate sample from the channel's statistics file. */
+/* Evidence for a new incident: the channel's statistics as they are. */
+static char *chan_stats(struct super *s, struct chan *c);
+static struct chan *find_chan(struct super *s, const char *name);
+static void wd_snapshot(FILE *f, const char *chan, void *op)
+{
+    struct super *s = op;
+    struct chan *c = chan ? find_chan(s, chan) : NULL;
+    char *st = c && c->state == CH_RUNNING ? chan_stats(s, c) : NULL;
+
+    if (st) {
+        size_t n = strlen(st);
+
+        while (n && (st[n - 1] == '\n' || st[n - 1] == ' '))
+            n--;
+        if (n && st[0] == '{' && st[n - 1] == '}')
+            fwrite(st, 1, n, f);
+        else
+            fprintf(f, "{}");
+    } else {
+        fprintf(f, "{}");
+    }
+    free(st);
+}
+
+/* The watchdog's view of one sample of a running channel (watchdog.h). */
+static void wd_channel(struct chan *c, const struct json_doc *d, int root, double bi, double bo)
+{
+    struct wd_limits L;
+    int64_t t = time(NULL);
+    int in = json_get(d, root, "input"), out = json_get(d, root, "output"), clk = json_get(d, root, "clock");
+    int svc = json_get(d, root, "service"), ct = json_get(d, root, "content");
+    int ss = svc >= 0 ? json_get(d, svc, "streams") : -1;
+    double up = json_get_num(d, root, "uptime_s", 0);
+    double age = in >= 0 ? json_get_num(d, in, "last_packet_age_ms", -1) : -1;
+    bool flowing = age >= 0 && age < 1000 && bi > 0;
+    const char *G;
+    char what[160];
+
+    wd_get_limits(&L);
+    if (in >= 0)
+        snprintf(c->wd_group, sizeof(c->wd_group), "%s", json_get_str(d, in, "url", ""));
+    G = c->wd_group;
+    /* the counters a minute ago */
+    {
+        int k = (c->wd_wh + c->wd_wn) % 40;
+        int64_t loss = c->c_ovf + c->c_lost, drop = c->c_drop + c->c_late;
+        int64_t dcc = 0, dloss = 0, ddrop = 0;
+
+        if (c->wd_wn == 40)
+            c->wd_wh = (c->wd_wh + 1) % 40;
+        else
+            c->wd_wn++;
+        c->wd_win[k].t = t;
+        c->wd_win[k].cc = c->c_cc;
+        c->wd_win[k].loss = loss;
+        c->wd_win[k].drop = drop;
+        for (int i = 0; i < c->wd_wn; i++) {
+            int j = (c->wd_wh + i) % 40;
+
+            if (t - c->wd_win[j].t <= 60) {
+                /* a restarted channel counts from 0 again: then from there */
+                dcc = c->c_cc >= c->wd_win[j].cc ? c->c_cc - c->wd_win[j].cc : c->c_cc;
+                dloss = loss >= c->wd_win[j].loss ? loss - c->wd_win[j].loss : loss;
+                ddrop = drop >= c->wd_win[j].drop ? drop - c->wd_win[j].drop : drop;
+                break;
+            }
+        }
+        snprintf(what, sizeof(what), "CC errors: %lld in a minute", (long long)dcc);
+        wd_observe(t, c->name, c->name, G, WD_CC, dcc >= L.cc_per_min, what, 0);
+        snprintf(what, sizeof(what), "packets lost on the way in: %lld in a minute", (long long)dloss);
+        wd_observe(t, c->name, c->name, G, WD_LOSS, dloss > 0, what, 0);
+        snprintf(what, sizeof(what), "dropped or late pictures: %lld in a minute", (long long)ddrop);
+        wd_observe(t, c->name, c->name, G, WD_DROPPING, ddrop > L.dropped_per_min, what, 0);
+    }
+    {
+        bool none = age > L.no_input_s * 1000.0 || (up > 10 && bi == 0);
+
+        wd_observe(t, c->name, c->name, G, WD_NO_INPUT, none, "no input",
+                   none && age > 0 ? t - (int64_t)(age / 1000) : 0);
+    }
+    wd_observe(t, c->name, c->name, G, WD_OUT_STALLED, flowing && up > 10 && out >= 0 && bo == 0,
+               "input arrives, nothing goes out", 0);
+    {
+        int active = in >= 0 ? (int)json_get_num(d, in, "active", 0) : 0;
+
+        snprintf(what, sizeof(what), "running on backup source %d", active);
+        wd_observe(t, c->name, c->name, G, WD_BACKUP, active > 0, what, 0);
+    }
+    wd_observe(t, c->name, c->name, G, WD_CLOCK,
+               clk >= 0 && flowing && up > 15 && !json_get_bool(d, clk, "locked", true), "clock not locked", 0);
+    /* the content (watch.h) */
+    {
+        int pic = ct >= 0 ? json_get(d, ct, "picture") : -1;
+        /* while input arrives: without it the last picture stays as it was */
+        bool fresh = flowing && pic >= 0 && json_get_num(d, pic, "age_ms", 1e9) < 30000;
+        double black = fresh ? json_get_num(d, pic, "black_ms", 0) : 0;
+        double frozen = fresh ? json_get_num(d, pic, "frozen_ms", 0) : 0;
+
+        wd_observe(t, c->name, c->name, G, WD_BLACK, black > 0, "black picture", t - (int64_t)(black / 1000));
+        wd_observe(t, c->name, c->name, G, WD_FROZEN, frozen > 0, "frozen picture", t - (int64_t)(frozen / 1000));
+    }
+    {
+        /* silent audio: which, by the language the stream list gives it */
+        int aa = ct >= 0 ? json_get(d, ct, "audio") : -1;
+        double longest = 0;
+        size_t n = 0;
+
+        what[0] = 0;
+        for (int j = aa >= 0 ? d->node[aa].first_child : -1; j >= 0; j = d->node[j].next) {
+            double ms = json_get_num(d, j, "silent_ms", 0);
+            int pid = (int)json_get_num(d, j, "pid", 0);
+            const char *lang = "";
+
+            if (ms <= 0)
+                continue;
+            for (int k = ss >= 0 ? d->node[ss].first_child : -1; k >= 0; k = d->node[k].next)
+                if ((int)json_get_num(d, k, "in_pid", -1) == pid && json_get(d, k, "from_pid") < 0)
+                    lang = json_get_str(d, k, "language", "");
+            n += (size_t)snprintf(what + n, n < sizeof(what) ? sizeof(what) - n : 0, "%s%s%s", n ? ", " : "audio ",
+                                  lang[0] ? lang : "", lang[0] ? "" : "(no language)");
+            if (ms > longest)
+                longest = ms;
+            if (n >= sizeof(what))
+                break;
+        }
+        if (what[0])
+            snprintf(what + strlen(what), sizeof(what) - strlen(what), " silent");
+        wd_observe(t, c->name, c->name, G, WD_SILENT, flowing && longest > 0, what, t - (int64_t)(longest / 1000));
+    }
+    {
+        /* video or audio listed, nothing of it arriving */
+        double longest = 0;
+        size_t n = 0;
+
+        what[0] = 0;
+        for (int k = ss >= 0 ? d->node[ss].first_child : -1; k >= 0; k = d->node[k].next) {
+            const char *kind = json_get_str(d, k, "kind", "");
+            double idle = json_get_num(d, k, "idle_ms", -1);
+
+            if (json_get(d, k, "from_pid") >= 0 || idle < 5000 || (strcmp(kind, "video") && strcmp(kind, "audio")))
+                continue;
+            n += (size_t)snprintf(what + n, n < sizeof(what) ? sizeof(what) - n : 0, "%s%s %s (PID %d)",
+                                  n ? ", " : "", kind, json_get_str(d, k, "language", ""),
+                                  (int)json_get_num(d, k, "in_pid", 0));
+            if (idle > longest)
+                longest = idle;
+            if (n >= sizeof(what))
+                break;
+        }
+        if (what[0])
+            snprintf(what + strlen(what), sizeof(what) - strlen(what), ": in the PMT, no data");
+        /* only while the rest arrives: no input at all is the other rule */
+        wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, t - (int64_t)(longest / 1000));
+    }
+}
+
+/* What the watchdog sees of a channel whatever its state: failing,
+ * restarting; stopped on purpose, nothing. */
+static void wd_channel_state(struct chan *c, int64_t t)
+{
+    struct wd_limits L;
+    int recent = 0;
+    char what[200];
+    static const enum wd_rule running_rules[] = { WD_NO_INPUT, WD_CC, WD_LOSS, WD_DROPPING, WD_OUT_STALLED,
+                                                  WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA };
+
+    if (!c->cfg || !c->want) {
+        wd_forget(t, c->name);
+        return;
+    }
+    wd_get_limits(&L);
+    for (int i = 0; i < c->wd_nd; i++)
+        recent += t - c->wd_died[i] <= L.restart_window_s;
+    snprintf(what, sizeof(what), "stopped on its own %d times in %d min (last: %s)", recent,
+             L.restart_window_s / 60, c->why);
+    wd_observe(t, c->name, c->name, c->wd_group, WD_RESTARTS, recent >= L.restarts, what, 0);
+    snprintf(what, sizeof(what), "channel failed: %s", c->why);
+    wd_observe(t, c->name, c->name, c->wd_group, WD_FAILED, c->state == CH_FAILED, what, 0);
+    if (c->state != CH_RUNNING)
+        for (size_t i = 0; i < sizeof(running_rules) / sizeof(running_rules[0]); i++)
+            wd_observe(t, c->name, c->name, c->wd_group, running_rules[i], false, NULL, 0);
+}
+
 static void chan_sample(struct super *s, struct chan *c, int64_t now)
 {
     char *st;
@@ -787,6 +1012,7 @@ static void chan_sample(struct super *s, struct chan *c, int64_t now)
         c->c_drop = (int64_t)json_get_num(&doc, out, "dropped_units", 0);
         c->c_late = (int64_t)json_get_num(&doc, out, "late_units", 0);
     }
+    wd_channel(c, &doc, root, bi, bo);
     {
         int k = (c->hist_head + c->hist_n) % HIST_N;
 
@@ -1198,7 +1424,30 @@ static int64_t inc(int64_t now_v, int64_t *was)
 
 static void metric_cb(const char *name, double v, void *op)
 {
-    history_metric(*(int64_t *)op, name, v);
+    int64_t t = *(int64_t *)op;
+    struct wd_limits L;
+    char subj[96], what[160];
+    size_t n = strlen(name);
+
+    history_metric(t, name, v);
+    wd_get_limits(&L);
+    if (!strcmp(name, "cpu.percent")) {
+        snprintf(what, sizeof(what), "CPU at %.0f%%", v);
+        wd_observe(t, "server/cpu", NULL, "", WD_CPU, v > L.cpu_pct, what, 0);
+    } else if (!strncmp(name, "gpu", 3) && n > 8 && !strcmp(name + n - 8, ".encoder")) {
+        snprintf(subj, sizeof(subj), "server/%.*s", (int)(n - 8), name);
+        snprintf(what, sizeof(what), "%.*s video encoder at %.0f%%", (int)(n - 8), name, v);
+        wd_observe(t, subj, NULL, "", WD_GPU, v > L.gpu_pct, what, 0);
+    } else if (!strncmp(name, "gpu", 3) && n > 8 && !strcmp(name + n - 8, ".decoder")) {
+        snprintf(subj, sizeof(subj), "server/%.*s.dec", (int)(n - 8), name);
+        snprintf(what, sizeof(what), "%.*s video decoder at %.0f%%", (int)(n - 8), name, v);
+        wd_observe(t, subj, NULL, "", WD_GPU, v > L.gpu_pct, what, 0);
+    } else if (!strncmp(name, "net.", 4) && n > 12 && !strcmp(name + n - 8, ".rx_drop")) {
+        snprintf(subj, sizeof(subj), "server/%s", name);
+        snprintf(what, sizeof(what), "network card %.*s dropping packets (%.0f in 10 s)", (int)(n - 12),
+                 name + 4, v);
+        wd_observe(t, subj, NULL, "", WD_NIC_DROP, v > 0, what, 0);
+    }
 }
 
 /* Every 10 s of wall clock: a row per channel, and the server's figures. */
@@ -1250,6 +1499,17 @@ static void tick(struct super *s)
         chan_share_prepare(s, &s->ch[i]);
     shares_update(s, now);
     hist_tick(s);
+    {
+        static int64_t wd_last;
+        int64_t t = time(NULL);
+
+        if (t - wd_last >= 2) {
+            wd_last = t;
+            for (int i = 0; i < s->n; i++)
+                wd_channel_state(&s->ch[i], t);
+            wd_tick(t);
+        }
+    }
 
     for (int i = 0; i < s->n; i++) {
         struct chan *c = &s->ch[i];
@@ -1761,6 +2021,101 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             api_error(resp, 500, "the history could not be read");
             return;
         }
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/incidents") || !strncmp(p, "/api/incidents/", 15)) {
+        /* ?channel=&open=1&from=&to=&limit= ; /api/incidents/ID: one, with its events */
+        char v[128], chan[64] = "";
+        int64_t now = time(NULL), from = now - 7 * 86400, to = now + 1;
+        int limit = 200;
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+        bool ok;
+
+        if (strcmp(req->method, "GET")) {
+            api_error(resp, 405, "GET only");
+            return;
+        }
+        if (!history_enabled()) {
+            api_error(resp, 503, "no history is kept (see the Server page)");
+            return;
+        }
+        if (query_param(req->query, "from", v, sizeof(v)))
+            from = strtoll(v, NULL, 10);
+        if (query_param(req->query, "to", v, sizeof(v)))
+            to = strtoll(v, NULL, 10);
+        if (query_param(req->query, "limit", v, sizeof(v)))
+            limit = atoi(v) > 0 && atoi(v) <= 2000 ? atoi(v) : 200;
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        if (p[14] == '/') {
+            ok = history_query_incident(f, strtoll(p + 15, NULL, 10), now);
+        } else {
+            bool has = query_param(req->query, "channel", chan, sizeof(chan));
+            bool open_only = query_param(req->query, "open", v, sizeof(v)) && !strcmp(v, "1");
+
+            ok = history_query_incidents(f, has ? chan : NULL, from, to, open_only, limit);
+        }
+        fclose(f);
+        if (!ok) {
+            free(out);
+            api_error(resp, p[14] == '/' ? 404 : 500, p[14] == '/' ? "no such incident" : "the history could not be read");
+            return;
+        }
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/watchdog")) {
+        /* GET: the limits, the rules, what is being watched now; PUT: new limits */
+        struct wd_limits L;
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+
+        wd_get_limits(&L);
+        if (!strcmp(req->method, "PUT")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
+
+            if (root < 0) {
+                free(doc);
+                api_error(resp, 400, doc ? err : "out of memory");
+                return;
+            }
+            wd_limits_read(doc, root, &L);
+            free(doc);
+            wd_set_limits(&L);
+            pthread_mutex_lock(&s->lock);
+            save_system_config(s);
+            pthread_mutex_unlock(&s->lock);
+            ev(NULL, "info", "user", "watchdog limits changed");
+        } else if (strcmp(req->method, "GET")) {
+            api_error(resp, 405, "GET or PUT");
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        fprintf(f, "{\"ok\": true, \"limits\": ");
+        wd_limits_write(f, &L);
+        fprintf(f, ", \"rules\": [");
+        for (int r = 0; r < WD_RULES; r++)
+            fprintf(f, "%s{\"id\": \"%s\", \"name\": \"%s\", \"on\": %s}", r ? ", " : "", wd_rule_id(r),
+                    wd_rule_name(r), L.off[r] ? "false" : "true");
+        fprintf(f, "], \"watching\": ");
+        wd_state_json(f, time(NULL));
+        fprintf(f, "}\n");
+        fclose(f);
         resp->status = 200;
         resp->type = "application/json";
         resp->body = out;
@@ -2403,6 +2758,7 @@ int super_main(int argc, char **argv)
         else
             ev(NULL, "info", "server", "supervisor started (caricoder3 %s)", CC3_VERSION);
     }
+    wd_set_snapshot(wd_snapshot, &s);
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);

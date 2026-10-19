@@ -2817,6 +2817,81 @@ def history_keeps_to_its_cap():
 
 
 @test
+def supervisor_incidents():
+    """The watchdog: an input lost on two channels of one source is one source incident with both in it; it closes when the input is back; limits read and set through the API."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super_inc")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin = _port[0] + 1, _port[0] + 2
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1",
+               "history": os.path.join(root, "history.db"),
+               "watchdog": {"min_s": 5, "clear_s": 4, "off": ["cpu"]}}, open(cfg, "w"))
+    src = synth("syn_mpts", mpts=True)
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.7)
+        code, j = api("/api/watchdog")
+        need(code == 200 and j["limits"]["min_s"] == 5 and j["limits"]["off"] == ["cpu"], f"watchdog: {code} {j}")
+        for name, prog in (("i1", 1650), ("i2", 2000)):
+            code, j = api(f"/api/channels/{name}", "PUT", {"input": f"udp://127.0.0.1:{pin}", "program": prog, "enabled": True})
+            need(code == 200, f"create {name}: {code} {j}")
+        time.sleep(1.5)
+        p = Player("127.0.0.1", pin)
+        p.play(src, stop_after=4.0)         # 4 s of input, then nothing
+        time.sleep(14)
+        code, j = api("/api/incidents?open=1")
+        need(code == 200, f"incidents: {code}")
+        inc = j["incidents"]
+        group = [x for x in inc if x["channel"] is None and x["rule"] == "no_input"]
+        mine = [x for x in inc if x["channel"] in ("i1", "i2") and x["rule"] == "no_input"]
+        need(len(group) == 1 and "2 channels" in group[0]["summary"], f"source incident: {inc}")
+        need(len(mine) == 2 and all(x["parent"] == group[0]["id"] for x in mine), f"channel incidents: {mine}")
+        need(mine[0]["detail"].get("then", {}).get("input"), f"no evidence kept: {mine[0]['detail']}")
+        code, one = api(f"/api/incidents/{group[0]['id']}")
+        need(code == 200 and len(one["members"]) == 2 and any("no input" in e["text"] for e in one["events"]),
+             f"one incident: {one}")
+        # the input comes back: all of it closes
+        dbg = {}
+        p.play(src, stop_after=8.0, at={6.0: lambda: dbg.update(w=api("/api/watchdog")[1]["watching"], c=api("/api/channels/i1")[1]["channel"]["stats"]["input"])})
+        time.sleep(1)
+        code, j = api("/api/incidents")
+        still = [x for x in j["incidents"] if x["closed"] is None and x["rule"] == "no_input"]
+        others = sorted({x["rule"] for x in j["incidents"]} - {"no_input"})
+        need(not others, f"other incidents for an input that stopped: {others}")
+        need(not still, f"still open: {[(x['id'], x['channel']) for x in still]}; watching {dbg.get('w')}; i1 input bitrate {dbg.get('c', {}).get('bitrate')} age {dbg.get('c', {}).get('last_packet_age_ms')}")
+        lasted = j["incidents"][0]["closed"] - j["incidents"][0]["opened"]
+        p.close()
+        # limits through the API, kept in the config file
+        code, j = api("/api/watchdog", "PUT", {"cc_per_min": 25, "off": []})
+        need(code == 200 and j["limits"]["cc_per_min"] == 25 and j["limits"]["min_s"] == 5, f"put: {code} {j}")
+        need(json.load(open(cfg))["watchdog"]["cc_per_min"] == 25, "limits not saved")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"source incident with both channels in it, closed after the input came back (lasted {lasted} s); limits set and saved"
+
+
+@test
 def supervisor_shared_input():
     """Channels on one input share a reader: the input is read once, each channel gets its program; the reader follows them."""
     import base64

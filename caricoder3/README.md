@@ -417,6 +417,9 @@ The API (basic auth, JSON in and out):
 | `GET /api/channels/NAME/history?from=&to=` | the record on disk (default the last 24 h): `rows` of `[t, in_kbps, in_max_kbps, out_kbps, out_max_kbps, cc, overflow, dropped, late, lost, switches, restarts, health, up_s]`, about 720 of them, 10 s, 1 min or 1 h apiece by span |
 | `GET /api/history/server?metric=cpu*&from=&to=` | the server's: `cpu.percent`, `load.1`, `mem.used_pct`, `gpuN.util/encoder/decoder/mem_mb/temp_c/power_w`, `net.IF.rx_mbps/tx_mbps/rx_drop/rx_err`; a name or a prefix ending in `*` |
 | `GET /api/events?channel=&from=&to=&limit=` | what happened, newest first (no `channel`: everything) |
+| `GET /api/incidents?channel=&open=1&from=&to=&limit=` | problems that lasted (default the last 7 days), open ones first; a channel's own and its source's |
+| `GET /api/incidents/ID` | one, with the channels' incidents that belong to it and the events from a minute before to a minute after |
+| `GET /api/watchdog`, `PUT /api/watchdog` | the watchdog's limits and rules (PUT: any of them, kept in the config), and what it is watching now |
 
 ### History and events
 
@@ -432,7 +435,33 @@ year. The file never grows past `"history_max_mb"` (default 2048; 120
 channels take about 42 MB a day): when it would, the oldest detail goes
 first and events last. The GUI shows it in a History card on each
 channel and on the Server page (1 h to 30 days). The on-server AI
-technician, when it comes, will read it too. Built without
+technician, when it comes, will read it too.
+
+### The watchdog and incidents
+
+Every 2 s the supervisor checks each channel against a set of rules: no
+input (after 5 s), CC errors (10 or more in a minute), packets lost on
+the way in, dropped or late pictures (more than 5 a minute), output
+stalled while input arrives, the channel failing or restarting again
+and again (3 times in 10 minutes), running on a backup source, the
+clock not locked, a black, frozen or silent picture or sound, a stream
+the PMT lists without data, the source's PIDs changing; and the server:
+CPU or a video engine above 90% for 2 minutes, a network card dropping
+packets. A problem that lasts 10 s is an **incident**, kept in the
+history with the channel's statistics as they were when it began; it is
+over when the problem has been gone 30 s. Shorter ones are only events.
+When channels that read the same source have the same upstream problem
+within a minute of each other, one incident for the source is opened as
+well and theirs belong to it ("no input on 3 channels of
+udp://239.1.1.1:5000: a, b, c"): the sign that the cause is before the
+transcoder. The picture, sound and missing-stream rules only count while
+input arrives. The limits and which rules are in use are set on the
+Server page (Watchdog, "Change") or in the config's `"watchdog"` object
+(`min_s`, `clear_s`, `group_s`, `no_input_s`, `cc_per_min`,
+`dropped_per_min`, `restarts`, `restart_window_s`, `cpu_pct`, `gpu_pct`,
+`load_s`, `off`: rule ids). The Channels page lists the last 24 hours'
+incidents, each channel's History card its own; a click shows one in
+full. Nothing is sent anywhere yet. Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

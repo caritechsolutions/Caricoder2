@@ -25,8 +25,8 @@ struct json_node {
     int first_child, next;      /* indexes into the arena, -1 for none */
 };
 
-#define JSON_NODES_MAX 256
-#define JSON_TEXT_MAX  16384
+#define JSON_NODES_MAX 2048
+#define JSON_TEXT_MAX  65536
 
 struct json_doc {
     struct json_node node[JSON_NODES_MAX];
