@@ -104,6 +104,10 @@ dialog h3 { margin:0 0 14px; font-size:17px } dialog .actions { display:flex; ju
 .legend { display:flex; gap:16px; align-items:center; font-size:12.5px; margin-bottom:4px } .legend i { display:inline-block; width:14px; height:3px; border-radius:2px; vertical-align:middle; margin-right:6px } .legend .li i { background:var(--air) } .legend .lo i { background:var(--ok) } .legend .hint { color:var(--dim); margin-left:auto }
 svg.graph { width:100%; height:auto; display:block } svg.graph .grid line { stroke:var(--line); stroke-width:1 } svg.graph .grid text { fill:var(--dim); font-size:10.5px; font-family:inherit }
 svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.graph .gin { stroke:var(--air) } svg.graph .gout { stroke:var(--ok) }
+.gwrap { position:relative } .gtip { display:none; position:absolute; top:6px; pointer-events:none; background:var(--panel); border:1px solid var(--line2); border-radius:8px; padding:7px 10px; font-size:12px; line-height:1.55; min-width:150px; box-shadow:0 4px 16px rgba(0,0,0,.35); z-index:5 }
+.gtip .tt { color:var(--fg2); margin-bottom:2px } .gtip b { font-weight:500; margin-left:auto; padding-left:14px } .gtip div { display:flex; align-items:center; gap:6px } .gtip i { width:10px; height:3px; border-radius:2px; display:inline-block }
+.gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
+svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
 svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
 .legend .gin-l i { background:var(--air) } .legend .gout-l i { background:var(--ok) } .legend .gdec-l i { background:var(--acc) } .legend .gg2-l i { background:#c58cf0 } .legend .gg3-l i { background:#6fd3e0 }
 .evwrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:var(--r) } table.evt td { padding:5px 10px; font-size:13px; vertical-align:top } table.evt td.mono { white-space:nowrap; color:var(--fg2) }
@@ -443,6 +447,42 @@ function mediaHtml(c) {
   return `<div class="media"><div><h4>Input</h4>${ins.map(s => mediaLine(s, true)).join("")}</div><div><h4>Output</h4>${ss.map(s => mediaLine(s, false)).join("")}</div></div>`;
 }
 function niceMax(v) { if (v <= 0) return 1e6; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
+/* Hover over a graph: a line at the nearest point and its figures. The
+ * place hovered is kept, so a graph drawn again under the mouse shows it. */
+const graphs = {}, hoverAt = {};
+function hoverWrap(gid, svg, xs, W, tip) {
+  graphs[gid] = { xs, W, tip };
+  return `<div class="gwrap" onmousemove="graphMove(event,'${gid}')" onmouseleave="graphLeave('${gid}')">${svg}<div class="gtip" id="tip_${gid}"></div></div>`;
+}
+function graphMove(ev, gid) {
+  const svg = ev.currentTarget.querySelector("svg"), g = graphs[gid];
+  if (!svg || !g) return;
+  const r = svg.getBoundingClientRect();
+  hoverAt[gid] = (ev.clientX - r.left) * g.W / r.width;
+  showTip(gid);
+}
+function graphLeave(gid) {
+  delete hoverAt[gid];
+  const t = document.getElementById("tip_" + gid), c = document.getElementById("cur_" + gid);
+  if (t) t.style.display = "none";
+  if (c) c.style.display = "none";
+}
+function showTip(gid) {
+  const g = graphs[gid], t = document.getElementById("tip_" + gid), c = document.getElementById("cur_" + gid);
+  if (!g || !t || !c || !g.xs.length || hoverAt[gid] == null) return;
+  let i = 0;
+  g.xs.forEach((x, k) => { if (Math.abs(x - hoverAt[gid]) < Math.abs(g.xs[i] - hoverAt[gid])) i = k; });
+  const far = Math.abs(g.xs[i] - hoverAt[gid]) > g.W * 0.02;    /* a gap in the record */
+  const at = far ? hoverAt[gid] : g.xs[i];
+  c.setAttribute("x1", at); c.setAttribute("x2", at); c.style.display = "";
+  t.innerHTML = far ? `<div class="dim">nothing recorded here</div>` : g.tip(i);
+  t.style.display = "block";
+  const pct = 100 * at / g.W;
+  if (pct > 60) { t.style.left = ""; t.style.right = (100 - pct + 1.5) + "%"; } else { t.style.right = ""; t.style.left = (pct + 1.5) + "%"; }
+}
+function reapplyHover() { for (const gid in hoverAt) showTip(gid); }
+const tipRow = (cls, label, value) => `<div><i class="${cls}"></i>${label}<b>${value}</b></div>`;
+
 function graphHtml(h) {
   const inn = (h && h.in) || [], out = (h && h.out) || [], step = (h && h.step_s) || 2;
   const W = 600, H = 170, L = 58, R = 10, T = 10, B = 24, n = 60;
@@ -453,8 +493,12 @@ function graphHtml(h) {
   let grid = "";
   for (let k = 0; k <= 4; k++) { const v = max * k / 4; grid += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${fmtRate(v) === "—" ? "0" : fmtRate(v)}</text>`; }
   for (let k = 0; k <= 4; k++) { const i = Math.round((n - 1) * k / 4), secs = i * step; grid += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${secs ? `−${secs >= 60 ? (secs / 60).toFixed(secs % 60 ? 1 : 0) + " min" : secs + " s"}` : "now"}</text>`; }
+  const m = Math.max(inn.length, out.length), xs = [];
+  for (let k = 0; k < m; k++) xs.push(x(m - 1 - k));
+  const tip = k => { const ago = (m - 1 - k) * step; return `<div class="tt">${ago ? `${ago} s ago` : "now"}</div>${tipRow("gin", "In", fmtRate(inn[k]))}${tipRow("gout", "Out", fmtRate(out[k]))}`; };
+  const svg = `<svg class="graph" viewBox="0 0 ${W} ${H}" role="img" aria-label="Input and output bit rate"><g class="grid">${grid}</g>${line(inn, "gin")}${line(out, "gout")}<line class="cursor" id="cur_live" y1="${T}" y2="${H - B}" style="display:none"/></svg>`;
   return `<div class="legend"><span class="li"><i></i>In ${fmtRate(inn[inn.length - 1])}</span><span class="lo"><i></i>Out ${fmtRate(out[out.length - 1])}</span><span class="hint">last ${Math.round(n * step / 60)} minutes</span></div>
-    <svg class="graph" viewBox="0 0 ${W} ${H}" role="img" aria-label="Input and output bit rate"><g class="grid">${grid}</g>${line(inn, "gin")}${line(out, "gout")}</svg>`;
+    ${hoverWrap("live", svg, xs, W, tip)}`;
 }
 
 /* ---------- history (the record on disk) ---------- */
@@ -478,8 +522,15 @@ function timeGraph(ts, series, from, to, opts = {}) {
   for (let k = 0; k <= 5; k++) { const t = from + (to - from) * k / 5; grid += `<text x="${x(t)}" y="${H - 6}" text-anchor="${k ? k < 5 ? "middle" : "end" : "start"}">${fmtTime(t, to - from)}</text>`; }
   const gaps = (opts.gaps || []).map(([a, b]) => `<rect class="gap" x="${x(a).toFixed(1)}" y="${T}" width="${Math.max(1, x(b) - x(a)).toFixed(1)}" height="${H - T - B}"/>`).join("");
   const marks = (opts.marks || []).map(t => `<line class="mark" x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="${H - B - 8}" y2="${H - B}"/>`).join("");
-  const lines = series.map(s => { const pts = []; ts.forEach((t, i) => { if (s.v[i] != null) pts.push(`${x(t).toFixed(1)},${y(s.v[i]).toFixed(1)}`); }); return pts.length > 1 ? `<polyline class="${s.cls}" points="${pts.join(" ")}"/>` : ""; }).join("");
-  return `<svg class="graph" viewBox="0 0 ${W} ${H}" role="img"><g class="grid">${grid}</g>${gaps}${lines}${marks}</svg>`;
+  /* a line breaks where the record has a hole (more than 2.5 steps between points) */
+  const diffs = ts.slice(1).map((t, i) => t - ts[i]).sort((a, b) => a - b), step = diffs.length ? diffs[diffs.length >> 1] : 0;
+  const lines = series.map(s => { const segs = [[]]; ts.forEach((t, i) => {
+      if (s.v[i] == null) return;
+      if (i && step && t - ts[i - 1] > 2.5 * step && segs[segs.length - 1].length) segs.push([]);
+      segs[segs.length - 1].push(`${x(t).toFixed(1)},${y(s.v[i]).toFixed(1)}`); });
+    return segs.filter(p => p.length > 1).map(p => `<polyline class="${s.cls}" points="${p.join(" ")}"/>`).join(""); }).join("");
+  const svg = `<svg class="graph" viewBox="0 0 ${W} ${H}" role="img"><g class="grid">${grid}</g>${gaps}${lines}${marks}${opts.gid ? `<line class="cursor" id="cur_${opts.gid}" y1="${T}" y2="${H - B}" style="display:none"/>` : ""}</svg>`;
+  return opts.gid && opts.tip ? hoverWrap(opts.gid, svg, ts.map(x), W, opts.tip) : svg;
 }
 function rangeButtons(onclick) { return `<span class="choice">${RANGES.map(r => `<button type="button" class="${histRange === r[0] ? "on" : ""}" onclick="${onclick}('${r[0]}')">${r[2]}</button>`).join("")}</span>`; }
 function eventRows(evs, withChan) {
@@ -496,7 +547,7 @@ async function loadChanHistory(name, force) {
       api(`/api/incidents?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] }))]);
     histData = Object.assign(h, { from, to }); histEvents = e.events; histInc = i.incidents;
   } catch(err) { histData = { error: err.message }; histEvents = null; }
-  if (current && current.name === name) renderChanHistory();
+  if (current && current.name === name) { renderChanHistory(); reapplyHover(); }
 }
 function setRange(r) { histRange = r; try { localStorage.setItem("cc3range", r); } catch(e) {} histFor = ""; if (view.page === "server" && !view.name) loadServerHistory(true); else if (current) loadChanHistory(current.name, true); }
 function renderChanHistory() {
@@ -512,7 +563,11 @@ function renderChanHistory() {
   const totals = [["CC errors", sum(5)], ["socket overflows", sum(6)], ["dropped", sum(7)], ["late", sum(8)], ["lost on the link", sum(9)], ["source switches", sum(10)], ["restarts", sum(11)]].filter(x => x[1]);
   const upPct = rows.length ? 100 * sum(13) / (rows.length * histData.step) : 0;
   el.innerHTML = `<div class="legend"><span class="li"><i></i>In</span><span class="lo"><i></i>Out</span><span><i style="background:var(--bad);width:3px;height:10px"></i>trouble</span><span><i style="background:#2c3640;height:10px"></i>not running</span><span class="hint">${rows.length ? `recorded since ${fmtWhen(rows[0][0]).slice(0, -3)}, running ${upPct.toFixed(upPct > 99.9 || upPct < 1 ? 0 : 1)}% of that` : "nothing recorded yet"} · ${totals.length ? totals.map(x => `${x[1].toLocaleString()} ${x[0]}`).join(" · ") : "no errors"}</span></div>
-    ${timeGraph(ts, [{ v: kb(1), cls: "gin" }, { v: kb(3), cls: "gout" }], histData.from, histData.to, { marks, gaps })}
+    ${timeGraph(ts, [{ v: kb(1), cls: "gin" }, { v: kb(3), cls: "gout" }], histData.from, histData.to, { marks, gaps, gid: "chist", tip: k => {
+      const r = rows[k], st = histData.step, span = st >= 120 ? `${fmtWhen(r[0]).slice(0, -3)} – ${fmtWhen(r[0] + st).slice(-8, -3)}` : fmtWhen(r[0]);
+      const errs = [["CC errors", r[5]], ["socket overflows", r[6]], ["dropped", r[7]], ["late", r[8]], ["lost on the link", r[9]], ["source switches", r[10]], ["restarts", r[11]]].filter(e => e[1]);
+      return `<div class="tt">${span}</div>${tipRow("gin", "In", fmtRate(r[1] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[2] * 1000)})</span>` : ""))}${tipRow("gout", "Out", fmtRate(r[3] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[4] * 1000)})</span>` : ""))}
+        ${r[13] < st ? `<div class="dim">running ${fmtDur(r[13])} of ${fmtDur(st)}</div>` : ""}${errs.length ? errs.map(e => `<div class="bad">${e[1].toLocaleString()} ${e[0]}</div>`).join("") : `<div class="dim">no errors</div>`}`; } })}
     <h4 class="sub4">Incidents</h4>${histInc && histInc.length ? `<div class="evwrap" style="max-height:220px">${incTable(histInc, false)}</div>` : `<div class="empty" style="padding:6px">None in this time.</div>`}
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
 }
@@ -525,7 +580,7 @@ async function loadServerHistory(force) {
     const [m, e] = await Promise.all([api(`/api/history/server?metric=${encodeURIComponent("*")}&from=${from}&to=${to + 1}`), api(`/api/events?from=${from}&to=${to + 1}&limit=300`)]);
     srvHist = Object.assign(m, { from, to }); srvEvents = e.events;
   } catch(err) { srvHist = { error: err.message }; srvEvents = null; }
-  if (view.page === "server" && !view.name) renderServerHistory();
+  if (view.page === "server" && !view.name) { renderServerHistory(); reapplyHover(); }
 }
 function renderServerHistory() {
   const el = $("#srvhist"); if (!el) return;
@@ -541,7 +596,9 @@ function renderServerHistory() {
   const nics = [...new Set(names.filter(n => /^net\..+\.rx_drop$/.test(n)).map(n => n.slice(4, -8)))];
   const drops = nics.map(n => [n, (S[`net.${n}.rx_drop`] || []).reduce((a, p) => a + p[1] * (srvHist.step / 10), 0)]).filter(d => d[1] > 0);
   el.innerHTML = `<div class="legend">${series.map(s => `<span class="${s.cls}-l"><i></i>${esc(s.label)}</span>`).join("")}<span class="hint">${drops.length ? drops.map(d => `${esc(d[0])}: about ${Math.round(d[1]).toLocaleString()} packets dropped`).join(" · ") : "no packets dropped by the network cards"}</span></div>
-    ${timeGraph(ts, series, srvHist.from, srvHist.to, { max: 100, fmt: pct })}
+    ${timeGraph(ts, series, srvHist.from, srvHist.to, { max: 100, fmt: pct, gid: "shist", tip: k => `<div class="tt">${fmtWhen(ts[k] - srvHist.step / 2)}</div>` +
+      series.map(s => tipRow(s.cls, esc(s.label), s.v[k] == null ? "—" : s.v[k].toFixed(0) + "%")).join("") +
+      (at("mem.used_pct")[k] != null ? `<div class="dim">memory ${at("mem.used_pct")[k].toFixed(0)}% · load ${(at("load.1")[k] || 0).toFixed(1)}</div>` : "") })}
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events (all channels and the server)</h4><div class="evwrap">${eventRows(srvEvents, true)}</div>`;
 }
 
@@ -1161,6 +1218,7 @@ async function refresh() {
   await loadAll();
   renderRail();
   if (view.name) await renderChan(view.name); else { $("#main").dataset.chan = ""; if (view.page === "server") renderServer(); else renderOverview(); }
+  reapplyHover();
   schedule(2000);
 }
 refresh();
