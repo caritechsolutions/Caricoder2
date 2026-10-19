@@ -109,6 +109,7 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
 .stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
 table.chat tr.out td:last-child { color:var(--fg2) } table.chat td:nth-child(2) { white-space:nowrap } .ok { color:var(--ok) }
+.tech .cause { font-size:15px; font-weight:500 } .tech p { margin:6px 0; line-height:1.5 } .tech ul { margin:2px 0 6px 18px; padding:0 } pre.ticket { white-space:pre-wrap; background:var(--line); padding:8px 10px; border-radius:6px; font-size:12.5px; margin:4px 0 }
 img.evpic { max-width:240px; border-radius:6px; display:block } table.evtab td { vertical-align:top } .tools { display:flex; gap:6px; flex-wrap:wrap; align-items:center } .tools .toolnote { font-size:12px; margin-left:6px }
 svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
 svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
@@ -628,7 +629,7 @@ function incTable(list, withChan) {
     const who = x.channel ? (withChan ? `<a onclick="event.stopPropagation();openChannel('${esc(x.channel)}')">${esc(x.channel)}</a>` : "") : `<span class="tag">source</span>`;
     return `<tr class="inc lv-${esc(x.level)}${x.closed ? "" : " open"}${child ? " child" : ""}" onclick="openIncident(${x.id})">
       <td><span class="lamp ${x.closed ? "off" : x.level === "error" ? "bad" : "warn"}"></span></td><td class="mono">${fmtWhen(x.opened)}</td>
-      <td>${x.closed ? fmtDur(dur) : `<b>${fmtDur(dur)}, still on</b>`}</td><td>${child ? "↳ " : ""}${who}</td><td>${esc(x.summary)}${x.verdict ? ` <span class="tag">${esc(x.verdict)}</span>` : ""}</td></tr>`;
+      <td>${x.closed ? fmtDur(dur) : `<b>${fmtDur(dur)}, still on</b>`}</td><td>${child ? "↳ " : ""}${who}</td><td>${esc(x.summary)}${x.diagnosis ? ` <span class="dim">· the technician: ${esc((CATEGORY[x.diagnosis.category] || x.diagnosis.category))}</span>` : ""}${x.verdict ? ` <span class="tag">${esc(x.verdict)}</span>` : ""}</td></tr>`;
   };
   return `<table class="evt inctab"><tbody>${top.map(x => row(x, false) + list.filter(y => y.parent === x.id).map(y => row(y, true)).join("")).join("")}</tbody></table>`;
 }
@@ -655,7 +656,9 @@ async function openIncident(id) {
     ["Sound", (ct.audio || []).map(a => `PID ${a.pid}: ${a.level_db.toFixed(0)} dBFS${a.silent_ms ? ` <span class="bad">silent ${Math.round(a.silent_ms / 1000)} s</span>` : ""}`).join(" · ") || "—"]] : [];
   const kv = rows => `<table class="kv">${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
   d.style.width = "860px";
+  if (!techInfo) loadTech();
   d.innerHTML = `<h3>${esc(x.summary)}</h3>${kv(ev)}
+    <h4 class="sub4">The technician's view ${x.parent ? "" : `<a style="font-weight:400;margin-left:8px" onclick="askTechnician(${x.id})">ask again</a>`}</h4>${techView(x)}
     ${j.members.length ? `<h4 class="sub4">Channels in it</h4>${incTable(j.members, true)}` : ""}
     ${proof.length ? `<h4 class="sub4">What the channel reported when it began</h4>${kv(proof)}` : ""}
     <h4 class="sub4">Evidence</h4>${evidenceList(j.evidence)}<div style="margin-top:8px">${toolButtons(x.channel, x.id)}</div>
@@ -797,6 +800,43 @@ function editPeers() {
   d.showModal();
 }
 
+/* ---------- the technician ---------- */
+const CATEGORY = { source_provider: "the provider's feed", source_ird: "an IRD", satellite_signal: "the satellite signal", network: "the network",
+  transcoder: "this transcoder", normal_content: "nothing wrong (normal content)", unknown: "not known" };
+function techView(x) {
+  const d = x.diagnosis;
+  if (!d) return `<div class="empty" style="padding:6px">${techInfo && techInfo.enabled ? "Not looked at yet (it looks once the evidence is in, about a minute after an incident opens)." : "The technician is not set up on this server."}</div>`;
+  const c = Number(d.confidence), pct = isFinite(c) ? Math.round(Math.min(100, Math.max(0, c <= 1 ? c * 100 : c))) : 0;
+  return `<div class="tech"><div class="cause">${esc(d.cause)}</div>
+    <div class="dim">${esc(CATEGORY[d.category] || d.category)} · ${pct}% sure${x.diag_t ? ` · ${fmtWhen(x.diag_t)}` : ""}</div>
+    <p>${esc(d.explanation)}</p>
+    ${(d.next_checks || []).length ? `<div class="dim">Next:</div><ul>${d.next_checks.map(c => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
+    ${d.ticket ? `<div class="dim">For the provider:</div><pre class="ticket">${esc(d.ticket)}</pre>` : ""}</div>`;
+}
+let techInfo = null, techAt = 0;
+async function loadTech(force) {
+  if (!force && Date.now() - techAt < 10000) return;
+  techAt = Date.now();
+  try { techInfo = await api("/api/technician"); } catch(e) { techInfo = { error: e.message }; }
+  if (view.page === "server" && !view.name) renderServer();
+}
+async function askTechnician(id) {
+  try { await api("/api/technician/diagnose", { method: "POST", body: JSON.stringify({ incident: id }) }); toolNote("Asked: the answer shows here when it is ready (a few seconds on a card, a minute or two on the CPU)."); setTimeout(() => openIncident(id), 20000); }
+  catch(e) { alert(e.message); }
+}
+function techCard() {
+  if (!techInfo) { loadTech(); return ""; }
+  if (techInfo.error) return "";
+  const T = techInfo, states = { off: "resting (started when there is something to look at)", idle: "ready", starting: "loading the model", thinking: "looking at an incident", unavailable: "cannot run", disabled: "turned off" };
+  const missing = T.setting_up ? "being set up now: the model server is built and the model downloaded (see /var/log/caricoder3-technician-setup.log)"
+    : !T.server_present ? "the model server is not installed" : !T.model_present ? "the model file is not there" : "";
+  return `<section class="card"><header><h2>Technician</h2><span class="hint">A language model on this server, offline: it says what it thinks caused each incident</span></header><div class="body"><div class="stat">
+    <div class="box"><h4>State</h4><div class="big" style="font-size:18px">${esc(states[T.state] || T.state)}</div><div class="sub">${T.where ? `on ${T.where === "cpu" ? "the CPU (lowest priority)" : "card " + esc(T.where.slice(3))}` : `will run on ${T.gpu === "auto" ? "a card with room, else the CPU" : esc(T.gpu)}`}${T.queue ? ` · ${T.queue} waiting` : ""}</div></div>
+    <div class="box"><h4>Model</h4><div class="sub mono" style="word-break:break-all">${esc(T.model)}</div>${missing ? `<div class="sub ${T.setting_up ? "warn" : "bad"}">${missing}${T.setting_up ? "" : " (the installer sets it up)"}</div>` : ""}</div>
+    <div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>
+  </div></div></section>`;
+}
+
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
 const barCls = p => p >= 90 ? "bad" : p >= 75 ? "warn" : "";
@@ -817,6 +857,7 @@ function renderServer() {
       ${!gpus.length ? `<div class="box"><h4>GPU</h4><div class="big" style="font-size:16px;font-weight:400;color:var(--dim)">${st.nvidia_smi ? esc(st.gpu_error || "no card reported") : "no nvidia-smi on this machine"}</div></div>` : ""}
     </div></div></section>
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
+    ${techCard()}
     ${watchdogCard()}
     ${peersCard()}
     ${disksCard()}
@@ -832,6 +873,7 @@ function renderServer() {
     <section class="card"><header><h2>This build</h2><span class="hint">Codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:var(--r);max-height:none">${esc(sys.backends || "")}</pre></div></section>`;
   if (sys.history) { renderServerHistory(); loadServerHistory(); loadWatchdog(); }
   loadPeers();
+  loadTech();
 }
 
 /* ---------- a channel ---------- */

@@ -69,6 +69,7 @@
 #include "watchdog.h"
 #include "disk.h"
 #include "peer.h"
+#include "tech.h"
 
 #include <stdarg.h>
 
@@ -238,6 +239,9 @@ struct super {
     char peer_key[128];
     struct peer_conf peers[PEERS_MAX];
     int n_peers;
+
+    /* the technician (tech.h) */
+    struct tech_conf tech;
 };
 
 static volatile sig_atomic_t g_stop, g_hup;
@@ -353,20 +357,23 @@ static void make_password(char *out, size_t len)
 
 static void save_system_config(struct super *s)
 {
-    char text[16384], q[8][600], err[200];
+    char text[16384], q[10][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
              "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
              "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s,\n"
-             "  \"name\": %s,\n  \"peer_key\": %s\n}\n",
+             "  \"name\": %s,\n  \"peer_key\": %s,\n"
+             "  \"technician\": {\"enabled\": %s, \"gpu\": %s, \"threads\": %d, \"model\": %s}\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
              json_quote(s->channels_dir, q[1], sizeof(q[1])),
              json_quote(s->run_dir, q[2], sizeof(q[2])),
              json_quote(s->password, q[3], sizeof(q[3])),
              json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb,
              json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false",
-             json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])));
+             json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])),
+             s->tech.enabled ? "true" : "false", json_quote(s->tech.gpu, q[8], sizeof(q[8])), s->tech.threads,
+             json_quote(s->tech.model, q[9], sizeof(q[9])));
     {
         /* the peers, before the closing brace */
         size_t n = strlen(text);
@@ -425,6 +432,18 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         snprintf(s->name, sizeof(s->name), "caricoder3");
     s->peer_key[0] = 0;
     s->n_peers = 0;
+    memset(&s->tech, 0, sizeof(s->tech));
+    s->tech.enabled = true;
+    snprintf(s->tech.server, sizeof(s->tech.server), "/usr/local/bin/caricoder3-llama-server");
+    snprintf(s->tech.model, sizeof(s->tech.model), "/var/lib/caricoder3/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf");
+    snprintf(s->tech.knowledge[0], sizeof(s->tech.knowledge[0]), "/usr/local/share/caricoder3/knowledge");
+    snprintf(s->tech.knowledge[1], sizeof(s->tech.knowledge[1]), "/etc/caricoder3/knowledge");
+    snprintf(s->tech.gpu, sizeof(s->tech.gpu), "auto");
+    s->tech.threads = 8;
+    s->tech.ctx = 16384;
+    s->tech.idle_s = 600;
+    s->tech.delay_s = 45;
+    s->tech.port = 8551;
     if (!text) {
         if (errno != ENOENT) {
             snprintf(err, errlen, "%.200s: %s", s->config_path, strerror(errno));
@@ -449,8 +468,30 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
              json_get_str(&doc, root, "evidence", "/var/lib/caricoder3/evidence"));
     s->evidence_max_mb = (int)json_get_num(&doc, root, "evidence_max_mb", 4096);
     s->evidence_auto = json_get_bool(&doc, root, "evidence_auto", true);
-    snprintf(s->name, sizeof(s->name), "%s", json_get_str(&doc, root, "name", s->name));
+    {
+        const char *nm = json_get_str(&doc, root, "name", "");
+
+        if (*nm)
+            snprintf(s->name, sizeof(s->name), "%s", nm);
+    }
     snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(&doc, root, "peer_key", ""));
+    {
+        int t = json_get(&doc, root, "technician");
+
+        if (t >= 0) {
+            s->tech.enabled = json_get_bool(&doc, t, "enabled", s->tech.enabled);
+            snprintf(s->tech.server, sizeof(s->tech.server), "%s", json_get_str(&doc, t, "server", s->tech.server));
+            snprintf(s->tech.model, sizeof(s->tech.model), "%s", json_get_str(&doc, t, "model", s->tech.model));
+            snprintf(s->tech.gpu, sizeof(s->tech.gpu), "%s", json_get_str(&doc, t, "gpu", s->tech.gpu));
+            s->tech.threads = (int)json_get_num(&doc, t, "threads", s->tech.threads);
+            s->tech.ctx = (int)json_get_num(&doc, t, "context", s->tech.ctx);
+            s->tech.idle_s = (int)json_get_num(&doc, t, "idle_s", s->tech.idle_s);
+            s->tech.delay_s = (int)json_get_num(&doc, t, "delay_s", s->tech.delay_s);
+            s->tech.port = (int)json_get_num(&doc, t, "port", s->tech.port);
+            snprintf(s->tech.knowledge[1], sizeof(s->tech.knowledge[1]), "%s",
+                     json_get_str(&doc, t, "knowledge", s->tech.knowledge[1]));
+        }
+    }
     {
         int a = json_get(&doc, root, "peers");
 
@@ -2072,6 +2113,8 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
     int program = 0;
     int64_t t = time(NULL);
 
+    /* the technician looks at it once the evidence is in */
+    tech_queue(id, false);
     if (!evidence_on(s) || !s->evidence_auto)
         return;
     switch (r) {
@@ -3292,6 +3335,58 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             return;
         }
     }
+    if (!strcmp(p, "/api/technician/prompt")) {
+        /* ?incident=ID: what the model is given about it */
+        char v[32], *out = NULL;
+        size_t len = 0;
+        FILE *f = open_memstream(&out, &len);
+        bool ok;
+
+        if (!f)
+            return;
+        ok = query_param(req->query, "incident", v, sizeof(v)) && tech_prompt(f, strtoll(v, NULL, 10));
+        fclose(f);
+        if (!ok) {
+            free(out);
+            api_error(resp, 404, "no such incident");
+            return;
+        }
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/technician") || !strcmp(p, "/api/technician/diagnose")) {
+        /* GET: how it is; POST /diagnose {"incident": ID}: look at that one now */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+
+        if (!strcmp(p, "/api/technician/diagnose")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
+            int64_t id = root >= 0 ? (int64_t)json_get_num(doc, root, "incident", 0) : 0;
+
+            free(doc);
+            if (strcmp(req->method, "POST") || id <= 0) {
+                api_error(resp, 400, "POST {\"incident\": ID}");
+                return;
+            }
+            tech_queue(id, true);
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        tech_state_json(f);
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
     if (!strcmp(p, "/api/peers")) {
         /* GET: this server's name, the peers and how they are, the conversation; PUT {"name", "key", "peers"} */
         char *out = NULL;
@@ -4036,6 +4131,8 @@ int super_main(int argc, char **argv)
     wd_set_snapshot(wd_snapshot, &s);
     wd_set_on_open(on_incident, &s);
     peers_apply(&s);
+    snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
+    tech_set(&s.tech);
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);
@@ -4082,6 +4179,8 @@ int super_main(int argc, char **argv)
     pthread_mutex_unlock(&s.lock);
     http_stop(s.http);
     ev(NULL, "info", "server", "supervisor stopped");
+    tech_stop();
+    peer_stop();
     history_close();
     sysstat_stop();
     for (int i = 0; i < s.n; i++)

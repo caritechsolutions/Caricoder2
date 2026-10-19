@@ -408,6 +408,23 @@ void sysstat_json(FILE *f)
     fprintf(f, "]}");
 }
 
+int sysstat_gpu_free(int *index, int *free_mb, int *busy_pct, int max)
+{
+    int n = 0;
+
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < cur.n_gpus && n < max; i++) {
+        const struct gpu *g = &cur.gpus[i];
+
+        index[n] = g->index;
+        free_mb[n] = g->mem_total > 0 && g->mem_used >= 0 ? g->mem_total - g->mem_used : -1;
+        busy_pct[n] = g->util;
+        n++;
+    }
+    pthread_mutex_unlock(&lock);
+    return n;
+}
+
 double sysstat_cpu_percent(void)
 {
     double v;

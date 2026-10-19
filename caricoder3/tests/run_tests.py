@@ -3106,6 +3106,72 @@ def supervisor_peers():
 
 
 @test
+def supervisor_technician():
+    """The technician: an incident opens, the model server is started for it, and the answer (JSON to the schema) is kept on the incident and said in the conversation. Needs CC3_LLAMA_SERVER and CC3_TEST_MODEL (any small GGUF)."""
+    import base64
+    import urllib.request
+    import urllib.error
+    server, model = os.environ.get("CC3_LLAMA_SERVER"), os.environ.get("CC3_TEST_MODEL")
+    if not (server and model and os.path.exists(server) and os.path.exists(model)):
+        return "SKIPPED: set CC3_LLAMA_SERVER and CC3_TEST_MODEL to run it"
+    root = w("super_tech")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin = _port[0] + 1, _port[0] + 2
+    _port[0] += 3
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1",
+               "history": os.path.join(root, "history.db"), "evidence": os.path.join(root, "evidence"),
+               "technician": {"enabled": True, "server": server, "model": model, "gpu": "cpu", "threads": 2,
+                              "context": 16384, "delay_s": 1, "port": port + 7, "knowledge": os.path.join(ROOT, "knowledge")},
+               "watchdog": {"min_s": 4, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
+              open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    diag, st = None, None
+    try:
+        time.sleep(0.7)
+        code, j = api("/api/channels/t1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "enabled": True})
+        need(code == 200, f"create: {code}")
+        p = Player("127.0.0.1", pin)
+        p.play(synth("live_src", duration=10.0), stop_after=3)        # then nothing: no input
+        for _ in range(120):
+            time.sleep(1)
+            code, j = api("/api/incidents?channel=t1")
+            got = [x for x in (j or {}).get("incidents", []) if x.get("diagnosis")]
+            if got:
+                diag = got[0]
+                break
+        code, st = api("/api/technician")
+        need(diag, f"no diagnosis; technician: {st}")
+        d = diag["diagnosis"]
+        need(set(d) >= {"cause", "category", "confidence", "explanation", "next_checks", "ticket"}, f"diagnosis: {d}")
+        need(d["category"] in ("source_provider", "source_ird", "satellite_signal", "network", "transcoder",
+                               "normal_content", "unknown"), f"category: {d['category']}")
+        code, pj = api("/api/peers")
+        need(any(m["peer"] == "technician" for m in pj["messages"]), "the conversation has no line from the technician")
+        need(st["done"] >= 1 and st["where"] == "cpu", f"state: {st}")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"answered in {st['last_seconds']:.0f} s on the {st['where']}: category {diag['diagnosis']['category']} (the test model is random: the form is what is tested)"
+
+
+@test
 def supervisor_shared_input():
     """Channels on one input share a reader: the input is read once, each channel gets its program; the reader follows them."""
     import base64

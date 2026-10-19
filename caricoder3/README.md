@@ -421,6 +421,7 @@ The API (basic auth, JSON in and out):
 | `GET /api/incidents/ID` | one, with the channels' incidents that belong to it and the events from a minute before to a minute after |
 | `POST /api/tools/record`, `/probe`, `/ping`, `/snapshot` | `{"channel", "url", "host", "seconds", "incident"}`: gather evidence (see Evidence); `GET /api/tools`: what is running |
 | `GET /api/evidence?channel=&incident=&limit=` | what the tools found or kept, newest first; `GET /api/evidence/ID/file`: the recording or picture |
+| `GET /api/technician`, `POST /api/technician/diagnose` | how the technician is; `{"incident": ID}`: look at it now; `GET /api/technician/prompt?incident=ID`: what it is given |
 | `GET /api/peers`, `PUT /api/peers` | `{"name", "key", "peers": [{"name", "url"}]}`: this server's name, the shared key, the other transcoders; GET also how each is and the conversation |
 | `GET /api/peer/hello`, `POST /api/peer/check`, `GET /api/peer/incidents` | what a peer may ask, with `Authorization: CC3-Peer <key>`: how it is; "can you see this source?" (`{"url", "program", "seconds", "from", "why"}`); its open incidents |
 | `GET /api/watchdog`, `PUT /api/watchdog` | the watchdog's limits and rules (PUT: any of them, kept in the config), and what it is watching now |
@@ -520,7 +521,37 @@ switch port); if none does, it is upstream (the IRD, the dish, the
 satellite). The answer is evidence on the incident ("transcoder1: I see
 it here: 38.2 Mb/s, 30 services, in 3 s."), and every question and
 answer is a line of the conversation on the Peers card. "Ask the other
-transcoders" on an incident or a channel asks by hand. Built without
+transcoders" on an incident or a channel asks by hand.
+
+### The technician
+
+A language model on each transcoder, offline, says what it thinks caused
+each incident. It is Qwen2.5 7B Instruct (Q4_K_M, 4.7 GB) run by
+llama.cpp's server, which the installer builds and downloads once, in
+the background (`/var/log/caricoder3-technician-setup.log`;
+`--no-technician` leaves it out; `scripts/technician-setup.sh` runs it
+by hand). The server is started when there is something to look at and
+stopped after ten idle minutes: on an NVIDIA card with 7 GB free (when
+llama.cpp was built with CUDA, which needs the CUDA compiler, `nvcc`, on
+the machine at install), otherwise on the CPU at the lowest priority
+with 8 threads.
+
+About a minute after an incident opens (once the evidence is in) it is
+given: its notes (`knowledge/*.md` as installed in
+`/usr/local/share/caricoder3/knowledge`, then the site's own in
+`/etc/caricoder3/knowledge`: write there what you know about each IRD,
+provider and usual fault), the incident with its members, evidence and
+events, and earlier incidents like it with what it said and what a
+person said. It answers in a fixed form: the cause, a category (the
+provider's feed, an IRD, the satellite signal, the network, this
+transcoder, nothing wrong, not known), how sure, why, what to check
+next, and a ticket for the provider when one is due. The answer is on
+the incident ("The technician's view", "ask again" for another look)
+and a line in the conversation. A source's incident is looked at, not
+each of its channels'. `GET /api/technician/prompt?incident=ID` shows
+exactly what it was given. Settings: `"technician"` in the config
+(`enabled`, `gpu`: "auto", "cpu" or a card's number, `threads`,
+`model`, `server`, `context`, `delay_s`, `idle_s`, `knowledge`). Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

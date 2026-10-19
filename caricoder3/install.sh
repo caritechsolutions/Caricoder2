@@ -13,6 +13,7 @@
 #   ... | sudo bash -s -- --test             also run the self-tests
 #   ... | sudo bash -s -- --branch main      install from another branch
 #   ... | sudo bash -s -- --no-codecs        build the plain remultiplexer only
+#   ... | sudo bash -s -- --no-technician    leave the AI technician out (no model download)
 #
 # What it does, in this order:
 #   1. installs gcc and make if they are missing (apt)
@@ -44,6 +45,7 @@ FDK_VERSION="2.0.3"
 FDK_URL="${CARICODER3_FDK_URL:-https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v$FDK_VERSION}"
 RUN_TESTS=0
 WITH_CODECS=1
+WITH_TECHNICIAN=1
 WORK=""
 
 # package : what it is for
@@ -195,11 +197,46 @@ install_fdk_aac() {
     note "fdk-aac $FDK_VERSION built into $LIBS_DIR"
 }
 
+# The technician's notes (shipped: replaced on each install; the site's
+# own in /etc/caricoder3/knowledge: never touched), and in the background
+# llama.cpp's server and the model (scripts/technician-setup.sh).
+install_technician() {
+    install -d "$PREFIX/share/caricoder3/knowledge" /etc/caricoder3/knowledge
+    rm -f "$PREFIX/share/caricoder3/knowledge/"*.md
+    install -m 644 "$SRC_DIR/knowledge/"*.md "$PREFIX/share/caricoder3/knowledge/"
+    note "notes   $PREFIX/share/caricoder3/knowledge (yours go in /etc/caricoder3/knowledge)"
+    if [ ! -e /etc/caricoder3/knowledge/README.md ]; then
+        cat > /etc/caricoder3/knowledge/README.md <<'NOTES'
+# Notes for the technician (this site's own)
+
+Every .md file here is given to the technician with each incident, after
+the notes that come with caricoder3. Write what you know about this site:
+each IRD and what it carries, which provider runs which channel and how
+to reach them, what usually goes wrong and what fixed it. Plain sentences,
+one fact to a line. The installer never changes this folder.
+NOTES
+    fi
+    local mark=/var/lib/caricoder3/technician-setup.running
+    if [ -f "$mark" ] && kill -0 "$(cat "$mark" 2>/dev/null)" 2>/dev/null; then
+        note "the model server and model are still being set up (/var/log/caricoder3-technician-setup.log)"
+        return 0
+    fi
+    if [ -x "$PREFIX/bin/caricoder3-llama-server" ] && [ -f /var/lib/caricoder3/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ] &&
+       grep -q "^b11200 " "$LIBS_DIR/llama-server.version" 2>/dev/null; then
+        note "model server and model are installed"
+        return 0
+    fi
+    setsid nohup bash "$SRC_DIR/scripts/technician-setup.sh" >>/var/log/caricoder3-technician-setup.log 2>&1 </dev/null &
+    note "the model server is being built and the model (4.7 GB) downloaded, in the background:"
+    note "  tail -f /var/log/caricoder3-technician-setup.log   (the Server page shows it too)"
+}
+
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --test)    RUN_TESTS=1 ;;
             --no-codecs) WITH_CODECS=0 ;;
+            --no-technician) WITH_TECHNICIAN=0 ;;
             --branch)  [ $# -ge 2 ] || die "--branch needs a name"
                        BRANCH="$2"; shift ;;
             -h|--help) usage; exit 0 ;;
@@ -326,6 +363,11 @@ main() {
         if [ -f /etc/caricoder3/caricoder3.json ]; then
             note "GUI: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$("$PREFIX/bin/caricoder3" serve --show-port 2>/dev/null || echo 8550)/  user admin, password: caricoder3 serve --show-password"
         fi
+    fi
+
+    if [ "$WITH_TECHNICIAN" -eq 1 ]; then
+        say "Technician"
+        install_technician
     fi
 
     say "Done: $("$PREFIX/bin/caricoder3" --version)"

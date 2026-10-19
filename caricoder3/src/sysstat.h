@@ -20,6 +20,9 @@ void sysstat_json(FILE *f);
  * net.IF.rx_mbps/tx_mbps, and net.IF.rx_drop/rx_err as increments since
  * the previous call. Nothing before the first sample. */
 double sysstat_cpu_percent(void);        /* -1: not sampled yet */
+/* The cards as last seen by nvidia-smi: index, memory free (MB, -1
+ * unknown) and how busy (%); returns how many. */
+int sysstat_gpu_free(int *index, int *free_mb, int *busy_pct, int max);
 void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op);
 
 #endif

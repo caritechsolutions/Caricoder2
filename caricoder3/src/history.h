@@ -75,6 +75,14 @@ bool history_query_evidence(FILE *f, const char *chan, int64_t incident, int lim
 void history_message(int64_t t, const char *peer, const char *dir, const char *text, const char *data,
                      int64_t incident);
 bool history_query_messages(FILE *f, int64_t incident, int limit);
+/* The technician's answer about incident `id` (a JSON object). */
+void history_incident_diagnosis(int64_t id, int64_t t, const char *json);
+/* As history_query_incident, briefer: the members without their snapshot,
+ * at most 80 events (what the technician is given). */
+bool history_report_incident(FILE *f, int64_t id, int64_t now);
+/* Up to `limit` earlier incidents like `id` (the same rule on the same
+ * channel or source), those a person gave a verdict on first: a JSON array. */
+bool history_similar(FILE *f, int64_t id, int limit);
 /* The file kept with evidence `id`. */
 bool history_evidence_file(int64_t id, char *path, size_t len);
 /* {"incident": ..., "members": [...], "evidence": [...], "events": [...]} */
