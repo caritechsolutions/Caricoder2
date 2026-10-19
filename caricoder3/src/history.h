@@ -43,6 +43,11 @@ void history_event(int64_t t, const char *chan, const char *level, const char *k
  * are made again from `since` on, next time the writer looks. */
 void history_resummarise(int64_t since);
 
+/* The disk is nearly full: keep the record to `bytes` for now (the oldest
+ * goes, as for the cap); 0: back to the configured cap. */
+void history_squeeze(int64_t bytes);
+int64_t history_bytes(void);
+
 /* JSON for the API. `chan` NULL: the server's metrics (`metric` a name or a
  * prefix ending in '*'). Resolution is chosen from the span. */
 bool history_query_chan(FILE *f, const char *chan, int64_t from, int64_t to);

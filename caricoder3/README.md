@@ -461,7 +461,23 @@ Server page (Watchdog, "Change") or in the config's `"watchdog"` object
 `dropped_per_min`, `restarts`, `restart_window_s`, `cpu_pct`, `gpu_pct`,
 `load_s`, `off`: rule ids). The Channels page lists the last 24 hours'
 incidents, each channel's History card its own; a click shows one in
-full. Nothing is sent anywhere yet. Built without
+full. Nothing is sent anywhere yet.
+
+### Disks
+
+Every 10 s the supervisor looks at each filesystem that holds something
+of its own (the history, the run and channel folders, the system log)
+or that an output writes to (`hls://?dir=`, `file://`), each once, and
+records its free space in the history; how fast it fills is worked out
+over the last hour. The Server page's Disks card shows them, with what
+is kept where and how big it is. Below 15% free is "disk space low",
+below 5% "disk nearly full" (an error), and full within 24 hours at the
+last hour's rate "disk filling up": incidents like the others (limits
+under Watchdog). When the history's own disk is nearly full the history
+gives up its oldest records, a quarter every ten minutes, until the
+disk is over the low mark again; then its cap is as set. Nothing that
+is not caricoder3's own is ever deleted: recordings and other files are
+only reported. Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

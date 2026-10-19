@@ -33,6 +33,9 @@ static const struct {
     [WD_CPU]         = { "cpu", "CPU busy", "warn", false },
     [WD_GPU]         = { "gpu", "video engine busy", "warn", false },
     [WD_NIC_DROP]    = { "nic_drop", "network card dropping packets", "warn", false },
+    [WD_DISK_LOW]    = { "disk_low", "disk space low", "warn", false },
+    [WD_DISK_CRITICAL] = { "disk_critical", "disk nearly full", "error", false },
+    [WD_DISK_FILLING] = { "disk_filling", "disk filling up", "warn", false },
 };
 
 #define ENTRIES_MAX 2048
@@ -86,6 +89,9 @@ void wd_defaults(struct wd_limits *l)
     l->cpu_pct = 90;
     l->gpu_pct = 90;
     l->load_s = 120;
+    l->disk_warn_pct = 15;
+    l->disk_crit_pct = 5;
+    l->disk_full_h = 24;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -107,7 +113,7 @@ int wd_rule_by_id(const char *id)
 }
 
 #define LIMIT_FIELDS(X) X(min_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
-    X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s)
+    X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {

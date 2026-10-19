@@ -66,6 +66,8 @@ bool history_query_incident(FILE *f, int64_t id, int64_t now)
     return false;
 }
 void history_resummarise(int64_t since) { (void)since; }
+void history_squeeze(int64_t bytes) { (void)bytes; }
+int64_t history_bytes(void) { return 0; }
 
 #else
 
@@ -113,6 +115,7 @@ static struct {
     char met_names[NAMES_MAX][96];
     int met_ids[NAMES_MAX], n_met;
     int64_t next_incident;
+    int64_t cap_cfg;                /* as configured; cap is lower while squeezed */
 } H = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
 static const char *const SCHEMA =
@@ -561,7 +564,7 @@ bool history_open(const char *path, int max_mb, char *err, size_t errlen)
         *slash = 0;
         mkdir(dir, 0755);
     }
-    H.cap = (int64_t)(max_mb > 16 ? max_mb : 16) * 1048576;
+    H.cap = H.cap_cfg = (int64_t)(max_mb > 16 ? max_mb : 16) * 1048576;
     if (sqlite3_open_v2(path, &H.db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL)
         != SQLITE_OK) {
         snprintf(err, errlen, "%s: %s", path, H.db ? sqlite3_errmsg(H.db) : "cannot open");
@@ -625,6 +628,19 @@ void history_close(void)
     pthread_mutex_unlock(&H.lock);
     sqlite3_close(H.db);
     H.db = NULL;
+}
+
+void history_squeeze(int64_t bytes)
+{
+    pthread_mutex_lock(&H.lock);
+    H.cap = bytes > 0 && bytes < H.cap_cfg ? (bytes > 4 * 1048576 ? bytes : 4 * 1048576) : H.cap_cfg;
+    pthread_cond_signal(&H.cond);
+    pthread_mutex_unlock(&H.lock);
+}
+
+int64_t history_bytes(void)
+{
+    return H.on ? db_bytes() : 0;
 }
 
 void history_resummarise(int64_t since)

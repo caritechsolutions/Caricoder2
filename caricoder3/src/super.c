@@ -67,6 +67,7 @@
 #include "sysstat.h"
 #include "history.h"
 #include "watchdog.h"
+#include "disk.h"
 
 #include <stdarg.h>
 
@@ -148,6 +149,23 @@ struct chan {
     int64_t wd_died[16];
     int wd_nd;
     char wd_group[512];                     /* its source, for grouping */
+    char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
+    int n_out_dirs;
+};
+
+/* A filesystem's use over the last hour, a sample a minute: how fast it fills. */
+struct disk_track {
+    char mount[128];
+    int64_t t[61];
+    uint64_t used[61];
+    int n, head;
+};
+
+/* A folder of interest and how much is in it (measured now and then). */
+struct disk_path {
+    char path[256];
+    char what[48];
+    int64_t bytes;
 };
 
 /* One reader of an input that several channels take programs from
@@ -180,6 +198,15 @@ struct super {
     int n;
     struct share sh[SHARES_MAX];
     struct http_server *http;
+
+    /* the disks (disk.h), main thread, read by the web under the lock */
+    struct disk_fs disks[DISK_MAX];
+    int n_disks;
+    struct disk_track dtr[DISK_MAX];
+    struct disk_path dpath[32];
+    int n_dpath;
+    int64_t disk_last, du_last, squeeze_last;
+    bool squeezed;
 };
 
 static volatile sig_atomic_t g_stop, g_hup;
@@ -804,6 +831,34 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
     wd_get_limits(&L);
     if (in >= 0)
         snprintf(c->wd_group, sizeof(c->wd_group), "%s", json_get_str(d, in, "url", ""));
+    {
+        /* where its outputs write, for the disk watch */
+        int outs = json_get(d, root, "outputs");
+
+        c->n_out_dirs = 0;
+        for (int j = outs >= 0 ? d->node[outs].first_child : -1; j >= 0 && c->n_out_dirs < 4; j = d->node[j].next) {
+            const char *u = json_get_str(d, j, "url", ""), *p = NULL;
+            char dir[256];
+
+            if (!strncmp(u, "file://", 7)) {
+                snprintf(dir, sizeof(dir), "%s", u + 7);
+                char *sl = strrchr(dir, '/');
+
+                if (sl && sl != dir)
+                    *sl = 0;
+                p = dir;
+            } else if (!strncmp(u, "hls://", 6) && (p = strstr(u, "dir="))) {
+                size_t n = strcspn(p + 4, "&");
+
+                snprintf(dir, sizeof(dir), "%.*s", (int)(n < sizeof(dir) ? n : sizeof(dir) - 1), p + 4);
+                p = dir;
+            } else {
+                p = NULL;
+            }
+            if (p && *p == '/')
+                snprintf(c->out_dirs[c->n_out_dirs++], sizeof(c->out_dirs[0]), "%s", p);
+        }
+    }
     G = c->wd_group;
     /* the counters a minute ago */
     {
@@ -1491,6 +1546,177 @@ static void hist_tick(struct super *s)
     sysstat_metrics(metric_cb, &t);
 }
 
+/* Every 10 s: how full the disks are, the rules about it, and room made
+ * in what is ours when one is nearly full. */
+static void disk_tick(struct super *s)
+{
+    int64_t t = time(NULL);
+    const char *paths[40];
+    char hist_dir[512] = "";
+    int np = 0;
+    struct wd_limits L;
+    bool hist_critical = false, hist_ok = true;
+
+    if (t - s->disk_last < 10)
+        return;
+    s->disk_last = t;
+    wd_get_limits(&L);
+    /* what to look at: ours, and where the outputs write */
+    static struct disk_path old[32];
+    int n_old = s->n_dpath;
+
+    memcpy(old, s->dpath, sizeof(old));
+    s->n_dpath = 0;
+#define DPATH(p_, w_) do { if (s->n_dpath < 32 && (p_)[0]) { snprintf(s->dpath[s->n_dpath].path, sizeof(s->dpath[0].path), "%.255s", p_); \
+        snprintf(s->dpath[s->n_dpath].what, sizeof(s->dpath[0].what), "%s", w_); s->dpath[s->n_dpath].bytes = -1; s->n_dpath++; } } while (0)
+    if (history_enabled()) {
+        char *sl;
+
+        snprintf(hist_dir, sizeof(hist_dir), "%s", s->history_path);
+        if ((sl = strrchr(hist_dir, '/')) && sl != hist_dir)
+            *sl = 0;
+        DPATH(s->history_path, "history");
+    }
+    DPATH(s->run_dir, "run folder");
+    if (access("/var/log/journal", F_OK) == 0)
+        DPATH("/var/log/journal", "system log (journald)");
+    DPATH(s->channels_dir, "channel settings");
+    for (int i = 0; i < s->n; i++)
+        for (int k = 0; k < s->ch[i].n_out_dirs; k++) {
+            bool dup = false;
+
+            for (int j = 0; j < s->n_dpath; j++)
+                dup |= !strcmp(s->dpath[j].path, s->ch[i].out_dirs[k]);
+            if (!dup)
+                DPATH(s->ch[i].out_dirs[k], "output folder");
+        }
+#undef DPATH
+    for (int j = 0; j < s->n_dpath; j++) {
+        paths[np++] = s->dpath[j].path;
+        for (int k = 0; k < n_old; k++)
+            if (!strcmp(old[k].path, s->dpath[j].path))
+                s->dpath[j].bytes = old[k].bytes;   /* measured once a minute: kept between */
+    }
+    s->n_disks = disk_list(paths, np, s->disks, DISK_MAX);
+    /* sizes of the folders, now and then (a walk) */
+    if (t - s->du_last >= 60) {
+        s->du_last = t;
+        for (int j = 0; j < s->n_dpath; j++)
+            s->dpath[j].bytes = !strcmp(s->dpath[j].what, "history") ? history_bytes()
+                                                                      : disk_du(s->dpath[j].path, 20000);
+    }
+    for (int k = 0; k < s->n_disks; k++) {
+        struct disk_fs *fs = &s->disks[k];
+        struct disk_track *tr = NULL;
+        double free_pct = fs->total ? 100.0 * (double)fs->avail / (double)fs->total : 100;
+        uint64_t used = fs->total - fs->avail;
+        char subj[160], what[220], name[96];
+        double growth = 0, full_h = -1;
+
+        for (int i = 0; i < DISK_MAX && !tr; i++)
+            if (!strcmp(s->dtr[i].mount, fs->mount))
+                tr = &s->dtr[i];
+        for (int i = 0; i < DISK_MAX && !tr; i++)
+            if (!s->dtr[i].mount[0]) {
+                tr = &s->dtr[i];
+                snprintf(tr->mount, sizeof(tr->mount), "%s", fs->mount);
+            }
+        if (tr) {
+            int last = (tr->head + tr->n - 1 + 61) % 61;
+
+            if (!tr->n || t - tr->t[last] >= 60) {
+                int idx = (tr->head + tr->n) % 61;
+
+                if (tr->n == 61)
+                    tr->head = (tr->head + 1) % 61;
+                else
+                    tr->n++;
+                tr->t[idx] = t;
+                tr->used[idx] = used;
+            }
+            if (tr->n > 1 && t - tr->t[tr->head] >= 600) {
+                growth = ((double)used - (double)tr->used[tr->head]) / ((double)(t - tr->t[tr->head]) / 3600.0);
+                if (growth > 0)
+                    full_h = (double)fs->avail / growth;
+            }
+        }
+        snprintf(subj, sizeof(subj), "server/disk:%s", fs->mount);
+        snprintf(name, sizeof(name), "%s", fs->mount);
+        snprintf(what, sizeof(what), "disk %s: %.1f%% free (%.1f GB of %.1f GB)", name, free_pct,
+                 (double)fs->avail / 1e9, (double)fs->total / 1e9);
+        wd_observe(t, subj, NULL, "", WD_DISK_CRITICAL, free_pct < L.disk_crit_pct, what, 0);
+        wd_observe(t, subj, NULL, "", WD_DISK_LOW, free_pct < L.disk_warn_pct && free_pct >= L.disk_crit_pct, what, 0);
+        snprintf(what, sizeof(what), "disk %s filling: %.1f GB an hour, full in about %.0f h", name, growth / 1e9,
+                 full_h);
+        wd_observe(t, subj, NULL, "", WD_DISK_FILLING, full_h >= 0 && full_h < L.disk_full_h, what, 0);
+        if (history_enabled()) {
+            char m[200];
+
+            snprintf(m, sizeof(m), "disk.%s.free_pct", fs->mount);
+            history_metric(t / 10 * 10, m, free_pct);
+        }
+        for (int i = 0; i < fs->n_paths; i++)
+            if (!strcmp(fs->paths[i], s->history_path)) {
+                hist_critical = free_pct < L.disk_crit_pct;
+                hist_ok = free_pct >= L.disk_warn_pct;
+            }
+    }
+    /* the history's disk nearly full: it gives up its oldest records, a
+     * quarter at a time, every ten minutes while it lasts */
+    if (hist_critical && t - s->squeeze_last >= 600) {
+        int64_t b = history_bytes();
+
+        s->squeeze_last = t;
+        s->squeezed = true;
+        history_squeeze(b * 3 / 4);
+        ev(NULL, "warn", "disk", "the history's disk is nearly full: the oldest records go (%.0f MB to %.0f MB)",
+           (double)b / 1048576, (double)b * 3 / 4 / 1048576);
+    } else if (s->squeezed && hist_ok) {
+        s->squeezed = false;
+        history_squeeze(0);
+        ev(NULL, "info", "disk", "the history's disk has room again: its cap is as set");
+    }
+}
+
+static void disks_json(const struct super *s, FILE *f)
+{
+    fputc('[', f);
+    for (int k = 0; k < s->n_disks; k++) {
+        const struct disk_fs *fs = &s->disks[k];
+        const struct disk_track *tr = NULL;
+        char q[300];
+        double growth = 0;
+        int n = 0;
+
+        for (int i = 0; i < DISK_MAX && !tr; i++)
+            if (!strcmp(s->dtr[i].mount, fs->mount))
+                tr = &s->dtr[i];
+        if (tr && tr->n > 1) {
+            int last = (tr->head + tr->n - 1) % 61;
+            int64_t span = tr->t[last] - tr->t[tr->head];
+
+            if (span >= 600)
+                growth = ((double)tr->used[last] - (double)tr->used[tr->head]) / ((double)span / 3600.0);
+        }
+        fprintf(f, "%s{\"mount\": %s", k ? ", " : "", json_quote(fs->mount, q, sizeof(q)));
+        fprintf(f, ", \"device\": %s", json_quote(fs->dev, q, sizeof(q)));
+        fprintf(f, ", \"type\": %s, \"total\": %llu, \"avail\": %llu, \"used_pct\": %.1f, \"growth_per_h\": %.0f",
+                json_quote(fs->fstype, q, sizeof(q)), (unsigned long long)fs->total, (unsigned long long)fs->avail,
+                fs->used_pct, growth);
+        fprintf(f, ", \"ours\": [");
+        for (int i = 0; i < fs->n_paths; i++)
+            for (int j = 0; j < s->n_dpath; j++)
+                if (!strcmp(s->dpath[j].path, fs->paths[i])) {
+                    fprintf(f, "%s{\"path\": %s", n++ ? ", " : "", json_quote(s->dpath[j].path, q, sizeof(q)));
+                    fprintf(f, ", \"what\": %s, \"bytes\": %lld}", json_quote(s->dpath[j].what, q, sizeof(q)),
+                            (long long)s->dpath[j].bytes);
+                    break;
+                }
+        fprintf(f, "]}");
+    }
+    fprintf(f, "], \"history_squeezed\": %s", s->squeezed ? "true" : "false");
+}
+
 static void tick(struct super *s)
 {
     int64_t now = clock_now_ns();
@@ -1499,6 +1725,7 @@ static void tick(struct super *s)
         chan_share_prepare(s, &s->ch[i]);
     shares_update(s, now);
     hist_tick(s);
+    disk_tick(s);
     {
         static int64_t wd_last;
         int64_t t = time(NULL);
@@ -2164,6 +2391,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         }
         fprintf(f, "], \"history\": ");
         history_info(f);
+        fprintf(f, ", \"disks\": ");
+        disks_json(s, f);
         fprintf(f, ", \"system\": ");
         pthread_mutex_unlock(&s->lock);
         sysstat_json(f);

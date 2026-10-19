@@ -2873,7 +2873,7 @@ def supervisor_incidents():
         time.sleep(1)
         code, j = api("/api/incidents")
         still = [x for x in j["incidents"] if x["closed"] is None and x["rule"] == "no_input"]
-        others = sorted({x["rule"] for x in j["incidents"]} - {"no_input"})
+        others = sorted({x["rule"] for x in j["incidents"] if x["channel"] or x["group"]} - {"no_input"})   # not the server's (this disk may be low)
         need(not others, f"other incidents for an input that stopped: {others}")
         need(not still, f"still open: {[(x['id'], x['channel']) for x in still]}; watching {dbg.get('w')}; i1 input bitrate {dbg.get('c', {}).get('bitrate')} age {dbg.get('c', {}).get('last_packet_age_ms')}")
         lasted = j["incidents"][0]["closed"] - j["incidents"][0]["opened"]
@@ -2889,6 +2889,51 @@ def supervisor_incidents():
         except subprocess.TimeoutExpired:
             sup.kill()
     return f"source incident with both channels in it, closed after the input came back (lasted {lasted} s); limits set and saved"
+
+
+@test
+def supervisor_disks():
+    """The disks: each filesystem once, with what of ours is on it; a disk under the critical limit is an incident and the history makes room."""
+    import base64
+    import urllib.request
+    root = w("super_disk")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 2
+    cfg = os.path.join(root, "caricoder3.json")
+    hist = os.path.join(root, "history.db")
+    # every disk is "nearly full" by these limits
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": hist,
+               "watchdog": {"min_s": 1, "disk_crit_pct": 100}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path):
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth), timeout=10) as r:
+            return json.load(r)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(16)
+        sy = api("/api/system")
+        disks = sy["disks"]
+        mounts = [d["mount"] for d in disks]
+        need("/" in mounts and len(mounts) == len(set(mounts)), f"disks: {mounts}")
+        ours = [o for d in disks for o in d["ours"]]
+        need(any(o["what"] == "history" and o["path"] == hist and o["bytes"] > 0 for o in ours), f"ours: {ours}")
+        need(sy["history_squeezed"], "the history did not make room")
+        inc = api("/api/incidents?open=1")["incidents"]
+        need(any(x["rule"] == "disk_critical" for x in inc), f"incidents: {inc}")
+        ev = api("/api/events?limit=50")["events"]
+        need(any("nearly full" in e["text"] for e in ev), "no event about making room")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"{len(disks)} filesystem(s): {', '.join(mounts)}; 'nearly full' opened an incident and the history made room"
 
 
 @test

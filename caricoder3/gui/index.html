@@ -107,6 +107,7 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gwrap { position:relative } .gtip { display:none; position:absolute; top:6px; pointer-events:none; background:var(--panel); border:1px solid var(--line2); border-radius:8px; padding:7px 10px; font-size:12px; line-height:1.55; min-width:150px; box-shadow:0 4px 16px rgba(0,0,0,.35); z-index:5 }
 .gtip .tt { color:var(--fg2); margin-bottom:2px } .gtip b { font-weight:500; margin-left:auto; padding-left:14px } .gtip div { display:flex; align-items:center; gap:6px } .gtip i { width:10px; height:3px; border-radius:2px; display:inline-block }
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
+.stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
 svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
 svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
 .legend .gin-l i { background:var(--air) } .legend .gout-l i { background:var(--ok) } .legend .gdec-l i { background:var(--acc) } .legend .gg2-l i { background:#c58cf0 } .legend .gg3-l i { background:#6fd3e0 }
@@ -662,10 +663,25 @@ async function loadWatchdog(force) {
   try { wdInfo = await api("/api/watchdog"); } catch(e) { wdInfo = { error: e.message }; }
   if (view.page === "server" && !view.name) renderServer();
 }
+const WD_FIELDS_DISK = [["disk_warn_pct", "Disk space low under (% free)"], ["disk_crit_pct", "Disk nearly full under (% free)"], ["disk_full_h", "Disk filling: full within (hours)"]];
 const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["clear_s", "It is over when gone for (s)"],
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
   ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
+const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
+function disksCard() {
+  const ds = (sys && sys.disks) || [];
+  if (!ds.length) return "";
+  const L = (wdInfo && wdInfo.limits) || { disk_warn_pct: 15, disk_crit_pct: 5 };
+  const rows = ds.map(d => {
+    const free = d.total ? 100 * d.avail / d.total : 100, cls = free < L.disk_crit_pct ? "bad" : free < L.disk_warn_pct ? "warn" : "";
+    const fill = d.growth_per_h > 0 ? `${fmtBytes(d.growth_per_h)} an hour · full in about ${fmtDur(Math.round(3600 * d.avail / d.growth_per_h))}` : d.growth_per_h < 0 ? `${fmtBytes(-d.growth_per_h)} an hour freed` : "steady";
+    const ours = d.ours.map(o => `<div class="sub">${esc(o.what)}: <span class="mono">${esc(o.path)}</span>${o.bytes >= 0 ? ` · ${fmtBytes(o.bytes)}` : ""}${o.what === "history" && sys.history && sys.history.cap_bytes ? ` of ${fmtBytes(sys.history.cap_bytes)} allowed` : ""}</div>`).join("");
+    return `<div class="box"><h4><span class="mono">${esc(d.mount)}</span> · ${esc(d.type)} · ${esc(d.device)}</h4><div class="big ${cls}">${free.toFixed(free < 10 ? 1 : 0)}% <span style="font-size:14px;font-weight:400;color:var(--dim)">free · ${fmtBytes(d.avail)} of ${fmtBytes(d.total)}</span></div>
+      <div class="bar"><i class="${cls}" style="width:${Math.min(100, 100 - free).toFixed(0)}%"></i></div><div class="sub">${fill}</div>${ours}</div>`;
+  }).join("");
+  return `<section class="card"><header><h2>Disks</h2><span class="hint">Where caricoder3 keeps things and where outputs write; low under ${L.disk_warn_pct}% free, critical under ${L.disk_crit_pct}% (then the history gives up its oldest records)${sys.history_squeezed ? ` · <span class="bad">the history is making room now</span>` : ""}</span></header><div class="body"><div class="stat disks">${rows}</div></div></section>`;
+}
 function watchdogCard() {
   if (!sys || !sys.history) return "";
   if (!wdInfo) { loadWatchdog(); return ""; }
@@ -677,7 +693,7 @@ function watchdogCard() {
 }
 function editWatchdog() {
   const d = $("#dlg"), L = wdInfo.limits;
-  d.innerHTML = `<h3>Watchdog rules</h3><div class="f">${WD_FIELDS.map(([k, l]) => `<label>${l}</label><input data-w="${k}" type="number" min="0" value="${L[k]}">`).join("")}</div>
+  d.innerHTML = `<h3>Watchdog rules</h3><div class="f">${WD_FIELDS.concat(WD_FIELDS_DISK).map(([k, l]) => `<label>${l}</label><input data-w="${k}" type="number" min="0" value="${L[k]}">`).join("")}</div>
     <h4 class="sub4">Rules in use</h4><div class="rulechecks">${wdInfo.rules.map(r => `<label><input type="checkbox" data-r="${r.id}" ${r.on ? "checked" : ""}> ${esc(r.name)}</label>`).join("")}</div>
     <div id="w_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="w_go">Save</button></div>`;
   $("#w_go").onclick = async () => {
@@ -711,6 +727,7 @@ function renderServer() {
     </div></div></section>
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     ${watchdogCard()}
+    ${disksCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>
       <table><thead><tr><th>Interface</th><th>State</th><th>Receive</th><th>Transmit</th><th>Packets in / out</th><th>Errors in / out</th><th>Dropped in / out</th></tr></thead><tbody>
       ${ifs.map(i => `<tr><td class="mono">${esc(i.name)}</td><td>${i.up ? "up" : "<span class='bad'>down</span>"}${i.speed_mbps > 0 ? ` · ${i.speed_mbps >= 1000 ? (i.speed_mbps / 1000) + " Gb/s" : i.speed_mbps + " Mb/s"}` : ""}</td><td>${fmtRate(i.rx_bps)}</td><td>${fmtRate(i.tx_bps)}</td><td>${i.rx_packets.toLocaleString()} / ${i.tx_packets.toLocaleString()}</td><td>${i.rx_errors || i.tx_errors ? `<span class="warn">${i.rx_errors} / ${i.tx_errors}</span>` : "0 / 0"}</td><td>${i.rx_dropped || i.tx_dropped ? `<span class="warn">${i.rx_dropped} / ${i.tx_dropped}</span>` : "0 / 0"}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No interfaces reported.</td></tr>`}
