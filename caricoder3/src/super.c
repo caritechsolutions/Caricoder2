@@ -1940,6 +1940,40 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 api_error(resp, 502, "the channel did not answer");
             }
             return;
+        } else if (!strncmp(rest, "outputs/", 8) && !strcmp(req->method, "PUT")) {
+            /* {"url": "..."}: the output with this id, changed in place */
+            struct json_doc *doc = malloc(sizeof(*doc));
+            int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
+            const char *url;
+            char reqline[1400], q2[600], q3[200], *reply;
+            struct chan tmp;
+
+            if (root < 0 || !(url = json_get_str(doc, root, "url", NULL))) {
+                pthread_mutex_unlock(&s->lock);
+                api_error(resp, 400, root < 0 ? err : "needs \"url\"");
+                free(doc);
+                return;
+            }
+            if (c->state != CH_RUNNING) {
+                pthread_mutex_unlock(&s->lock);
+                api_error(resp, 409, "the channel is not running");
+                free(doc);
+                return;
+            }
+            snprintf(reqline, sizeof(reqline), "{\"cmd\": \"replace-output\", \"id\": %s, \"url\": %s}",
+                     json_quote(rest + 8, q3, sizeof(q3)), json_quote(url, q2, sizeof(q2)));
+            free(doc);
+            memset(&tmp, 0, sizeof(tmp));
+            snprintf(tmp.name, sizeof(tmp.name), "%s", c->name);
+            pthread_mutex_unlock(&s->lock);
+            reply = chan_ctl(s, &tmp, reqline);
+            if (reply) {
+                http_resp_text(resp, strstr(reply, "\"ok\": true") ? 200 : 400, "application/json", reply);
+                free(reply);
+            } else {
+                api_error(resp, 502, "the channel did not answer");
+            }
+            return;
         } else if (!strncmp(rest, "outputs/", 8) && !strcmp(req->method, "DELETE")) {
             char reqline[400], q3[200], *reply;
             struct chan tmp;

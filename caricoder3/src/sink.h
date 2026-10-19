@@ -105,6 +105,8 @@ const char *sinks_first_url(struct sinks *s, char *buf, size_t len);
 void sinks_last_id(struct sinks *s, char *buf, size_t len);
 bool sinks_has(struct sinks *s, const char *id);
 bool sinks_is_saved(struct sinks *s, const char *id);
+/* The URL of output `id`; false when there is none. */
+bool sinks_url_of(struct sinks *s, const char *id, char *buf, size_t len);
 /* Finds a saved output whose id is not among `keep`; false when none. */
 bool sinks_saved_not_in(struct sinks *s, const char *const *keep, int n_keep,
                         char *id, size_t len);

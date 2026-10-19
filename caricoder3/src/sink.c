@@ -539,3 +539,15 @@ void packer_flush(struct packer *p, packer_fn fn, void *ctx)
         p->fill = 0;
     }
 }
+
+bool sinks_url_of(struct sinks *s, const char *id, char *buf, size_t len)
+{
+    struct sink *k;
+
+    pthread_mutex_lock(&s->lock);
+    k = find(s, id);
+    if (k)
+        snprintf(buf, len, "%s", k->url);
+    pthread_mutex_unlock(&s->lock);
+    return k != NULL;
+}

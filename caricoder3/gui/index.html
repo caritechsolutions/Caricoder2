@@ -553,26 +553,52 @@ function outputsHtml(c) {
   const rows = outs.map(o => `<tr><td><span class="tag">${esc(o.type||o.url.split(":")[0])}</span></td><td class="mono">${esc(o.url)}</td><td>${esc(o.state||"")}</td>
       <td style="color:var(--fg2)">${o.packets!=null ? `${o.packets.toLocaleString()} pkts${o.errors?` · <span class="warn">${o.errors} errors</span>`:""}${o.overruns?` · <span class="bad">${o.overruns} overruns</span>`:""}${o.rtt_ms!=null?` · rtt ${o.rtt_ms} ms`:""}${o.retransmitted?` · ${o.retransmitted} resent`:""}${o.reconnects?` · ${o.reconnects} reconnects`:""}` : ""}</td>
       <td class="mono" style="color:var(--dim)">${esc(o.id)}</td>
-      <td style="text-align:right">${running ? `<button class="quiet danger" onclick="delOutput('${esc(o.id)}')">Remove</button>` : ""}</td></tr>`).join("");
+      <td style="text-align:right;white-space:nowrap">${running ? `<button class="quiet" onclick="addOutput('${esc(o.id)}')">Edit</button><button class="quiet danger" onclick="delOutput('${esc(o.id)}')">Remove</button>` : ""}</td></tr>`).join("");
   const hls = outs.find(o => (o.type||"").startsWith("hls") || o.url.startsWith("hls"));
   return `<header><h2>Outputs</h2><span class="hint">Added and removed while the channel runs; the others are not disturbed.</span><div class="sp"></div>
       <button class="primary" onclick="addOutput()" ${running?"":"disabled title='Start the channel first'"}>Add output</button></header>
     <div class="body" style="padding:0 0 4px">${rows ? `<table><thead><tr><th>Type</th><th>Where</th><th>State</th><th>Counters</th><th>Id</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No outputs yet. ${running?"Add one above.":"Start the channel, then add outputs."}</div>`}
     ${hls ? `<div style="padding:10px 16px;color:var(--fg2)">Players open <a href="/hls/${esc(c.name)}/index.m3u8" target="_blank">http://${location.host}/hls/${esc(c.name)}/index.m3u8</a></div>` : ""}</div>`;
 }
-function addOutput() {
+/* An output's URL back into the form: its type, the fields the form has,
+ * and the parameters it has not (kept as they are). */
+function parseOut(url) {
+  const m = /^(udp|rtp|srt|rist|rtmp|hls):\/\/(@?)([^:\/?]*)(?::(\d+))?([^?]*)(?:\?(.*))?$/.exec(url || "");
+  if (!m) return url && !url.includes("://") || /^file:/.test(url || "") ? { type: "file", f: { path: (url || "").replace(/^file:\/\//, "") }, extra: [] } : null;
+  const [, sch, at, host, port, path, query] = m;
+  const q = {}; const order = [];
+  (query || "").split("&").filter(Boolean).forEach(p => { const k = p.split("=")[0]; q[k] = decodeURIComponent(p.slice(k.length + 1)); order.push(k); });
+  let type, f = {}, own = [];
+  if (sch === "udp" || sch === "rtp") { type = sch; f = { host, port, ttl: q.ttl || "8", iface: q.iface || "", loop: q.loop === "0" || q.loop === "false" ? "0" : "1" }; own = ["ttl", "iface", "loop"]; }
+  else if (sch === "srt") { type = host && q.mode !== "listener" ? "srtc" : "srtl"; f = { host, port, latency: q.latency || "120", passphrase: q.passphrase || "", streamid: q.streamid || "" }; own = ["latency", "passphrase", "streamid"]; }
+  else if (sch === "rist") { type = at ? "ristl" : "ristc"; f = { host, port, buffer: q.buffer || "1000", secret: q.secret || "" }; own = ["buffer", "secret", "aes-type"]; }
+  else if (sch === "rtmp") { const parts = path.replace(/^\//, "").split("/"); type = "rtmp"; f = { host, port: port || "1935", app: parts[0] || "live", stream: parts.slice(1).join("/") }; }
+  else if (sch === "hls") { type = "hls"; f = { port: port || "", segment: q.segment || "4", window: q.window || "6", dir: q.dir || "" }; own = ["segment", "window", "dir"]; }
+  return { type, f, extra: order.filter(k => !own.includes(k)).map(k => k + "=" + encodeURIComponent(q[k])) };
+}
+function addOutput(editId) {
   const d = $("#dlg");
+  const cur = editId ? (((current && current.outputs && current.outputs.outputs) || []).find(o => o.id === editId) || {}) : null;
+  const parsed = cur ? parseOut(cur.url) : null;
   const sel = Object.entries(TYPES).map(([k,t]) => `<option value="${k}">${t.label}</option>`).join("");
-  d.innerHTML = `<h3>Add an output</h3><div class="f"><label>Type</label><select id="o_type">${sel}</select><div id="o_fields" style="display:contents"></div>
-    <label>Will be</label><div class="urlprev" id="o_prev"></div></div><div id="o_msg" style="margin-top:10px"></div>
-    <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">Add output</button></div>`;
-  const fields = () => { const t = TYPES[$("#o_type").value]; $("#o_fields").innerHTML = t.fields.map(([k,l,ph,opts]) => opts ? `<label>${l}</label><select data-k="${k}">${opts.map(o => `<option value="${esc(o[0])}" ${o[0]===ph?"selected":""}>${esc(o[1])}</option>`).join("")}</select>` : `<label>${l}</label><input data-k="${k}" value="${esc(ph)}" placeholder="${esc(ph)}">`).join(""); d.querySelectorAll("#o_fields input,#o_fields select").forEach(i => { i.oninput = prev; i.onchange = prev; }); prev(); };
+  d.innerHTML = `<h3>${editId ? `Change output <span class="mono">${esc(editId)}</span>` : "Add an output"}</h3><div class="f"><label>Type</label><select id="o_type">${sel}</select><div id="o_fields" style="display:contents"></div>
+    <label>Will be</label><div class="urlprev" id="o_prev"></div></div>${editId ? `<div class="help" style="margin-top:8px">The output is switched over at once; its receivers see a gap of a few milliseconds.</div>` : ""}<div id="o_msg" style="margin-top:10px"></div>
+    <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">${editId ? "Change output" : "Add output"}</button></div>`;
+  let preset = parsed && TYPES[parsed.type] ? parsed : null;
+  const fields = () => { const t = TYPES[$("#o_type").value]; const pv = preset && preset.type === $("#o_type").value ? preset.f : {};
+    $("#o_fields").innerHTML = t.fields.map(([k,l,ph,opts]) => { const val = pv[k] ?? ph; return opts ? `<label>${l}</label><select data-k="${k}">${opts.map(o => `<option value="${esc(o[0])}" ${o[0]===val?"selected":""}>${esc(o[1])}</option>`).join("")}</select>` : `<label>${l}</label><input data-k="${k}" value="${esc(val)}" placeholder="${esc(ph)}">`; }).join("");
+    d.querySelectorAll("#o_fields input,#o_fields select").forEach(i => { i.oninput = prev; i.onchange = prev; }); prev(); };
   const vals = () => { const f = {}; d.querySelectorAll("[data-k]").forEach(i => f[i.dataset.k] = i.value.trim()); return f; };
-  const prev = () => { $("#o_prev").textContent = TYPES[$("#o_type").value].make(vals()); };
+  const make = () => { let u = TYPES[$("#o_type").value].make(vals()); const ex = preset && preset.type === $("#o_type").value ? preset.extra : []; if (ex.length) u += (u.includes("?") ? "&" : "?") + ex.join("&"); return u; };
+  const prev = () => { $("#o_prev").textContent = make(); };
+  if (preset) $("#o_type").value = preset.type;
   $("#o_type").onchange = fields; fields();
   $("#o_go").onclick = async () => {
-    try { await api(`/api/channels/${encodeURIComponent(view.name)}/outputs`, {method:"POST", body: JSON.stringify({url: TYPES[$("#o_type").value].make(vals())})}); d.close(); schedule(200); }
-    catch(e) { $("#o_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+    try {
+      if (editId) await api(`/api/channels/${encodeURIComponent(view.name)}/outputs/${encodeURIComponent(editId)}`, {method:"PUT", body: JSON.stringify({url: make()})});
+      else await api(`/api/channels/${encodeURIComponent(view.name)}/outputs`, {method:"POST", body: JSON.stringify({url: make()})});
+      d.close(); schedule(200);
+    } catch(e) { $("#o_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };
   d.showModal();
 }

@@ -669,6 +669,43 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
         if (saved && c->opt->config && !config_save(c, err, sizeof(err)))
             log_err("config: %s", err);
         fprintf(f, "{\"ok\": true}");
+    } else if (!strcmp(cmd, "replace-output")) {
+        /* the same id, another URL: out and in at once (the old one put
+         * back if the new one will not open); saved or not as before */
+        const char *id = json_get_str(req, 0, "id", NULL);
+        const char *url = json_get_str(req, 0, "url", NULL);
+        char old_url[SINK_URL_MAX];
+        bool saved;
+
+        if (!id || !url) {
+            reply_error(f, "replace-output needs \"id\" and \"url\"");
+            return;
+        }
+        if (!strstr(url, "://")) {
+            reply_error(f, "a URL with a scheme is expected here (file:///path for a file)");
+            return;
+        }
+        if (!sinks_url_of(&c->sinks, id, old_url, sizeof(old_url))) {
+            reply_error(f, "no output with that id");
+            return;
+        }
+        saved = sinks_is_saved(&c->sinks, id);
+        if (!sinks_remove(&c->sinks, id, err, sizeof(err))) {
+            reply_error(f, err);
+            return;
+        }
+        if (!sinks_add(&c->sinks, id, url, saved, err, sizeof(err))) {
+            char e2[200];
+
+            if (!sinks_add(&c->sinks, id, old_url, saved, e2, sizeof(e2)))
+                log_err("output %s: the old one would not open again either: %s", id, e2);
+            reply_error(f, err);
+            return;
+        }
+        log_info("output %s: now %s (was %s)", id, url, old_url);
+        if (saved && c->opt->config && !config_save(c, err, sizeof(err)))
+            log_err("config: %s", err);
+        fprintf(f, "{\"ok\": true}");
     } else if (!strcmp(cmd, "stats")) {
         pthread_mutex_lock(&c->stats_lock);
         if (c->stats_json) {
@@ -685,7 +722,7 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
         else
             fprintf(f, "{\"ok\": true}");
     } else {
-        reply_error(f, "unknown cmd (list-outputs, add-output, remove-output, stats, reload)");
+        reply_error(f, "unknown cmd (list-outputs, add-output, remove-output, replace-output, stats, reload)");
     }
 }
 

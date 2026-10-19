@@ -407,6 +407,7 @@ The API (basic auth, JSON in and out):
 | `DELETE /api/channels/NAME` | stop it and remove its files |
 | `POST /api/channels/NAME/start`, `/stop`, `/restart` | |
 | `POST /api/channels/NAME/outputs` | `{"url": "...", "id": "...", "save": true}`: add an output (`"save": false` for one that should not survive a restart) |
+| `PUT /api/channels/NAME/outputs/ID` | `{"url": "..."}`: change one in place (out and in at once; a URL that will not open leaves the old one); saved or not as before. The GUI's Edit |
 | `DELETE /api/channels/NAME/outputs/ID` | remove one |
 | `GET /api/channels/NAME/log` | the last lines it wrote |
 | `POST /api/channels/NAME/preview` | `{"drop": [pid, ...]}`: start the preview (or restart it leaving out other streams); answers `{"url": "/hls/NAME.preview/index.m3u8"}` |
