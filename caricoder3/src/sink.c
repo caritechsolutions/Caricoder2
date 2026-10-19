@@ -440,7 +440,7 @@ void sinks_json_saved(struct sinks *s, FILE *f, int indent)
 void sink_list(FILE *f)
 {
     fprintf(f, "Output types:\n");
-    fprintf(f, "  udp        udp://host:port  rtp://host:port  (?ttl= iface= pkt= buf=), or a file\n");
+    fprintf(f, "  udp        udp://host:port  rtp://host:port  (?ttl= iface= pkt= buf= loop=0), or a file\n");
     fprintf(f, "  rtmp       rtmp://host[:1935]/app/stream (?program=N): H.264 + AAC pushed to a server\n");
     fprintf(f, "  hls        hls://[:port][/name] (?segment=4 window=6 dir=PATH keep=20): TS segments and\n"
                "             playlists served over HTTP (and through the supervisor), one variant per program\n");

@@ -5,6 +5,7 @@
 #ifndef CC3_UDP_H
 #define CC3_UDP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 struct udp_addr {
@@ -15,6 +16,7 @@ struct udp_addr {
     int  ttl;           /* 0 = default */
     int  bufsize;       /* socket buffer in bytes, 0 = default */
     int  pkt;           /* TS packets per datagram on output, 1..7 */
+    bool no_loop;       /* output to a group: not delivered back to this machine */
 };
 
 /* udp://[source@]host:port[?iface=..&ttl=..&buf=..&pkt=..&source=..]

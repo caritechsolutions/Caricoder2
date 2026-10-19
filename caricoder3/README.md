@@ -232,7 +232,7 @@ lists what the build has):
 
 | URL | What |
 |---|---|
-| `udp://host:port[?ttl=&iface=&pkt=&buf=]`, `rtp://...` | plain UDP or RTP, unicast or multicast |
+| `udp://host:port[?ttl=&iface=&pkt=&buf=&loop=0]`, `rtp://...` | plain UDP or RTP, unicast or multicast; `loop=0` keeps a multicast output off this machine (Flussonic's `multicast_loop=false`): a receiver here does not get it |
 | a file path | written as fast as it comes |
 | `srt://host:port[?latency=120&passphrase=...&pbkeylen=16&streamid=...]` | SRT caller: connects, and connects again by itself when the link breaks (`reconnects` in the stats; datagrams dropped meanwhile count as `errors`) |
 | `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 8 receivers may call in; each gets every datagram, a slow one loses its own |

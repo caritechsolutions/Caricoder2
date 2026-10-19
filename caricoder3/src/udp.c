@@ -105,6 +105,12 @@ int udp_parse(const char *url, struct udp_addr *a, char *err, size_t errlen)
                 a->bufsize = atoi(eq);
             } else if (!strcmp(q, "pkt")) {
                 a->pkt = atoi(eq);
+            } else if (!strcmp(q, "loop") || !strcmp(q, "multicast_loop")) {
+                if (strcmp(eq, "0") && strcmp(eq, "1") && strcmp(eq, "false") && strcmp(eq, "true")) {
+                    snprintf(err, errlen, "loop must be 0 or 1");
+                    return -1;
+                }
+                a->no_loop = !strcmp(eq, "0") || !strcmp(eq, "false");
             } else {
                 snprintf(err, errlen, "unknown URL option '%s'", q);
                 return -1;
@@ -244,7 +250,7 @@ int udp_open_tx(const struct udp_addr *a, char *err, size_t errlen)
 
     if (IN_MULTICAST(ntohl(dst.s_addr))) {
         unsigned char ttl = (unsigned char)(a->ttl ? a->ttl : DEFAULT_TTL);
-        unsigned char loop = 1;
+        unsigned char loop = a->no_loop ? 0 : 1;
 
         setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
         setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));

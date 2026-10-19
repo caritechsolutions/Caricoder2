@@ -2767,6 +2767,56 @@ def supervisor_shared_input():
 
 
 @test
+def live_udp_multicast_loop():
+    """A multicast UDP output reaches a receiver on this machine; with ?loop=0 it does not (Flussonic's multicast_loop=false)."""
+    import socket
+    import struct
+    import threading
+    src = synth("live_src", duration=3.0)
+    got = {}
+    for opt in ("", "?loop=0"):
+        pin, grp_port = _port[0], _port[0] + 1
+        _port[0] += 2
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rx.bind(("", grp_port))
+        try:
+            rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                          struct.pack("4s4s", socket.inet_aton("239.77.7.7"), socket.inet_aton("0.0.0.0")))
+        except OSError:
+            rx.close()
+            return "SKIPPED: this machine cannot join a multicast group"
+        rx.settimeout(0.2)
+        count = [0]
+        stop = [False]
+
+        def loop_rx():
+            while not stop[0]:
+                try:
+                    rx.recv(2048)
+                    count[0] += 1
+                except OSError:
+                    pass
+        t = threading.Thread(target=loop_rx, daemon=True)
+        t.start()
+        proc = subprocess.Popen([BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://239.77.7.7:{grp_port}{opt}"],
+                                stderr=subprocess.PIPE, text=True)
+        time.sleep(0.3)
+        Player("127.0.0.1", pin).play(src)
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10)
+        stop[0] = True
+        t.join()
+        rx.close()
+        got[opt] = count[0]
+    if got[""] == 0:
+        return "SKIPPED: multicast is not delivered back on this machine at all (no route for it)"
+    need(got["?loop=0"] == 0, f"loop=0 still delivered {got['?loop=0']} datagrams here")
+    return f"{got['']} datagrams received here by default, none with loop=0"
+
+
+@test
 def live_systemd_watchdog():
     """Reports READY and keeps petting the systemd watchdog while healthy."""
     import socket

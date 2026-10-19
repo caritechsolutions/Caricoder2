@@ -525,10 +525,13 @@ function pathParts(c) {
 }
 
 /* ---------- outputs ---------- */
+/* a multicast output is also delivered to this server unless loop=0 (Flussonic's multicast_loop=false) */
+const LOOPF = ["loop", "Also to this server", "1", [["1", "Yes (other programs here may receive it)"], ["0", "No (multicast only to the network)"]]];
+function udpQ(base, f) { const q = []; if (f.ttl && f.ttl !== "8") q.push("ttl=" + f.ttl); if (f.iface) q.push("iface=" + f.iface); if (f.loop === "0") q.push("loop=0"); return base + (q.length ? "?" + q.join("&") : ""); }
 const TYPES = {
-  udp:  {label:"UDP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"],["iface","Interface (optional)",""]],
-         make:f=>`udp://${f.host}:${f.port}${f.ttl&&f.ttl!=="8"?"?ttl="+f.ttl:""}${f.iface?(f.ttl&&f.ttl!=="8"?"&":"?")+"iface="+f.iface:""}`},
-  rtp:  {label:"RTP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"]], make:f=>`rtp://${f.host}:${f.port}${f.ttl&&f.ttl!=="8"?"?ttl="+f.ttl:""}`},
+  udp:  {label:"UDP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"],["iface","Interface (optional)",""],LOOPF],
+         make:f=>udpQ(`udp://${f.host}:${f.port}`, f)},
+  rtp:  {label:"RTP / multicast", fields:[["host","Address","239.1.1.1"],["port","Port","5000"],["ttl","TTL","8"],LOOPF], make:f=>udpQ(`rtp://${f.host}:${f.port}`, f)},
   srtc: {label:"SRT — call a receiver", fields:[["host","Receiver address",""],["port","Port","9000"],["latency","Latency (ms)","120"],["passphrase","Passphrase (optional, 10+ chars)",""],["streamid","Stream id (optional)",""]],
          make:f=>`srt://${f.host}:${f.port}?latency=${f.latency||120}${f.passphrase?"&passphrase="+enc(f.passphrase):""}${f.streamid?"&streamid="+enc(f.streamid):""}`},
   srtl: {label:"SRT — listen for receivers", fields:[["port","Port","9000"],["latency","Latency (ms)","120"],["passphrase","Passphrase (optional, 10+ chars)",""]],
@@ -563,8 +566,8 @@ function addOutput() {
   d.innerHTML = `<h3>Add an output</h3><div class="f"><label>Type</label><select id="o_type">${sel}</select><div id="o_fields" style="display:contents"></div>
     <label>Will be</label><div class="urlprev" id="o_prev"></div></div><div id="o_msg" style="margin-top:10px"></div>
     <div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="o_go">Add output</button></div>`;
-  const fields = () => { const t = TYPES[$("#o_type").value]; $("#o_fields").innerHTML = t.fields.map(([k,l,ph]) => `<label>${l}</label><input data-k="${k}" value="${esc(ph)}" placeholder="${esc(ph)}">`).join(""); d.querySelectorAll("input").forEach(i => i.oninput = prev); prev(); };
-  const vals = () => { const f = {}; d.querySelectorAll("input[data-k]").forEach(i => f[i.dataset.k] = i.value.trim()); return f; };
+  const fields = () => { const t = TYPES[$("#o_type").value]; $("#o_fields").innerHTML = t.fields.map(([k,l,ph,opts]) => opts ? `<label>${l}</label><select data-k="${k}">${opts.map(o => `<option value="${esc(o[0])}" ${o[0]===ph?"selected":""}>${esc(o[1])}</option>`).join("")}</select>` : `<label>${l}</label><input data-k="${k}" value="${esc(ph)}" placeholder="${esc(ph)}">`).join(""); d.querySelectorAll("#o_fields input,#o_fields select").forEach(i => { i.oninput = prev; i.onchange = prev; }); prev(); };
+  const vals = () => { const f = {}; d.querySelectorAll("[data-k]").forEach(i => f[i.dataset.k] = i.value.trim()); return f; };
   const prev = () => { $("#o_prev").textContent = TYPES[$("#o_type").value].make(vals()); };
   $("#o_type").onchange = fields; fields();
   $("#o_go").onclick = async () => {
