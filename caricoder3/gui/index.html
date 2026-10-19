@@ -482,7 +482,7 @@ function renderChanHistory() {
   const sum = i => rows.reduce((a, r) => a + r[i], 0);
   const totals = [["CC errors", sum(5)], ["socket overflows", sum(6)], ["dropped", sum(7)], ["late", sum(8)], ["lost on the link", sum(9)], ["source switches", sum(10)], ["restarts", sum(11)]].filter(x => x[1]);
   const upPct = rows.length ? 100 * sum(13) / (rows.length * histData.step) : 0;
-  el.innerHTML = `<div class="legend"><span class="li"><i></i>In</span><span class="lo"><i></i>Out</span><span><i style="background:var(--bad);width:3px;height:10px"></i>trouble</span><span><i style="background:#2c3640;height:10px"></i>not running</span><span class="hint">running ${upPct.toFixed(upPct > 99.9 || upPct < 1 ? 0 : 1)}% of the time · ${totals.length ? totals.map(x => `${x[1].toLocaleString()} ${x[0]}`).join(" · ") : "no errors"}</span></div>
+  el.innerHTML = `<div class="legend"><span class="li"><i></i>In</span><span class="lo"><i></i>Out</span><span><i style="background:var(--bad);width:3px;height:10px"></i>trouble</span><span><i style="background:#2c3640;height:10px"></i>not running</span><span class="hint">${rows.length ? `recorded since ${fmtWhen(rows[0][0]).slice(0, -3)}, running ${upPct.toFixed(upPct > 99.9 || upPct < 1 ? 0 : 1)}% of that` : "nothing recorded yet"} · ${totals.length ? totals.map(x => `${x[1].toLocaleString()} ${x[0]}`).join(" · ") : "no errors"}</span></div>
     ${timeGraph(ts, [{ v: kb(1), cls: "gin" }, { v: kb(3), cls: "gout" }], histData.from, histData.to, { marks, gaps })}
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
 }
