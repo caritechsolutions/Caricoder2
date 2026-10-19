@@ -12,6 +12,10 @@
  * rate and channels for audio (through libavcodec's parsers, which read
  * headers without decoding). The GUI's "Scan source" and the channel
  * setup use it to choose a program and the streams to keep.
+ *
+ * --save FILE also writes what was received to FILE as plain TS (RTP
+ * taken off): with --program, only that service (PAT, SDT, its PMT, its
+ * streams and PCR); the evidence tools record a source this way.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -73,7 +77,29 @@ struct probe {
     bool pat_seen;
     uint64_t packets, bytes, sync_errors;
     int only_program;
+    FILE *save;
+    uint64_t saved;
 };
+
+/* With --program, a packet worth keeping: the tables, and the program's
+ * PMT, streams and PCR once its PMT is known. */
+static bool keep_pid(const struct probe *p, int pid)
+{
+    if (!p->only_program || pid == 0 || pid == 0x11)
+        return true;
+    for (int i = 0; i < p->n_progs; i++) {
+        const struct program *pr = &p->progs[i];
+
+        if (pr->number != p->only_program)
+            continue;
+        if (pid == pr->pmt_pid || pid == pr->pcr_pid)
+            return true;
+        for (int k = 0; k < pr->n_es; k++)
+            if (pr->es[k].pid == pid)
+                return true;
+    }
+    return false;
+}
 
 static struct pid_stat *ps(struct probe *p, int pid)
 {
@@ -550,8 +576,12 @@ static void feed(struct probe *p, const uint8_t *d, size_t n)
             n -= hdr;
         }
     }
-    for (; n >= TS_SIZE; d += TS_SIZE, n -= TS_SIZE)
+    for (; n >= TS_SIZE; d += TS_SIZE, n -= TS_SIZE) {
         packet(p, d);
+        if (p->save && d[0] == 0x47 && keep_pid(p, ((d[1] & 0x1F) << 8) | d[2]) &&
+            fwrite(d, TS_SIZE, 1, p->save) == 1)
+            p->saved++;
+    }
 }
 
 /* ---- the report ----------------------------------------------------- */
@@ -592,6 +622,8 @@ static void report(struct probe *p, FILE *f, const char *url, double seconds, bo
 
     fprintf(f, "{\n  \"ok\": true,\n  \"url\": ");
     jstr(f, url);
+    if (p->saved)
+        fprintf(f, ",\n  \"saved_packets\": %llu", (unsigned long long)p->saved);
     fprintf(f, ",\n  \"seconds\": %.1f,\n  \"bitrate\": %.0f,\n  \"packets\": %llu,\n  \"sync_errors\": %llu,\n"
                "  \"ts_id\": %u,\n  \"programs\": [",
             span, (double)p->bytes * 8.0 / span, (unsigned long long)p->packets,
@@ -677,10 +709,11 @@ static void report(struct probe *p, FILE *f, const char *url, double seconds, bo
 
 static void usage(FILE *f)
 {
-    fprintf(f, "Usage: caricoder3 probe URL [--seconds N] [--program N]\n"
+    fprintf(f, "Usage: caricoder3 probe URL [--seconds N] [--program N] [--save FILE]\n"
                "  URL       udp://, rtp://, srt://, rist://, http:// as for --input, or a .ts file\n"
                "  --seconds how long to listen (default 3)\n"
                "  --program report this service only\n"
+               "  --save    also write what was received to FILE (TS; with --program, that service)\n"
                "Prints JSON: programs, streams, rates, picture and sound formats.\n");
 }
 
@@ -704,6 +737,7 @@ int probe_main(int argc, char **argv)
     int only = 0;
     char err[256];
     bool live;
+    const char *save = NULL;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
@@ -714,6 +748,8 @@ int probe_main(int argc, char **argv)
             only = atoi(argv[++i]);
         else if (!strncmp(argv[i], "--program=", 10))
             only = atoi(argv[i] + 10);
+        else if (!strcmp(argv[i], "--save") && i + 1 < argc)
+            save = argv[++i];
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(stdout);
             return 0;
@@ -737,6 +773,8 @@ int probe_main(int argc, char **argv)
         return fail("out of memory", NULL);
     p->only_program = only;
     live = input_is_live(url);
+    if (save && !(p->save = fopen(save, "wb")))
+        return fail("--save: %s", strerror(errno));
 
     if (!live) {
         const char *path = !strncmp(url, "file:", 5) ? url + 5 : url;
@@ -823,6 +861,10 @@ int probe_main(int argc, char **argv)
             pes_done(p, pid, p->pid[pid]);
     if (!p->pat_seen)
         return fail("no PAT in what was received from %s", url);
+    if (p->save) {
+        fclose(p->save);
+        p->save = NULL;
+    }
     report(p, stdout, url, seconds, live);
     for (int pid = 0; pid < PID_COUNT; pid++) {
         struct pid_stat *s = p->pid[pid];

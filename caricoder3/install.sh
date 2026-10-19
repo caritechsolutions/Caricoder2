@@ -60,6 +60,7 @@ libx265-dev:H.265 encode on the CPU
 libsrt-openssl-dev:SRT output
 librist-dev:RIST output
 libsqlite3-dev:the supervisor's history and event log
+iputils-ping:the evidence tools' ping
 "
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }

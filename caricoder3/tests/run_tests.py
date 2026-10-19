@@ -2938,6 +2938,93 @@ def supervisor_disks():
 
 
 @test
+def supervisor_evidence():
+    """Evidence: a black picture on a multicast channel gets its picture and 20 s of the source kept by itself; by hand, a unicast channel's output is recorded instead; a ping; the files can be fetched."""
+    import base64
+    import threading
+    import urllib.request
+    import urllib.error
+    src = _content_faults_src()
+    if not src:
+        return "SKIPPED: this ffmpeg cannot make the test stream"
+    root = w("super_ev")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pm, pu = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    evdir = os.path.join(root, "evidence")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1",
+               "history": os.path.join(root, "history.db"), "evidence": evdir,
+               "watchdog": {"min_s": 5, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
+              open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None, raw=False):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, (resp.read() if raw else json.load(resp))
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    group = f"239.255.10.3:{pm}"
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.7)
+        for name, url in (("m1", f"udp://{group}"), ("u1", f"udp://127.0.0.1:{pu}")):
+            code, j = api(f"/api/channels/{name}", "PUT", {"input": url, "enabled": True})
+            need(code == 200, f"create {name}: {code} {j}")
+        time.sleep(1.5)
+        pm_ = Player("239.255.10.3", pm)
+        pu_ = Player("127.0.0.1", pu)
+        th = [threading.Thread(target=lambda: pm_.play(src, stop_after=26)),
+              threading.Thread(target=lambda: pu_.play(synth("live_src", duration=10.0)))]
+        for t in th:
+            t.start()
+        time.sleep(3)
+        code, j = api("/api/tools/record", "POST", {"channel": "u1", "seconds": 4})
+        need(code == 200, f"record u1: {code} {j}")
+        code, j = api("/api/tools/ping", "POST", {"host": "127.0.0.1", "seconds": 3})
+        need(code == 200, f"ping: {code} {j}")
+        code, j = api("/api/tools/probe", "POST", {"channel": "u1"})
+        need(code == 400, f"a unicast source was probed beside its channel: {code}")
+        for t in th:
+            t.join()
+        time.sleep(8)
+        code, j = api("/api/incidents?channel=m1")
+        black = [x for x in j["incidents"] if x["rule"] == "black" and x["channel"] == "m1"]
+        need(black, f"no black incident: {[x['rule'] for x in j['incidents']]}")
+        code, one = api(f"/api/incidents/{black[0]['id']}")
+        tools = {e["tool"]: e for e in one["evidence"]}
+        need("picture" in tools and tools["picture"]["file_bytes"] > 1000, f"picture: {one['evidence']}")
+        rec = tools.get("record")
+        need(rec and rec["args"]["from"] == "source" and rec["file_bytes"] > 100000 and rec["result"].get("ok"),
+             f"recording: {one['evidence']}")
+        code, data = api(f"/api/evidence/{rec['id']}/file", raw=True)
+        need(code == 200 and data[:1] == b"\x47" and len(data) == rec["file_bytes"], f"fetch: {code} {len(data or b'')}")
+        code, j = api("/api/evidence?channel=u1")
+        urec = [e for e in j["evidence"] if e["tool"] == "record"]
+        need(urec and urec[0]["args"]["from"] == "output" and urec[0]["file_bytes"] > 10000, f"u1: {j}")
+        code, j = api("/api/evidence")
+        ping = [e for e in j["evidence"] if e["tool"] == "ping"]
+        need(ping and (ping[0]["result"].get("loss_pct") == 0 or (not shutil.which("ping") and "not installed" in ping[0]["result"].get("error", ""))),
+             f"ping: {ping}")
+        a = Analysis(os.path.join(evdir, rec["file"]))
+        need(a.pat and a.pmt, "the recording is not a playable stream")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"black: picture {tools['picture']['file_bytes'] // 1024} kB + source {rec['file_bytes'] // 1024} kB; " \
+           f"u1 output {urec[0]['file_bytes'] // 1024} kB; ping {ping[0]['result'].get('rtt_avg_ms', ping[0]['result'].get('error'))}"
+
+
+@test
 def supervisor_shared_input():
     """Channels on one input share a reader: the input is read once, each channel gets its program; the reader follows them."""
     import base64

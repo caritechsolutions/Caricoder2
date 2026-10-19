@@ -108,6 +108,7 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gtip .tt { color:var(--fg2); margin-bottom:2px } .gtip b { font-weight:500; margin-left:auto; padding-left:14px } .gtip div { display:flex; align-items:center; gap:6px } .gtip i { width:10px; height:3px; border-radius:2px; display:inline-block }
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
 .stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
+img.evpic { max-width:240px; border-radius:6px; display:block } table.evtab td { vertical-align:top } .tools { display:flex; gap:6px; flex-wrap:wrap; align-items:center } .tools .toolnote { font-size:12px; margin-left:6px }
 svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
 svg.graph .gdec { stroke:var(--acc) } svg.graph .gg2 { stroke:#c58cf0 } svg.graph .gg3 { stroke:#6fd3e0 } svg.graph .gap { fill:#2c3640; opacity:.6 } svg.graph .mark { stroke:var(--bad); stroke-width:2 }
 .legend .gin-l i { background:var(--air) } .legend .gout-l i { background:var(--ok) } .legend .gdec-l i { background:var(--acc) } .legend .gg2-l i { background:#c58cf0 } .legend .gg3-l i { background:#6fd3e0 }
@@ -193,7 +194,7 @@ function healthOf(c) {
   if (c.state !== "running") return ["off", c.state];
   const st = c.stats; if (!st) return ["warn", "starting"];
   const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
-  const outs = ((c.outputs && c.outputs.outputs) || []).filter(o => o.id !== "pvtap");
+  const outs = ((c.outputs && c.outputs.outputs) || []).filter(o => o.id !== "pvtap" && !/^evrec/.test(o.id));
   const now = { cc: inp.cc_errors||0, ovf: inp.socket_overflow||0, drop: out.dropped_units||0, late: out.late_units||0, lost: (inp.link||{}).lost||0,
                 send: outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0), xdrop: (svc.streams||[]).reduce((a,s)=>a+(s.input_dropped||0),0) };
   const was = prevCounters[c.name] || now;
@@ -504,7 +505,7 @@ function graphHtml(h) {
 
 /* ---------- history (the record on disk) ---------- */
 const RANGES = [["1h", 3600, "1 h"], ["6h", 21600, "6 h"], ["24h", 86400, "24 h"], ["7d", 604800, "7 days"], ["30d", 2592000, "30 days"]];
-let histRange = "24h", histData = null, histEvents = null, histInc = null, histFor = "", histAt = 0;
+let histRange = "24h", histData = null, histEvents = null, histInc = null, histEv = null, histFor = "", histAt = 0;
 try { histRange = localStorage.getItem("cc3range") || "24h"; } catch(e) {}
 const fmtTime = (t, span) => { const d = new Date(t * 1000); const hm = d.toTimeString().slice(0, 5);
   return span > 2 * 86400 ? `${d.getDate()}/${d.getMonth() + 1} ${span > 8 * 86400 ? "" : hm}`.trim() : hm; };
@@ -544,9 +545,10 @@ async function loadChanHistory(name, force) {
   histFor = key; histAt = Date.now();
   const to = Math.floor(Date.now() / 1000), from = to - span;
   try {
-    const [h, e, i] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`),
-      api(`/api/incidents?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] }))]);
-    histData = Object.assign(h, { from, to }); histEvents = e.events; histInc = i.incidents;
+    const [h, e, i, v] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`),
+      api(`/api/incidents?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] })),
+      api(`/api/evidence?channel=${encN(name)}&limit=20`).catch(() => ({ evidence: [] }))]);
+    histData = Object.assign(h, { from, to }); histEvents = e.events; histInc = i.incidents; histEv = v.evidence;
   } catch(err) { histData = { error: err.message }; histEvents = null; }
   if (current && current.name === name) { renderChanHistory(); reapplyHover(); }
 }
@@ -570,6 +572,8 @@ function renderChanHistory() {
       return `<div class="tt">${span}</div>${tipRow("gin", "In", fmtRate(r[1] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[2] * 1000)})</span>` : ""))}${tipRow("gout", "Out", fmtRate(r[3] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[4] * 1000)})</span>` : ""))}
         ${r[13] < st ? `<div class="dim">running ${fmtDur(r[13])} of ${fmtDur(st)}</div>` : ""}${errs.length ? errs.map(e => `<div class="bad">${e[1].toLocaleString()} ${e[0]}</div>`).join("") : `<div class="dim">no errors</div>`}`; } })}
     <h4 class="sub4">Incidents</h4>${histInc && histInc.length ? `<div class="evwrap" style="max-height:220px">${incTable(histInc, false)}</div>` : `<div class="empty" style="padding:6px">None in this time.</div>`}
+    <h4 class="sub4">Evidence <span style="font-weight:400">(the latest; kept in the evidence folder to its size)</span></h4><div class="evwrap" style="max-height:260px">${evidenceList(histEv)}</div>
+    <div style="margin-top:8px">${toolButtons(current && current.name, 0)}</div>
     <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
 }
 let srvHist = null, srvEvents = null, srvHistAt = 0;
@@ -653,6 +657,7 @@ async function openIncident(id) {
   d.innerHTML = `<h3>${esc(x.summary)}</h3>${kv(ev)}
     ${j.members.length ? `<h4 class="sub4">Channels in it</h4>${incTable(j.members, true)}` : ""}
     ${proof.length ? `<h4 class="sub4">What the channel reported when it began</h4>${kv(proof)}` : ""}
+    <h4 class="sub4">Evidence</h4>${evidenceList(j.evidence)}<div style="margin-top:8px">${toolButtons(x.channel, x.id)}</div>
     <h4 class="sub4">Events from a minute before to a minute after</h4><div class="evwrap" style="max-height:260px">${eventRows(j.events.slice().reverse(), true)}</div>
     <div class="actions"><button onclick="document.getElementById('dlg').close();document.getElementById('dlg').style.width=''">Close</button></div>`;
   d.showModal();
@@ -704,6 +709,47 @@ function editWatchdog() {
     catch(e) { $("#w_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };
   d.showModal();
+}
+
+/* ---------- evidence (what the tools found or kept) ---------- */
+function evidenceList(list) {
+  if (!list || !list.length) return `<div class="empty" style="padding:6px">Nothing gathered yet.</div>`;
+  const one = e => {
+    const r = e.result || {}, a = e.args || {}, file = e.file_bytes > 0 ? `/api/evidence/${e.id}/file` : null;
+    let what = "", body = "";
+    if (e.tool === "picture") { what = "Picture"; body = file ? `<a href="${file}" target="_blank"><img class="evpic" src="${file}" alt="picture"></a>` : `<span class="dim">the file is gone</span>`; }
+    else if (e.tool === "record" || e.tool === "probe") {
+      what = e.tool === "record" ? `${a.seconds || ""} s of the ${a.from === "output" ? "output" : "source"}` : `Probe of the source (${a.seconds || 3} s)`;
+      if (a.from === "output") body = r.ok ? "" : `<span class="bad">nothing was written</span>`;
+      else if (r.ok === false) body = `<span class="bad">${esc(r.error || "no answer")}</span>`;
+      else if (r.programs) {
+        const progs = r.programs.filter(p => !a.program || p.number === a.program);
+        body = `${fmtRate(r.bitrate)} arriving · ${r.packets.toLocaleString()} packets${r.sync_errors ? ` · <span class="bad">${r.sync_errors} sync errors</span>` : ""} · ` +
+          progs.slice(0, 3).map(p => `${esc(p.name || "service " + p.number)}: ${(p.streams || []).map(s => `${esc(s.kind)} ${s.pid}${s.bitrate != null ? " " + fmtRate(s.bitrate) : ""}`).join(", ")}`).join("; ") + (progs.length > 3 ? ` (+${progs.length - 3} more services)` : "");
+      }
+      if (file) body += ` <a href="${file}">download (${fmtBytes(e.file_bytes)})</a>`;
+      else if (e.tool === "record") body += ` <span class="dim">no file (or it is gone)</span>`;
+    } else if (e.tool === "ping") {
+      what = `Ping ${esc(a.host || "")}`;
+      body = r.error ? `<span class="bad">${esc(r.error)}</span>` : r.loss_pct < 0 ? `<span class="bad">no answer</span>` : `${r.loss_pct}% lost · ${r.rtt_avg_ms >= 0 ? r.rtt_avg_ms.toFixed(1) + " ms average" : "—"}`;
+    } else { what = esc(e.tool); body = esc(JSON.stringify(r)).slice(0, 200); }
+    return `<tr><td class="mono">${fmtWhen(e.t)}</td>${e.channel ? `<td>${esc(e.channel)}</td>` : "<td></td>"}<td>${what}</td><td>${body}</td></tr>`;
+  };
+  return `<table class="evt evtab"><tbody>${list.map(one).join("")}</tbody></table>`;
+}
+async function runTool(tool, body, after) {
+  try {
+    if (tool === "ping" && !body.host) { const h = prompt("Ping which host or address?", "192.168.110."); if (!h) return; body.host = h.trim(); }
+    await api(`/api/tools/${tool}`, { method: "POST", body: JSON.stringify(body) });
+    const wait = tool === "record" ? (body.seconds || 20) * 1000 + 4000 : tool === "probe" ? 7000 : tool === "ping" ? 6000 : 800;
+    toolNote(`${tool === "record" ? "Recording" : tool === "probe" ? "Probing" : tool === "ping" ? "Pinging" : "Keeping the picture"}… it shows here when done${wait > 2000 ? ` (about ${Math.round(wait / 1000)} s)` : ""}.`);
+    setTimeout(() => { toolNote(""); after && after(); }, wait);
+  } catch(e) { alert(e.message); }
+}
+function toolNote(t) { document.querySelectorAll(".toolnote").forEach(n => n.textContent = t); }
+function toolButtons(chan, incident) {
+  const b = (tool, label, extra) => `<button type="button" onclick='runTool("${tool}", ${JSON.stringify(Object.assign({ channel: chan || undefined, incident: incident || undefined }, extra || {}))}, ${incident ? `() => openIncident(${incident})` : `() => { histFor = ""; loadChanHistory(${JSON.stringify(chan)}, true); }`})'>${label}</button>`;
+  return `<span class="tools">${chan ? b("record", "Record 20 s", { seconds: 20 }) + b("snapshot", "Keep the picture") + b("probe", "Probe the source", { seconds: 3 }) : ""}${b("ping", "Ping…")}<span class="toolnote dim"></span></span>`;
 }
 
 /* ---------- the server ---------- */
@@ -798,7 +844,7 @@ function pathParts(c) {
   const xs = (svc.streams||[]).filter(s => s.mode === "transcode");
   const proc = !(svc.streams||[]).length ? `<span style="color:var(--dim)">Waiting for the source</span>` : xs.length ? xs.map(s => `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}${s.encoder?` <span style="color:var(--dim)">on ${s.encoder}</span>`:""}`).join("<br>") : "Copied as is";
   const slack = xs.length ? Math.min(...xs.map(s => s.slack_min_ms ?? 1e9)) : null;
-  const outs = ((c.outputs && c.outputs.outputs) || []).filter(o => o.id !== "pvtap");
+  const outs = ((c.outputs && c.outputs.outputs) || []).filter(o => o.id !== "pvtap" && !/^evrec/.test(o.id));
   const oerr = outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0);
   return { srcBad: inBad,
     src: `<div class="big">${fmtRate(inp.bitrate)}</div>
@@ -837,7 +883,7 @@ const TYPES = {
 const enc = s => encodeURIComponent(s);
 function outputsHtml(c) {
   const running = c.state === "running";
-  const outs = ((c.outputs && c.outputs.outputs) || ((c.saved_outputs||{}).outputs||[]).map(o => Object.assign({state:"saved; starts with the channel"}, o))).filter(o => o.id !== "pvtap");
+  const outs = ((c.outputs && c.outputs.outputs) || ((c.saved_outputs||{}).outputs||[]).map(o => Object.assign({state:"saved; starts with the channel"}, o))).filter(o => o.id !== "pvtap" && !/^evrec/.test(o.id));
   const rows = outs.map(o => `<tr><td><span class="tag">${esc(o.type||o.url.split(":")[0])}</span></td><td class="mono">${esc(o.url)}</td><td>${esc(o.state||"")}</td>
       <td style="color:var(--fg2)">${o.packets!=null ? `${o.packets.toLocaleString()} pkts${o.errors?` · <span class="warn">${o.errors} errors</span>`:""}${o.overruns?` · <span class="bad">${o.overruns} overruns</span>`:""}${o.rtt_ms!=null?` · rtt ${o.rtt_ms} ms`:""}${o.retransmitted?` · ${o.retransmitted} resent`:""}${o.reconnects?` · ${o.reconnects} reconnects`:""}` : ""}</td>
       <td class="mono" style="color:var(--dim)">${esc(o.id)}</td>

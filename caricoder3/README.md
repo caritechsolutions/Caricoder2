@@ -419,6 +419,8 @@ The API (basic auth, JSON in and out):
 | `GET /api/events?channel=&from=&to=&limit=` | what happened, newest first (no `channel`: everything) |
 | `GET /api/incidents?channel=&open=1&from=&to=&limit=` | problems that lasted (default the last 7 days), open ones first; a channel's own and its source's |
 | `GET /api/incidents/ID` | one, with the channels' incidents that belong to it and the events from a minute before to a minute after |
+| `POST /api/tools/record`, `/probe`, `/ping`, `/snapshot` | `{"channel", "url", "host", "seconds", "incident"}`: gather evidence (see Evidence); `GET /api/tools`: what is running |
+| `GET /api/evidence?channel=&incident=&limit=` | what the tools found or kept, newest first; `GET /api/evidence/ID/file`: the recording or picture |
 | `GET /api/watchdog`, `PUT /api/watchdog` | the watchdog's limits and rules (PUT: any of them, kept in the config), and what it is watching now |
 
 ### History and events
@@ -477,7 +479,28 @@ under Watchdog). When the history's own disk is nearly full the history
 gives up its oldest records, a quarter every ten minutes, until the
 disk is over the low mark again; then its cap is as set. Nothing that
 is not caricoder3's own is ever deleted: recordings and other files are
-only reported. Built without
+only reported.
+
+### Evidence
+
+An incident carries what was found about it. When one opens for a
+black, frozen or silent picture or sound, a stream without data, CC
+errors, a PID change, the clock or a backup source, the channel's
+picture is kept and 20 s of its source recorded (TS, that service
+only); a channel gets at most one such recording in ten minutes. When
+input is lost, the source is probed from the supervisor's own socket
+for 3 s (does anything arrive at all?), once per source a minute. Only
+a source that can be read beside the channel without taking from it is
+read again: multicast and HTTP. For anything else (unicast UDP, SRT,
+RIST) the channel's output is recorded instead, through an output of
+its own for the time. The same tools are on each incident and in each
+channel's History card: "Record 20 s", "Keep the picture", "Probe the
+source", "Ping…" (an IRD's management address, say). Files go to the
+evidence folder (`"evidence"` in the config, default
+`/var/lib/caricoder3/evidence`; `"none"`: nothing kept), kept to
+`"evidence_max_mb"` (default 4096; half that while its disk is nearly
+full), the oldest going first; `"evidence_auto": false` gathers only
+when asked. Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

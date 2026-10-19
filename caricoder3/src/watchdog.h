@@ -60,6 +60,11 @@ void wd_get_limits(struct wd_limits *l);
  * `f` for `chan` (NULL: the server). Called while opening one. */
 void wd_set_snapshot(void (*fn)(FILE *f, const char *chan, void *op), void *op);
 
+/* Told when an incident opens (`chan` NULL: the server's or a source's,
+ * `group` the source), so evidence can be gathered while it lasts. Called
+ * from wd_tick; it must not call back into the watchdog. */
+void wd_set_on_open(void (*fn)(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op), void *op);
+
 /*
  * Whether rule `r` holds for `subject` (a channel's name, or "server",
  * "server/gpu0", ...) now (`t`, wall clock seconds). `chan` is the channel

@@ -151,7 +151,22 @@ struct chan {
     char wd_group[512];                     /* its source, for grouping */
     char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
     int64_t wd_flow_since;                  /* input arriving since (0: it is not) */
+    int64_t ev_last;                        /* the last recording made for it without being asked */
     int n_out_dirs;
+};
+
+/* A tool at work (the evidence tools): a child, or an output of a channel for a while. */
+#define JOBS_MAX 8
+struct job {
+    bool used;
+    pid_t pid;                              /* 0: a recording through the channel's output */
+    char tool[16];
+    char chan[64];
+    int64_t incident;
+    char out[600];                          /* the child's output file; the output's id */
+    char file[600];                         /* what it keeps */
+    char args[700];                         /* JSON */
+    int64_t started_ns, deadline_ns;
 };
 
 /* A filesystem's use over the last hour, a sample a minute: how fast it fills. */
@@ -206,8 +221,16 @@ struct super {
     struct disk_track dtr[DISK_MAX];
     struct disk_path dpath[32];
     int n_dpath;
-    int64_t disk_last, du_last, squeeze_last;
+    int64_t disk_last, du_last, squeeze_last, ev_trim_last;
     bool squeezed;
+
+    /* the evidence tools */
+    char evidence_dir[512];                 /* "none": nothing kept */
+    int evidence_max_mb;
+    bool evidence_auto;                     /* gathered when an incident opens */
+    struct job jobs[JOBS_MAX];
+    char probe_url[8][512];                 /* sources probed lately, not again for a minute */
+    int64_t probe_t[8];
 };
 
 static volatile sig_atomic_t g_stop, g_hup;
@@ -241,6 +264,28 @@ static char *read_file(const char *path, size_t *len)
     if (len)
         *len = n;
     return text;
+}
+
+/* A whole file, of any size up to `max` (binary; a 0 after it all the same). */
+static char *read_whole(const char *path, size_t *len, size_t max)
+{
+    FILE *f = fopen(path, "rb");
+    struct stat sb;
+    char *d;
+    size_t n;
+
+    if (!f)
+        return NULL;
+    if (fstat(fileno(f), &sb) != 0 || (size_t)sb.st_size > max || !(d = malloc((size_t)sb.st_size + 1))) {
+        fclose(f);
+        return NULL;
+    }
+    n = fread(d, 1, (size_t)sb.st_size, f);
+    fclose(f);
+    d[n] = 0;
+    if (len)
+        *len = n;
+    return d;
 }
 
 static bool write_file(const char *path, const char *text, char *err, size_t errlen)
@@ -301,16 +346,18 @@ static void make_password(char *out, size_t len)
 
 static void save_system_config(struct super *s)
 {
-    char text[3072], q[5][600], err[200];
+    char text[4096], q[6][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
-             "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d\n}\n",
+             "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
+             "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
              json_quote(s->channels_dir, q[1], sizeof(q[1])),
              json_quote(s->run_dir, q[2], sizeof(q[2])),
              json_quote(s->password, q[3], sizeof(q[3])),
-             json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb);
+             json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb,
+             json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false");
     {
         /* the watchdog's limits, before the closing brace */
         struct wd_limits L;
@@ -346,6 +393,9 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     s->password[0] = 0;
     snprintf(s->history_path, sizeof(s->history_path), "/var/lib/caricoder3/history.db");
     s->history_max_mb = 2048;
+    snprintf(s->evidence_dir, sizeof(s->evidence_dir), "/var/lib/caricoder3/evidence");
+    s->evidence_max_mb = 4096;
+    s->evidence_auto = true;
     if (!text) {
         if (errno != ENOENT) {
             snprintf(err, errlen, "%.200s: %s", s->config_path, strerror(errno));
@@ -366,6 +416,10 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     snprintf(s->history_path, sizeof(s->history_path), "%s",
              json_get_str(&doc, root, "history", "/var/lib/caricoder3/history.db"));
     s->history_max_mb = (int)json_get_num(&doc, root, "history_max_mb", 2048);
+    snprintf(s->evidence_dir, sizeof(s->evidence_dir), "%s",
+             json_get_str(&doc, root, "evidence", "/var/lib/caricoder3/evidence"));
+    s->evidence_max_mb = (int)json_get_num(&doc, root, "evidence_max_mb", 4096);
+    s->evidence_auto = json_get_bool(&doc, root, "evidence_auto", true);
     {
         struct wd_limits L;
 
@@ -840,6 +894,9 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         for (int j = outs >= 0 ? d->node[outs].first_child : -1; j >= 0 && c->n_out_dirs < 4; j = d->node[j].next) {
             const char *u = json_get_str(d, j, "url", ""), *p = NULL;
             char dir[256];
+
+            if (!strncmp(json_get_str(d, j, "id", ""), "evrec", 5))
+                continue;                   /* an evidence recording: the evidence folder is watched already */
 
             if (!strncmp(u, "file://", 7)) {
                 snprintf(dir, sizeof(dir), "%s", u + 7);
@@ -1553,6 +1610,467 @@ static void hist_tick(struct super *s)
     sysstat_metrics(metric_cb, &t);
 }
 
+/* ---- the evidence tools --------------------------------------------------------- */
+
+/*
+ * What can be looked at or kept about a problem, by the watchdog when an
+ * incident opens or by a person (or, later, the technician) through the
+ * API: a recording of the source (or, when the source cannot be read a
+ * second time without harm, of the channel's output), a probe of the
+ * source, a ping, the picture. Each runs on its own (a child process, or
+ * an output of the channel for a while) and leaves a row in the history's
+ * evidence table, with its file in the evidence folder (kept to its cap).
+ */
+
+/* A source that can be read again beside the channel without taking
+ * anything from it: multicast (every listener gets every datagram), HTTP
+ * (a connection of its own). Unicast UDP would have its datagrams shared
+ * out between the two readers. */
+static bool source_readable(const char *url)
+{
+    unsigned a = 0;
+
+    if (!strncmp(url, "http://", 7) || !strncmp(url, "https://", 8))
+        return true;
+    if (strncmp(url, "udp://", 6) && strncmp(url, "rtp://", 6))
+        return false;
+    {
+        const char *h = url + 6;
+
+        if (*h == '@')
+            h++;
+        if (sscanf(h, "%u.", &a) != 1)
+            return false;
+    }
+    return a >= 224 && a <= 239;
+}
+
+/* The channel's source as it really is (a shared input: the reader's URL). */
+static void chan_source(const struct chan *c, char *url, size_t len, int *program)
+{
+    url[0] = 0;
+    *program = 0;
+    if (c->sh_url[0]) {
+        snprintf(url, len, "%s", c->sh_url);
+        *program = c->sh_program;
+    } else if (c->wd_group[0]) {
+        snprintf(url, len, "%s", c->wd_group);
+    }
+    if (!*program && c->cfg) {
+        static struct json_doc doc;
+        char err[100];
+        int root = json_parse(&doc, c->cfg, err, sizeof(err));
+
+        if (root >= 0) {
+            *program = (int)json_get_num(&doc, root, "program", 0);
+            if (!url[0])
+                snprintf(url, len, "%s", json_get_str(&doc, root, "input", ""));
+        }
+    }
+}
+
+static int job_slot(struct super *s)
+{
+    for (int i = 0; i < JOBS_MAX; i++)
+        if (!s->jobs[i].used)
+            return i;
+    return -1;
+}
+
+static bool evidence_on(const struct super *s)
+{
+    return s->evidence_dir[0] && strcmp(s->evidence_dir, "none") && history_enabled();
+}
+
+/* evidence/20261019-140501_bet_record.ts */
+static void evidence_path(const struct super *s, const char *chan, const char *tool, const char *ext,
+                          char *out, size_t len)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    char when[32], safe[64];
+    size_t k = 0;
+
+    localtime_r(&now, &tm);
+    strftime(when, sizeof(when), "%Y%m%d-%H%M%S", &tm);
+    for (const char *p = chan ? chan : "server"; *p && k < sizeof(safe) - 1; p++)
+        safe[k++] = isalnum((unsigned char)*p) || *p == '-' || *p == '_' ? *p : '_';
+    safe[k] = 0;
+    mkdir(s->evidence_dir, 0755);
+    snprintf(out, len, "%.400s/%s_%s_%s.%s", s->evidence_dir, when, safe, tool, ext);
+    for (int n = 2; access(out, F_OK) == 0 && n < 100; n++)
+        snprintf(out, len, "%.400s/%s_%s_%s-%d.%s", s->evidence_dir, when, safe, tool, n, ext);
+}
+
+/* A child whose standard output is kept in a file, its JSON the result. */
+static bool job_spawn(struct super *s, const char *tool, const char *chan, int64_t incident, char *const argv[],
+                      const char *file, const char *args, int timeout_s, char *err, size_t errlen)
+{
+    int k = job_slot(s), fd;
+    struct job *j;
+    pid_t pid;
+
+    if (k < 0) {
+        snprintf(err, errlen, "%d tools are running already", JOBS_MAX);
+        return false;
+    }
+    j = &s->jobs[k];
+    memset(j, 0, sizeof(*j));
+    snprintf(j->out, sizeof(j->out), "%.500s/tool-%d.out", s->run_dir, k);
+    fd = open(j->out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        snprintf(err, errlen, "%s: %s", j->out, strerror(errno));
+        return false;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        snprintf(err, errlen, "fork: %s", strerror(errno));
+        return false;
+    }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+
+        dup2(fd, 1);
+        if (nul >= 0)
+            dup2(nul, 2), dup2(nul, 0);
+        for (int f = 3; f < 1024; f++)
+            close(f);
+        setpgid(0, 0);
+        if (nice(5) < 0) {
+            /* as it is */
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fd);
+    j->used = true;
+    j->pid = pid;
+    snprintf(j->tool, sizeof(j->tool), "%s", tool);
+    snprintf(j->chan, sizeof(j->chan), "%s", chan ? chan : "");
+    snprintf(j->file, sizeof(j->file), "%s", file ? file : "");
+    snprintf(j->args, sizeof(j->args), "%s", args ? args : "{}");
+    j->incident = incident;
+    j->started_ns = clock_now_ns();
+    j->deadline_ns = j->started_ns + (int64_t)timeout_s * 1000000000LL;
+    return true;
+}
+
+/* Reads `url` for `seconds` (a probe), and with `keep` records it too. */
+static bool tool_probe(struct super *s, const char *chan, const char *url, int program, int seconds, bool keep,
+                       int64_t incident, char *err, size_t errlen)
+{
+    char secs[16], prog[16], file[600] = "", args[700], q[600];
+    char *argv[12];
+    int n = 0;
+
+    if (!source_readable(url)) {
+        snprintf(err, errlen, "%s cannot be read beside the channel without taking from it "
+                 "(only multicast and HTTP sources can)", url);
+        return false;
+    }
+    if (keep && !evidence_on(s)) {
+        snprintf(err, errlen, "no evidence is kept (see \"evidence\" in the config)");
+        return false;
+    }
+    snprintf(secs, sizeof(secs), "%d", seconds);
+    snprintf(prog, sizeof(prog), "%d", program);
+    argv[n++] = s->binary;
+    argv[n++] = "probe";
+    argv[n++] = (char *)url;
+    argv[n++] = "--seconds";
+    argv[n++] = secs;
+    if (program > 0) {
+        argv[n++] = "--program";
+        argv[n++] = prog;
+    }
+    if (keep) {
+        evidence_path(s, chan, "source", "ts", file, sizeof(file));
+        argv[n++] = "--save";
+        argv[n++] = file;
+    }
+    argv[n] = NULL;
+    snprintf(args, sizeof(args), "{\"url\": %s, \"seconds\": %d, \"program\": %d, \"from\": \"source\"}",
+             json_quote(url, q, sizeof(q)), seconds, program);
+    return job_spawn(s, keep ? "record" : "probe", chan, incident, argv, file, args, seconds + 25, err, errlen);
+}
+
+/* The channel's output for `seconds`, through a file output of its own. */
+static bool tool_record_output(struct super *s, struct chan *c, int seconds, int64_t incident, char *err,
+                               size_t errlen)
+{
+    int k = job_slot(s);
+    char req[900], *reply, q[700], file[600];
+    struct job *j;
+
+    if (k < 0) {
+        snprintf(err, errlen, "%d tools are running already", JOBS_MAX);
+        return false;
+    }
+    if (!evidence_on(s)) {
+        snprintf(err, errlen, "no evidence is kept (see \"evidence\" in the config)");
+        return false;
+    }
+    if (c->state != CH_RUNNING) {
+        snprintf(err, errlen, "the channel is not running");
+        return false;
+    }
+    j = &s->jobs[k];
+    memset(j, 0, sizeof(*j));
+    evidence_path(s, c->name, "output", "ts", file, sizeof(file));
+    snprintf(j->out, sizeof(j->out), "evrec%d", k);       /* the output's id */
+    {
+        char u[700];
+
+        snprintf(u, sizeof(u), "file://%s", file);
+        snprintf(req, sizeof(req), "{\"cmd\": \"add-output\", \"url\": %s, \"id\": \"%s\", \"save\": false}",
+                 json_quote(u, q, sizeof(q)), j->out);
+    }
+    reply = chan_ctl(s, c, req);
+    if (!reply || !strstr(reply, "\"ok\": true")) {
+        snprintf(err, errlen, "the channel did not take the recording%s%.100s", reply ? ": " : "", reply ? reply : "");
+        free(reply);
+        return false;
+    }
+    free(reply);
+    j->used = true;
+    j->pid = 0;
+    snprintf(j->tool, sizeof(j->tool), "record");
+    snprintf(j->chan, sizeof(j->chan), "%s", c->name);
+    snprintf(j->file, sizeof(j->file), "%s", file);
+    snprintf(j->args, sizeof(j->args), "{\"seconds\": %d, \"from\": \"output\"}", seconds);
+    j->incident = incident;
+    j->started_ns = clock_now_ns();
+    j->deadline_ns = j->started_ns + (int64_t)seconds * 1000000000LL;
+    return true;
+}
+
+static bool host_ok(const char *h)
+{
+    if (!*h || strlen(h) > 253 || *h == '-')
+        return false;
+    for (; *h; h++)
+        if (!isalnum((unsigned char)*h) && *h != '.' && *h != '-' && *h != ':')
+            return false;
+    return true;
+}
+
+static bool tool_ping(struct super *s, const char *host, int count, int64_t incident, char *err, size_t errlen)
+{
+    char cnt[8], args[400], q[300];
+    char *argv[] = { "ping", "-n", "-c", cnt, "-W", "1", "-i", "0.3", (char *)host, NULL };
+
+    if (!host_ok(host)) {
+        snprintf(err, errlen, "not a host name or address: %.80s", host);
+        return false;
+    }
+    snprintf(cnt, sizeof(cnt), "%d", count);
+    snprintf(args, sizeof(args), "{\"host\": %s, \"count\": %d}", json_quote(host, q, sizeof(q)), count);
+    return job_spawn(s, "ping", NULL, incident, argv, NULL, args, count + 10, err, errlen);
+}
+
+/* The channel's picture as it is now (its thumbnail), kept. */
+static bool tool_snapshot(struct super *s, struct chan *c, int64_t incident, char *err, size_t errlen)
+{
+    char from[600], to[600];
+    size_t len = 0;
+    char *jpg;
+
+    if (!evidence_on(s)) {
+        snprintf(err, errlen, "no evidence is kept (see \"evidence\" in the config)");
+        return false;
+    }
+    snprintf(from, sizeof(from), "%.500s/%s.jpg", s->run_dir, c->name);
+    jpg = read_whole(from, &len, 16 << 20);
+    if (!jpg || !len) {
+        free(jpg);
+        snprintf(err, errlen, "the channel has no picture yet");
+        return false;
+    }
+    evidence_path(s, c->name, "picture", "jpg", to, sizeof(to));
+    {
+        FILE *f = fopen(to, "wb");
+
+        if (!f || fwrite(jpg, 1, len, f) != len) {
+            if (f)
+                fclose(f);
+            free(jpg);
+            snprintf(err, errlen, "%.200s: %s", to, strerror(errno));
+            return false;
+        }
+        fclose(f);
+    }
+    free(jpg);
+    history_evidence_add(time(NULL), incident, c->name, "picture", "{}", "{}", to);
+    return true;
+}
+
+/* ping's summary as JSON */
+static void ping_result(const char *out, char *res, size_t len)
+{
+    const char *loss = strstr(out, "% packet loss");
+    const char *rtt = strstr(out, "min/avg/max");
+    double pl = -1, mn = -1, av = -1, mx = -1;
+
+    if (loss) {
+        const char *b = loss;
+
+        while (b > out && (isdigit((unsigned char)b[-1]) || b[-1] == '.'))
+            b--;
+        pl = atof(b);
+    }
+    if (rtt && (rtt = strchr(rtt, '=')))
+        sscanf(rtt + 1, " %lf/%lf/%lf", &mn, &av, &mx);
+    snprintf(res, len, "{\"loss_pct\": %.0f, \"rtt_min_ms\": %.2f, \"rtt_avg_ms\": %.2f, \"rtt_max_ms\": %.2f}",
+             pl, mn, av, mx);
+}
+
+/* Each tick: tools that are done leave their evidence. */
+static void jobs_tick(struct super *s)
+{
+    int64_t now = clock_now_ns();
+
+    for (int i = 0; i < JOBS_MAX; i++) {
+        struct job *j = &s->jobs[i];
+        int status;
+        bool done = false, timed_out = false;
+
+        if (!j->used)
+            continue;
+        if (j->pid > 0) {
+            if (waitpid(j->pid, &status, WNOHANG) == j->pid)
+                done = true;
+            else if (now > j->deadline_ns) {
+                kill(-j->pid, SIGKILL);
+                kill(j->pid, SIGKILL);
+                waitpid(j->pid, &status, 0);
+                done = timed_out = true;
+            }
+            if (!done)
+                continue;
+            {
+                size_t len = 0;
+                char *out = read_whole(j->out, &len, 8 << 20);
+                char res[700];
+                const char *result = out && out[0] == '{' ? out : NULL;
+
+                if (!timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+                    snprintf(res, sizeof(res), "{\"ok\": false, \"error\": \"%s is not installed on this server\"}",
+                             !strcmp(j->tool, "ping") ? "ping" : "the tool");
+                    result = res;
+                } else if (!strcmp(j->tool, "ping")) {
+                    ping_result(out ? out : "", res, sizeof(res));
+                    result = res;
+                } else if (!result) {
+                    snprintf(res, sizeof(res), "{\"ok\": false, \"error\": \"%s\"}",
+                             timed_out ? "took too long" : "no answer");
+                    result = res;
+                }
+                if (j->file[0] && access(j->file, F_OK) != 0)
+                    j->file[0] = 0;
+                history_evidence_add(time(NULL), j->incident, j->chan[0] ? j->chan : NULL, j->tool, j->args, result,
+                                     j->file);
+                free(out);
+                unlink(j->out);
+            }
+            j->used = false;
+        } else if (now > j->deadline_ns) {
+            /* an output recording: the output goes, the file stays */
+            struct chan *c = find_chan(s, j->chan);
+            char req[200], res[200];
+            struct stat sb;
+
+            snprintf(req, sizeof(req), "{\"cmd\": \"remove-output\", \"id\": \"%s\"}", j->out);
+            if (c && c->state == CH_RUNNING)
+                free(chan_ctl(s, c, req));
+            snprintf(res, sizeof(res), "{\"ok\": %s, \"bytes\": %lld}", stat(j->file, &sb) == 0 ? "true" : "false",
+                     stat(j->file, &sb) == 0 ? (long long)sb.st_size : 0LL);
+            history_evidence_add(time(NULL), j->incident, j->chan, "record", j->args, res,
+                                 access(j->file, F_OK) == 0 ? j->file : "");
+            j->used = false;
+        }
+    }
+}
+
+static void jobs_json(const struct super *s, FILE *f)
+{
+    int n = 0;
+    char q[200];
+
+    fprintf(f, "{\"running\": [");
+    for (int i = 0; i < JOBS_MAX; i++) {
+        const struct job *j = &s->jobs[i];
+
+        if (!j->used)
+            continue;
+        fprintf(f, "%s{\"tool\": \"%s\", \"channel\": %s, \"incident\": %lld, \"args\": %s, \"for_s\": %.0f}",
+                n++ ? ", " : "", j->tool, json_quote(j->chan, q, sizeof(q)), (long long)j->incident, j->args,
+                (double)(clock_now_ns() - j->started_ns) / 1e9);
+    }
+    fprintf(f, "]}");
+}
+
+/*
+ * What is gathered when an incident opens, without being asked:
+ *   picture and sound problems, a stream without data, CC errors, PID
+ *   changes, the clock, a backup source: the picture, and 20 s of the
+ *   source (of the output when the source cannot be read twice);
+ *   no input: a probe of the source from here (does anything arrive at
+ *   all?), once per source a minute.
+ * A channel gets at most one recording in ten minutes.
+ */
+static void on_incident(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op)
+{
+    struct super *s = op;
+    struct chan *c = chan ? find_chan(s, chan) : NULL;
+    char err[300], url[512];
+    int program = 0;
+    int64_t t = time(NULL);
+
+    if (!evidence_on(s) || !s->evidence_auto)
+        return;
+    switch (r) {
+    case WD_BLACK: case WD_FROZEN: case WD_SILENT: case WD_NO_DATA: case WD_CC: case WD_PIDS:
+    case WD_CLOCK: case WD_BACKUP:
+        if (!c)
+            return;
+        if (r == WD_BLACK || r == WD_FROZEN)
+            tool_snapshot(s, c, id, err, sizeof(err));
+        if (t - c->ev_last < 600)
+            return;
+        c->ev_last = t;
+        chan_source(c, url, sizeof(url), &program);
+        if (!(source_readable(url) && tool_probe(s, c->name, url, program, 20, true, id, err, sizeof(err))) &&
+            !tool_record_output(s, c, 20, id, err, sizeof(err)))
+            log_info("evidence for %s: %s", c->name, err);
+        break;
+    case WD_NO_INPUT:
+        if (c)
+            chan_source(c, url, sizeof(url), &program);
+        else
+            snprintf(url, sizeof(url), "%s", group ? group : "");
+        if (!url[0] || !source_readable(url))
+            return;
+        for (int k = 0; k < 8; k++)
+            if (!strcmp(s->probe_url[k], url) && t - s->probe_t[k] < 60)
+                return;
+        {
+            int k = 0;
+
+            for (int i = 1; i < 8; i++)
+                if (s->probe_t[i] < s->probe_t[k])
+                    k = i;
+            snprintf(s->probe_url[k], sizeof(s->probe_url[k]), "%s", url);
+            s->probe_t[k] = t;
+        }
+        if (!tool_probe(s, chan, url, 0, 3, false, id, err, sizeof(err)))
+            log_info("evidence for %s: %s", chan ? chan : url, err);
+        break;
+    default:
+        break;
+    }
+}
+
 /* Every 10 s: how full the disks are, the rules about it, and room made
  * in what is ours when one is nearly full. */
 static void disk_tick(struct super *s)
@@ -1585,6 +2103,8 @@ static void disk_tick(struct super *s)
         DPATH(s->history_path, "history");
     }
     DPATH(s->run_dir, "run folder");
+    if (evidence_on(s))
+        DPATH(s->evidence_dir, "evidence");
     if (access("/var/log/journal", F_OK) == 0)
         DPATH("/var/log/journal", "system log (journald)");
     DPATH(s->channels_dir, "channel settings");
@@ -1668,6 +2188,18 @@ static void disk_tick(struct super *s)
                 hist_ok = free_pct >= L.disk_warn_pct;
             }
     }
+    /* the evidence folder within its cap; to half of it while its disk is nearly full */
+    if (evidence_on(s) && t - s->ev_trim_last >= 60) {
+        int64_t cap = (int64_t)s->evidence_max_mb * 1048576;
+
+        s->ev_trim_last = t;
+        for (int k = 0; k < s->n_disks; k++)
+            for (int i = 0; i < s->disks[k].n_paths; i++)
+                if (!strcmp(s->disks[k].paths[i], s->evidence_dir) && s->disks[k].total &&
+                    100.0 * (double)s->disks[k].avail / (double)s->disks[k].total < L.disk_crit_pct)
+                    cap /= 2;
+        disk_trim(s->evidence_dir, cap);
+    }
     /* the history's disk nearly full: it gives up its oldest records, a
      * quarter at a time, every ten minutes while it lasts */
     if (hist_critical && t - s->squeeze_last >= 600) {
@@ -1733,6 +2265,7 @@ static void tick(struct super *s)
     shares_update(s, now);
     hist_tick(s);
     disk_tick(s);
+    jobs_tick(s);
     {
         static int64_t wd_last;
         int64_t t = time(NULL);
@@ -2307,6 +2840,158 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->body = out;
         resp->body_len = len;
         return;
+    }
+    if (!strncmp(p, "/api/tools", 10) && (p[10] == 0 || p[10] == '/')) {
+        /* POST /api/tools/record|probe|ping|snapshot {"channel", "url", "host", "seconds", "incident"};
+         * GET /api/tools: what is running */
+        const char *tool = p[10] == '/' ? p + 11 : "";
+        char err[400] = "", url[512] = "", tq[64];
+        bool ok = false;
+
+        if (!strcmp(req->method, "GET") && !tool[0]) {
+            char *out = NULL;
+            size_t len = 0;
+            FILE *f = open_memstream(&out, &len);
+
+            if (!f)
+                return;
+            pthread_mutex_lock(&s->lock);
+            jobs_json(s, f);
+            pthread_mutex_unlock(&s->lock);
+            fclose(f);
+            resp->status = 200;
+            resp->type = "application/json";
+            resp->body = out;
+            resp->body_len = len;
+            return;
+        }
+        if (strcmp(req->method, "POST")) {
+            api_error(resp, 405, "POST /api/tools/record, probe, ping or snapshot");
+            return;
+        }
+        {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            int root = doc ? json_parse(doc, req->body && req->body_len ? req->body : "{}", err, sizeof(err)) : -1;
+            const char *chan, *host;
+            int seconds, program = 0;
+            int64_t incident;
+            struct chan *c = NULL;
+
+            if (root < 0) {
+                free(doc);
+                api_error(resp, 400, doc ? err : "out of memory");
+                return;
+            }
+            chan = json_get_str(doc, root, "channel", NULL);
+            host = json_get_str(doc, root, "host", "");
+            seconds = (int)json_get_num(doc, root, "seconds", !strcmp(tool, "record") ? 20 : 3);
+            incident = (int64_t)json_get_num(doc, root, "incident", 0);
+            snprintf(url, sizeof(url), "%s", json_get_str(doc, root, "url", ""));
+            if (seconds < 1)
+                seconds = 1;
+            if (seconds > 60)
+                seconds = 60;
+            pthread_mutex_lock(&s->lock);
+            if (chan && !(c = find_chan(s, chan)))
+                snprintf(err, sizeof(err), "no channel %.60s", chan);
+            else if (c && !url[0])
+                chan_source(c, url, sizeof(url), &program);
+            if (err[0]) {
+                /* said above */
+            } else if (!strcmp(tool, "record")) {
+                const char *from = json_get_str(doc, root, "from", "");
+
+                if (!c)
+                    snprintf(err, sizeof(err), "record needs \"channel\"");
+                else if (strcmp(from, "output") && source_readable(url))
+                    ok = tool_probe(s, c->name, url, program, seconds, true, incident, err, sizeof(err));
+                else
+                    ok = tool_record_output(s, c, seconds, incident, err, sizeof(err));
+            } else if (!strcmp(tool, "probe")) {
+                if (!url[0])
+                    snprintf(err, sizeof(err), "probe needs \"channel\" or \"url\"");
+                else
+                    ok = tool_probe(s, c ? c->name : NULL, url, program, seconds, false, incident, err, sizeof(err));
+            } else if (!strcmp(tool, "ping")) {
+                ok = tool_ping(s, host, seconds < 2 ? 3 : seconds > 10 ? 10 : seconds, incident, err, sizeof(err));
+            } else if (!strcmp(tool, "snapshot")) {
+                if (!c)
+                    snprintf(err, sizeof(err), "snapshot needs \"channel\"");
+                else
+                    ok = tool_snapshot(s, c, incident, err, sizeof(err));
+            } else {
+                snprintf(err, sizeof(err), "no tool %.40s (record, probe, ping, snapshot)", tool);
+            }
+            pthread_mutex_unlock(&s->lock);
+            free(doc);
+            if (!ok) {
+                api_error(resp, 400, err);
+                return;
+            }
+            ev(c ? c->name : NULL, "info", "tool", "%s started by hand%s%s", tool, url[0] && strcmp(tool, "ping") ? " on " : "",
+               strcmp(tool, "ping") ? url : "");
+            http_resp_printf(resp, 200, "application/json", "{\"ok\": true, \"tool\": %s}\n", json_quote(tool, tq, sizeof(tq)));
+            return;
+        }
+    }
+    if (!strncmp(p, "/api/evidence", 13) && (p[13] == 0 || p[13] == '/')) {
+        /* GET /api/evidence?channel=&incident=&limit= ; /api/evidence/ID/file: the file kept */
+        char v[64], chan[64];
+
+        if (!history_enabled()) {
+            api_error(resp, 503, "no history is kept");
+            return;
+        }
+        if (p[13] == '/') {
+            char path[600];
+            int64_t id = strtoll(p + 14, NULL, 10);
+            size_t len = 0;
+            char *data;
+            const char *ext;
+
+            if (!strstr(p + 14, "/file") || !history_evidence_file(id, path, sizeof(path))) {
+                api_error(resp, 404, "no such evidence file");
+                return;
+            }
+            /* only from the evidence folder */
+            if (strncmp(path, s->evidence_dir, strlen(s->evidence_dir)) || strstr(path, "..") ||
+                !(data = read_whole(path, &len, 512u << 20))) {
+                api_error(resp, 404, "the file is gone (the evidence folder is kept to its size)");
+                return;
+            }
+            ext = strrchr(path, '.');
+            resp->status = 200;
+            resp->type = ext && !strcmp(ext, ".jpg") ? "image/jpeg" : "video/mp2t";
+            resp->body = data;
+            resp->body_len = len;
+            if (!(ext && !strcmp(ext, ".jpg")))
+                snprintf(resp->extra, sizeof(resp->extra), "Content-Disposition: attachment; filename=\"%.200s\"\r\n",
+                         strrchr(path, '/') + 1);
+            return;
+        }
+        {
+            char *out = NULL;
+            size_t len = 0;
+            FILE *f = open_memstream(&out, &len);
+            bool has = query_param(req->query, "channel", chan, sizeof(chan));
+            int64_t inc = query_param(req->query, "incident", v, sizeof(v)) ? strtoll(v, NULL, 10) : 0;
+            int limit = query_param(req->query, "limit", v, sizeof(v)) ? atoi(v) : 100;
+
+            if (!f)
+                return;
+            if (!history_query_evidence(f, has ? chan : NULL, inc, limit > 0 && limit <= 1000 ? limit : 100)) {
+                fclose(f);
+                free(out);
+                api_error(resp, 500, "the history could not be read");
+                return;
+            }
+            fclose(f);
+            resp->status = 200;
+            resp->type = "application/json";
+            resp->body = out;
+            resp->body_len = len;
+            return;
+        }
     }
     if (!strcmp(p, "/api/watchdog")) {
         /* GET: the limits, the rules, what is being watched now; PUT: new limits */
@@ -2995,6 +3680,7 @@ int super_main(int argc, char **argv)
             ev(NULL, "info", "server", "supervisor started (caricoder3 %s)", CC3_VERSION);
     }
     wd_set_snapshot(wd_snapshot, &s);
+    wd_set_on_open(on_incident, &s);
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {
         log_err("web: %s", err);

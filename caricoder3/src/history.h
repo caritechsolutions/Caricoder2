@@ -64,7 +64,15 @@ void history_incident_update(int64_t id, int64_t closed, const char *summary, co
 /* {"incidents": [...]}: overlapping the span, open ones first; for a
  * channel, its own and the source's it belongs to */
 bool history_query_incidents(FILE *f, const char *chan, int64_t from, int64_t to, bool open_only, int limit);
-/* {"incident": ..., "members": [...], "events": [...]} */
+/* Evidence a tool gathered: `args` and `result` JSON objects, `file` a
+ * file it kept ("" none); `incident` 0 when it belongs to none. */
+int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, const char *tool, const char *args,
+                             const char *result, const char *file);
+/* {"evidence": [...]}, newest first; chan NULL / incident 0: any */
+bool history_query_evidence(FILE *f, const char *chan, int64_t incident, int limit);
+/* The file kept with evidence `id`. */
+bool history_evidence_file(int64_t id, char *path, size_t len);
+/* {"incident": ..., "members": [...], "evidence": [...], "events": [...]} */
 bool history_query_incident(FILE *f, int64_t id, int64_t now);
 
 /* {"path": ..., "bytes": ..., "cap_bytes": ..., "oldest": ...} */

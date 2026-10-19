@@ -73,6 +73,8 @@ static struct {
     struct group g[GROUPS_MAX];
     void (*snap)(FILE *f, const char *chan, void *op);
     void *snap_op;
+    void (*on_open)(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op);
+    void *open_op;
 } W = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
 void wd_defaults(struct wd_limits *l)
@@ -176,6 +178,12 @@ void wd_get_limits(struct wd_limits *l)
     ensure_lim();
     *l = W.lim;
     pthread_mutex_unlock(&W.lock);
+}
+
+void wd_set_on_open(void (*fn)(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op), void *op)
+{
+    W.on_open = fn;
+    W.open_op = op;
 }
 
 void wd_set_snapshot(void (*fn)(FILE *f, const char *chan, void *op), void *op)
@@ -319,6 +327,8 @@ static void open_entry(struct entry *e, int64_t t)
         e->id = -1;                 /* no record kept: still followed, for the state */
     history_event(e->since, e->chan[0] ? e->chan : NULL, RULES[e->rule].level, "incident", sum);
     log_info("incident: %s%s%s", e->chan[0] ? e->chan : "server", ": ", sum);
+    if (W.on_open && e->id > 0)
+        W.on_open(e->id, e->chan[0] ? e->chan : NULL, e->group, e->rule, W.open_op);
 }
 
 static void close_entry(struct entry *e, int64_t t)
@@ -407,6 +417,8 @@ static void groups(int64_t t)
                 g->id = -2;
             history_event(g->since, NULL, RULES[g->rule].level, "incident", sum);
             log_info("incident: %s", sum);
+            if (W.on_open && g->id > 0)
+                W.on_open(g->id, NULL, g->group, g->rule, W.open_op);
             for (int k = -1; k < n; k++) {
                 struct entry *m = k < 0 ? e : &W.e[with[k]];
 
