@@ -2876,7 +2876,8 @@ def supervisor_incidents():
         others = sorted({x["rule"] for x in j["incidents"] if x["channel"] or x["group"]} - {"no_input"})   # not the server's (this disk may be low)
         need(not others, f"other incidents for an input that stopped: {others}")
         need(not still, f"still open: {[(x['id'], x['channel']) for x in still]}; watching {dbg.get('w')}; i1 input bitrate {dbg.get('c', {}).get('bitrate')} age {dbg.get('c', {}).get('last_packet_age_ms')}")
-        lasted = j["incidents"][0]["closed"] - j["incidents"][0]["opened"]
+        src_inc = [x for x in j["incidents"] if x["rule"] == "no_input" and x["channel"] is None][0]
+        lasted = src_inc["closed"] - src_inc["opened"]
         p.close()
         # limits through the API, kept in the config file
         code, j = api("/api/watchdog", "PUT", {"cc_per_min": 25, "off": []})

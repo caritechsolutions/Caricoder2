@@ -150,6 +150,7 @@ struct chan {
     int wd_nd;
     char wd_group[512];                     /* its source, for grouping */
     char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
+    int64_t wd_flow_since;                  /* input arriving since (0: it is not) */
     int n_out_dirs;
 };
 
@@ -860,6 +861,12 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         }
     }
     G = c->wd_group;
+    /* the content rules count only while input arrives, and from when it began to */
+    if (!flowing)
+        c->wd_flow_since = 0;
+    else if (!c->wd_flow_since)
+        c->wd_flow_since = t;
+#define SINCE_FLOW(b_) ((b_) > c->wd_flow_since ? (b_) : c->wd_flow_since)
     /* the counters a minute ago */
     {
         int k = (c->wd_wh + c->wd_wn) % 40;
@@ -916,8 +923,8 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         double black = fresh ? json_get_num(d, pic, "black_ms", 0) : 0;
         double frozen = fresh ? json_get_num(d, pic, "frozen_ms", 0) : 0;
 
-        wd_observe(t, c->name, c->name, G, WD_BLACK, black > 0, "black picture", t - (int64_t)(black / 1000));
-        wd_observe(t, c->name, c->name, G, WD_FROZEN, frozen > 0, "frozen picture", t - (int64_t)(frozen / 1000));
+        wd_observe(t, c->name, c->name, G, WD_BLACK, black > 0, "black picture", SINCE_FLOW(t - (int64_t)(black / 1000)));
+        wd_observe(t, c->name, c->name, G, WD_FROZEN, frozen > 0, "frozen picture", SINCE_FLOW(t - (int64_t)(frozen / 1000)));
     }
     {
         /* silent audio: which, by the language the stream list gives it */
@@ -945,7 +952,7 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         }
         if (what[0])
             snprintf(what + strlen(what), sizeof(what) - strlen(what), " silent");
-        wd_observe(t, c->name, c->name, G, WD_SILENT, flowing && longest > 0, what, t - (int64_t)(longest / 1000));
+        wd_observe(t, c->name, c->name, G, WD_SILENT, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
     {
         /* video or audio listed, nothing of it arriving */
@@ -970,7 +977,7 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         if (what[0])
             snprintf(what + strlen(what), sizeof(what) - strlen(what), ": in the PMT, no data");
         /* only while the rest arrives: no input at all is the other rule */
-        wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, t - (int64_t)(longest / 1000));
+        wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
 }
 
