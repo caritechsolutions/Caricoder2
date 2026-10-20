@@ -474,7 +474,9 @@ void wd_tick(int64_t t)
                 continue;
             }
         }
-        if (!e->id && (e->on || e->instant) && t - e->since >= min_for(e->rule))
+        /* long enough by what was seen (not by the clock alone: the last
+         * sample may be a couple of seconds old) */
+        if (!e->id && (e->instant || (e->on && e->last_on - e->since >= min_for(e->rule))))
             open_entry(e, t);
     }
     groups(t);

@@ -2934,13 +2934,32 @@ def supervisor_incidents():
         code, j = api("/api/watchdog", "PUT", {"cc_per_min": 25, "off": []})
         need(code == 200 and j["limits"]["cc_per_min"] == 25 and j["limits"]["min_s"] == 5, f"put: {code} {j}")
         need(json.load(open(cfg))["watchdog"]["cc_per_min"] == 25, "limits not saved")
+        # many verdicts at once: JSON lines; the bad ones said, the good ones kept
+        lines = "\n".join([json.dumps({"id": src_inc["id"], "verdict": "wrong", "category": "network", "cause": "the test stopped the input", "note": "review"}),
+                           json.dumps({"id": src_inc["id"], "verdict": "maybe"}),
+                           json.dumps({"id": 999999, "verdict": "right"}), ""])
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/api/verdicts/import", method="POST", headers=auth, data=lines.encode())
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            imp = json.load(resp)
+        need(imp["applied"] == 1 and imp["failed"] == 2 and "line 3: no such incident" in imp["errors"], f"import: {imp}")
+        for _ in range(20):
+            code, one = api(f"/api/incidents/{src_inc['id']}")
+            if one and one.get("incident", one).get("verdict"):
+                break
+            time.sleep(0.25)
+        got = one.get("incident", one)
+        need(got.get("verdict") == "wrong" and (got.get("actual") or {}).get("category") == "network", f"verdict not kept: {got.get('verdict')} {got.get('actual')}")
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/api/incidents?limit=2000&download=1", headers=auth)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            need("attachment" in (resp.headers.get("Content-Disposition") or ""), "the download is not offered as a file")
+            need(any(x["id"] == src_inc["id"] for x in json.load(resp)["incidents"]), "download without the incidents")
     finally:
         sup.send_signal(signal.SIGTERM)
         try:
             sup.wait(timeout=10)
         except subprocess.TimeoutExpired:
             sup.kill()
-    return f"source incident with both channels in it, closed after the input came back (lasted {lasted} s); limits set and saved"
+    return f"source incident with both channels in it, closed after the input came back (lasted {lasted} s); limits set and saved; verdicts imported in bulk"
 
 
 @test
@@ -3242,6 +3261,8 @@ def supervisor_technician():
         with urllib.request.urlopen(r, timeout=20) as resp:
             prompt = json.load(resp)
         need(said in prompt["messages"][1]["content"], "the verdict is not given with the next incident like it")
+        um = prompt["messages"][1]["content"]
+        need("Key facts" in um and "- rule: " in um and "- began: " in um, f"no key facts ahead of the report: {um[:400]!r}")
         # a question in plain words
         code, j = api("/api/technician/ask", "POST", {"question": "What is wrong with t1 right now?"})
         need(code == 200 and j["id"], f"ask: {code} {j}")

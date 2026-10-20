@@ -152,6 +152,7 @@ struct chan {
     int64_t wd_died[16];
     int wd_nd;
     char wd_group[512];                     /* its source, for grouping */
+    char *wd_stats;                         /* the statistics the watchdog last judged (main thread) */
     char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
     int64_t wd_flow_since;                  /* input arriving since (0: it is not) */
     int64_t ev_last;                        /* the last recording made for it without being asked */
@@ -939,7 +940,9 @@ static void wd_snapshot(FILE *f, const char *chan, void *op)
 {
     struct super *s = op;
     struct chan *c = chan ? find_chan(s, chan) : NULL;
-    char *st = c && c->state == CH_RUNNING ? chan_stats(s, c) : NULL;
+    /* what the watchdog saw when it decided, not the file as it is now (it
+     * may have changed since: a short silence already over) */
+    char *st = !c || c->state != CH_RUNNING ? NULL : c->wd_stats ? strdup(c->wd_stats) : chan_stats(s, c);
 
     if (st) {
         size_t n = strlen(st);
@@ -1087,8 +1090,8 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
             for (int k = ss >= 0 ? d->node[ss].first_child : -1; k >= 0; k = d->node[k].next)
                 if ((int)json_get_num(d, k, "in_pid", -1) == pid && json_get(d, k, "from_pid") < 0)
                     lang = json_get_str(d, k, "language", "");
-            n += (size_t)snprintf(what + n, n < sizeof(what) ? sizeof(what) - n : 0, "%s%s%s", n ? ", " : "audio ",
-                                  lang[0] ? lang : "", lang[0] ? "" : "(no language)");
+            n += (size_t)snprintf(what + n, n < sizeof(what) ? sizeof(what) - n : 0, "%s%s (PID %d)", n ? ", " : "audio ",
+                                  lang[0] ? lang : "no language", pid);
             if (ms > longest)
                 longest = ms;
             if (n >= sizeof(what))
@@ -1187,9 +1190,12 @@ static void chan_sample(struct super *s, struct chan *c, int64_t now)
     if (!st)
         return;
     root = json_parse(&doc, st, err, sizeof(err));
-    free(st);
-    if (root < 0)
+    if (root < 0) {
+        free(st);
         return;
+    }
+    free(c->wd_stats);
+    c->wd_stats = st;
     in = json_get(&doc, root, "input");
     out = json_get(&doc, root, "output");
     if (in >= 0)
@@ -2190,6 +2196,40 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
     }
 }
 
+static bool history_incident_exists(int64_t id)
+{
+    char *d, *v, *n, *a;
+    bool ok = history_incident_answer(id, &d, &v, &n, &a);
+
+    free(d), free(v), free(n), free(a);
+    return ok;
+}
+
+/* A person's word on the technician's answer for incident `id`. */
+static bool apply_verdict(const struct json_doc *doc, int root, int64_t id, char *err, size_t errlen)
+{
+    static const char *const cats[] = { "", "source_provider", "source_ird", "satellite_signal", "network",
+                                        "transcoder", "normal_content", "unknown" };
+    char actual[1200], q1[700], q2[700], text[900];
+    const char *v = json_get_str(doc, root, "verdict", ""), *cat = json_get_str(doc, root, "category", "");
+    const char *cause = json_get_str(doc, root, "cause", ""), *note = json_get_str(doc, root, "note", "");
+    bool cat_ok = false;
+
+    for (size_t k = 0; k < sizeof(cats) / sizeof(cats[0]); k++)
+        cat_ok |= !strcmp(cat, cats[k]);
+    if ((strcmp(v, "right") && strcmp(v, "partly") && strcmp(v, "wrong")) || !cat_ok) {
+        snprintf(err, errlen, "verdict: right, partly or wrong; category: one of the technician's");
+        return false;
+    }
+    snprintf(actual, sizeof(actual), "{\"category\": %s, \"cause\": %s}", json_quote(cat, q1, sizeof(q1)),
+             json_quote(cause, q2, sizeof(q2)));
+    history_incident_verdict(id, time(NULL), v, note, *cat || *cause ? actual : "{}");
+    snprintf(text, sizeof(text), "%s%s%.300s%s%.300s", !strcmp(v, "right") ? "Right." : !strcmp(v, "partly") ? "Partly." : "Wrong.",
+             *cause ? " It was: " : "", cause, *note ? " " : "", note);
+    history_message(time(NULL), "person", "in", text, "{}", id);
+    return true;
+}
+
 /* ---- the peers: answering them, and telling ours about them ------------------------- */
 
 static void api_error(struct http_resp *resp, int status, const char *msg);
@@ -2759,6 +2799,7 @@ static void scan_channels(struct super *s)
             }
             if (!c)
                 c = &s->ch[s->n++];
+            free(c->wd_stats);
             memset(c, 0, sizeof(*c));
             snprintf(c->name, sizeof(c->name), "%s", name);
             c->log_fd = -1;
@@ -3199,39 +3240,70 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
     }
     if (!strncmp(p, "/api/incidents/", 15) && strstr(p + 15, "/verdict")) {
         /* POST {"verdict": "right"|"partly"|"wrong", "category", "cause", "note"}: a person's word on the technician's */
-        static const char *const cats[] = { "", "source_provider", "source_ird", "satellite_signal", "network",
-                                            "transcoder", "normal_content", "unknown" };
         struct json_doc *doc = malloc(sizeof(*doc));
-        char err[200], actual[1200], q1[700], q2[700], text[900];
+        char err[200];
         int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
         int64_t id = strtoll(p + 15, NULL, 10);
-        const char *v, *cat, *cause, *note;
-        bool cat_ok = false;
 
         if (root < 0 || strcmp(req->method, "POST") || id <= 0) {
             free(doc);
             api_error(resp, 400, "POST {\"verdict\": \"right\", \"partly\" or \"wrong\", ...}");
             return;
         }
-        v = json_get_str(doc, root, "verdict", "");
-        cat = json_get_str(doc, root, "category", "");
-        cause = json_get_str(doc, root, "cause", "");
-        note = json_get_str(doc, root, "note", "");
-        for (size_t k = 0; k < sizeof(cats) / sizeof(cats[0]); k++)
-            cat_ok |= !strcmp(cat, cats[k]);
-        if ((strcmp(v, "right") && strcmp(v, "partly") && strcmp(v, "wrong")) || !cat_ok) {
+        if (!apply_verdict(doc, root, id, err, sizeof(err))) {
             free(doc);
-            api_error(resp, 400, "verdict: right, partly or wrong; category: one of the technician's");
+            api_error(resp, 400, err);
             return;
         }
-        snprintf(actual, sizeof(actual), "{\"category\": %s, \"cause\": %s}", json_quote(cat, q1, sizeof(q1)),
-                 json_quote(cause, q2, sizeof(q2)));
-        history_incident_verdict(id, time(NULL), v, note, *cat || *cause ? actual : "{}");
-        snprintf(text, sizeof(text), "%s%s%.300s%s%.300s", !strcmp(v, "right") ? "Right." : !strcmp(v, "partly") ? "Partly." : "Wrong.",
-                 *cause ? " It was: " : "", cause, *note ? " " : "", note);
-        history_message(time(NULL), "person", "in", text, "{}", id);
         free(doc);
         http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+        return;
+    }
+    if (!strcmp(p, "/api/verdicts/import")) {
+        /* POST JSON lines, one verdict to a line: {"id", "verdict", "category", "cause", "note"} */
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char *body = req->body ? strdup(req->body) : NULL, *save = NULL, out[1500], err[200];
+        int done = 0, bad = 0, lineno = 0;
+        size_t n = 0;
+
+        if (strcmp(req->method, "POST") || !doc || !body) {
+            free(doc);
+            free(body);
+            api_error(resp, 400, "POST the verdicts, one JSON object to a line");
+            return;
+        }
+        out[0] = 0;
+        for (char *line = strtok_r(body, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+            int root;
+            int64_t id;
+
+            lineno++;
+            while (*line == ' ' || *line == '\t' || *line == '\r')
+                line++;
+            if (!*line)
+                continue;
+            root = json_parse(doc, line, err, sizeof(err));
+            id = root >= 0 ? (int64_t)json_get_num(doc, root, "id", 0) : 0;
+            if (root < 0 || id <= 0 || !history_incident_exists(id) || !apply_verdict(doc, root, id, err, sizeof(err))) {
+                bad++;
+                if (n + 200 < sizeof(out))
+                    n += (size_t)snprintf(out + n, sizeof(out) - n, "%sline %d: %.120s", n ? "; " : "", lineno,
+                                          root < 0 ? err : id <= 0 ? "no id" : !history_incident_exists(id) ? "no such incident" : err);
+                continue;
+            }
+            done++;
+        }
+        free(body);
+        free(doc);
+        {
+            char qe[1600], text[1800];
+
+            snprintf(text, sizeof(text), "{\"ok\": true, \"applied\": %d, \"failed\": %d, \"errors\": %s}\n", done, bad,
+                     json_quote(out, qe, sizeof(qe)));
+            http_resp_text(resp, 200, "application/json", text);
+        }
+        if (done)
+            ev(NULL, "info", "verdicts", "%d verdicts imported%s", done, bad ? " (some lines could not be)" : "");
         return;
     }
     if (!strcmp(p, "/api/training/export")) {
@@ -3298,6 +3370,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->type = "application/json";
         resp->body = out;
         resp->body_len = len;
+        if (query_param(req->query, "download", v, sizeof(v)) && !strcmp(v, "1"))
+            snprintf(resp->extra, sizeof(resp->extra),
+                     "Content-Disposition: attachment; filename=\"caricoder3-%s-incidents.json\"\r\n", s->name);
         return;
     }
     if (!strncmp(p, "/api/tools", 10) && (p[10] == 0 || p[10] == '/')) {

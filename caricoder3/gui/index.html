@@ -884,7 +884,21 @@ function techCard() {
     <div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at since the supervisor started${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>
     ${T.verdicts ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
       <div class="sub"><a href="/api/training/export">Download them as training data</a> (JSON lines)</div></div>` : ""}
-  </div></div></section>`;
+  </div>
+  <div class="sub" style="margin-top:10px">Reviewing many at once: <a href="/api/incidents?limit=2000&download=1">download the last week's incidents</a> (JSON, with the technician's answers) ·
+    <a href="#" onclick="$('#vimport').click(); return false">import verdicts…</a> (JSON lines: <span class="mono">{"id", "verdict", "category", "cause", "note"}</span>)
+    <input type="file" id="vimport" accept=".jsonl,.json,.txt" style="display:none" onchange="importVerdicts(this)"> <span id="vimport_note">${importNote}</span></div>
+  </div></section>`;
+}
+let importNote = "";
+async function importVerdicts(inp) {
+  const f = inp.files && inp.files[0]; if (!f) return;
+  try {
+    const j = await api("/api/verdicts/import", { method: "POST", body: await f.text() });
+    importNote = `<span class="${j.failed ? "warn" : "ok"}">${j.applied} verdict${j.applied === 1 ? "" : "s"} imported${j.failed ? `, ${j.failed} could not be: ${esc(j.errors)}` : ""}</span>`;
+  } catch(e) { importNote = `<span class="bad">${esc(e.message)}</span>`; }
+  inp.value = "";
+  loadTech(true);
 }
 
 /* ---------- asking the technician (the chat) ---------- */

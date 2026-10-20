@@ -327,6 +327,100 @@ static const char SCHEMA[] =
     "\"ticket\": {\"type\": \"string\", \"maxLength\": 800}},"
     " \"required\": [\"cause\", \"category\", \"confidence\", \"explanation\", \"next_checks\", \"ticket\"]}";
 
+/* Makes `s` valid UTF-8 in place: a model can send a broken sequence, and a
+ * cut ("%.300s") can split one; each bad byte becomes '?'. */
+static void utf8_fix(char *s)
+{
+    unsigned char *p = (unsigned char *)s;
+
+    while (*p) {
+        int n = *p < 0x80 ? 0 : (*p & 0xE0) == 0xC0 && *p >= 0xC2 ? 1 : (*p & 0xF0) == 0xE0 ? 2 : (*p & 0xF8) == 0xF0 && *p <= 0xF4 ? 3 : -1;
+        int k = 1;
+
+        for (; n > 0 && k <= n; k++)
+            if ((p[k] & 0xC0) != 0x80)
+                break;
+        if (n < 0 || k <= n) {
+            *p++ = '?';
+            continue;
+        }
+        p += n + 1;
+    }
+}
+
+/* The first `"key": value` in a report (the incident's own fields come
+ * before its detail): a number, or a string copied unescaped enough to
+ * read. false: not there, or null. */
+static bool rep_num(const char *rep, const char *key, long long *v)
+{
+    char k[48];
+    const char *p;
+
+    snprintf(k, sizeof(k), "\"%s\":", key);
+    if (!(p = strstr(rep, k)))
+        return false;
+    p += strlen(k);
+    while (*p == ' ')
+        p++;
+    if (!strncmp(p, "null", 4))
+        return false;
+    *v = strtoll(p, NULL, 10);
+    return true;
+}
+
+static void rep_str(const char *rep, const char *key, char *out, size_t len)
+{
+    char k[48];
+    const char *p;
+    size_t n = 0;
+
+    out[0] = 0;
+    snprintf(k, sizeof(k), "\"%s\":", key);
+    if (!(p = strstr(rep, k)))
+        return;
+    p += strlen(k);
+    while (*p == ' ')
+        p++;
+    if (*p != '"')
+        return;
+    for (p++; *p && *p != '"' && n + 1 < len; p++) {
+        if (*p == '\\' && p[1])
+            p++;
+        out[n++] = *p;
+    }
+    out[n] = 0;
+}
+
+/* The few facts that matter most, in plain words ahead of the JSON: a
+ * small model reads these better than it finds them in a long report. */
+static void key_facts(FILE *f, const char *rep, int64_t now)
+{
+    long long opened = 0, closed = 0;
+    char rule[48], what[300], chan[80];
+    bool has_closed;
+
+    rep_num(rep, "opened", &opened);
+    has_closed = rep_num(rep, "closed", &closed);
+    rep_str(rep, "rule", rule, sizeof(rule));
+    rep_str(rep, "summary", what, sizeof(what));
+    rep_str(rep, "channel", chan, sizeof(chan));
+    fprintf(f, "Key facts (from the record; do not add to them):\n- rule: %s\n- what: %s\n- where: %s\n", rule, what,
+            chan[0] ? chan : "a source or the server (no single channel)");
+    if (opened) {
+        char tb[40];
+        time_t tt = (time_t)opened;
+        struct tm tm;
+
+        localtime_r(&tt, &tm);
+        strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S", &tm);
+        fprintf(f, "- began: %s (this server's local time)\n", tb);
+    }
+    if (has_closed)
+        fprintf(f, "- it lasted %lld s and is OVER: it ended by itself\n", closed - opened);
+    else if (opened)
+        fprintf(f, "- it began %lld s ago and is STILL GOING ON\n", (long long)now - opened);
+}
+
 /* The request to the model, malloc'd; NULL when the incident is not there
  * (or belongs to a source's: that one is looked at instead, *parent set).
  * With `answer` (training data): the messages only, and that answer as the
@@ -389,7 +483,9 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
                         fprintf(uf, " %s (%s)%s", ps[i].name, ps[i].reachable ? "answering" : "not answering",
                                 i + 1 < np ? "," : ".");
                 }
-                fprintf(uf, "\n\nThe incident, with its evidence and the events around it (JSON; times are Unix "
+                fprintf(uf, "\n\n");
+                key_facts(uf, rep, time(NULL));
+                fprintf(uf, "\nThe incident, with its evidence and the events around it (JSON; times are Unix "
                             "seconds):\n%.40000s\n\nEarlier incidents like it, with what you said then and what a "
                             "person said (JSON; null where nobody said):\n%.12000s\n\nWhat caused this incident? "
                             "Answer with the JSON object only.", rep, sim ? sim : "[]");
@@ -537,6 +633,8 @@ static void answer(int k)
                 content = msg >= 0 ? json_get_str(doc, msg, "content", NULL) : NULL;
             }
         }
+        if (content)
+            utf8_fix((char *)content);
         pthread_mutex_lock(&T.lock);
         for (int i = 0; i < ASKS_MAX; i++)
             if (T.asks[i].id == id) {
@@ -601,6 +699,8 @@ static void diagnose(int64_t id, int tries)
                 content = msg >= 0 ? json_get_str(&doc, msg, "content", NULL) : NULL;
             }
         }
+        if (content)
+            utf8_fix((char *)content);
         if (content && *content == '{') {
             static struct json_doc dd;
             char e3[200], text[700], q[400];
@@ -616,6 +716,7 @@ static void diagnose(int64_t id, int tries)
                     conf = conf <= 100 ? conf / 100 : 1;
                 snprintf(text, sizeof(text), "%.300s (%s, %.0f%% sure)", json_get_str(&dd, r, "cause", "?"),
                          json_get_str(&dd, r, "category", "?"), conf * 100);
+                utf8_fix(text);
                 history_message(time(NULL), "technician", "out", text, "{}", id);
                 (void)q;
                 pthread_mutex_lock(&T.lock);

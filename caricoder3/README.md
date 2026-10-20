@@ -423,6 +423,7 @@ The API (basic auth, JSON in and out):
 | `GET /api/evidence?channel=&incident=&limit=` | what the tools found or kept, newest first; `GET /api/evidence/ID/file`: the recording or picture |
 | `POST /api/incidents/ID/verdict` | `{"verdict": "right"\|"partly"\|"wrong", "cause", "category", "note"}`: a person's word on the technician's answer |
 | `GET /api/training/export` | the verdicts so far as training data (JSON lines) |
+| `POST /api/verdicts/import` | verdicts for many incidents, one JSON object to a line |
 | `POST /api/technician/ask`, `GET /api/technician/ask?id=` | a question in plain words, and its answer when there is one |
 | `GET /api/technician`, `POST /api/technician/diagnose` | how the technician is; `{"incident": ID}`: look at it now; `GET /api/technician/prompt?incident=ID`: what it is given |
 | `GET /api/peers`, `PUT /api/peers` | `{"name", "key", "peers": [{"name", "url"}]}`: this server's name, the shared key, the other transcoders; GET also how each is and the conversation |
@@ -566,6 +567,17 @@ offers them as training data (`GET /api/training/export`: one JSON line
 per incident, `{"incident", "verdict", "messages": [system, user,
 assistant]}`, the assistant's answer being what it should have said)
 for fine-tuning the model later.
+
+Many at once: the Technician card downloads the last week's incidents
+with the technician's answers (`GET /api/incidents?limit=2000&download=1`)
+for reviewing elsewhere, and imports verdicts back (`POST
+/api/verdicts/import`: one JSON object to a line, `{"id", "verdict",
+"category", "cause", "note"}`; it says which lines it could not take).
+
+Each request to the model starts with the key facts in plain words (the
+rule, what it was, where, when it began, how long it lasted and whether
+it is over) ahead of the full report: a small model reads those more
+reliably than it finds them in a long JSON report.
 
 **Ask the technician** (the button at the bottom right of every page)
 opens a conversation with it in plain words: "what is wrong right now?",
