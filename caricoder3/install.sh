@@ -225,8 +225,10 @@ NOTES
     if [ -x "$PREFIX/bin/caricoder3-llama-server" ] && [ -f /var/lib/caricoder3/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ] &&
        grep -q "^b11200 " "$LIBS_DIR/llama-server.version" 2>/dev/null; then
         if grep -q " cpu$" "$LIBS_DIR/llama-server.version" &&
-           { command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]; }; then
-            note "the CUDA compiler is here now: the model server is rebuilt for the cards"
+           { command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ] ||
+             { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 &&
+               [ ! -f /var/lib/caricoder3/cuda-toolkit.refused ]; }; }; then
+            note "an NVIDIA card is here: the CUDA toolkit is checked and the model server rebuilt for the card"
         else
             note "model server and model are installed"
             return 0

@@ -7,6 +7,8 @@
 # 4.7 GB download), or by hand:  sudo /opt/caricoder3/scripts/technician-setup.sh
 # What it did is in /var/log/caricoder3-technician-setup.log.
 #
+#   0. With an NVIDIA card and no CUDA compiler: Ubuntu's CUDA toolkit,
+#      only when apt's dry run shows the driver packages are left alone.
 #   1. llama-server, built from llama.cpp at a fixed release: with CUDA
 #      (for the Tesla cards, compute 6.1) when the CUDA compiler (nvcc) is
 #      on this machine, otherwise for the CPU. Installed as
@@ -35,6 +37,44 @@ echo $$ > "$MARK"
 trap 'rm -f "$MARK"' EXIT
 
 log "technician setup: llama.cpp $LLAMA_TAG, model $MODEL"
+
+# ---- the CUDA compiler, for the cards ------------------------------------------------
+# With an NVIDIA card and no nvcc: Ubuntu's CUDA toolkit (12.0, which a 525 or
+# later driver runs), but only if apt's dry run shows it would leave every
+# driver package alone (on Ubuntu 24.04 an updated 535 driver package now means
+# the 580 driver: under running channels that would stop the cards until a
+# reboot). Not tried again once refused; CC3_NO_CUDA_TOOLKIT=1 skips it.
+REFUSED=/var/lib/caricoder3/cuda-toolkit.refused
+DRIVER_PKGS='nvidia-(kernel|firmware|dkms|driver|utils|compute-utils)|libnvidia-(compute|encode|decode|gl|cfg|fbc|extra|common)|xserver-xorg-video-nvidia'
+if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ] && [ -z "${CC3_NO_CUDA_TOOLKIT:-}" ] &&
+   [ ! -f "$REFUSED" ] && command -v nvidia-smi >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1 &&
+   drv_before="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)" && [ -n "$drv_before" ]; then
+    log "an NVIDIA card (driver $drv_before) and no CUDA compiler: checking whether Ubuntu's CUDA toolkit leaves the driver alone"
+    sim="$(DEBIAN_FRONTEND=noninteractive apt-get install -s --no-install-recommends nvidia-cuda-toolkit nvidia-cuda-toolkit-gcc 2>&1)"
+    touch_drv="$(printf '%s\n' "$sim" | grep -E '^(Inst|Remv|Conf) ' | grep -iE "$DRIVER_PKGS")"
+    if ! printf '%s\n' "$sim" | grep -qE '^Inst nvidia-cuda-toolkit '; then
+        log "the CUDA toolkit is not offered here (apt: $(printf '%s' "$sim" | tail -n 1)); staying on the CPU"
+        printf '%s\n' "not offered" > "$REFUSED"
+    elif [ -n "$touch_drv" ]; then
+        log "NOT installing the CUDA toolkit: it would change the driver:"
+        printf '%s\n' "$touch_drv" | sed 's/^/    /'
+        log "staying on the CPU; see the README (\"The technician on a card\")"
+        printf '%s\n' "$touch_drv" > "$REFUSED"
+    else
+        log "installing Ubuntu's CUDA toolkit (a few GB; the driver packages are not touched)"
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+               nvidia-cuda-toolkit nvidia-cuda-toolkit-gcc </dev/null >"$LIBS/cuda-toolkit-install.log" 2>&1; then
+            drv_after="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)"
+            if [ "$drv_after" != "$drv_before" ]; then
+                log "WARNING: the driver reads '$drv_after' now (was $drv_before): check nvidia-smi"
+            fi
+            log "CUDA toolkit installed: $(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*')"
+        else
+            log "the CUDA toolkit did not install (see $LIBS/cuda-toolkit-install.log); staying on the CPU"
+            printf '%s\n' "install failed" > "$REFUSED"
+        fi
+    fi
+fi
 
 # ---- the model server --------------------------------------------------------------
 NVCC=""

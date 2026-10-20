@@ -540,6 +540,18 @@ llama.cpp was built with CUDA, which needs the CUDA compiler, `nvcc`, on
 the machine at install), otherwise on the CPU at the lowest priority
 with 8 threads.
 
+**The technician on a card.** With an NVIDIA card and no `nvcc`, the
+setup installs Ubuntu's CUDA toolkit (`nvidia-cuda-toolkit`, CUDA 12.0:
+any 525 or later driver runs it, and it builds for the Tesla P40) — but
+only after apt's dry run shows that no driver package would be installed,
+changed or removed. On Ubuntu 24.04 an updated `libnvidia-compute-535`
+package now means the 580 driver's libraries; under a running 535 driver
+that stops the cards until a reboot, so when the dry run shows any of
+that the setup stays on the CPU, says why in its log, and does not try
+again (`/var/lib/caricoder3/cuda-toolkit.refused`; delete it to try
+again, `CC3_NO_CUDA_TOOLKIT=1` never to). With the toolkit in place the
+model server is built again, for the card, and nothing else changes.
+
 About a minute after an incident opens (once the evidence is in) it is
 given: its notes (`knowledge/*.md` as installed in
 `/usr/local/share/caricoder3/knowledge`, then the site's own in
