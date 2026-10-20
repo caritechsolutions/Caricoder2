@@ -1028,3 +1028,307 @@ void tech_state_json(FILE *f)
     fputc('}', f);
     pthread_mutex_unlock(&T.lock);
 }
+
+/* ---- testing models against the verdicts ----------------------------------------- */
+
+static int64_t file_mb(const char *path)
+{
+    struct stat sb;
+
+    return stat(path, &sb) == 0 ? (int64_t)(sb.st_size / 1048576) : -1;
+}
+
+/* Where a model of `need_mb` goes: a card's index, -2 all cards (split),
+ * -1 the CPU. `want`: "auto", "cpu", "all" or an index. */
+static int eval_place(const char *want, int need_mb, char *why, size_t len)
+{
+    int idx[8], free_mb[8], busy[8], n = sysstat_gpu_free(idx, free_mb, busy, 8), best = -1, total = 0;
+
+    if (!strcmp(want, "cpu")) {
+        snprintf(why, len, "the CPU (asked)");
+        return -1;
+    }
+    if (server_cpu_only()) {
+        snprintf(why, len, "the CPU (the model server was built without CUDA)");
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (free_mb[i] > 0)
+            total += free_mb[i];
+        if (strcmp(want, "auto") && strcmp(want, "all") && atoi(want) == idx[i]) {
+            snprintf(why, len, "card %d (asked; %d MB free, about %d MB needed)", idx[i], free_mb[i], need_mb);
+            return idx[i];
+        }
+        if (free_mb[i] >= need_mb && (best < 0 || free_mb[i] > free_mb[best]))
+            best = i;
+    }
+    if (!strcmp(want, "all") || (best < 0 && n > 1 && total >= need_mb)) {
+        snprintf(why, len, "all %d cards, split (%d MB free together, about %d MB needed)", n, total, need_mb);
+        return -2;
+    }
+    if (best >= 0) {
+        snprintf(why, len, "card %d (%d MB free, about %d MB needed)", idx[best], free_mb[best], need_mb);
+        return idx[best];
+    }
+    snprintf(why, len, "the CPU (no card has %d MB free; it will be slow)", need_mb);
+    return -1;
+}
+
+static pid_t eval_spawn(const struct tech_conf *c, const char *model, int port, int ctx, int place, const char *logp)
+{
+    char sport[16], sctx[16], sthr[16];
+    pid_t pid = fork();
+
+    if (pid != 0)
+        return pid;
+    snprintf(sport, sizeof(sport), "%d", port);
+    snprintf(sctx, sizeof(sctx), "%d", ctx);
+    snprintf(sthr, sizeof(sthr), "%d", c->threads > 0 ? c->threads : 8);
+    {
+        char *argv[24];
+        int a = 0, fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC, 0644), nul = open("/dev/null", O_RDONLY);
+        char dev[16];
+
+        argv[a++] = (char *)c->server;
+        argv[a++] = "-m"; argv[a++] = (char *)model;
+        argv[a++] = "--host"; argv[a++] = "127.0.0.1";
+        argv[a++] = "--port"; argv[a++] = sport;
+        argv[a++] = "-c"; argv[a++] = sctx;
+        argv[a++] = "-t"; argv[a++] = sthr;
+        argv[a++] = "-ngl"; argv[a++] = place == -1 ? "0" : "99";
+        if (place == -2) {
+            argv[a++] = "--split-mode"; argv[a++] = "layer";
+        }
+        argv[a++] = "-np"; argv[a++] = "1";
+        argv[a++] = "--no-webui";
+        argv[a] = NULL;
+        if (fd >= 0)
+            dup2(fd, 1), dup2(fd, 2);
+        if (nul >= 0)
+            dup2(nul, 0);
+        for (int f = 3; f < 1024; f++)
+            close(f);
+        setpgid(0, 0);
+        if (place >= 0) {
+            snprintf(dev, sizeof(dev), "%d", place);
+            setenv("CUDA_VISIBLE_DEVICES", dev, 1);
+        } else if (place == -1) {
+            setenv("CUDA_VISIBLE_DEVICES", "", 1);
+        }
+        setpriority(PRIO_PROCESS, 0, place == -1 ? 19 : 5);
+        execv(c->server, argv);
+        _exit(127);
+    }
+}
+
+static bool eval_up(int port)
+{
+    char url[64], *out = NULL;
+    int st;
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
+    st = peer_http(url, "GET", "/health", NULL, NULL, 2000, &out);
+    free(out);
+    return st == 200;
+}
+
+static void eval_stop(pid_t pid)
+{
+    if (pid <= 0)
+        return;
+    kill(-pid, SIGTERM);
+    for (int i = 0; i < 100; i++) {
+        if (waitpid(pid, NULL, WNOHANG) == pid)
+            return;
+        usleep(100000);
+    }
+    kill(-pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+}
+
+static volatile sig_atomic_t eval_quit;
+static void eval_on_sig(int sig)
+{
+    (void)sig;
+    eval_quit = 1;
+}
+
+int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o)
+{
+    static struct hist_case all[4000];
+    int n_all = history_eval_cases(all, 4000), picked[64], n_pick = 0, want = o->cases > 0 ? o->cases : 12;
+    char *req[64] = { 0 };
+    FILE *out = fopen(o->out, "w");
+    int port = o->port > 0 ? o->port : 8561, ctx = o->ctx > 0 ? o->ctx : (c->ctx > 0 ? c->ctx : 16384);
+    struct { int n, scored, match, ticket_short, failed; double secs, conf; } sum[TECH_EVAL_MODELS];
+
+    if (want > 64)
+        want = 64;
+    if (!out) {
+        fprintf(stderr, "cannot write %s: %s\n", o->out, strerror(errno));
+        return 1;
+    }
+    if (!n_all) {
+        fprintf(stderr, "no incidents with both an answer from the technician and a verdict: nothing to test against\n");
+        fclose(out);
+        return 1;
+    }
+    /* one or two of each kind (rule and place), newest first, in turns:
+     * no one kind fills the test */
+    for (int round = 0; round < 2 && n_pick < want; round++)
+        for (int i = 0; i < n_all && n_pick < want; i++) {
+            int same = 0;
+            bool taken = false;
+
+            for (int k = 0; k < n_pick; k++) {
+                if (picked[k] == i)
+                    taken = true;
+                if (!strcmp(all[picked[k]].rule, all[i].rule) && !strcmp(all[picked[k]].where, all[i].where))
+                    same++;
+            }
+            if (!taken && same == round)
+                picked[n_pick++] = i;
+        }
+    printf("%d incidents with a verdict; testing on %d of them:\n", n_all, n_pick);
+    for (int k = 0; k < n_pick; k++) {
+        const struct hist_case *h = &all[picked[k]];
+        int64_t parent = 0;
+
+        req[k] = build_request(c, h->id, &parent);
+        printf("  %lld  %-12s %-28.28s %-7s expected: %s\n", (long long)h->id, h->rule, h->where, h->verdict,
+               h->actual_category[0] ? h->actual_category : !strcmp(h->verdict, "right") ? h->said_category : "(not scored)");
+    }
+    signal(SIGINT, eval_on_sig);
+    signal(SIGTERM, eval_on_sig);
+    memset(sum, 0, sizeof(sum));
+    for (int m = 0; m < o->n_models && !eval_quit; m++) {
+        const char *model = o->models[m];
+        int64_t mb = file_mb(model);
+        char why[200], logp[600], url[64];
+        int place;
+        pid_t pid;
+        time_t t0;
+        bool up = false;
+
+        if (mb < 0) {
+            printf("\n%s: not there, skipped\n", model);
+            fprintf(out, "{\"model\": \"%s\", \"error\": \"no such file\"}\n", model);
+            continue;
+        }
+        place = eval_place(o->gpu ? o->gpu : "auto", (int)(mb * 11 / 10 + 2500), why, sizeof(why));
+        snprintf(logp, sizeof(logp), "/tmp/caricoder3-tech-eval-%d.log", m);
+        printf("\n%s (%lld MB) on %s\n  loading...", model, (long long)mb, why);
+        fflush(stdout);
+        pid = eval_spawn(c, model, port, ctx, place, logp);
+        t0 = time(NULL);
+        while (!eval_quit && time(NULL) - t0 < 900) {
+            if (waitpid(pid, NULL, WNOHANG) == pid) {
+                pid = 0;
+                break;
+            }
+            if ((up = eval_up(port)))
+                break;
+            usleep(500000);
+        }
+        if (!up) {
+            printf(" did not load (see %s)\n", logp);
+            fprintf(out, "{\"model\": \"%s\", \"error\": \"did not load; see %s\"}\n", model, logp);
+            eval_stop(pid);
+            continue;
+        }
+        printf(" loaded in %lld s\n", (long long)(time(NULL) - t0));
+        snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
+        for (int k = 0; k < n_pick && !eval_quit; k++) {
+            const struct hist_case *h = &all[picked[k]];
+            const char *expect = h->actual_category[0] ? h->actual_category
+                               : !strcmp(h->verdict, "right") ? h->said_category : "";
+            char *resp = NULL, cat[48] = "", e2[100];
+            static struct json_doc doc, dd;
+            struct timespec a, b;
+            double secs, conf = -1;
+            int st, root, ptok = 0, ctok = 0;
+            const char *content = NULL;
+            bool ticket = false, match = false;
+
+            if (!req[k])
+                continue;
+            clock_gettime(CLOCK_MONOTONIC, &a);
+            st = peer_http(url, "POST", "/v1/chat/completions", NULL, req[k], 1800000, &resp);
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            secs = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+            root = st == 200 && resp ? json_parse(&doc, resp, e2, sizeof(e2)) : -1;
+            if (root >= 0) {
+                int ch = json_get(&doc, root, "choices"), us = json_get(&doc, root, "usage");
+
+                if (ch >= 0 && doc.node[ch].first_child >= 0) {
+                    int msg = json_get(&doc, doc.node[ch].first_child, "message");
+
+                    content = msg >= 0 ? json_get_str(&doc, msg, "content", NULL) : NULL;
+                }
+                if (us >= 0) {
+                    ptok = (int)json_get_num(&doc, us, "prompt_tokens", 0);
+                    ctok = (int)json_get_num(&doc, us, "completion_tokens", 0);
+                }
+            }
+            sum[m].n++;
+            sum[m].secs += secs;
+            fprintf(out, "{\"model\": \"%s\", \"incident\": %lld, \"rule\": \"%s\", \"where\": ", model, (long long)h->id, h->rule);
+            jesc(out, h->where, strlen(h->where));
+            fprintf(out, ", \"summary\": ");
+            jesc(out, h->summary, strlen(h->summary));
+            fprintf(out, ", \"lasted_s\": %lld, \"verdict\": \"%s\", \"expected\": \"%s\", \"seconds\": %.1f, "
+                         "\"prompt_tokens\": %d, \"completion_tokens\": %d, \"answer\": ",
+                    (long long)h->lasted_s, h->verdict, expect, secs, ptok, ctok);
+            if (content && *content == '{' && json_parse(&dd, content, e2, sizeof(e2)) >= 0) {
+                int r = json_parse(&dd, content, e2, sizeof(e2));
+
+                utf8_fix((char *)content);
+                compact((char *)content);       /* one line: the file is JSON lines */
+                fputs(content, out);
+                snprintf(cat, sizeof(cat), "%s", json_get_str(&dd, r, "category", ""));
+                conf = json_get_num(&dd, r, "confidence", -1);
+                ticket = json_get_str(&dd, r, "ticket", "")[0] != 0;
+            } else {
+                fprintf(out, "null, \"error\": ");
+                jesc(out, st == 200 ? "not a JSON answer" : resp ? resp : "no answer", 300);
+                sum[m].failed++;
+            }
+            fprintf(out, "}\n");
+            fflush(out);
+            if (expect[0]) {
+                sum[m].scored++;
+                /* "unknown" said for an "unknown" one is right; so is "normal_content" for a short
+                 * picture or sound one a person could not pin down */
+                match = !strcmp(cat, expect) ||
+                        (!strcmp(expect, "unknown") && !strcmp(cat, "normal_content") &&
+                         (!strcmp(h->rule, "black") || !strcmp(h->rule, "frozen") || !strcmp(h->rule, "silent")));
+                sum[m].match += match;
+            }
+            if (ticket && h->lasted_s >= 0 && h->lasted_s < 120)
+                sum[m].ticket_short++;
+            if (conf >= 0)
+                sum[m].conf += conf <= 1 ? conf : conf <= 100 ? conf / 100 : 1;
+            printf("  %2d/%d  %-12s %5.0f s  %-16s %s%s\n", k + 1, n_pick, h->rule, secs, cat[0] ? cat : "(no answer)",
+                   !expect[0] ? "" : match ? "right" : "WRONG",
+                   ticket && h->lasted_s >= 0 && h->lasted_s < 120 ? "  (ticket for a short one)" : "");
+            fflush(stdout);
+            free(resp);
+        }
+        eval_stop(pid);
+    }
+    printf("\n%-48s %8s %8s %10s %9s %8s\n", "model", "right", "tickets", "avg sure", "avg s", "failed");
+    for (int m = 0; m < o->n_models; m++) {
+        const char *base = strrchr(o->models[m], '/');
+
+        if (!sum[m].n)
+            continue;
+        printf("%-48.48s %3d/%-4d %8d %9.0f%% %9.0f %8d\n", base ? base + 1 : o->models[m], sum[m].match, sum[m].scored,
+               sum[m].ticket_short, sum[m].n ? 100 * sum[m].conf / sum[m].n : 0, sum[m].secs / sum[m].n, sum[m].failed);
+    }
+    printf("\nright: the kind of cause matched your verdict; tickets: written for one that was over in under 2 min\n"
+           "(none should be). Every answer is in %s: attach it to read the wording.\n", o->out);
+    for (int k = 0; k < n_pick; k++)
+        free(req[k]);
+    fclose(out);
+    return eval_quit ? 130 : 0;
+}

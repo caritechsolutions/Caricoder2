@@ -83,6 +83,24 @@ void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const 
 bool history_incident_answer(int64_t id, char **diagnosis, char **verdict, char **note, char **actual);
 /* The incidents with both an answer and a verdict, oldest first. */
 int history_verdict_ids(int64_t *ids, int max);
+
+/* For testing models (tech_eval): the incidents a person gave a verdict on
+ * and the technician had answered, newest first. */
+struct hist_case {
+    int64_t id;
+    char rule[32];
+    char where[128];            /* the channel, or the source */
+    char summary[200];
+    char verdict[12];
+    char actual_category[32];   /* what the person said it was ("" none) */
+    char said_category[32];     /* what the technician had said */
+    int64_t lasted_s;           /* -1: not over */
+};
+int history_eval_cases(struct hist_case *out, int max);
+
+/* Reading only (another process keeps the history): the queries work,
+ * nothing is written. */
+bool history_open_readonly(const char *path, char *err, size_t errlen);
 /* {"right", "partly", "wrong", "waiting", "waiting_looked_at"} */
 void history_verdict_counts(FILE *f);
 /* The technician's answer about incident `id` (a JSON object). */

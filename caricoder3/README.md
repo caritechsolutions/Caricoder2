@@ -596,6 +596,29 @@ rule, what it was, where, when it began, how long it lasted and whether
 it is over) ahead of the full report: a small model reads those more
 reliably than it finds them in a long JSON report.
 
+**Trying other models** (`caricoder3 tech-eval`). Is another model better
+at this than the technician's own? The test answers that with your
+verdicts: it takes incidents you gave a verdict on (one or two of each
+kind, newest first, 12 by default: no one kind fills it), sends each
+model exactly what the technician would be sent about them, in a model
+server of its own (port 8561; the running technician is not disturbed),
+and scores the answers: whether the kind of cause matches your verdict,
+whether a ticket was written for one that was over in under two minutes,
+how sure it said it was, and how long it took. Every answer goes to a
+file (`/var/lib/caricoder3/tech-eval-DATE.jsonl`) for reading the wording.
+
+    sudo bash /opt/caricoder3/scripts/tech-eval-models.sh   # Qwen3.8-27B and Qwen3.6-35B-A3B, once
+    sudo caricoder3 tech-eval                               # those and the technician's own
+
+`tech-eval-models.sh` fetches each candidate's 4-bit (Q4_K_M) file into
+`/var/lib/caricoder3/models/eval`, checked against the SHA-256 in the
+repository's own file list (other repositories: give their names). Without
+`--model`, `tech-eval` tries the technician's model and every `.gguf`
+there; `--gpu auto` (a card with room for the model, else all cards with
+it split between them, else the CPU), `cpu`, `all` or a card's index;
+`--cases N`. A model this llama.cpp release cannot read says so ("did not
+load", with its log).
+
 **Ask the technician** (the button at the bottom right of every page)
 opens a conversation with it in plain words: "what is wrong right now?",
 "why did bet go black this morning?". Each question is answered from

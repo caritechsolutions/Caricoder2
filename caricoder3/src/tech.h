@@ -58,6 +58,23 @@ void tech_set_context(void (*fn)(FILE *f, void *op), void *op);
 int64_t tech_ask(const char *question);
 bool tech_answer_json(FILE *f, int64_t id);
 
+/* Testing models: the same requests the technician sends, for incidents
+ * a person gave a verdict on (one or two of each kind), to each model in
+ * turn in its own model server; every answer is written to `out` (JSON
+ * lines) and a table is printed. Needs the history (history_open_readonly
+ * will do). Returns 0 when done. */
+#define TECH_EVAL_MODELS 8
+struct tech_eval_opts {
+    const char *models[TECH_EVAL_MODELS];
+    int n_models;
+    int cases;          /* how many incidents (12) */
+    const char *gpu;    /* "auto", "cpu", "all" (split across the cards) or a card's index */
+    int port;           /* the test's model server, on 127.0.0.1 (8561) */
+    int ctx;            /* context, tokens (0: the technician's) */
+    const char *out;
+};
+int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o);
+
 /* {"enabled", "state", "where", "model", "queue", "done", "last_error", ...} */
 void tech_state_json(FILE *f);
 

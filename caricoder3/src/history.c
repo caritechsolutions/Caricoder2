@@ -100,6 +100,13 @@ void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const 
     (void)id; (void)t; (void)verdict; (void)note; (void)actual;
 }
 int history_verdict_ids(int64_t *ids, int max) { (void)ids; (void)max; return 0; }
+int history_eval_cases(struct hist_case *out, int max) { (void)out; (void)max; return 0; }
+bool history_open_readonly(const char *path, char *err, size_t errlen)
+{
+    (void)path;
+    snprintf(err, errlen, "this build has no SQLite: no history is kept");
+    return false;
+}
 bool history_query_incidents_brief(FILE *f, int64_t from, int64_t to, bool open_only, int limit)
 {
     (void)from; (void)to; (void)open_only; (void)limit;
@@ -1246,6 +1253,72 @@ int history_verdict_ids(int64_t *ids, int max)
     }
     sqlite3_close(db);
     return n;
+}
+
+static void json_category(const char *j, char *out, size_t len)
+{
+    const char *p = j ? strstr(j, "\"category\"") : NULL;
+    size_t n = 0;
+
+    out[0] = 0;
+    if (!p || !(p = strchr(p + 10, ':')))
+        return;
+    while (*++p == ' ')
+        ;
+    if (*p != '"')
+        return;
+    for (p++; *p && *p != '"' && n + 1 < len; p++)
+        out[n++] = *p;
+    out[n] = 0;
+}
+
+int history_eval_cases(struct hist_case *out, int max)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    int n = 0;
+
+    if (!db)
+        return 0;
+    if (sqlite3_prepare_v2(db, "SELECT id, rule, COALESCE(chan, grp, ''), summary, verdict, actual, diagnosis, t, closed"
+                               " FROM incidents WHERE verdict IS NOT NULL AND diagnosis IS NOT NULL AND parent IS NULL"
+                               " ORDER BY t DESC", -1, &st, NULL) == SQLITE_OK) {
+        while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+            struct hist_case *c = &out[n++];
+            const char *t;
+
+            memset(c, 0, sizeof(*c));
+            c->id = sqlite3_column_int64(st, 0);
+#define COPY(dst, col) snprintf(dst, sizeof(dst), "%s", (t = (const char *)sqlite3_column_text(st, col)) ? t : "")
+            COPY(c->rule, 1);
+            COPY(c->where, 2);
+            COPY(c->summary, 3);
+            COPY(c->verdict, 4);
+#undef COPY
+            json_category((const char *)sqlite3_column_text(st, 5), c->actual_category, sizeof(c->actual_category));
+            json_category((const char *)sqlite3_column_text(st, 6), c->said_category, sizeof(c->said_category));
+            c->lasted_s = sqlite3_column_type(st, 8) == SQLITE_NULL ? -1
+                        : sqlite3_column_int64(st, 8) - sqlite3_column_int64(st, 7);
+        }
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    return n;
+}
+
+bool history_open_readonly(const char *path, char *err, size_t errlen)
+{
+    sqlite3 *db = NULL;
+
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        snprintf(err, errlen, "%s: %s", path, db ? sqlite3_errmsg(db) : "cannot open");
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_close(db);
+    snprintf(H.path, sizeof(H.path), "%s", path);
+    H.on = true;
+    return true;
 }
 
 void history_verdict_counts(FILE *f)

@@ -956,6 +956,7 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
 
 /* `caricoder3 ctl SOCKET|NAME cmd [args]`: the command-line client. */
 int super_main(int argc, char **argv);      /* super.c */
+int super_tech_eval(int argc, char **argv); /* super.c */
 int probe_main(int argc, char **argv);      /* probe.c */
 int share_main(int argc, char **argv);      /* share.c */
 
@@ -1380,6 +1381,8 @@ int main(int argc, char **argv)
         return ctl_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "serve"))
         return super_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "tech-eval"))
+        return super_tech_eval(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "probe"))
         return probe_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "share"))

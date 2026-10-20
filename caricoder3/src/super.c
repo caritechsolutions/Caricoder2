@@ -4352,6 +4352,86 @@ static void usage(FILE *f)
 }
 
 int super_main(int argc, char **argv);
+int super_tech_eval(int argc, char **argv);
+
+/* caricoder3 tech-eval: models tried against the verdicts (tech.h) */
+int super_tech_eval(int argc, char **argv)
+{
+    static struct super s;
+    struct tech_eval_opts o;
+    char err[300], outp[512];
+    static char found[TECH_EVAL_MODELS][600];
+    int n_found = 0;
+
+    memset(&o, 0, sizeof(o));
+    o.cases = 12;
+    o.gpu = "auto";
+    o.port = 8561;
+    snprintf(s.config_path, sizeof(s.config_path), DEFAULT_CONFIG);
+    outp[0] = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc)
+            snprintf(s.config_path, sizeof(s.config_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc && o.n_models < TECH_EVAL_MODELS)
+            o.models[o.n_models++] = argv[++i];
+        else if (!strcmp(argv[i], "--cases") && i + 1 < argc)
+            o.cases = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gpu") && i + 1 < argc)
+            o.gpu = argv[++i];
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc)
+            o.port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--context") && i + 1 < argc)
+            o.ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc)
+            snprintf(outp, sizeof(outp), "%s", argv[++i]);
+        else {
+            fprintf(stderr,
+                    "usage: caricoder3 tech-eval [--model FILE.gguf ...] [--cases 12] [--gpu auto|cpu|all|N]\n"
+                    "                            [--context TOKENS] [--port 8561] [--out FILE] [--config FILE]\n"
+                    "  Tries each model on incidents you gave a verdict on (one or two of each kind), with\n"
+                    "  exactly what the technician is sent, and scores the answers against your verdicts.\n"
+                    "  Without --model: the technician's own model and every .gguf in\n"
+                    "  /var/lib/caricoder3/models/eval. The running technician is not disturbed.\n");
+            return 2;
+        }
+    }
+    if (!load_system_config(&s, err, sizeof(err))) {
+        fprintf(stderr, "%s\n", err);
+        return 1;
+    }
+    if (!history_open_readonly(s.history_path, err, sizeof(err))) {
+        fprintf(stderr, "history: %s\n", err);
+        return 1;
+    }
+    snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
+    if (!o.n_models) {
+        DIR *d = opendir("/var/lib/caricoder3/models/eval");
+        struct dirent *e;
+
+        snprintf(found[n_found++], sizeof(found[0]), "%s", s.tech.model);
+        while (d && (e = readdir(d)) && n_found < TECH_EVAL_MODELS) {
+            size_t n = strlen(e->d_name);
+
+            if (n > 5 && !strcmp(e->d_name + n - 5, ".gguf"))
+                snprintf(found[n_found++], sizeof(found[0]), "/var/lib/caricoder3/models/eval/%.500s", e->d_name);
+        }
+        if (d)
+            closedir(d);
+        for (int i = 0; i < n_found; i++)
+            o.models[o.n_models++] = found[i];
+    }
+    if (!outp[0]) {
+        time_t t = time(NULL);
+        struct tm tm;
+
+        localtime_r(&t, &tm);
+        strftime(outp, sizeof(outp), "/var/lib/caricoder3/tech-eval-%Y%m%d-%H%M.jsonl", &tm);
+    }
+    o.out = outp;
+    sysstat_start();
+    sleep(6);                       /* the cards' free memory, from the first samples */
+    return tech_eval(&s.tech, &o);
+}
 
 int super_main(int argc, char **argv)
 {

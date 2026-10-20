@@ -3283,13 +3283,25 @@ def supervisor_technician():
         code, pj = api("/api/peers")
         chat = [m for m in pj["messages"] if m["incident"] is None and m["peer"] in ("person", "technician")]
         need(len(chat) >= 2, f"the question and answer are not in the conversation: {chat}")
+        # testing models against the verdicts, while the supervisor runs (the history read only)
+        evout = os.path.join(root, "eval.jsonl")
+        ev = subprocess.run([BIN, "tech-eval", "--config", cfg, "--model", model, "--model", "/nonexistent.gguf",
+                             "--gpu", "cpu", "--port", str(port + 9), "--cases", "4", "--out", evout],
+                            capture_output=True, text=True, timeout=600)
+        need(ev.returncode == 0, f"tech-eval: {ev.returncode} {ev.stdout[-800:]} {ev.stderr[-400:]}")
+        rows = [json.loads(l) for l in open(evout)]
+        mine = [r for r in rows if r.get("model") == model]
+        need(mine and all("seconds" in r and r["expected"] == "source_ird" for r in mine) and
+             any(r.get("error") == "no such file" for r in rows), f"eval rows: {rows}")
+        need("right" in ev.stdout and "tiny-qwen2.gguf" in ev.stdout, f"no table: {ev.stdout[-600:]}")
+        if os.environ.get("CC3_SHOW_EVAL"): print(ev.stdout)
     finally:
         sup.send_signal(signal.SIGTERM)
         try:
             sup.wait(timeout=20)
         except subprocess.TimeoutExpired:
             sup.kill()
-    return f"answered in {st['last_seconds']:.0f} s on the {st['where']} (random test model: the form is tested); a 'wrong, it was the IRD' verdict kept, exported as training data and given with the next incident like it"
+    return f"answered in {st['last_seconds']:.0f} s on the {st['where']} (random test model: the form is tested); a 'wrong, it was the IRD' verdict kept, exported as training data and given with the next incident like it; tech-eval scored {len(mine)} against it"
 
 
 @test
