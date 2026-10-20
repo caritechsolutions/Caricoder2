@@ -41,6 +41,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -1122,6 +1123,26 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         /* only while the rest arrives: no input at all is the other rule */
         wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
+    {
+        /* the source's A/V timing, against its baseline (main.c, sync) */
+        int sy = json_get(d, root, "sync"), aa = sy >= 0 ? json_get(d, sy, "audio") : -1;
+        double worst = 0;
+        int shifted = 0;
+
+        what[0] = 0;
+        for (int j = aa >= 0 ? d->node[aa].first_child : -1; j >= 0; j = d->node[j].next) {
+            double sh = json_get_num(d, j, "shift_ms", 0);
+
+            if (fabs(sh) >= L.av_shift_ms && fabs(sh) > fabs(worst)) {
+                worst = sh;
+                shifted = (int)json_get_num(d, j, "shifted_s", 0);
+                snprintf(what, sizeof(what), "audio PID %d moved %+.0f ms against the video (was %+.0f ms): possibly out of sync at the source",
+                         (int)json_get_num(d, j, "pid", 0), sh, json_get_num(d, j, "baseline_ms", 0));
+            }
+        }
+        wd_observe(t, c->name, c->name, G, WD_AV_SHIFT, flowing && worst != 0, what,
+                   SINCE_FLOW(t - shifted));
+    }
 }
 
 /* What the watchdog sees of a channel whatever its state: failing,
@@ -1141,7 +1162,7 @@ static void wd_channel_state(struct chan *c, int64_t t)
     wd_get_limits(&L);
     for (int i = 0; i < c->wd_nd; i++)
         recent += t - c->wd_died[i] <= L.restart_window_s;
-    snprintf(what, sizeof(what), "stopped on its own %d times in %d min (last: %s)", recent,
+    snprintf(what, sizeof(what), "stopped on its own %d times in %d min (last: %.120s)", recent,
              L.restart_window_s / 60, c->why);
     wd_observe(t, c->name, c->name, c->wd_group, WD_RESTARTS, recent >= L.restarts, what, 0);
     snprintf(what, sizeof(what), "channel failed: %s", c->why);
@@ -2119,10 +2140,10 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
         return;
     switch (r) {
     case WD_BLACK: case WD_FROZEN: case WD_SILENT: case WD_NO_DATA: case WD_CC: case WD_PIDS:
-    case WD_CLOCK: case WD_BACKUP:
+    case WD_CLOCK: case WD_BACKUP: case WD_AV_SHIFT:
         if (!c)
             return;
-        if (r == WD_BLACK || r == WD_FROZEN)
+        if (r == WD_BLACK || r == WD_FROZEN || r == WD_AV_SHIFT)
             tool_snapshot(s, c, id, err, sizeof(err));
         if (t - c->ev_last < 600)
             return;

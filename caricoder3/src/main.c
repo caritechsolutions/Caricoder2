@@ -11,6 +11,7 @@
  *   main     once a second: statistics file, log line, systemd watchdog
  */
 #include <errno.h>
+#include <math.h>
 #include <getopt.h>
 #include <pthread.h>
 #include <sched.h>
@@ -283,6 +284,137 @@ static void idle_check(const struct engine_stats *st, int64_t input_age_ms)
     }
 }
 
+/*
+ * The A/V timing the source signals: for each audio stream, how far ahead
+ * of its arrival it is stamped less how far the video is (a 5 s window
+ * each, engine.c). What it is does not matter (encoders buffer the two
+ * differently); a change in it does: the provider's encoder has moved its
+ * audio against its video, and the channel may be out of sync. The first
+ * two minutes of a run give the baseline (their median); a move of
+ * SYNC_WARN_MS from it for 30 s is said once, and again when it is back.
+ */
+#define SYNC_WARN_MS 80.0
+#define SYNC_BASE_N 24
+struct sync_state {
+    uint16_t pid;
+    double samples[SYNC_BASE_N];
+    int n;
+    double baseline, offset, shift;
+    bool have_base, warned;
+    int over;
+    float last_a, last_v;
+};
+static struct sync_state g_sync[MAX_ES];
+static int g_nsync;
+static uint16_t g_sync_video;
+
+static int cmp_d(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+
+    return x < y ? -1 : x > y;
+}
+
+static void sync_check(const struct engine_stats *st, int64_t input_age_ms)
+{
+    int v = -1;
+    static uint64_t changes = (uint64_t)-1;
+    static int base_n = -1, over_n = 6;
+
+    if (base_n < 0) {
+        /* shorter for the tests */
+        const char *b = getenv("CC3_SYNC_BASE_WINDOWS"), *o = getenv("CC3_SYNC_OVER_WINDOWS");
+
+        base_n = b && atoi(b) > 0 && atoi(b) <= SYNC_BASE_N ? atoi(b) : SYNC_BASE_N;
+        over_n = o && atoi(o) > 0 ? atoi(o) : 6;
+    }
+    for (int i = 0; st->have_program && i < st->prog.n_es && v < 0; i++) {
+        char lang[8];
+
+        if (!strcmp(program_es_kind(&st->prog, i, lang, sizeof(lang)), "video"))
+            v = i;
+    }
+    /* a new programme layout, or the input gone a while: learnt again */
+    if (v < 0 || st->in.program_changes != changes || input_age_ms > 5000 || input_age_ms < 0) {
+        if (v < 0 || st->in.program_changes != changes || input_age_ms > 5000)
+            g_nsync = 0;
+        changes = st->in.program_changes;
+        if (v < 0 || input_age_ms > 5000 || input_age_ms < 0)
+            return;
+    }
+    g_sync_video = st->prog.es[v].pid;
+    for (int i = 0; i < st->prog.n_es; i++) {
+        char lang[8];
+        struct sync_state *s = NULL;
+        float la = st->es_lead_ms[i], lv = st->es_lead_ms[v];
+
+        if (strcmp(program_es_kind(&st->prog, i, lang, sizeof(lang)), "audio") || isnan(la) || isnan(lv))
+            continue;
+        for (int k = 0; k < g_nsync; k++)
+            if (g_sync[k].pid == st->prog.es[i].pid)
+                s = &g_sync[k];
+        if (!s) {
+            if (g_nsync == MAX_ES)
+                continue;
+            s = &g_sync[g_nsync++];
+            memset(s, 0, sizeof(*s));
+            s->pid = st->prog.es[i].pid;
+            s->last_a = s->last_v = NAN;
+        }
+        if (la == s->last_a && lv == s->last_v)
+            continue;                       /* no new window since */
+        s->last_a = la;
+        s->last_v = lv;
+        s->offset = (double)la - (double)lv;
+        if (!s->have_base) {
+            s->samples[s->n++] = s->offset;
+            if (s->n == base_n) {
+                double sorted[SYNC_BASE_N];
+
+                memcpy(sorted, s->samples, sizeof(sorted));
+                qsort(sorted, (size_t)base_n, sizeof(double), cmp_d);
+                s->baseline = base_n % 2 ? sorted[base_n / 2] : (sorted[base_n / 2 - 1] + sorted[base_n / 2]) / 2;
+                s->have_base = true;
+                log_info("PID 0x%04X (audio%s%s): A/V timing %+.0f ms against the video (the baseline)", s->pid,
+                         lang[0] ? " " : "", lang, s->baseline);
+            }
+            continue;
+        }
+        s->shift = s->offset - s->baseline;
+        if (fabs(s->shift) >= SYNC_WARN_MS) {
+            if (++s->over == over_n && !s->warned) {    /* 6 windows: 30 s */
+                s->warned = true;
+                log_warn("PID 0x%04X (audio%s%s): the source's A/V timing moved by %+.0f ms (was %+.0f ms, now %+.0f ms): "
+                         "the audio may be out of sync at the source", s->pid, lang[0] ? " " : "", lang, s->shift,
+                         s->baseline, s->offset);
+            }
+        } else {
+            if (s->warned)
+                log_info("PID 0x%04X (audio%s%s): the source's A/V timing is back (%+.0f ms)", s->pid,
+                         lang[0] ? " " : "", lang, s->offset);
+            s->over = 0;
+            s->warned = false;
+        }
+    }
+}
+
+static void sync_json(FILE *f)
+{
+    fprintf(f, "  \"sync\": {\"video_pid\": %u, \"audio\": [", g_sync_video);
+    for (int k = 0; k < g_nsync; k++) {
+        const struct sync_state *s = &g_sync[k];
+
+        fprintf(f, "%s{\"pid\": %u, \"offset_ms\": %.1f", k ? ", " : "", s->pid, s->offset);
+        if (s->have_base)
+            fprintf(f, ", \"baseline_ms\": %.1f, \"shift_ms\": %.1f, \"shifted_s\": %d", s->baseline, s->shift,
+                    s->over * 5);
+        else
+            fprintf(f, ", \"learning\": %d", s->n);
+        fputc('}', f);
+    }
+    fprintf(f, "]},\n");
+}
+
 /* Black or frozen picture, silent audio: said once it has lasted
  * CONTENT_WARN_MS, and once when it ends. */
 #define CONTENT_WARN_MS 10000
@@ -510,6 +642,7 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
         }
         fprintf(f, "]\n  },\n");
     }
+    sync_json(f);
 
     fprintf(f, "  \"clock\": {\n    \"locked\": %s,\n    \"drift_ppm\": %.2f,\n"
                "    \"jitter_us\": %.1f,\n    \"ts_offset_ms\": %.3f,\n"
@@ -933,6 +1066,7 @@ static int run_live(struct options *o, struct ctx *c)
         write_stats(c, &st, &r);
         idle_check(&st, r.input_age_ms);
         content_check(&st, r.input_age_ms);
+        sync_check(&st, r.input_age_ms);
 
         if (atomic_exchange(&g_hup, 0) && o->config) {
             char e[300];

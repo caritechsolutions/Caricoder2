@@ -97,6 +97,19 @@ the first where they are known to be bad. The cause is between them.
 Audio and video out of sync almost always comes from the provider's
 transcoder; the fix is a ticket asking them to reboot it.
 
+- "audio timing moved" (av_shift): the timestamps the source puts on its
+  audio moved against those on its video, compared with what they were
+  when the channel started (its baseline). This transcoder does not
+  change them on the way in, so the move happened at the source: almost
+  always the provider's encoder. If it happened on several channels of
+  the same source at once, look further up (the IRD or a remultiplexer).
+  The ticket asks the provider to check, and reboot, their encoder for
+  that service, saying by how many milliseconds and since when. A move
+  that comes back by itself within a minute was probably a glitch, not a
+  fault. A sync fault that does not change the timestamps (the encoder
+  captures the sound late but stamps it as on time) cannot be seen this
+  way: then only the picture and sound themselves tell.
+
 ## What you answer
 
 Exactly one JSON object, nothing before or after it:

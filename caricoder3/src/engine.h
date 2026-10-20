@@ -82,6 +82,7 @@ struct engine_stats {
      * since anything of it arrived (live; -1 unknown) */
     uint16_t es_src_pid[MAX_ES];
     int64_t es_idle_ms[MAX_ES];
+    float es_lead_ms[MAX_ES];           /* how far ahead of arrival it is stamped (NAN: not yet) */
     uint16_t out_number, out_ts_id, out_pmt_pid, out_pcr_pid;
 };
 

@@ -792,6 +792,18 @@ random-access flag on key frames.
 - A video or audio stream the PMT lists but nothing of which arrives
   while the rest does is reported once after 5 s, and again when it is
   back; the GUI marks it "no data".
+- The A/V timing the source signals is watched: for each audio stream,
+  how far ahead of its arrival it is stamped less how far the video is
+  (the highest in each 5 s, which late packets cannot raise). Its value
+  depends on the provider's encoder and does not matter; a change in it
+  does. The first two minutes of a run give its baseline; a move of
+  80 ms or more for 30 s is reported ("the source's A/V timing moved by
+  +200 ms (was -145 ms, now +55 ms): the audio may be out of sync at the
+  source"), is an incident (rule `av_shift`, limits under Watchdog) with
+  20 s of the source kept, and shows on the channel ("A/V moved +200
+  ms"). A fault that leaves the timestamps alone (sound captured late but
+  stamped on time) is not seen this way; telling that needs the picture
+  and sound themselves (lips against speech), which is still to come.
 - The content is watched: a picture that is black, or does not change
   at all, for 10 s, and an audio stream that is silent (peaks under
   -60 dBFS) for 10 s, are reported once and again when they end, and

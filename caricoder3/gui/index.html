@@ -200,6 +200,10 @@ function contentFaults(st) {
   }
   for (const s of ss) if (!s.from_pid && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio"))
     out.push(`${s.kind}${s.language ? " " + s.language.toUpperCase() : ""} has no data`);
+  for (const a of ((st.sync || {}).audio || [])) if (a.baseline_ms != null && Math.abs(a.shift_ms) >= 80 && a.shifted_s >= 30) {
+    const s = ss.find(x => x.in_pid === a.pid && !x.from_pid);
+    out.push(`audio${s && s.language ? " " + s.language.toUpperCase() : ""} timing moved ${a.shift_ms >= 0 ? "+" : ""}${Math.round(a.shift_ms)} ms (sync?)`);
+  }
   return out;
 }
 function healthOf(c) {
@@ -445,21 +449,26 @@ function codecLabel(s, input) {
   if (s.codec === "PES private data") return s.kind === "audio" ? "AC-3" : s.kind === "subtitles" ? "DVB subtitles" : s.kind === "teletext" ? "Teletext" : "data";
   return s.codec || "";
 }
-function mediaLine(s, input) {
+function mediaLine(s, input, sync) {
   const rate = input ? s.bitrate_in : s.bitrate;
   const bits = [codecLabel(s, input)];
+  const sy = input && sync && s.kind === "audio" ? (sync.audio || []).find(a => a.pid === s.in_pid) : null;
   if (!input && s.size) bits.push(s.size);
   if (s.language) bits.push(s.language.toUpperCase());
   const what = `<b class="k-${esc(s.kind || "data")}">${esc(s.kind || "data")}</b> ${esc(bits.join(" "))}`;
   const quiet = input && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio");
   const pid = input && s.src_pid ? `<span title="The source moved this stream from PID ${s.in_pid}; settings and output stay on ${s.in_pid}">pid ${s.src_pid} <span class="warn">(was ${s.in_pid})</span></span>` : `pid ${input ? s.in_pid : s.pid}`;
-  return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span></div>`;
+  const syncTxt = sy ? (sy.baseline_ms == null ? `<span class="dim" title="Learning how the source times its audio against its video (two minutes)">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms…</span>`
+    : Math.abs(sy.shift_ms) >= 80 ? `<span class="bad" title="The source's A/V timing has moved from what it was: the audio may be out of sync at the source">A/V moved ${sy.shift_ms >= 0 ? "+" : ""}${Math.round(sy.shift_ms)} ms</span>`
+    : `<span class="dim" title="How far ahead of the video the source times its audio; a change in it means the sync moved">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms, steady</span>`) : "";
+  return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span>${syncTxt ? `<span class="pid">${syncTxt}</span>` : ""}</div>`;
 }
 function mediaHtml(c) {
   const ss = ((c.stats || {}).service || {}).streams || [];
   if (c.state !== "running" || !ss.length) return `<div class="empty" style="padding:20px">${c.state === "running" ? "Waiting for the source…" : "Not running."}</div>`;
   const ins = ss.filter(s => !s.from_pid);
-  return `<div class="media"><div><h4>Input</h4>${ins.map(s => mediaLine(s, true)).join("")}</div><div><h4>Output</h4>${ss.map(s => mediaLine(s, false)).join("")}</div></div>`;
+  const sync = (c.stats || {}).sync;
+  return `<div class="media"><div><h4>Input</h4>${ins.map(s => mediaLine(s, true, sync)).join("")}</div><div><h4>Output</h4>${ss.map(s => mediaLine(s, false)).join("")}</div></div>`;
 }
 function niceMax(v) { if (v <= 0) return 1e6; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 /* Hover over a graph: a line at the nearest point and its figures. The
@@ -683,6 +692,7 @@ async function loadWatchdog(force) {
   try { wdInfo = await api("/api/watchdog"); } catch(e) { wdInfo = { error: e.message }; }
   if (view.page === "server" && !view.name) renderServer();
 }
+const WD_FIELDS_SYNC = [["av_shift_ms", "Audio timing moved by (ms) …"], ["av_shift_s", "… for (s): an incident"]];
 const WD_FIELDS_DISK = [["disk_warn_pct", "Disk space low under (% free)"], ["disk_crit_pct", "Disk nearly full under (% free)"], ["disk_full_h", "Disk filling: full within (hours)"]];
 const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["clear_s", "It is over when gone for (s)"],
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
@@ -713,7 +723,7 @@ function watchdogCard() {
 }
 function editWatchdog() {
   const d = $("#dlg"), L = wdInfo.limits;
-  d.innerHTML = `<h3>Watchdog rules</h3><div class="f">${WD_FIELDS.concat(WD_FIELDS_DISK).map(([k, l]) => `<label>${l}</label><input data-w="${k}" type="number" min="0" value="${L[k]}">`).join("")}</div>
+  d.innerHTML = `<h3>Watchdog rules</h3><div class="f">${WD_FIELDS.concat(WD_FIELDS_SYNC, WD_FIELDS_DISK).map(([k, l]) => `<label>${l}</label><input data-w="${k}" type="number" min="0" value="${L[k]}">`).join("")}</div>
     <h4 class="sub4">Rules in use</h4><div class="rulechecks">${wdInfo.rules.map(r => `<label><input type="checkbox" data-r="${r.id}" ${r.on ? "checked" : ""}> ${esc(r.name)}</label>`).join("")}</div>
     <div id="w_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="w_go">Save</button></div>`;
   $("#w_go").onclick = async () => {
@@ -909,7 +919,14 @@ async function chatSend() {
     if (!chatWait) return;
     try {
       const a = await api(`/api/technician/ask?id=${chatWait.id}`);
-      if (a.state === "answered" || a.state === "failed") { chatWait = null; if (a.state === "failed") chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: "(" + (a.answer || "no answer") + ")" }); await chatLoad(); return; }
+      if (a.state === "answered" || a.state === "failed") {
+        /* shown at once: the record has it a couple of seconds later */
+        chatWait = null;
+        chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: a.state === "failed" ? "(" + (a.answer || "no answer") + ")" : a.answer });
+        chatRender();
+        setTimeout(chatLoad, 4000);
+        return;
+      }
       chatWait.note = a.model_state === "starting" ? "loading the model first (up to a minute)…" : a.state === "waiting" ? "waiting its turn…" : "thinking…";
       chatRender();
     } catch(e) { chatWait = null; chatRender(); return; }

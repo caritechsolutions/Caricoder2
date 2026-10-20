@@ -22,6 +22,7 @@
  */
 #include "engine.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,13 @@ struct engine {
     uint16_t src_of[8192];          /* inside PID -> source PID */
     int64_t pid_last_ns[8192];      /* inside PID: when a unit of it last arrived */
     uint8_t acodec[8192];           /* inside PID: an audio stream's coding (watch.h), input thread */
+    /* how far ahead of its arrival each stream is stamped (its "lead"): the
+     * highest in each 5 s of input clock, which late arrival cannot raise.
+     * Audio's lead less video's is the A/V timing the source signals.
+     * win_* input thread; lead_ms under the lock (NAN: not known yet). */
+    stc_t lead_win_start[8192];
+    double lead_win_max[8192];
+    float lead_ms[8192];
     struct demux *dmx;
     struct mux *mux;
     stc_t delay;
@@ -936,6 +944,23 @@ static void on_unit(void *opaque, struct es_unit *u)
     struct engine *e = opaque;
 
     u->pid = e->alias[u->pid & 0x1FFF];
+    if (u->kind == ES_PES && (u->dts != NOPTS || u->pts != NOPTS)) {
+        int pid = u->pid & 0x1FFF;
+        double lead = (double)((u->dts != NOPTS ? u->dts : u->pts) * STC_PER_90K - u->t1) / (double)STC_PER_MS;
+
+        if (!e->lead_win_start[pid] || u->t1 < e->lead_win_start[pid]) {
+            e->lead_win_start[pid] = u->t1 ? u->t1 : 1;
+            e->lead_win_max[pid] = lead;
+        } else if (u->t1 - e->lead_win_start[pid] >= 5 * STC_HZ) {
+            pthread_mutex_lock(&e->lock);
+            e->lead_ms[pid] = (float)e->lead_win_max[pid];
+            pthread_mutex_unlock(&e->lock);
+            e->lead_win_start[pid] = u->t1;
+            e->lead_win_max[pid] = lead;
+        } else if (lead > e->lead_win_max[pid]) {
+            e->lead_win_max[pid] = lead;
+        }
+    }
     if (e->cfg.n_drop && dropped(e, u->pid)) {
         free(u);
         return;
@@ -1412,6 +1437,7 @@ void engine_get_stats(struct engine *e, struct engine_stats *out)
 
             out->es_out_pid[i] = e->out_pid[pid];
             out->es_src_pid[i] = e->src_of[pid];
+            out->es_lead_ms[i] = e->lead_ms[pid];
             out->es_idle_ms[i] = e->cfg.live && e->pid_last_ns[pid] ? (now - e->pid_last_ns[pid]) / 1000000 : -1;
         }
         for (int i = 0; i < e->prog.n_es && i < MAX_ES; i++) {
@@ -1439,8 +1465,10 @@ struct engine *engine_new(const struct engine_cfg *cfg, mux_out_fn out,
     if (!e)
         return NULL;
     e->cfg = *cfg;
-    for (int i = 0; i < 8192; i++)
+    for (int i = 0; i < 8192; i++) {
         e->out_pid[i] = e->alias[i] = e->src_of[i] = (uint16_t)i;
+        e->lead_ms[i] = NAN;
+    }
     follow_init(&e->follow, cfg->streams_file);
     e->delay = cfg->delay_ms * STC_PER_MS;
     pthread_mutex_init(&e->lock, NULL);

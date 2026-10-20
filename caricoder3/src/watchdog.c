@@ -36,6 +36,7 @@ static const struct {
     [WD_DISK_LOW]    = { "disk_low", "disk space low", "warn", false },
     [WD_DISK_CRITICAL] = { "disk_critical", "disk nearly full", "error", false },
     [WD_DISK_FILLING] = { "disk_filling", "disk filling up", "warn", false },
+    [WD_AV_SHIFT]    = { "av_shift", "audio timing moved (sync)", "error", true },
 };
 
 #define ENTRIES_MAX 2048
@@ -94,6 +95,8 @@ void wd_defaults(struct wd_limits *l)
     l->disk_warn_pct = 15;
     l->disk_crit_pct = 5;
     l->disk_full_h = 24;
+    l->av_shift_ms = 80;
+    l->av_shift_s = 30;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -115,7 +118,8 @@ int wd_rule_by_id(const char *id)
 }
 
 #define LIMIT_FIELDS(X) X(min_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
-    X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h)
+    X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
+    X(av_shift_ms) X(av_shift_s)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {
@@ -198,6 +202,8 @@ static int min_for(enum wd_rule r)
         return W.lim.load_s;
     if (r == WD_PIDS)
         return 0;
+    if (r == WD_AV_SHIFT)
+        return W.lim.av_shift_s;
     return W.lim.min_s;
 }
 

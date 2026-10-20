@@ -23,7 +23,7 @@
 enum wd_rule {
     WD_NO_INPUT, WD_CC, WD_LOSS, WD_DROPPING, WD_OUT_STALLED, WD_RESTARTS, WD_FAILED,
     WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA, WD_PIDS,
-    WD_CPU, WD_GPU, WD_NIC_DROP, WD_DISK_LOW, WD_DISK_CRITICAL, WD_DISK_FILLING,
+    WD_CPU, WD_GPU, WD_NIC_DROP, WD_DISK_LOW, WD_DISK_CRITICAL, WD_DISK_FILLING, WD_AV_SHIFT,
     WD_RULES
 };
 
@@ -41,6 +41,8 @@ struct wd_limits {
     int disk_warn_pct;      /* free space below this: low */
     int disk_crit_pct;      /* ... below this: critical (the history makes room) */
     int disk_full_h;        /* full within this many hours at the last hour's rate */
+    int av_shift_ms;        /* the source's A/V timing moved this far from its baseline ... */
+    int av_shift_s;         /* ... for this long */
     bool off[WD_RULES];     /* rules turned off */
 };
 

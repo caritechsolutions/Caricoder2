@@ -1100,6 +1100,57 @@ def live_content_faults():
     return "black, silent and frozen each said once after 10 s and once at the end"
 
 
+def _shift_pts(data, pid, from_frac, delta_90k):
+    """The stream with `pid`'s PTS/DTS moved by delta (90 kHz) from that share of it on."""
+    out = bytearray(data)
+    n = len(data) // 188
+    def rw(b, off):
+        v = ((b[off] >> 1) & 7) << 30 | b[off + 1] << 22 | (b[off + 2] >> 1) << 15 | b[off + 3] << 7 | b[off + 4] >> 1
+        v = (v + delta_90k) % (1 << 33)
+        b[off] = (b[off] & 0xF1) | ((v >> 29) & 0x0E)
+        b[off + 1] = (v >> 22) & 0xFF
+        b[off + 2] = ((v >> 14) & 0xFE) | 1
+        b[off + 3] = (v >> 7) & 0xFF
+        b[off + 4] = ((v << 1) & 0xFE) | 1
+    for i in range(int(n * from_frac), n):
+        p = i * 188
+        if ((out[p + 1] & 0x1F) << 8 | out[p + 2]) != pid or not (out[p + 1] & 0x40):
+            continue
+        q = p + 4
+        if out[p + 3] & 0x20:
+            q += 1 + out[q]
+        if q + 14 > p + 188 or out[q:q + 3] != b"\x00\x00\x01":
+            continue
+        flags = out[q + 7]
+        if flags & 0x80:
+            rw(out, q + 9)
+        if flags & 0x40:
+            rw(out, q + 14)
+    return bytes(out)
+
+
+@test
+def live_av_timing_moves():
+    """The source moves its audio 200 ms against its video halfway: the A/V timing it signals is tracked, and the move is reported once."""
+    src = _real_h264_aac(40)
+    if not src:
+        return "SKIPPED: this ffmpeg cannot encode H.264/AAC"
+    a = Analysis(src)
+    apid = [e["pid"] for e in a.pmt["streams"] if e["type"] == 0x0F][0]
+    shifted = write(w("av_shift_src.ts"), _shift_pts(read(src), apid, 0.55, 18000))
+    env = dict(os.environ, CC3_SYNC_BASE_WINDOWS="3", CC3_SYNC_OVER_WINDOWS="2")
+    st, cap, log = live(lambda p: p.play(shifted), capture_name="live_av_shift.ts", env=env, tail=1.5)
+    base = [l for l in log.splitlines() if "(the baseline)" in l]
+    moved = [l for l in log.splitlines() if "A/V timing moved by" in l]
+    need(base, f"no baseline: {log[-1500:]}")
+    import re
+    got = [int(m.group(1)) for l in moved for m in [re.search(r"moved by \+?(-?\d+) ms", l)] if m]
+    need(len(moved) == 1 and got and abs(got[0] - 200) <= 15, f"moves: {moved}\n{log[-1500:]}")
+    s = st["sync"]["audio"][0]
+    need(abs(s["shift_ms"] - 200) < 15, f"sync stats: {st['sync']}")
+    return f"{base[0].split('): ')[-1].strip()}; then: {moved[0].split('): ')[-1].strip()}"
+
+
 @test
 def live_input_outage():
     """Input vanishes for 3 s: the output never stops and resumes cleanly."""
@@ -3201,6 +3252,7 @@ def supervisor_technician():
             if ans and ans["state"] in ("answered", "failed"):
                 break
         need(ans and ans["state"] == "answered" and ans["answer"], f"answer: {ans}")
+        time.sleep(3)                       # the record is written every 2 s
         code, pj = api("/api/peers")
         chat = [m for m in pj["messages"] if m["incident"] is None and m["peer"] in ("person", "technician")]
         need(len(chat) >= 2, f"the question and answer are not in the conversation: {chat}")
