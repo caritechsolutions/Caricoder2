@@ -7,7 +7,7 @@
 #   sudo bash /opt/caricoder3/scripts/tech-eval-models.sh REPO ...   # others (Hugging Face repos)
 #
 # Each is fetched once into /var/lib/caricoder3/models/eval: the repo's
-# 4-bit Q4_K_M file, found from the repo's own file list, which also gives
+# 4-bit Q4_K_M file (or its "UD" Q4_K_M when that is all it has), found from the repo's own file list, which also gives
 # its SHA-256; the download is checked against it before it is kept. Nothing
 # else on the machine changes, and the running technician keeps its model.
 # Delete a file there to remove a candidate.
@@ -28,12 +28,14 @@ for repo in "${REPOS[@]}"; do
     say "$repo: looking for its Q4_K_M file"
     list="$(curl -fsSL --retry 3 "https://huggingface.co/api/models/$repo/tree/main")" ||
         { say "$repo: could not read its file list (is the name right?)"; continue; }
-    # one file, not split into parts, not the 'UD' variants: name, size, sha256
+    # one file at the top, not split into parts: the plain Q4_K_M if there is one,
+    # else the publisher's own "UD" (dynamic) Q4_K_M (unsloth names theirs so)
     pick="$(printf '%s' "$list" | python3 -c '
 import json, sys
-files = [f for f in json.load(sys.stdin) if f.get("type") == "file"]
-c = [f for f in files if f["path"].endswith("Q4_K_M.gguf") and "/" not in f["path"]
-     and "-of-" not in f["path"] and not f["path"].startswith("UD-") and "-UD-" not in f["path"]]
+files = [f for f in json.load(sys.stdin) if f.get("type") == "file" and "/" not in f["path"] and "-of-" not in f["path"]]
+plain = [f for f in files if f["path"].endswith("-Q4_K_M.gguf") and "-UD-" not in f["path"]]
+ud = [f for f in files if f["path"].endswith("-UD-Q4_K_M.gguf")]
+c = plain or ud
 if not c:
     sys.exit(1)
 f = c[0]
