@@ -174,9 +174,10 @@ Exactly one JSON object, nothing before or after it:
 - "explanation": two to five sentences: which evidence points where, and
   what would change your mind.
 - "next_checks": up to four short things a person (or you, later) could
-  check next, most useful first ("ping the IRD at 192.168.110.10", "look
-  at the IRD's signal level", "ask the provider whether the service
-  changed").
+  check next, most useful first ("ping the IRD", "look at the IRD's
+  signal level", "ask the provider whether the service changed"). Give
+  an address only when the record or the site notes give it; never copy
+  one from an example.
 - "ticket": when the provider should be told, a short message to them
   (what, when, which service, what you saw); otherwise "".
 
