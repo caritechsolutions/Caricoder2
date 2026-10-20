@@ -3191,6 +3191,19 @@ def supervisor_technician():
         with urllib.request.urlopen(r, timeout=20) as resp:
             prompt = json.load(resp)
         need(said in prompt["messages"][1]["content"], "the verdict is not given with the next incident like it")
+        # a question in plain words
+        code, j = api("/api/technician/ask", "POST", {"question": "What is wrong with t1 right now?"})
+        need(code == 200 and j["id"], f"ask: {code} {j}")
+        ans = None
+        for _ in range(60):
+            time.sleep(1)
+            code, ans = api(f"/api/technician/ask?id={j['id']}")
+            if ans and ans["state"] in ("answered", "failed"):
+                break
+        need(ans and ans["state"] == "answered" and ans["answer"], f"answer: {ans}")
+        code, pj = api("/api/peers")
+        chat = [m for m in pj["messages"] if m["incident"] is None and m["peer"] in ("person", "technician")]
+        need(len(chat) >= 2, f"the question and answer are not in the conversation: {chat}")
     finally:
         sup.send_signal(signal.SIGTERM)
         try:

@@ -423,6 +423,7 @@ The API (basic auth, JSON in and out):
 | `GET /api/evidence?channel=&incident=&limit=` | what the tools found or kept, newest first; `GET /api/evidence/ID/file`: the recording or picture |
 | `POST /api/incidents/ID/verdict` | `{"verdict": "right"\|"partly"\|"wrong", "cause", "category", "note"}`: a person's word on the technician's answer |
 | `GET /api/training/export` | the verdicts so far as training data (JSON lines) |
+| `POST /api/technician/ask`, `GET /api/technician/ask?id=` | a question in plain words, and its answer when there is one |
 | `GET /api/technician`, `POST /api/technician/diagnose` | how the technician is; `{"incident": ID}`: look at it now; `GET /api/technician/prompt?incident=ID`: what it is given |
 | `GET /api/peers`, `PUT /api/peers` | `{"name", "key", "peers": [{"name", "url"}]}`: this server's name, the shared key, the other transcoders; GET also how each is and the conversation |
 | `GET /api/peer/hello`, `POST /api/peer/check`, `GET /api/peer/incidents` | what a peer may ask, with `Authorization: CC3-Peer <key>`: how it is; "can you see this source?" (`{"url", "program", "seconds", "from", "why"}`); its open incidents |
@@ -564,7 +565,17 @@ this site without being retrained. The Technician card counts them and
 offers them as training data (`GET /api/training/export`: one JSON line
 per incident, `{"incident", "verdict", "messages": [system, user,
 assistant]}`, the assistant's answer being what it should have said)
-for fine-tuning the model later. Built without
+for fine-tuning the model later.
+
+**Ask the technician** (the button at the bottom right of every page)
+opens a conversation with it in plain words: "what is wrong right now?",
+"why did bet go black this morning?". Each question is answered from
+how things are at that moment (every channel and its rates, what the
+watchdog is watching, the last day's incidents, the disks, the peers,
+the last half hour's events) and its notes. Questions go before
+incidents waiting to be looked at. The questions and answers are lines
+of the conversation (`POST /api/technician/ask {"question"}`, then
+`GET /api/technician/ask?id=`). Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

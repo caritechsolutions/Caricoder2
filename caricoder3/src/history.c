@@ -100,6 +100,12 @@ void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const 
     (void)id; (void)t; (void)verdict; (void)note; (void)actual;
 }
 int history_verdict_ids(int64_t *ids, int max) { (void)ids; (void)max; return 0; }
+bool history_query_incidents_brief(FILE *f, int64_t from, int64_t to, bool open_only, int limit)
+{
+    (void)from; (void)to; (void)open_only; (void)limit;
+    fprintf(f, "{\"incidents\": []}");
+    return true;
+}
 bool history_incident_answer(int64_t id, char **diagnosis, char **verdict, char **note, char **actual)
 {
     (void)id;
@@ -1269,6 +1275,16 @@ void history_verdict_counts(FILE *f)
         sqlite3_close(db);
     fprintf(f, "{\"right\": %d, \"partly\": %d, \"wrong\": %d, \"waiting\": %d, \"waiting_looked_at\": %d}",
             right, partly, wrong, open, looked);
+}
+
+bool history_query_incidents_brief(FILE *f, int64_t from, int64_t to, bool open_only, int limit)
+{
+    bool ok;
+
+    row_brief = true;
+    ok = history_query_incidents(f, NULL, from, to, open_only, limit);
+    row_brief = false;
+    return ok;
 }
 
 bool history_report_incident(FILE *f, int64_t id, int64_t now)

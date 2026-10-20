@@ -50,6 +50,14 @@ bool tech_prompt(FILE *f, int64_t id);
  * assistant's answer being what it should have said). Returns how many. */
 int tech_export(FILE *f);
 
+/* Questions in plain words. The context is how things are now (a JSON
+ * object, written by the supervisor when a question is taken up).
+ * tech_ask returns its id (0: the technician is off); tech_answer_json
+ * writes {"id", "state": waiting|thinking|answered|failed, "question", "answer"}. */
+void tech_set_context(void (*fn)(FILE *f, void *op), void *op);
+int64_t tech_ask(const char *question);
+bool tech_answer_json(FILE *f, int64_t id);
+
 /* {"enabled", "state", "where", "model", "queue", "done", "last_error", ...} */
 void tech_state_json(FILE *f);
 

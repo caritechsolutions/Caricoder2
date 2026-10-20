@@ -2365,6 +2365,57 @@ static void handle_peer(struct super *s, const struct http_req *req, struct http
     api_error(resp, 404, "no such peer request");
 }
 
+static const char *state_name(enum chan_state st);
+static void disks_json(const struct super *s, FILE *f);
+
+/* How things are now, for a question to the technician (tech.h). */
+static void tech_context(FILE *f, void *op)
+{
+    struct super *s = op;
+    char q[700];
+    int64_t now = time(NULL);
+    struct peer_state ps[PEERS_MAX];
+    int np = peer_get(ps, PEERS_MAX);
+
+    fprintf(f, "{\"now\": %lld, \"channels\": [", (long long)now);
+    pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < s->n; i++) {
+        const struct chan *c = &s->ch[i];
+        int last = c->hist_n ? (c->hist_head + c->hist_n - 1) % HIST_N : -1;
+
+        if (!c->cfg)
+            continue;
+        fprintf(f, "%s{\"name\": %s, \"state\": \"%s\"", i ? ", " : "", json_quote(c->name, q, sizeof(q)),
+                state_name(c->state));
+        fprintf(f, ", \"source\": %s", json_quote(c->wd_group, q, sizeof(q)));
+        if (c->state == CH_RUNNING && last >= 0)
+            fprintf(f, ", \"in_kbps\": %.0f, \"out_kbps\": %.0f, \"up_s\": %lld", c->hist_in[last] / 1000,
+                    c->hist_out[last] / 1000, (long long)((clock_now_ns() - c->started_ns) / 1000000000LL));
+        if (c->state != CH_RUNNING && c->why[0])
+            fprintf(f, ", \"why\": %s", json_quote(c->why, q, sizeof(q)));
+        if (c->restarts)
+            fprintf(f, ", \"restarts\": %d", c->restarts);
+        fputc('}', f);
+    }
+    fprintf(f, "], \"disks\": ");
+    disks_json(s, f);
+    pthread_mutex_unlock(&s->lock);
+    fprintf(f, ", \"being_watched\": ");
+    wd_state_json(f, now);
+    fprintf(f, ", \"incidents_last_24h\": ");
+    if (!history_query_incidents_brief(f, now - 86400, now + 1, false, 30))
+        fprintf(f, "{}");
+    fprintf(f, ", \"peers\": [");
+    for (int i = 0; i < np; i++) {
+        fprintf(f, "%s{\"name\": %s, \"answering\": %s, \"open_incidents\": %d}", i ? ", " : "",
+                json_quote(ps[i].name, q, sizeof(q)), ps[i].reachable ? "true" : "false", ps[i].open_incidents);
+    }
+    fprintf(f, "], \"recent_events\": ");
+    if (!history_query_events(f, NULL, now - 1800, now + 1, 40))
+        fprintf(f, "{}");
+    fputc('}', f);
+}
+
 /* Our peers as configured, to the peer thread. */
 static void peers_apply(struct super *s)
 {
@@ -3391,6 +3442,44 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             return;
         }
     }
+    if (!strcmp(p, "/api/technician/ask")) {
+        /* POST {"question"}: {"id"}; GET ?id=: how it is, the answer when there is one */
+        char v[32], *out = NULL, q2[64];
+        size_t len = 0;
+        FILE *f;
+
+        if (!strcmp(req->method, "POST")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
+            const char *question = root >= 0 ? json_get_str(doc, root, "question", "") : "";
+            int64_t id = *question ? tech_ask(question) : 0;
+
+            free(doc);
+            if (!id) {
+                api_error(resp, *question ? 503 : 400, *question ? "the technician is not running on this server" : "no question");
+                return;
+            }
+            snprintf(q2, sizeof(q2), "%lld", (long long)id);
+            http_resp_printf(resp, 200, "application/json", "{\"ok\": true, \"id\": %s}\n", q2);
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        if (!query_param(req->query, "id", v, sizeof(v)) || !tech_answer_json(f, strtoll(v, NULL, 10))) {
+            fclose(f);
+            free(out);
+            api_error(resp, 404, "no such question (the last 16 are kept)");
+            return;
+        }
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
     if (!strcmp(p, "/api/technician/prompt")) {
         /* ?incident=ID: what the model is given about it */
         char v[32], *out = NULL;
@@ -4196,6 +4285,7 @@ int super_main(int argc, char **argv)
     wd_set_on_open(on_incident, &s);
     peers_apply(&s);
     snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
+    tech_set_context(tech_context, &s);
     tech_set(&s.tech);
     s.http = http_start(s.listen, s.port, handle, &s, err, sizeof(err));
     if (!s.http) {

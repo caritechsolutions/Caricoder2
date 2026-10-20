@@ -109,6 +109,12 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
 .stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
 table.chat tr.out td:last-child { color:var(--fg2) } table.chat td:nth-child(2) { white-space:nowrap } .ok { color:var(--ok) }
+#chatbtn { position:fixed; right:18px; bottom:18px; z-index:20; border-radius:20px; padding:9px 16px; box-shadow:0 4px 16px rgba(0,0,0,.4) }
+#chat { position:fixed; right:0; top:0; bottom:0; width:420px; max-width:100vw; background:var(--panel); border-left:1px solid var(--line2); z-index:30; display:none; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.35) }
+#chat.on { display:flex } #chat header { display:flex; gap:10px; align-items:baseline; padding:14px 16px; border-bottom:1px solid var(--line) } #chat header button { margin-left:auto; font-size:18px; padding:0 8px }
+#chatlog { flex:1; overflow:auto; padding:12px 14px; display:flex; flex-direction:column; gap:10px } .cm { max-width:88% } .cm.me { align-self:flex-end; text-align:right }
+.cm .who { font-size:11px; color:var(--dim); margin-bottom:2px } .cm .txt { white-space:pre-wrap; line-height:1.5; background:var(--line); padding:8px 11px; border-radius:10px; font-size:13.5px; text-align:left } .cm.me .txt { background:#1d3550 }
+#chat form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line) } #chat textarea { flex:1; resize:none }
 .verdict { margin-top:10px; display:flex; gap:6px; align-items:center; flex-wrap:wrap } .verdict #vform { flex-basis:100% }
 .tech .cause { font-size:15px; font-weight:500 } .tech p { margin:6px 0; line-height:1.5 } .tech ul { margin:2px 0 6px 18px; padding:0 } pre.ticket { white-space:pre-wrap; background:var(--line); padding:8px 10px; border-radius:6px; font-size:12.5px; margin:4px 0 }
 img.evpic { max-width:240px; border-radius:6px; display:block } table.evtab td { vertical-align:top } .tools { display:flex; gap:6px; flex-wrap:wrap; align-items:center } .tools .toolnote { font-size:12px; margin-left:6px }
@@ -141,6 +147,10 @@ h4.sub4 { margin:16px 0 6px; font-size:12px; font-weight:500; color:var(--dim) }
 </nav>
 <main id="main"></main>
 <dialog id="dlg"></dialog>
+<button id="chatbtn" onclick="chatToggle()" title="Ask the technician">Ask the technician</button>
+<aside id="chat"><header><b>The technician</b><span class="dim">offline, on this server</span><button class="quiet" onclick="chatToggle()">×</button></header>
+  <div id="chatlog"></div>
+  <form onsubmit="event.preventDefault(); chatSend()"><textarea id="chatq" rows="2" placeholder="Ask in plain words…" onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); chatSend(); }"></textarea><button class="primary">Ask</button></form></aside>
 
 <script>
 "use strict";
@@ -865,6 +875,47 @@ function techCard() {
     ${T.verdicts ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
       <div class="sub"><a href="/api/training/export">Download them as training data</a> (JSON lines)</div></div>` : ""}
   </div></div></section>`;
+}
+
+/* ---------- asking the technician (the chat) ---------- */
+let chatOpen = false, chatMsgs = [], chatWait = null;
+async function chatLoad() {
+  try { const j = await api("/api/peers"); chatMsgs = (j.messages || []).filter(m => (m.peer === "technician" || m.peer === "person") && !m.incident).reverse(); } catch(e) {}
+  chatRender();
+}
+function chatRender() {
+  const el = $("#chatlog"); if (!el) return;
+  el.innerHTML = chatMsgs.length ? chatMsgs.map(m => `<div class="cm ${m.peer === "person" ? "me" : "it"}"><div class="who">${m.peer === "person" ? "You" : "Technician"} · ${fmtWhen(m.t)}</div><div class="txt">${esc(m.text)}</div></div>`).join("")
+    : `<div class="dim" style="padding:10px">Ask anything about this transcoder in plain words: "what is wrong right now?", "why did bet go black this morning?", "which channels come from 224.100.1.5?"</div>`;
+  if (chatWait) el.innerHTML += `<div class="cm it"><div class="who">Technician</div><div class="txt dim">${esc(chatWait.note || "thinking…")}</div></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+function chatToggle() {
+  chatOpen = !chatOpen;
+  $("#chat").classList.toggle("on", chatOpen);
+  if (chatOpen) { chatLoad(); setTimeout(() => $("#chatq").focus(), 50); }
+}
+async function chatSend() {
+  const q = $("#chatq").value.trim();
+  if (!q || chatWait) return;
+  $("#chatq").value = "";
+  chatMsgs.push({ peer: "person", t: Date.now() / 1000, text: q });
+  try {
+    const r = await api("/api/technician/ask", { method: "POST", body: JSON.stringify({ question: q }) });
+    chatWait = { id: r.id };
+  } catch(e) { chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: "(" + e.message + ")" }); }
+  chatRender();
+  const poll = async () => {
+    if (!chatWait) return;
+    try {
+      const a = await api(`/api/technician/ask?id=${chatWait.id}`);
+      if (a.state === "answered" || a.state === "failed") { chatWait = null; if (a.state === "failed") chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: "(" + (a.answer || "no answer") + ")" }); await chatLoad(); return; }
+      chatWait.note = a.model_state === "starting" ? "loading the model first (up to a minute)…" : a.state === "waiting" ? "waiting its turn…" : "thinking…";
+      chatRender();
+    } catch(e) { chatWait = null; chatRender(); return; }
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 1500);
 }
 
 /* ---------- the server ---------- */

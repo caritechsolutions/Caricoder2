@@ -33,6 +33,16 @@ struct job {
     int tries;                  /* not in the record yet (written every 2 s): looked for again */
 };
 
+#define ASKS_MAX 16
+
+/* A question in plain words, and its answer. */
+struct ask {
+    int64_t id, t;
+    char question[1200];
+    int state;                  /* 0 waiting, 1 thinking, 2 answered, 3 failed */
+    char *answer;
+};
+
 static struct {
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -49,6 +59,10 @@ static struct {
     int done, failed;
     int64_t last_id, last_t;
     double last_seconds;
+    struct ask asks[ASKS_MAX];
+    int64_t next_ask;
+    void (*context)(FILE *f, void *op);
+    void *context_op;
 } T = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
 static void set_state(const char *st)
@@ -392,6 +406,135 @@ static char *build_request(const struct tech_conf *c, int64_t id, int64_t *paren
 
 static void requeue(int64_t id, int tries);
 
+/* The server up (started if need be); false with the reason in T.last_error. */
+static bool ensure_server(struct tech_conf *c)
+{
+    char err[300] = "";
+    bool up;
+
+    pthread_mutex_lock(&T.lock);
+    up = T.server > 0;
+    pthread_mutex_unlock(&T.lock);
+    if (up && server_up())
+        return true;
+    pthread_mutex_lock(&T.lock);
+    server_stop();
+    pthread_mutex_unlock(&T.lock);
+    if (server_start(c, err, sizeof(err)))
+        return true;
+    pthread_mutex_lock(&T.lock);
+    set_state("unavailable");
+    snprintf(T.last_error, sizeof(T.last_error), "%s", err);
+    T.failed++;
+    pthread_mutex_unlock(&T.lock);
+    log_warn("technician: %s", err);
+    return false;
+}
+
+/* A question: the notes, how things are now, the conversation so far. */
+static void answer(int k)
+{
+    struct tech_conf c;
+    char question[1200], *sys = NULL, *ctx = NULL, *req = NULL, *out = NULL, url[64];
+    size_t sl = 0, cl = 0, ql = 0;
+    FILE *f;
+    int st;
+    int64_t id;
+
+    pthread_mutex_lock(&T.lock);
+    c = T.c;
+    snprintf(question, sizeof(question), "%s", T.asks[k].question);
+    id = T.asks[k].id;
+    T.asks[k].state = 1;
+    pthread_mutex_unlock(&T.lock);
+    if ((f = open_memstream(&sys, &sl))) {
+        knowledge(f, &c);
+        fprintf(f, "\n\n# Questions in plain words\n\nBetween incidents an engineer may ask you anything about "
+                   "this transcoder in plain words. Answer from the state you are given and your notes, in plain "
+                   "sentences, briefly (a few sentences; a short list when there are several things). Name the "
+                   "channels, sources and figures you mean. When the state does not say, say so and say what "
+                   "would tell. Do not answer in JSON.\n");
+        fclose(f);
+    }
+    if ((f = open_memstream(&ctx, &cl))) {
+        if (T.context)
+            T.context(f, T.context_op);
+        else
+            fputs("{}", f);
+        fclose(f);
+        if (ctx)
+            compact(ctx);
+    }
+    if ((f = open_memstream(&req, &ql))) {
+        char *u = NULL;
+        size_t ul = 0;
+        FILE *uf = open_memstream(&u, &ul);
+
+        if (uf) {
+            fprintf(uf, "This transcoder is %s. How things are now (JSON; times are Unix seconds):\n%.40000s\n\n"
+                        "The question: %s", c.my_name, ctx ? ctx : "{}", question);
+            fclose(uf);
+        }
+        fprintf(f, "{\"messages\": [{\"role\": \"system\", \"content\": ");
+        jesc(f, sys ? sys : "", 120000);
+        fprintf(f, "}, {\"role\": \"user\", \"content\": ");
+        jesc(f, u ? u : "", ul);
+        fprintf(f, "}], \"temperature\": 0.3, \"max_tokens\": 700, \"stream\": false}");
+        fclose(f);
+        free(u);
+    }
+    free(sys);
+    free(ctx);
+    if (!req || !ensure_server(&c)) {
+        pthread_mutex_lock(&T.lock);
+        for (int i = 0; i < ASKS_MAX; i++)
+            if (T.asks[i].id == id) {
+                T.asks[i].state = 3;
+                free(T.asks[i].answer);
+                T.asks[i].answer = strdup(T.last_error[0] ? T.last_error : "the model could not be started");
+            }
+        pthread_mutex_unlock(&T.lock);
+        free(req);
+        return;
+    }
+    pthread_mutex_lock(&T.lock);
+    set_state("thinking");
+    pthread_mutex_unlock(&T.lock);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", c.port);
+    st = peer_http(url, "POST", "/v1/chat/completions", NULL, req, 600000, &out);
+    free(req);
+    {
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char e2[200];
+        const char *content = NULL;
+        int root = doc && st == 200 && out ? json_parse(doc, out, e2, sizeof(e2)) : -1;
+
+        if (root >= 0) {
+            int ch = json_get(doc, root, "choices");
+
+            if (ch >= 0 && doc->node[ch].first_child >= 0) {
+                int msg = json_get(doc, doc->node[ch].first_child, "message");
+
+                content = msg >= 0 ? json_get_str(doc, msg, "content", NULL) : NULL;
+            }
+        }
+        pthread_mutex_lock(&T.lock);
+        for (int i = 0; i < ASKS_MAX; i++)
+            if (T.asks[i].id == id) {
+                T.asks[i].state = content ? 2 : 3;
+                free(T.asks[i].answer);
+                T.asks[i].answer = strdup(content ? content : "no answer from the model");
+            }
+        T.last_used = time(NULL);
+        set_state("idle");
+        pthread_mutex_unlock(&T.lock);
+        if (content)
+            history_message(time(NULL), "technician", "out", content, "{}", 0);
+        free(doc);
+    }
+    free(out);
+}
+
 static void diagnose(int64_t id, int tries)
 {
     struct tech_conf c;
@@ -412,20 +555,10 @@ static void diagnose(int64_t id, int tries)
             requeue(id, tries + 1);         /* not written yet */
         return;
     }
-    if (!up || !server_up()) {
-        pthread_mutex_lock(&T.lock);
-        server_stop();
-        pthread_mutex_unlock(&T.lock);
-        if (!server_start(&c, err, sizeof(err))) {
-            pthread_mutex_lock(&T.lock);
-            set_state("unavailable");
-            snprintf(T.last_error, sizeof(T.last_error), "%s", err);
-            T.failed++;
-            pthread_mutex_unlock(&T.lock);
-            log_warn("technician: %s", err);
-            free(req);
-            return;
-        }
+    (void)up;
+    if (!ensure_server(&c)) {
+        free(req);
+        return;
     }
     pthread_mutex_lock(&T.lock);
     set_state("thinking");
@@ -507,6 +640,18 @@ static void *thread_main(void *arg)
             server_stop();
             pthread_mutex_unlock(&T.lock);
             break;
+        }
+        {
+            int k = -1;
+
+            for (int i = 0; i < ASKS_MAX; i++)
+                if (T.asks[i].id && T.asks[i].state == 0 && (k < 0 || T.asks[i].id < T.asks[k].id))
+                    k = i;
+            if (k >= 0) {
+                pthread_mutex_unlock(&T.lock);
+                answer(k);
+                continue;
+            }
         }
         for (int i = 0; i < T.qn; i++)
             if (T.q[i].due <= now) {
@@ -680,6 +825,60 @@ int tech_export(FILE *f)
         free(ac);
     }
     return written;
+}
+
+void tech_set_context(void (*fn)(FILE *f, void *op), void *op)
+{
+    pthread_mutex_lock(&T.lock);
+    T.context = fn;
+    T.context_op = op;
+    pthread_mutex_unlock(&T.lock);
+}
+
+int64_t tech_ask(const char *question)
+{
+    int k = 0;
+    int64_t id;
+
+    pthread_mutex_lock(&T.lock);
+    if (!T.c.enabled || !T.running) {
+        pthread_mutex_unlock(&T.lock);
+        return 0;
+    }
+    for (int i = 1; i < ASKS_MAX; i++)
+        if (T.asks[i].id < T.asks[k].id)
+            k = i;                          /* the oldest gives way */
+    free(T.asks[k].answer);
+    memset(&T.asks[k], 0, sizeof(T.asks[k]));
+    id = T.asks[k].id = ++T.next_ask;
+    T.asks[k].t = time(NULL);
+    snprintf(T.asks[k].question, sizeof(T.asks[k].question), "%s", question);
+    pthread_cond_signal(&T.cond);
+    pthread_mutex_unlock(&T.lock);
+    history_message(time(NULL), "person", "in", question, "{}", 0);
+    return id;
+}
+
+bool tech_answer_json(FILE *f, int64_t id)
+{
+    static const char *const states[] = { "waiting", "thinking", "answered", "failed" };
+    bool found = false;
+
+    pthread_mutex_lock(&T.lock);
+    for (int i = 0; i < ASKS_MAX; i++)
+        if (T.asks[i].id == id && id) {
+            fprintf(f, "{\"id\": %lld, \"state\": \"%s\", \"question\": ", (long long)id, states[T.asks[i].state]);
+            jesc(f, T.asks[i].question, sizeof(T.asks[i].question));
+            fprintf(f, ", \"answer\": ");
+            if (T.asks[i].answer)
+                jesc(f, T.asks[i].answer, strlen(T.asks[i].answer));
+            else
+                fputs("null", f);
+            fprintf(f, ", \"model_state\": \"%s\"}", T.state);
+            found = true;
+        }
+    pthread_mutex_unlock(&T.lock);
+    return found;
 }
 
 void tech_state_json(FILE *f)

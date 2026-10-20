@@ -95,6 +95,8 @@ bool history_report_incident(FILE *f, int64_t id, int64_t now);
 bool history_similar(FILE *f, int64_t id, int limit);
 /* The file kept with evidence `id`. */
 bool history_evidence_file(int64_t id, char *path, size_t len);
+/* As history_query_incidents (any channel), without each one's snapshot. */
+bool history_query_incidents_brief(FILE *f, int64_t from, int64_t to, bool open_only, int limit);
 /* {"incident": ..., "members": [...], "evidence": [...], "events": [...]} */
 bool history_query_incident(FILE *f, int64_t id, int64_t now);
 
