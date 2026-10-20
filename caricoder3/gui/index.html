@@ -619,9 +619,13 @@ function renderServerHistory() {
   const gpus = [...new Set(names.filter(n => /^gpu\d+\.util$/.test(n)).map(n => n.split(".")[0]))];
   const series = [{ v: at("cpu.percent"), cls: "gin", label: "CPU" }].concat(gpus.flatMap((g, k) => [{ v: at(g + ".encoder"), cls: k ? "gg2" : "gout", label: g + " encoder" }, { v: at(g + ".decoder"), cls: k ? "gg3" : "gdec", label: g + " decoder" }]));
   const pct = v => v.toFixed(0) + "%";
-  const nics = [...new Set(names.filter(n => /^net\..+\.rx_drop$/.test(n)).map(n => n.slice(4, -8)))];
-  const drops = nics.map(n => [n, (S[`net.${n}.rx_drop`] || []).reduce((a, p) => a + p[1] * (srvHist.step / 10), 0)]).filter(d => d[1] > 0);
-  el.innerHTML = `<div class="legend">${series.map(s => `<span class="${s.cls}-l"><i></i>${esc(s.label)}</span>`).join("")}<span class="hint">${drops.length ? drops.map(d => `${esc(d[0])}: about ${Math.round(d[1]).toLocaleString()} packets dropped`).join(" · ") : "no packets dropped by the network cards"}</span></div>
+  const sum = name => (S[name] || []).reduce((a, p) => a + p[1] * (srvHist.step / 10), 0);
+  const nics = [...new Set(names.filter(n => /^net\..+\.rx_lost$/.test(n)).map(n => n.slice(4, -8)))];
+  const drops = nics.map(n => [n, sum(`net.${n}.rx_lost`)]).filter(d => d[1] > 0);
+  const udpLost = sum("udp.rcvbuf_errors");
+  const lossTxt = drops.map(d => `${esc(d[0])}: about ${Math.round(d[1]).toLocaleString()} packets lost (no room on the card)`)
+    .concat(udpLost > 0 ? [`about ${Math.round(udpLost).toLocaleString()} UDP packets lost (socket buffers full)`] : []);
+  el.innerHTML = `<div class="legend">${series.map(s => `<span class="${s.cls}-l"><i></i>${esc(s.label)}</span>`).join("")}<span class="hint">${lossTxt.length ? `<span class="warn">${lossTxt.join(" · ")}</span>` : "no packets lost on this server"}</span></div>
     ${timeGraph(ts, series, srvHist.from, srvHist.to, { max: 100, fmt: pct, gid: "shist", tip: k => `<div class="tt">${fmtWhen(ts[k] - srvHist.step / 2)}</div>` +
       series.map(s => tipRow(s.cls, esc(s.label), s.v[k] == null ? "—" : s.v[k].toFixed(0) + "%")).join("") +
       (at("mem.used_pct")[k] != null ? `<div class="dim">memory ${at("mem.used_pct")[k].toFixed(0)}% · load ${(at("load.1")[k] || 0).toFixed(1)}</div>` : "") })}

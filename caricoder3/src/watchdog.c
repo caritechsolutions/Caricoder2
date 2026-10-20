@@ -32,7 +32,7 @@ static const struct {
     [WD_PIDS]        = { "pids_changed", "source PIDs changed", "warn", true },
     [WD_CPU]         = { "cpu", "CPU busy", "warn", false },
     [WD_GPU]         = { "gpu", "video engine busy", "warn", false },
-    [WD_NIC_DROP]    = { "nic_drop", "network card dropping packets", "warn", false },
+    [WD_NIC_DROP]    = { "nic_drop", "packets lost on this server", "warn", false },
     [WD_DISK_LOW]    = { "disk_low", "disk space low", "warn", false },
     [WD_DISK_CRITICAL] = { "disk_critical", "disk nearly full", "error", false },
     [WD_DISK_FILLING] = { "disk_filling", "disk filling up", "warn", false },

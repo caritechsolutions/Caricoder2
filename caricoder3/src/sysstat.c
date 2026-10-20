@@ -25,6 +25,7 @@
 struct iface {
     char name[32];
     uint64_t rx_bytes, tx_bytes, rx_pkts, tx_pkts, rx_err, tx_err, rx_drop, tx_drop;
+    uint64_t rx_lost;                   /* missed + FIFO overruns: the card had no room (real loss) */
     double rx_bps, tx_bps;              /* since the previous sample */
     bool up;
     int speed_mbps;                     /* -1 unknown */
@@ -153,6 +154,16 @@ static void read_net(struct sample *s)
                 if (fgets(buf, sizeof(buf), g))
                     i->up = !strncmp(buf, "up", 2) || !strncmp(buf, "unknown", 7);
                 fclose(g);
+            }
+            i->rx_lost = 0;
+            for (int k = 0; k < 2; k++) {
+                snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/%s", i->name,
+                         k ? "rx_fifo_errors" : "rx_missed_errors");
+                if ((g = fopen(path, "r"))) {
+                    if (fgets(buf, sizeof(buf), g))
+                        i->rx_lost += strtoull(buf, NULL, 10);
+                    fclose(g);
+                }
             }
             snprintf(path, sizeof(path), "/sys/class/net/%s/speed", i->name);
             if ((g = fopen(path, "r"))) {
@@ -437,8 +448,10 @@ double sysstat_cpu_percent(void)
 
 void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op)
 {
-    static struct { char name[32]; uint64_t drop, err; } prev[IFACES_MAX];
+    static struct { char name[32]; uint64_t drop, err, lost; } prev[IFACES_MAX];
     static int n_prev;
+    static uint64_t udp_prev;
+    static bool udp_have;
     struct sample s;
     char name[96];
 
@@ -482,14 +495,49 @@ void sysstat_metrics(void (*cb)(const char *name, double v, void *op), void *op)
             snprintf(prev[p].name, sizeof(prev[p].name), "%s", n->name);
             prev[p].drop = n->rx_drop;
             prev[p].err = n->rx_err;
+            prev[p].lost = n->rx_lost;
         }
         if (p >= 0) {
+            snprintf(name, sizeof(name), "net.%s.rx_lost", n->name);
+            cb(name, (double)(n->rx_lost >= prev[p].lost ? n->rx_lost - prev[p].lost : 0), op);
+            prev[p].lost = n->rx_lost;
             snprintf(name, sizeof(name), "net.%s.rx_drop", n->name);
             cb(name, (double)(n->rx_drop >= prev[p].drop ? n->rx_drop - prev[p].drop : 0), op);
             snprintf(name, sizeof(name), "net.%s.rx_err", n->name);
             cb(name, (double)(n->rx_err >= prev[p].err ? n->rx_err - prev[p].err : 0), op);
             prev[p].drop = n->rx_drop;
             prev[p].err = n->rx_err;
+        }
+    }
+    {
+        /* UDP datagrams dropped because a socket's buffer was full: this
+         * server did not read fast enough (/proc/net/snmp, RcvbufErrors) */
+        FILE *f = fopen("/proc/net/snmp", "r");
+        char hdr[1024], val[1024];
+        uint64_t v = 0;
+        bool got = false;
+
+        while (f && fgets(hdr, sizeof(hdr), f)) {
+            if (strncmp(hdr, "Udp: ", 5) || !fgets(val, sizeof(val), f))
+                continue;
+            {
+                char *hs = NULL, *vs = NULL, *h = strtok_r(hdr, " \n", &hs), *x = strtok_r(val, " \n", &vs);
+
+                for (; h && x; h = strtok_r(NULL, " \n", &hs), x = strtok_r(NULL, " \n", &vs))
+                    if (!strcmp(h, "RcvbufErrors")) {
+                        v = strtoull(x, NULL, 10);
+                        got = true;
+                    }
+            }
+            break;
+        }
+        if (f)
+            fclose(f);
+        if (got) {
+            if (udp_have)
+                cb("udp.rcvbuf_errors", (double)(v >= udp_prev ? v - udp_prev : 0), op);
+            udp_prev = v;
+            udp_have = true;
         }
     }
 }

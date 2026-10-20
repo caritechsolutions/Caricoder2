@@ -415,7 +415,7 @@ The API (basic auth, JSON in and out):
 | `GET /api/channels/NAME/thumb.jpg` | a picture of the channel, up to 5 s old (320 wide) |
 | `GET /hls/NAME/...` | the channel's HLS output (no password) |
 | `GET /api/channels/NAME/history?from=&to=` | the record on disk (default the last 24 h): `rows` of `[t, in_kbps, in_max_kbps, out_kbps, out_max_kbps, cc, overflow, dropped, late, lost, switches, restarts, health, up_s]`, about 720 of them, 10 s, 1 min or 1 h apiece by span |
-| `GET /api/history/server?metric=cpu*&from=&to=` | the server's: `cpu.percent`, `load.1`, `mem.used_pct`, `gpuN.util/encoder/decoder/mem_mb/temp_c/power_w`, `net.IF.rx_mbps/tx_mbps/rx_drop/rx_err`; a name or a prefix ending in `*` |
+| `GET /api/history/server?metric=cpu*&from=&to=` | the server's: `cpu.percent`, `load.1`, `mem.used_pct`, `gpuN.util/encoder/decoder/mem_mb/temp_c/power_w`, `net.IF.rx_mbps/tx_mbps/rx_drop/rx_lost/rx_err`, `udp.rcvbuf_errors`; a name or a prefix ending in `*` |
 | `GET /api/events?channel=&from=&to=&limit=` | what happened, newest first (no `channel`: everything) |
 | `GET /api/incidents?channel=&open=1&from=&to=&limit=` | problems that lasted (default the last 7 days), open ones first; a channel's own and its source's |
 | `GET /api/incidents/ID` | one, with the channels' incidents that belong to it and the events from a minute before to a minute after |
@@ -455,9 +455,14 @@ stalled while input arrives, the channel failing or restarting again
 and again (3 times in 10 minutes), running on a backup source, the
 clock not locked, a black, frozen or silent picture or sound, a stream
 the PMT lists without data, the source's PIDs changing; and the server:
-CPU or a video engine above 90% for 2 minutes, a network card dropping
-packets. A problem that lasts 10 s is an **incident**, kept in the
-history with the channel's statistics as they were when it began; it is
+CPU or a video engine above 90% for 2 minutes, packets lost on this
+server (a network card with no room for them: its missed and FIFO
+counters; or UDP socket buffers full: `RcvbufErrors`. Not the cards'
+`rx_dropped`, which counts frames the kernel sets aside, steady and
+harmless, nor Intel's `dropped_smbus`, the management controller's own).
+A problem that lasts 10 s (a black, frozen or silent picture or sound:
+30 s, as programmes have short ones) is an **incident**, kept in the
+history with the channel's statistics as the watchdog saw them; it is
 over when the problem has been gone 30 s. Shorter ones are only events.
 When channels that read the same source have the same upstream problem
 within a minute of each other, one incident for the source is opened as

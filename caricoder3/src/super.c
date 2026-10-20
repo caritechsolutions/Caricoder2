@@ -1677,11 +1677,17 @@ static void metric_cb(const char *name, double v, void *op)
         snprintf(subj, sizeof(subj), "server/%.*s.dec", (int)(n - 8), name);
         snprintf(what, sizeof(what), "%.*s video decoder at %.0f%%", (int)(n - 8), name, v);
         wd_observe(t, subj, NULL, "", WD_GPU, v > L.gpu_pct, what, 0);
-    } else if (!strncmp(name, "net.", 4) && n > 12 && !strcmp(name + n - 8, ".rx_drop")) {
+    } else if (!strncmp(name, "net.", 4) && n > 12 && !strcmp(name + n - 8, ".rx_lost")) {
+        /* the card had no room (missed, FIFO overrun): real loss. Not rx_dropped:
+         * that counts frames the kernel set aside (no protocol for them, a VLAN
+         * not configured), steady and harmless, seen at 0.5 a second for days */
         snprintf(subj, sizeof(subj), "server/%s", name);
-        snprintf(what, sizeof(what), "network card %.*s dropping packets (%.0f in 10 s)", (int)(n - 12),
+        snprintf(what, sizeof(what), "network card %.*s losing packets: no room on the card (%.0f in 10 s)", (int)(n - 12),
                  name + 4, v);
         wd_observe(t, subj, NULL, "", WD_NIC_DROP, v > 0, what, 0);
+    } else if (!strcmp(name, "udp.rcvbuf_errors")) {
+        snprintf(what, sizeof(what), "UDP packets lost on this server: socket buffers full (%.0f in 10 s)", v);
+        wd_observe(t, "server/udp", NULL, "", WD_NIC_DROP, v > 0, what, 0);
     }
 }
 
