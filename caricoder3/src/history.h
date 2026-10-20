@@ -75,6 +75,16 @@ bool history_query_evidence(FILE *f, const char *chan, int64_t incident, int lim
 void history_message(int64_t t, const char *peer, const char *dir, const char *text, const char *data,
                      int64_t incident);
 bool history_query_messages(FILE *f, int64_t incident, int limit);
+/* A person's verdict on the technician's answer: "right", "partly" or
+ * "wrong"; `note` in their words; `actual` {"category", "cause"} when it
+ * was something else. */
+void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const char *note, const char *actual);
+/* Incident `id`'s answer, verdict, note and what it was (malloc'd strings, "" none). */
+bool history_incident_answer(int64_t id, char **diagnosis, char **verdict, char **note, char **actual);
+/* The incidents with both an answer and a verdict, oldest first. */
+int history_verdict_ids(int64_t *ids, int max);
+/* {"right", "partly", "wrong", "waiting", "waiting_looked_at"} */
+void history_verdict_counts(FILE *f);
 /* The technician's answer about incident `id` (a JSON object). */
 void history_incident_diagnosis(int64_t id, int64_t t, const char *json);
 /* As history_query_incident, briefer: the members without their snapshot,

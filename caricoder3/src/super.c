@@ -3125,6 +3125,62 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->body_len = len;
         return;
     }
+    if (!strncmp(p, "/api/incidents/", 15) && strstr(p + 15, "/verdict")) {
+        /* POST {"verdict": "right"|"partly"|"wrong", "category", "cause", "note"}: a person's word on the technician's */
+        static const char *const cats[] = { "", "source_provider", "source_ird", "satellite_signal", "network",
+                                            "transcoder", "normal_content", "unknown" };
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char err[200], actual[1200], q1[700], q2[700], text[900];
+        int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
+        int64_t id = strtoll(p + 15, NULL, 10);
+        const char *v, *cat, *cause, *note;
+        bool cat_ok = false;
+
+        if (root < 0 || strcmp(req->method, "POST") || id <= 0) {
+            free(doc);
+            api_error(resp, 400, "POST {\"verdict\": \"right\", \"partly\" or \"wrong\", ...}");
+            return;
+        }
+        v = json_get_str(doc, root, "verdict", "");
+        cat = json_get_str(doc, root, "category", "");
+        cause = json_get_str(doc, root, "cause", "");
+        note = json_get_str(doc, root, "note", "");
+        for (size_t k = 0; k < sizeof(cats) / sizeof(cats[0]); k++)
+            cat_ok |= !strcmp(cat, cats[k]);
+        if ((strcmp(v, "right") && strcmp(v, "partly") && strcmp(v, "wrong")) || !cat_ok) {
+            free(doc);
+            api_error(resp, 400, "verdict: right, partly or wrong; category: one of the technician's");
+            return;
+        }
+        snprintf(actual, sizeof(actual), "{\"category\": %s, \"cause\": %s}", json_quote(cat, q1, sizeof(q1)),
+                 json_quote(cause, q2, sizeof(q2)));
+        history_incident_verdict(id, time(NULL), v, note, *cat || *cause ? actual : "{}");
+        snprintf(text, sizeof(text), "%s%s%.300s%s%.300s", !strcmp(v, "right") ? "Right." : !strcmp(v, "partly") ? "Partly." : "Wrong.",
+                 *cause ? " It was: " : "", cause, *note ? " " : "", note);
+        history_message(time(NULL), "person", "in", text, "{}", id);
+        free(doc);
+        http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+        return;
+    }
+    if (!strcmp(p, "/api/training/export")) {
+        /* the verdicts so far as training data: JSON lines */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f = open_memstream(&out, &len);
+        int n;
+
+        if (!f)
+            return;
+        n = tech_export(f);
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/x-ndjson";
+        resp->body = out;
+        resp->body_len = len;
+        snprintf(resp->extra, sizeof(resp->extra),
+                 "Content-Disposition: attachment; filename=\"caricoder3-%s-training-%d.jsonl\"\r\n", s->name, n);
+        return;
+    }
     if (!strcmp(p, "/api/incidents") || !strncmp(p, "/api/incidents/", 15)) {
         /* ?channel=&open=1&from=&to=&limit= ; /api/incidents/ID: one, with its events */
         char v[128], chan[64] = "";
@@ -3380,6 +3436,14 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         if (!f)
             return;
         tech_state_json(f);
+        fflush(f);
+        if (len && out[len - 1] == '}') {
+            /* and the verdicts so far */
+            fseek(f, -1, SEEK_END);
+            fprintf(f, ", \"verdicts\": ");
+            history_verdict_counts(f);
+            fputc('}', f);
+        }
         fclose(f);
         resp->status = 200;
         resp->type = "application/json";

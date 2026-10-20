@@ -3162,13 +3162,42 @@ def supervisor_technician():
         code, pj = api("/api/peers")
         need(any(m["peer"] == "technician" for m in pj["messages"]), "the conversation has no line from the technician")
         need(st["done"] >= 1 and st["where"] == "cpu", f"state: {st}")
+        # a person says it was something else: kept, in the training data, and given with the next one like it
+        said = "The IRD on 192.168.110.10 lost lock and rebooted"
+        code, j = api(f"/api/incidents/{diag['id']}/verdict", "POST",
+                      {"verdict": "wrong", "category": "source_ird", "cause": said, "note": "its front panel said so"})
+        need(code == 200, f"verdict: {code}")
+        time.sleep(3)
+        code, one = api(f"/api/incidents/{diag['id']}")
+        x = one["incident"]
+        need(x["verdict"] == "wrong" and x["actual"]["category"] == "source_ird", f"kept: {x['verdict']} {x.get('actual')}")
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/api/training/export", headers=auth)
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            lines = [json.loads(l) for l in resp.read().decode().splitlines() if l.strip()]
+        need(len(lines) == 1 and lines[0]["messages"][-1]["role"] == "assistant", f"export: {len(lines)} lines")
+        target = json.loads(lines[0]["messages"][-1]["content"])
+        need(target["cause"] == said and target["category"] == "source_ird", f"what it should have said: {target}")
+        need(len(lines[0]["messages"][0]["content"]) > 1000, "no notes in the training prompt")
+        p.play(synth("live_src", duration=10.0), stop_after=3)        # the same again
+        nxt = None
+        for _ in range(30):
+            time.sleep(1)
+            code, j = api("/api/incidents?channel=t1")
+            nxt = [x for x in j["incidents"] if x["id"] != diag["id"] and x["rule"] == "no_input"]
+            if nxt:
+                break
+        need(nxt, "no second incident")
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/api/technician/prompt?incident={nxt[0]['id']}", headers=auth)
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            prompt = json.load(resp)
+        need(said in prompt["messages"][1]["content"], "the verdict is not given with the next incident like it")
     finally:
         sup.send_signal(signal.SIGTERM)
         try:
             sup.wait(timeout=20)
         except subprocess.TimeoutExpired:
             sup.kill()
-    return f"answered in {st['last_seconds']:.0f} s on the {st['where']}: category {diag['diagnosis']['category']} (the test model is random: the form is what is tested)"
+    return f"answered in {st['last_seconds']:.0f} s on the {st['where']} (random test model: the form is tested); a 'wrong, it was the IRD' verdict kept, exported as training data and given with the next incident like it"
 
 
 @test

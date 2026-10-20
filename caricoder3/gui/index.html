@@ -109,6 +109,7 @@ svg.graph polyline { fill:none; stroke-width:2; stroke-linejoin:round } svg.grap
 .gtip i.gin { background:var(--air) } .gtip i.gout { background:var(--ok) } .gtip i.gdec { background:var(--acc) } .gtip i.gg2 { background:#c58cf0 } .gtip i.gg3 { background:#6fd3e0 } .gtip .dim { color:var(--dim) } .gtip .bad { color:var(--bad) }
 .stat.disks { grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)) } .stat.disks .mono { word-break:break-all }
 table.chat tr.out td:last-child { color:var(--fg2) } table.chat td:nth-child(2) { white-space:nowrap } .ok { color:var(--ok) }
+.verdict { margin-top:10px; display:flex; gap:6px; align-items:center; flex-wrap:wrap } .verdict #vform { flex-basis:100% }
 .tech .cause { font-size:15px; font-weight:500 } .tech p { margin:6px 0; line-height:1.5 } .tech ul { margin:2px 0 6px 18px; padding:0 } pre.ticket { white-space:pre-wrap; background:var(--line); padding:8px 10px; border-radius:6px; font-size:12.5px; margin:4px 0 }
 img.evpic { max-width:240px; border-radius:6px; display:block } table.evtab td { vertical-align:top } .tools { display:flex; gap:6px; flex-wrap:wrap; align-items:center } .tools .toolnote { font-size:12px; margin-left:6px }
 svg.graph .cursor { stroke:var(--fg2); stroke-width:1; stroke-dasharray:3 3 }
@@ -658,7 +659,7 @@ async function openIncident(id) {
   d.style.width = "860px";
   if (!techInfo) loadTech();
   d.innerHTML = `<h3>${esc(x.summary)}</h3>${kv(ev)}
-    <h4 class="sub4">The technician's view ${x.parent ? "" : `<a style="font-weight:400;margin-left:8px" onclick="askTechnician(${x.id})">ask again</a>`}</h4>${techView(x)}
+    <h4 class="sub4">The technician's view ${x.parent ? "" : `<a style="font-weight:400;margin-left:8px" onclick="askTechnician(${x.id})">ask again</a>`}</h4>${techView(x)}${verdictView(x)}<span class="toolnote dim"></span>
     ${j.members.length ? `<h4 class="sub4">Channels in it</h4>${incTable(j.members, true)}` : ""}
     ${proof.length ? `<h4 class="sub4">What the channel reported when it began</h4>${kv(proof)}` : ""}
     <h4 class="sub4">Evidence</h4>${evidenceList(j.evidence)}<div style="margin-top:8px">${toolButtons(x.channel, x.id)}</div>
@@ -813,6 +814,33 @@ function techView(x) {
     ${(d.next_checks || []).length ? `<div class="dim">Next:</div><ul>${d.next_checks.map(c => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
     ${d.ticket ? `<div class="dim">For the provider:</div><pre class="ticket">${esc(d.ticket)}</pre>` : ""}</div>`;
 }
+/* A person's word on the technician's answer: what makes it better */
+function verdictView(x) {
+  if (!x.diagnosis || x.parent) return "";
+  const V = { right: "Right", partly: "Partly right", wrong: "Wrong" };
+  if (x.verdict) {
+    const a = x.actual || {};
+    return `<div class="verdict"><b>Your verdict: ${V[x.verdict] || esc(x.verdict)}</b>${a.cause ? ` · it was: ${esc(a.cause)}` : ""}${a.category ? ` <span class="dim">(${esc(CATEGORY[a.category] || a.category)})</span>` : ""}${x.note ? ` · ${esc(x.note)}` : ""}
+      <a style="margin-left:8px" onclick="verdictForm(${x.id}, '${esc(x.verdict)}')">change</a><div id="vform"></div></div>`;
+  }
+  return `<div class="verdict"><span class="dim">Was the technician right?</span>
+    <button type="button" onclick="sendVerdict(${x.id}, 'right')">Right</button> <button type="button" onclick="verdictForm(${x.id}, 'partly')">Partly</button> <button type="button" onclick="verdictForm(${x.id}, 'wrong')">Wrong…</button>
+    <div id="vform"></div></div>`;
+}
+function verdictForm(id, v) {
+  const el = $("#vform");
+  el.innerHTML = `<div class="f" style="margin-top:10px"><label>Verdict</label><select id="v_v"><option value="right">Right</option><option value="partly">Partly right</option><option value="wrong">Wrong</option></select>
+    <label>It was actually</label><input id="v_cause" placeholder="in a sentence: what really caused it (leave empty if it was right)">
+    <label>Which is</label><select id="v_cat"><option value="">—</option>${Object.entries(CATEGORY).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select>
+    <label>Note</label><input id="v_note" placeholder="what told you, what fixed it (optional)"></div>
+    <div style="margin-top:8px"><button type="button" class="primary" onclick="sendVerdict(${id})">Save</button></div>`;
+  $("#v_v").value = v;
+}
+async function sendVerdict(id, v) {
+  const body = v ? { verdict: v } : { verdict: $("#v_v").value, cause: $("#v_cause").value.trim(), category: $("#v_cat").value, note: $("#v_note").value.trim() };
+  try { await api(`/api/incidents/${id}/verdict`, { method: "POST", body: JSON.stringify(body) }); setTimeout(() => { openIncident(id); incAt = 0; }, 2500); toolNote("Kept: it is used the next time something like this happens."); }
+  catch(e) { alert(e.message); }
+}
 let techInfo = null, techAt = 0;
 async function loadTech(force) {
   if (!force && Date.now() - techAt < 10000) return;
@@ -833,7 +861,9 @@ function techCard() {
   return `<section class="card"><header><h2>Technician</h2><span class="hint">A language model on this server, offline: it says what it thinks caused each incident</span></header><div class="body"><div class="stat">
     <div class="box"><h4>State</h4><div class="big" style="font-size:18px">${esc(states[T.state] || T.state)}</div><div class="sub">${T.where ? `on ${T.where === "cpu" ? "the CPU (lowest priority)" : "card " + esc(T.where.slice(3))}` : `will run on ${T.gpu === "auto" ? "a card with room, else the CPU" : esc(T.gpu)}`}${T.queue ? ` · ${T.queue} waiting` : ""}</div></div>
     <div class="box"><h4>Model</h4><div class="sub mono" style="word-break:break-all">${esc(T.model)}</div>${missing ? `<div class="sub ${T.setting_up ? "warn" : "bad"}">${missing}${T.setting_up ? "" : " (the installer sets it up)"}</div>` : ""}</div>
-    <div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>
+    <div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at since the supervisor started${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>
+    ${T.verdicts ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
+      <div class="sub"><a href="/api/training/export">Download them as training data</a> (JSON lines)</div></div>` : ""}
   </div></div></section>`;
 }
 

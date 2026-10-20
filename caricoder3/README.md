@@ -421,6 +421,8 @@ The API (basic auth, JSON in and out):
 | `GET /api/incidents/ID` | one, with the channels' incidents that belong to it and the events from a minute before to a minute after |
 | `POST /api/tools/record`, `/probe`, `/ping`, `/snapshot` | `{"channel", "url", "host", "seconds", "incident"}`: gather evidence (see Evidence); `GET /api/tools`: what is running |
 | `GET /api/evidence?channel=&incident=&limit=` | what the tools found or kept, newest first; `GET /api/evidence/ID/file`: the recording or picture |
+| `POST /api/incidents/ID/verdict` | `{"verdict": "right"\|"partly"\|"wrong", "cause", "category", "note"}`: a person's word on the technician's answer |
+| `GET /api/training/export` | the verdicts so far as training data (JSON lines) |
 | `GET /api/technician`, `POST /api/technician/diagnose` | how the technician is; `{"incident": ID}`: look at it now; `GET /api/technician/prompt?incident=ID`: what it is given |
 | `GET /api/peers`, `PUT /api/peers` | `{"name", "key", "peers": [{"name", "url"}]}`: this server's name, the shared key, the other transcoders; GET also how each is and the conversation |
 | `GET /api/peer/hello`, `POST /api/peer/check`, `GET /api/peer/incidents` | what a peer may ask, with `Authorization: CC3-Peer <key>`: how it is; "can you see this source?" (`{"url", "program", "seconds", "from", "why"}`); its open incidents |
@@ -551,7 +553,18 @@ and a line in the conversation. A source's incident is looked at, not
 each of its channels'. `GET /api/technician/prompt?incident=ID` shows
 exactly what it was given. Settings: `"technician"` in the config
 (`enabled`, `gpu`: "auto", "cpu" or a card's number, `threads`,
-`model`, `server`, `context`, `delay_s`, `idle_s`, `knowledge`). Built without
+`model`, `server`, `context`, `delay_s`, `idle_s`, `knowledge`).
+
+Under each answer: "Was the technician right?" **Right**, **Partly** or
+**Wrong…** (what it really was, in a sentence, which kind of cause, and
+a note). Verdicts are kept with the incident and given to the
+technician with every later incident like it (the same rule on the same
+channel or source), those with a verdict first: that is how it learns
+this site without being retrained. The Technician card counts them and
+offers them as training data (`GET /api/training/export`: one JSON line
+per incident, `{"incident", "verdict", "messages": [system, user,
+assistant]}`, the assistant's answer being what it should have said)
+for fine-tuning the model later. Built without
 `libsqlite3-dev`, none is kept.
 
 ## Transcoding

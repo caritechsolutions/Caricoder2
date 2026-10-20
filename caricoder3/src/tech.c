@@ -295,8 +295,10 @@ static const char SCHEMA[] =
     " \"required\": [\"cause\", \"category\", \"confidence\", \"explanation\", \"next_checks\", \"ticket\"]}";
 
 /* The request to the model, malloc'd; NULL when the incident is not there
- * (or belongs to a source's: that one is looked at instead, *parent set). */
-static char *build_request(const struct tech_conf *c, int64_t id, int64_t *parent)
+ * (or belongs to a source's: that one is looked at instead, *parent set).
+ * With `answer` (training data): the messages only, and that answer as the
+ * assistant's. */
+static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *parent, const char *answer)
 {
     char *sys = NULL, *rep = NULL, *sim = NULL, *req = NULL;
     size_t sl = 0, rl = 0, ml = 0, ql = 0;
@@ -363,16 +365,27 @@ static char *build_request(const struct tech_conf *c, int64_t id, int64_t *paren
             }
             free(u);
         }
-        snprintf(user, sizeof(user), "}], \"temperature\": 0.2, \"max_tokens\": 1500, \"stream\": false, ");
-        fputs(user, f);
-        fprintf(f, "\"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"diagnosis\", "
-                   "\"schema\": %s}}}", SCHEMA);
+        if (answer) {
+            fprintf(f, "}, {\"role\": \"assistant\", \"content\": ");
+            jesc(f, answer, strlen(answer));
+            fprintf(f, "}]}");
+        } else {
+            snprintf(user, sizeof(user), "}], \"temperature\": 0.2, \"max_tokens\": 1500, \"stream\": false, ");
+            fputs(user, f);
+            fprintf(f, "\"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"diagnosis\", "
+                       "\"schema\": %s}}}", SCHEMA);
+        }
         fclose(f);
     }
     free(sys);
     free(rep);
     free(sim);
     return req;
+}
+
+static char *build_request(const struct tech_conf *c, int64_t id, int64_t *parent)
+{
+    return build_request_as(c, id, parent, NULL);
 }
 
 /* ---- the thread ---------------------------------------------------------------------- */
@@ -604,6 +617,69 @@ bool tech_prompt(FILE *f, int64_t id)
     fputs(req, f);
     free(req);
     return true;
+}
+
+/* The answer it should have given, as a person said: its own when right;
+ * theirs when it was something else. NULL: nothing to learn from. */
+static char *target_answer(const char *diag, const char *verdict, const char *note, const char *actual)
+{
+    struct json_doc *a = malloc(sizeof(*a));
+    char e[100], *out = NULL;
+    size_t len = 0;
+    FILE *f;
+    int r = a && actual && *actual == '{' ? json_parse(a, actual, e, sizeof(e)) : -1;
+    const char *cat = r >= 0 ? json_get_str(a, r, "category", "") : "", *cause = r >= 0 ? json_get_str(a, r, "cause", "") : "";
+
+    if (!strcmp(verdict, "right") || (!strcmp(verdict, "partly") && !*cause && !*cat)) {
+        free(a);
+        return diag && *diag == '{' ? strdup(diag) : NULL;
+    }
+    if ((!*cause && !*cat) || !(f = open_memstream(&out, &len))) {
+        free(a);
+        return NULL;                /* wrong, but not said what it was */
+    }
+    fprintf(f, "{\"cause\": ");
+    jesc(f, *cause ? cause : "", 300);
+    fprintf(f, ", \"category\": ");
+    jesc(f, *cat ? cat : "unknown", 40);
+    fprintf(f, ", \"confidence\": 0.8, \"explanation\": ");
+    jesc(f, note ? note : "", 1200);
+    fprintf(f, ", \"next_checks\": [], \"ticket\": \"\"}");
+    fclose(f);
+    free(a);
+    return out;
+}
+
+int tech_export(FILE *f)
+{
+    static int64_t ids[20000];
+    int n = history_verdict_ids(ids, 20000), written = 0;
+    struct tech_conf c;
+
+    pthread_mutex_lock(&T.lock);
+    c = T.c;
+    pthread_mutex_unlock(&T.lock);
+    for (int i = 0; i < n; i++) {
+        char *d, *v, *no, *ac, *ans, *line;
+        int64_t parent = 0;
+
+        if (!history_incident_answer(ids[i], &d, &v, &no, &ac))
+            continue;
+        ans = target_answer(d, v, no, ac);
+        line = ans ? build_request_as(&c, ids[i], &parent, ans) : NULL;
+        if (line) {
+            /* {"messages": [...]} with the incident and verdict alongside */
+            fprintf(f, "{\"incident\": %lld, \"verdict\": \"%s\", %s\n", (long long)ids[i], v, line + 1);
+            written++;
+        }
+        free(line);
+        free(ans);
+        free(d);
+        free(v);
+        free(no);
+        free(ac);
+    }
+    return written;
 }
 
 void tech_state_json(FILE *f)

@@ -36,7 +36,13 @@ you better. So be plain, be specific, and point at the evidence.
   asked whether they see the same source from their side, a recording, a
   picture, a ping.
 - Events from a minute before to a minute after.
-- Past incidents like this one, with what a person said the cause was.
+- Past incidents like this one, with what you said then and what a person
+  said ("person_said": right, partly or wrong, and when wrong "it_was":
+  what it really was). Weigh these above everything else in these notes:
+  the same problem on the same channel or source is most often the same
+  cause again. When a person said you were wrong, do not repeat that
+  answer for a case like it unless the evidence is clearly different, and
+  say so.
 
 ## How to think about it
 

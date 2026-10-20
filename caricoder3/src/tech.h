@@ -45,6 +45,11 @@ void tech_queue(int64_t id, bool now);
  * user messages, schema): to read and improve the prompt. */
 bool tech_prompt(FILE *f, int64_t id);
 
+/* Training data: one JSON line per incident a person gave a verdict on
+ * ({"incident", "verdict", "messages": [system, user, assistant]}, the
+ * assistant's answer being what it should have said). Returns how many. */
+int tech_export(FILE *f);
+
 /* {"enabled", "state", "where", "model", "queue", "done", "last_error", ...} */
 void tech_state_json(FILE *f);
 

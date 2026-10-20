@@ -95,6 +95,18 @@ bool history_query_messages(FILE *f, int64_t incident, int limit)
     return true;
 }
 void history_incident_diagnosis(int64_t id, int64_t t, const char *json) { (void)id; (void)t; (void)json; }
+void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const char *note, const char *actual)
+{
+    (void)id; (void)t; (void)verdict; (void)note; (void)actual;
+}
+int history_verdict_ids(int64_t *ids, int max) { (void)ids; (void)max; return 0; }
+bool history_incident_answer(int64_t id, char **diagnosis, char **verdict, char **note, char **actual)
+{
+    (void)id;
+    *diagnosis = *verdict = *note = *actual = NULL;
+    return false;
+}
+void history_verdict_counts(FILE *f) { fprintf(f, "null"); }
 bool history_report_incident(FILE *f, int64_t id, int64_t now) { (void)f; (void)id; (void)now; return false; }
 bool history_similar(FILE *f, int64_t id, int limit) { (void)id; (void)limit; fprintf(f, "[]"); return true; }
 int64_t history_bytes(void) { return 0; }
@@ -111,7 +123,7 @@ int64_t history_bytes(void) { return 0; }
 #define TIDY_S        600             /* retention and the cap, this often */
 #define NAMES_MAX     1024
 
-enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE, R_MESSAGE, R_INC_DIAG };
+enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE, R_MESSAGE, R_INC_DIAG, R_INC_VERDICT };
 
 struct rec {
     enum rec_type type;
@@ -279,6 +291,7 @@ static int metric_id(const char *name)
 static void write_batch(struct rec *q, int n)
 {
     sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL, *si = NULL, *su = NULL, *sv = NULL, *sg = NULL, *sd = NULL;
+    sqlite3_stmt *sx = NULL;
 
     exec(H.db, "BEGIN");
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO s10 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &sc, NULL);
@@ -289,6 +302,8 @@ static void write_batch(struct rec *q, int n)
     sqlite3_prepare_v2(H.db, "INSERT INTO messages (t, peer, dir, text, data, incident) VALUES (?,?,?,?,?,?)", -1, &sg,
                        NULL);
     sqlite3_prepare_v2(H.db, "UPDATE incidents SET diagnosis = ?, diag_t = ? WHERE id = ?", -1, &sd, NULL);
+    sqlite3_prepare_v2(H.db, "UPDATE incidents SET verdict = ?, note = ?, actual = ?, verdict_t = ? WHERE id = ?", -1,
+                       &sx, NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO evidence (id, t, incident, chan, tool, args, result, file)"
                        " VALUES (?,?,?,?,?,?,?,?)", -1, &sv, NULL);
     sqlite3_prepare_v2(H.db, "UPDATE incidents SET closed = ?, summary = COALESCE(?, summary),"
@@ -351,6 +366,14 @@ static void write_batch(struct rec *q, int n)
                 sqlite3_bind_null(si, 10);
             sqlite3_step(si);
             sqlite3_reset(si);
+        } else if (r->type == R_INC_VERDICT && sx) {
+            sqlite3_bind_text(sx, 1, r->kind, -1, SQLITE_STATIC);
+            sqlite3_bind_text(sx, 2, r->text ? r->text : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(sx, 3, r->detail ? r->detail : "{}", -1, SQLITE_STATIC);
+            sqlite3_bind_int64(sx, 4, r->t);
+            sqlite3_bind_int64(sx, 5, r->id);
+            sqlite3_step(sx);
+            sqlite3_reset(sx);
         } else if (r->type == R_INC_DIAG && sd) {
             sqlite3_bind_text(sd, 1, r->detail ? r->detail : "{}", -1, SQLITE_STATIC);
             sqlite3_bind_int64(sd, 2, r->t);
@@ -416,6 +439,7 @@ static void write_batch(struct rec *q, int n)
     sqlite3_finalize(sv);
     sqlite3_finalize(sg);
     sqlite3_finalize(sd);
+    sqlite3_finalize(sx);
     exec(H.db, "COMMIT");
 }
 
@@ -671,6 +695,7 @@ bool history_open(const char *path, int max_mb, char *err, size_t errlen)
     /* columns added since the first version of the file */
     sqlite3_exec(H.db, "ALTER TABLE incidents ADD COLUMN diagnosis TEXT", NULL, NULL, NULL);
     sqlite3_exec(H.db, "ALTER TABLE incidents ADD COLUMN diag_t INTEGER", NULL, NULL, NULL);
+    sqlite3_exec(H.db, "ALTER TABLE incidents ADD COLUMN actual TEXT", NULL, NULL, NULL);
     /* incidents still open when the supervisor last stopped: closed then */
     {
         sqlite3_stmt *st;
@@ -833,6 +858,22 @@ int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, cons
     r.text = strdup(file ? file : "");
     push(&r);
     return r.id;
+}
+
+void history_incident_verdict(int64_t id, int64_t t, const char *verdict, const char *note, const char *actual)
+{
+    struct rec r;
+
+    if (!H.on || id <= 0)
+        return;
+    memset(&r, 0, sizeof(r));
+    r.type = R_INC_VERDICT;
+    r.id = id;
+    r.t = t;
+    snprintf(r.kind, sizeof(r.kind), "%s", verdict);
+    r.text = strdup(note ? note : "");
+    r.detail = strdup(actual && *actual == '{' ? actual : "{}");
+    push(&r);
 }
 
 void history_incident_diagnosis(int64_t id, int64_t t, const char *json)
@@ -1108,25 +1149,29 @@ static void incident_row(FILE *f, sqlite3_stmt *st)
     else
         fprintf(f, "%lld", (long long)sqlite3_column_int64(st, 9));
     fprintf(f, ", \"verdict\": ");
-    if (sqlite3_column_type(st, 10) == SQLITE_NULL)
+    if (sqlite3_column_type(st, 10) == SQLITE_NULL || report_mode)
         fprintf(f, "null");
     else
         jstr(f, (const char *)sqlite3_column_text(st, 10));
     fprintf(f, ", \"note\": ");
-    if (sqlite3_column_type(st, 11) == SQLITE_NULL)
+    if (sqlite3_column_type(st, 11) == SQLITE_NULL || report_mode)
         fprintf(f, "null");
     else
         jstr(f, (const char *)sqlite3_column_text(st, 11));
     {
         const char *dg = (const char *)sqlite3_column_text(st, 13);
 
+        const char *ac = (const char *)sqlite3_column_text(st, 15);
+
         fprintf(f, ", \"diagnosis\": %s, \"diag_t\": %lld", dg && *dg == '{' && !report_mode ? dg : "null",
                 (long long)sqlite3_column_int64(st, 14));
+        fprintf(f, ", \"actual\": %s, \"verdict_t\": %lld", ac && *ac == '{' && !report_mode ? ac : "null",
+                (long long)sqlite3_column_int64(st, 12));
     }
     fputc('}', f);
 }
 
-#define INC_COLS "id, t, closed, chan, rule, level, grp, summary, detail, parent, verdict, note, verdict_t, diagnosis, diag_t"
+#define INC_COLS "id, t, closed, chan, rule, level, grp, summary, detail, parent, verdict, note, verdict_t, diagnosis, diag_t, actual"
 
 /* id, t, incident, chan, tool, args, result, file */
 static void evidence_row(FILE *f, sqlite3_stmt *st)
@@ -1154,6 +1199,78 @@ static void evidence_row(FILE *f, sqlite3_stmt *st)
     fprintf(f, ", \"file_bytes\": %lld}", there ? (long long)sb.st_size : -1LL);
 }
 
+bool history_incident_answer(int64_t id, char **diagnosis, char **verdict, char **note, char **actual)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    bool ok = false;
+
+    *diagnosis = *verdict = *note = *actual = NULL;
+    if (!db)
+        return false;
+    if (sqlite3_prepare_v2(db, "SELECT diagnosis, verdict, note, actual FROM incidents WHERE id = ?", -1, &st, NULL)
+        == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            char **out[] = { diagnosis, verdict, note, actual };
+
+            for (int k = 0; k < 4; k++)
+                *out[k] = strdup(sqlite3_column_text(st, k) ? (const char *)sqlite3_column_text(st, k) : "");
+            ok = true;
+        }
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
+int history_verdict_ids(int64_t *ids, int max)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    int n = 0;
+
+    if (!db)
+        return 0;
+    if (sqlite3_prepare_v2(db, "SELECT id FROM incidents WHERE verdict IS NOT NULL AND diagnosis IS NOT NULL ORDER BY t",
+                           -1, &st, NULL) == SQLITE_OK) {
+        while (n < max && sqlite3_step(st) == SQLITE_ROW)
+            ids[n++] = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    return n;
+}
+
+void history_verdict_counts(FILE *f)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    int right = 0, partly = 0, wrong = 0, open = 0, looked = 0;
+
+    if (db && sqlite3_prepare_v2(db, "SELECT verdict, COUNT(*), SUM(diagnosis IS NOT NULL) FROM incidents"
+                                     " WHERE parent IS NULL GROUP BY verdict", -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            int n = sqlite3_column_int(st, 1);
+
+            if (!v)
+                open = n, looked = sqlite3_column_int(st, 2);
+            else if (!strcmp(v, "right"))
+                right = n;
+            else if (!strcmp(v, "partly"))
+                partly = n;
+            else if (!strcmp(v, "wrong"))
+                wrong = n;
+        }
+        sqlite3_finalize(st);
+    }
+    if (db)
+        sqlite3_close(db);
+    fprintf(f, "{\"right\": %d, \"partly\": %d, \"wrong\": %d, \"waiting\": %d, \"waiting_looked_at\": %d}",
+            right, partly, wrong, open, looked);
+}
+
 bool history_report_incident(FILE *f, int64_t id, int64_t now)
 {
     bool ok;
@@ -1173,7 +1290,7 @@ bool history_similar(FILE *f, int64_t id, int limit)
         return false;
     /* the same rule on the same channel or source, before this one, those with a person's verdict first */
     if (sqlite3_prepare_v2(db,
-            "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note FROM incidents o,"
+            "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note, o.actual FROM incidents o,"
             " incidents i WHERE i.id = ? AND o.id != i.id AND o.t < i.t AND o.rule = i.rule AND"
             " (o.chan IS i.chan OR (o.grp = i.grp AND o.grp != '')) AND o.parent IS NULL"
             " ORDER BY o.verdict IS NULL, o.t DESC LIMIT ?", -1, &st, NULL) != SQLITE_OK) {
@@ -1208,6 +1325,11 @@ bool history_similar(FILE *f, int64_t id, int limit)
             jstr(f, (const char *)sqlite3_column_text(st, 7));
             fprintf(f, ", \"note\": ");
             jstr(f, sqlite3_column_type(st, 8) == SQLITE_NULL ? "" : (const char *)sqlite3_column_text(st, 8));
+            {
+                const char *ac = (const char *)sqlite3_column_text(st, 9);
+
+                fprintf(f, ", \"it_was\": %s", ac && *ac == '{' && strcmp(ac, "{}") ? ac : "null");
+            }
             fputc('}', f);
         }
         fputc('}', f);
