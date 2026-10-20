@@ -994,7 +994,7 @@ bool tech_answer_json(FILE *f, int64_t id)
                 jesc(f, T.asks[i].answer, strlen(T.asks[i].answer));
             else
                 fputs("null", f);
-            fprintf(f, ", \"model_state\": \"%s\"}", T.state);
+            fprintf(f, ", \"model_state\": \"%s\", \"where\": \"%s\"}", T.state, T.server > 0 ? T.where : "");
             found = true;
         }
     pthread_mutex_unlock(&T.lock);

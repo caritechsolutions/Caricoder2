@@ -925,7 +925,7 @@ async function chatSend() {
   chatMsgs.push({ peer: "person", t: Date.now() / 1000, text: q });
   try {
     const r = await api("/api/technician/ask", { method: "POST", body: JSON.stringify({ question: q }) });
-    chatWait = { id: r.id };
+    chatWait = { id: r.id, since: Date.now(), errs: 0 };
   } catch(e) { chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: "(" + e.message + ")" }); }
   chatRender();
   const poll = async () => {
@@ -940,10 +940,16 @@ async function chatSend() {
         setTimeout(chatLoad, 4000);
         return;
       }
-      chatWait.note = a.model_state === "starting" ? "loading the model first (up to a minute)…" : a.state === "waiting" ? "waiting its turn…" : "thinking…";
+      const secs = Math.round((Date.now() - chatWait.since) / 1000);
+      chatWait.errs = 0;
+      chatWait.note = (a.model_state === "starting" ? "loading the model first…" : a.state === "waiting" ? "waiting its turn (it finishes the incident it is on first)…" : "thinking…")
+        + ` ${fmtDur(secs)}` + (secs > 60 && a.where === "cpu" ? " · on the CPU an answer can take several minutes; it stays here when it comes" : "");
       chatRender();
-    } catch(e) { chatWait = null; chatRender(); return; }
-    setTimeout(poll, 2000);
+    } catch(e) {
+      /* a hiccup is not the end of the question: give up only after a few in a row */
+      if (++chatWait.errs >= 5) { chatMsgs.push({ peer: "technician", t: Date.now() / 1000, text: "(lost track of the answer: " + e.message + "; it will show here when the chat is opened again)" }); chatWait = null; chatRender(); return; }
+    }
+    setTimeout(poll, 3000);
   };
   setTimeout(poll, 1500);
 }
