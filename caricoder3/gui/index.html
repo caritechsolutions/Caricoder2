@@ -459,8 +459,7 @@ function mediaLine(s, input, sync) {
   const quiet = input && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio");
   const pid = input && s.src_pid ? `<span title="The source moved this stream from PID ${s.in_pid}; settings and output stay on ${s.in_pid}">pid ${s.src_pid} <span class="warn">(was ${s.in_pid})</span></span>` : `pid ${input ? s.in_pid : s.pid}`;
   const syncTxt = sy ? (sy.baseline_ms == null ? `<span class="dim" title="Learning how the source times its audio against its video (two minutes)">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms…</span>`
-    : Math.abs(sy.shift_ms) >= 80 ? `<span class="bad" title="The source's A/V timing has moved from what it was: the audio may be out of sync at the source">A/V moved ${sy.shift_ms >= 0 ? "+" : ""}${Math.round(sy.shift_ms)} ms</span>`
-    : `<span class="dim" title="How far ahead of the video the source times its audio; a change in it means the sync moved">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms, steady</span>`) : "";
+    : `<span class="dim" title="How far ahead of the video the source times its audio (for information: it follows how far ahead the video is sent, which changes with its bit rate; it is not lip sync)">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms${Math.abs(sy.shift_ms) >= 80 ? ` (${sy.shift_ms >= 0 ? "+" : ""}${Math.round(sy.shift_ms)} from the start)` : ""}</span>`) : "";
   return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span>${syncTxt ? `<span class="pid">${syncTxt}</span>` : ""}</div>`;
 }
 function mediaHtml(c) {
@@ -694,7 +693,7 @@ async function loadWatchdog(force) {
 }
 const WD_FIELDS_SYNC = [["av_shift_ms", "Audio timing moved by (ms) …"], ["av_shift_s", "… for (s): an incident"]];
 const WD_FIELDS_DISK = [["disk_warn_pct", "Disk space low under (% free)"], ["disk_crit_pct", "Disk nearly full under (% free)"], ["disk_full_h", "Disk filling: full within (hours)"]];
-const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["clear_s", "It is over when gone for (s)"],
+const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["content_s", "… a black or frozen picture, silent audio: this long (s)"], ["clear_s", "It is over when gone for (s)"],
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
   ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];

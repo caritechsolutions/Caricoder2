@@ -29,6 +29,7 @@ enum wd_rule {
 
 struct wd_limits {
     int min_s;              /* a problem this long is an incident */
+    int content_s;          /* ... a black or frozen picture, silent audio: this long (programmes have short ones) */
     int clear_s;            /* gone this long: the incident is over */
     int group_s;            /* channels of one source within this of each other: one source incident */
     int no_input_s;

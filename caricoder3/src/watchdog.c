@@ -95,6 +95,7 @@ void wd_defaults(struct wd_limits *l)
     l->disk_warn_pct = 15;
     l->disk_crit_pct = 5;
     l->disk_full_h = 24;
+    l->content_s = 30;
     l->av_shift_ms = 80;
     l->av_shift_s = 30;
 }
@@ -117,7 +118,7 @@ int wd_rule_by_id(const char *id)
     return -1;
 }
 
-#define LIMIT_FIELDS(X) X(min_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
+#define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
     X(av_shift_ms) X(av_shift_s)
 
@@ -158,6 +159,8 @@ void wd_limits_read(const struct json_doc *d, int obj, struct wd_limits *l)
         l->min_s = 1;
     if (l->clear_s < 1)
         l->clear_s = 1;
+    if (l->content_s < 1)
+        l->content_s = 1;
 }
 
 static void ensure_lim(void)
@@ -204,6 +207,8 @@ static int min_for(enum wd_rule r)
         return 0;
     if (r == WD_AV_SHIFT)
         return W.lim.av_shift_s;
+    if (r == WD_BLACK || r == WD_FROZEN || r == WD_SILENT)
+        return W.lim.content_s;
     return W.lim.min_s;
 }
 

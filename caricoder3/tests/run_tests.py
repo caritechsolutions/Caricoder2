@@ -3028,7 +3028,7 @@ def supervisor_evidence():
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1",
                "history": os.path.join(root, "history.db"), "evidence": evdir,
-               "watchdog": {"min_s": 5, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
+               "watchdog": {"min_s": 5, "content_s": 5, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
               open(cfg, "w"))
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
 

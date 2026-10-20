@@ -287,11 +287,12 @@ static void idle_check(const struct engine_stats *st, int64_t input_age_ms)
 /*
  * The A/V timing the source signals: for each audio stream, how far ahead
  * of its arrival it is stamped less how far the video is (a 5 s window
- * each, engine.c). What it is does not matter (encoders buffer the two
- * differently); a change in it does: the provider's encoder has moved its
- * audio against its video, and the channel may be out of sync. The first
- * two minutes of a run give the baseline (their median); a move of
- * SYNC_WARN_MS from it for 30 s is said once, and again when it is back.
+ * each, engine.c). The first two minutes of a run give the baseline
+ * (their median); a move of SYNC_WARN_MS from it for 30 s is said once,
+ * and again when it is back. For information only: on a variable bit-rate
+ * source the video is sent further ahead when the picture is busy, so this
+ * gap wanders by hundreds of milliseconds with no sync fault at all (seen
+ * on a live feed); it is not a lip-sync measure and opens no incident.
  */
 #define SYNC_WARN_MS 80.0
 #define SYNC_BASE_N 24
@@ -384,9 +385,9 @@ static void sync_check(const struct engine_stats *st, int64_t input_age_ms)
         if (fabs(s->shift) >= SYNC_WARN_MS) {
             if (++s->over == over_n && !s->warned) {    /* 6 windows: 30 s */
                 s->warned = true;
-                log_warn("PID 0x%04X (audio%s%s): the source's A/V timing moved by %+.0f ms (was %+.0f ms, now %+.0f ms): "
-                         "the audio may be out of sync at the source", s->pid, lang[0] ? " " : "", lang, s->shift,
-                         s->baseline, s->offset);
+                log_info("PID 0x%04X (audio%s%s): the source's A/V timing moved by %+.0f ms (was %+.0f ms, now %+.0f ms); "
+                         "for information: this follows how far ahead the video is sent, not lip sync", s->pid,
+                         lang[0] ? " " : "", lang, s->shift, s->baseline, s->offset);
             }
         } else {
             if (s->warned)

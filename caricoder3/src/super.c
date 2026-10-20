@@ -1143,8 +1143,11 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
                          (int)json_get_num(d, j, "pid", 0), sh, json_get_num(d, j, "baseline_ms", 0));
             }
         }
-        wd_observe(t, c->name, c->name, G, WD_AV_SHIFT, flowing && worst != 0, what,
-                   SINCE_FLOW(t - shifted));
+        /* Not an incident: this gap follows the video's bit rate (a live
+         * source wandered by 150-630 ms all night with nothing out of sync);
+         * the rule waits for a check on the picture and sound themselves. */
+        (void)shifted;
+        (void)flowing;
     }
 }
 

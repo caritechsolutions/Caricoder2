@@ -144,18 +144,12 @@ the first where they are known to be bad. The cause is between them.
 Audio and video out of sync almost always comes from the provider's
 transcoder; the fix is a ticket asking them to reboot it.
 
-- "audio timing moved" (av_shift): the timestamps the source puts on its
-  audio moved against those on its video, compared with what they were
-  when the channel started (its baseline). This transcoder does not
-  change them on the way in, so the move happened at the source: almost
-  always the provider's encoder. If it happened on several channels of
-  the same source at once, look further up (the IRD or a remultiplexer).
-  The ticket asks the provider to check, and reboot, their encoder for
-  that service, saying by how many milliseconds and since when. A move
-  that comes back by itself within a minute was probably a glitch, not a
-  fault. A sync fault that does not change the timestamps (the encoder
-  captures the sound late but stamps it as on time) cannot be seen this
-  way: then only the picture and sound themselves tell.
+- The "A/V" figure on a channel's audio streams (how far ahead the audio
+  is timed against the video) is for information only. It follows how
+  far ahead the video is sent, which changes with the video's bit rate:
+  it wanders by hundreds of milliseconds with nothing out of sync. Never
+  call a channel out of sync from it. Out of sync can be told only by a
+  person watching, or from the picture and sound themselves.
 
 ## What you answer
 
