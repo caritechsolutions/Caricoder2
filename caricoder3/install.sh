@@ -65,8 +65,9 @@ libsqlite3-dev:the supervisor's history and event log
 iputils-ping:the evidence tools' ping
 "
 
-say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
-note() { printf '    %s\n' "$*"; }
+# to stderr: shown even when the output is sent to /dev/null (the build's own output goes to logs)
+say()  { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
+note() { printf '    %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
