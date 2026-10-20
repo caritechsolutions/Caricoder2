@@ -3263,6 +3263,12 @@ def supervisor_technician():
         need(said in prompt["messages"][1]["content"], "the verdict is not given with the next incident like it")
         um = prompt["messages"][1]["content"]
         need("Key facts" in um and "- rule: " in um and "- began: " in um, f"no key facts ahead of the report: {um[:400]!r}")
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/api/technician/prompt?chat=1", headers=auth)
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            chat_ctx = json.load(resp)
+        lines = chat_ctx["incidents_in_plain_words"]
+        need(lines and any("ended in the last 24 hours" in l for l in lines) and "incidents_last_24h" not in chat_ctx,
+             f"chat context: {lines}")
         # a question in plain words
         code, j = api("/api/technician/ask", "POST", {"question": "What is wrong with t1 right now?"})
         need(code == 200 and j["id"], f"ask: {code} {j}")

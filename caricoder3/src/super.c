@@ -2439,6 +2439,73 @@ static const char *state_name(enum chan_state st);
 static void disks_json(const struct super *s, FILE *f);
 
 /* How things are now, for a question to the technician (tech.h). */
+/* The incidents in plain lines for the chat, ahead of the JSON: what is
+ * open now, apart from what is over, with ages in minutes (a small model
+ * neither subtracts Unix times nor keeps the two apart reliably). */
+static void chat_incident_lines(FILE *f, int64_t now, bool *first)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        char *buf = NULL;
+        size_t len = 0;
+        FILE *m = open_memstream(&buf, &len);
+        struct json_doc *d = malloc(sizeof(*d));
+        char err[100], line[700], q[800];
+        int root = -1, shown = 0, total = 0;
+
+        if (!m || !d) {
+            if (m)
+                fclose(m);
+            free(buf);
+            free(d);
+            return;
+        }
+        if (!history_query_incidents_brief(m, pass ? now - 86400 : 0, now + 1, pass == 0, pass ? 60 : 30))
+            fprintf(m, "{}");
+        fclose(m);
+        root = buf && strlen(buf) < JSON_TEXT_MAX ? json_parse(d, buf, err, sizeof(err)) : -1;
+        free(buf);
+        if (root >= 0) {
+            int arr = json_get(d, root, "incidents");
+
+            for (int j = arr >= 0 ? d->node[arr].first_child : -1; j >= 0; j = d->node[j].next) {
+                bool open = json_get(d, j, "closed") < 0 || d->node[json_get(d, j, "closed")].type == JSON_NULL;
+                double opened = json_get_num(d, j, "opened", 0), closed = json_get_num(d, j, "closed", 0);
+                const char *ch = json_get_str(d, j, "channel", "");
+                int parent = json_get(d, j, "parent");
+
+                if (pass == 1 && open)
+                    continue;
+                if (parent >= 0 && d->node[parent].type != JSON_NULL)
+                    continue;               /* part of a source's: that one is listed */
+                total++;
+                if (shown >= (pass ? 12 : 30))
+                    continue;
+                shown++;
+                if (pass == 0)
+                    snprintf(line, sizeof(line), "OPEN NOW, for %.0f min: %s (%s; incident %.0f)", (now - opened) / 60,
+                             json_get_str(d, j, "summary", "?"), ch[0] ? ch : "the server or a source",
+                             json_get_num(d, j, "id", 0));
+                else
+                    snprintf(line, sizeof(line), "over, ended %.0f min ago after %.0f s: %s (%s)", (now - closed) / 60,
+                             closed - opened, json_get_str(d, j, "summary", "?"), ch[0] ? ch : "the server or a source");
+                fprintf(f, "%s%s", *first ? "" : ", ", json_quote(line, q, sizeof(q)));
+                *first = false;
+            }
+        }
+        if (pass == 0 && !total) {
+            fprintf(f, "%s\"Nothing is open now: no incident is going on.\"", *first ? "" : ", ");
+            *first = false;
+        }
+        if (pass == 1) {
+            snprintf(line, sizeof(line), "%d incident%s ended in the last 24 hours%s", total, total == 1 ? "" : "s",
+                     total > shown ? " (the latest shown above)" : "");
+            fprintf(f, "%s%s", *first ? "" : ", ", json_quote(line, q, sizeof(q)));
+            *first = false;
+        }
+        free(d);
+    }
+}
+
 static void tech_context(FILE *f, void *op)
 {
     struct super *s = op;
@@ -2446,8 +2513,11 @@ static void tech_context(FILE *f, void *op)
     int64_t now = time(NULL);
     struct peer_state ps[PEERS_MAX];
     int np = peer_get(ps, PEERS_MAX);
+    bool first = true;
 
-    fprintf(f, "{\"now\": %lld, \"channels\": [", (long long)now);
+    fprintf(f, "{\"incidents_in_plain_words\": [");
+    chat_incident_lines(f, now, &first);
+    fprintf(f, "], \"now\": %lld, \"channels\": [", (long long)now);
     pthread_mutex_lock(&s->lock);
     for (int i = 0; i < s->n; i++) {
         const struct chan *c = &s->ch[i];
@@ -2470,11 +2540,6 @@ static void tech_context(FILE *f, void *op)
     fprintf(f, "], \"disks\": ");
     disks_json(s, f);
     pthread_mutex_unlock(&s->lock);
-    fprintf(f, ", \"being_watched\": ");
-    wd_state_json(f, now);
-    fprintf(f, ", \"incidents_last_24h\": ");
-    if (!history_query_incidents_brief(f, now - 86400, now + 1, false, 30))
-        fprintf(f, "{}");
     fprintf(f, ", \"peers\": [");
     for (int i = 0; i < np; i++) {
         fprintf(f, "%s{\"name\": %s, \"answering\": %s, \"open_incidents\": %d}", i ? ", " : "",
@@ -3586,7 +3651,7 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         return;
     }
     if (!strcmp(p, "/api/technician/prompt")) {
-        /* ?incident=ID: what the model is given about it */
+        /* ?incident=ID: what the model is given about it; ?chat=1: the chat's state */
         char v[32], *out = NULL;
         size_t len = 0;
         FILE *f = open_memstream(&out, &len);
@@ -3594,7 +3659,13 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
 
         if (!f)
             return;
-        ok = query_param(req->query, "incident", v, sizeof(v)) && tech_prompt(f, strtoll(v, NULL, 10));
+        if (query_param(req->query, "chat", v, sizeof(v))) {
+            /* ?chat=1: how things are now, as a question in the chat is given it */
+            tech_context(f, s);
+            ok = true;
+        } else {
+            ok = query_param(req->query, "incident", v, sizeof(v)) && tech_prompt(f, strtoll(v, NULL, 10));
+        }
         fclose(f);
         if (!ok) {
             free(out);

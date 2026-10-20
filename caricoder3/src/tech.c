@@ -568,7 +568,17 @@ static void answer(int k)
                    "this transcoder in plain words. Answer from the state you are given and your notes, in plain "
                    "sentences, briefly (a few sentences; a short list when there are several things). Name the "
                    "channels, sources and figures you mean. When the state does not say, say so and say what "
-                   "would tell. Do not answer in JSON.\n");
+                   "would tell. Do not answer in JSON.\n\n"
+                   "- \"incidents_in_plain_words\" is the only list of incidents. Lines that start \"OPEN NOW\" "
+                   "are going on now; every other line is over. Never call an incident that is over open or "
+                   "ongoing.\n"
+                   "- Say how long ago something happened with the minutes given there; do not work out times "
+                   "yourself.\n"
+                   "- Do not give causes the state does not show, and never say something is \"known\" to "
+                   "happen unless your notes say so. If asked why, say what the evidence shows and what would "
+                   "tell.\n"
+                   "- Answer what was asked, no more: a question about how things are gets the channels' state "
+                   "and what is open now, not a list of everything that happened today.\n");
         fclose(f);
     }
     if ((f = open_memstream(&ctx, &cl))) {

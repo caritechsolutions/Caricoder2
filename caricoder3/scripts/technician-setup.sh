@@ -87,6 +87,7 @@ WANT="$LLAMA_TAG $KIND"
 
 if [ -x "$BIN" ] && [ "$(cat "$LIBS/llama-server.version" 2>/dev/null)" = "$WANT" ]; then
     log "llama-server $WANT is installed already"
+    [ -d "$LIBS/src/llama.cpp/build" ] && rm -rf "$LIBS/src/llama.cpp/build" && log "removed the old build's objects"
 else
     for p in cmake git g++; do
         if ! command -v "$p" >/dev/null 2>&1; then
@@ -131,6 +132,7 @@ else
     install -m 755 "$SRC/build/bin/llama-server" "$BIN.new" && mv -f "$BIN.new" "$BIN"
     echo "$WANT" > "$LIBS/llama-server.version"
     log "installed $BIN ($WANT)"
+    rm -rf "$SRC/build"             # the build's objects: no use once installed (hundreds of MB)
 fi
 
 # ---- the model --------------------------------------------------------------------

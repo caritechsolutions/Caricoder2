@@ -231,11 +231,16 @@ NOTES
             note "an NVIDIA card is here: the CUDA toolkit is checked and the model server rebuilt for the card"
         else
             note "model server and model are installed"
+            rm -rf "$LIBS_DIR/src/llama.cpp/build"     # its build's objects, no use once installed
             return 0
         fi
     fi
     setsid nohup bash "$SRC_DIR/scripts/technician-setup.sh" >>/var/log/caricoder3-technician-setup.log 2>&1 </dev/null &
-    note "the model server is being built and the model (4.7 GB) downloaded, in the background:"
+    if [ -f /var/lib/caricoder3/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ]; then
+        note "the model server is being set up in the background (the model is here already):"
+    else
+        note "the model server is being built and the model (4.7 GB) downloaded, in the background:"
+    fi
     note "  tail -f /var/log/caricoder3-technician-setup.log   (the Server page shows it too)"
 }
 
