@@ -85,13 +85,32 @@ static void server_stop(void)
     T.server = 0;
 }
 
+/* Whether the model server was built for the CPU only (no CUDA compiler
+ * when it was set up): then the cards are of no use to it. */
+static bool server_cpu_only(void)
+{
+    const char *libs = getenv("CARICODER3_LIBS");
+    char path[512], line[128] = "";
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/llama-server.version", libs && libs[0] ? libs : "/opt/caricoder3-libs");
+    if (!(f = fopen(path, "r")))
+        return false;
+    if (!fgets(line, sizeof(line), f))
+        line[0] = 0;
+    fclose(f);
+    line[strcspn(line, "\r\n")] = 0;
+    return strlen(line) >= 4 && !strcmp(line + strlen(line) - 4, " cpu");
+}
+
 /* A card with room: the most memory free, at least GPU_NEED_MB, not flat out. -1: none. */
 static int pick_gpu(const char *want)
 {
-    int idx[8], free_mb[8], busy[8], n = sysstat_gpu_free(idx, free_mb, busy, 8), best = -1;
+    int idx[8], free_mb[8], busy[8], n, best = -1;
 
-    if (!strcmp(want, "cpu"))
+    if (!strcmp(want, "cpu") || server_cpu_only())
         return -1;
+    n = sysstat_gpu_free(idx, free_mb, busy, 8);
     for (int i = 0; i < n; i++) {
         if (strcmp(want, "auto") && atoi(want) != idx[i])
             continue;
