@@ -844,17 +844,11 @@ random-access flag on key frames.
 - A video or audio stream the PMT lists but nothing of which arrives
   while the rest does is reported once after 5 s, and again when it is
   back; the GUI marks it "no data".
-- The A/V timing the source signals is watched: for each audio stream,
-  how far ahead of its arrival it is stamped less how far the video is
-  (the highest in each 5 s, which late packets cannot raise). The first
-  two minutes of a run give its baseline; a move of 80 ms or more for
-  30 s is logged and shown on the channel. **For information only**: on a
-  variable bit-rate source the video is sent further ahead when the
-  picture is busy, so this gap wanders by hundreds of milliseconds with
-  nothing out of sync (a live Discovery feed moved 150-630 ms all night,
-  46 times, and looked fine). It is not a lip-sync measure and opens no
-  incident; the rule `av_shift` waits for a check on the picture and
-  sound themselves (lips against speech), which is still to come.
+- Lip sync is not measured yet. (The gap between how far ahead the
+  source sends its audio and its video was watched for a while: on a
+  variable bit-rate feed it follows the video's bit rate, not lip sync,
+  so it was taken out. A check on the picture and sound themselves is to
+  come.)
 - The content is watched: a picture that is black, or does not change
   at all, for 10 s, and an audio stream that is silent (peaks under
   -60 dBFS) for 10 s, are reported once and again when they end, and

@@ -1126,29 +1126,6 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         /* only while the rest arrives: no input at all is the other rule */
         wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
-    {
-        /* the source's A/V timing, against its baseline (main.c, sync) */
-        int sy = json_get(d, root, "sync"), aa = sy >= 0 ? json_get(d, sy, "audio") : -1;
-        double worst = 0;
-        int shifted = 0;
-
-        what[0] = 0;
-        for (int j = aa >= 0 ? d->node[aa].first_child : -1; j >= 0; j = d->node[j].next) {
-            double sh = json_get_num(d, j, "shift_ms", 0);
-
-            if (fabs(sh) >= L.av_shift_ms && fabs(sh) > fabs(worst)) {
-                worst = sh;
-                shifted = (int)json_get_num(d, j, "shifted_s", 0);
-                snprintf(what, sizeof(what), "audio PID %d moved %+.0f ms against the video (was %+.0f ms): possibly out of sync at the source",
-                         (int)json_get_num(d, j, "pid", 0), sh, json_get_num(d, j, "baseline_ms", 0));
-            }
-        }
-        /* Not an incident: this gap follows the video's bit rate (a live
-         * source wandered by 150-630 ms all night with nothing out of sync);
-         * the rule waits for a check on the picture and sound themselves. */
-        (void)shifted;
-        (void)flowing;
-    }
 }
 
 /* What the watchdog sees of a channel whatever its state: failing,

@@ -144,12 +144,9 @@ the first where they are known to be bad. The cause is between them.
 Audio and video out of sync almost always comes from the provider's
 transcoder; the fix is a ticket asking them to reboot it.
 
-- The "A/V" figure on a channel's audio streams (how far ahead the audio
-  is timed against the video) is for information only. It follows how
-  far ahead the video is sent, which changes with the video's bit rate:
-  it wanders by hundreds of milliseconds with nothing out of sync. Never
-  call a channel out of sync from it. Out of sync can be told only by a
-  person watching, or from the picture and sound themselves.
+- Nothing on this transcoder measures lip sync yet. Never call a channel
+  out of sync from the figures you are given; only a person watching can
+  say so for now.
 
 ## What you answer
 

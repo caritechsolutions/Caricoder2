@@ -200,10 +200,6 @@ function contentFaults(st) {
   }
   for (const s of ss) if (!s.from_pid && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio"))
     out.push(`${s.kind}${s.language ? " " + s.language.toUpperCase() : ""} has no data`);
-  for (const a of ((st.sync || {}).audio || [])) if (a.baseline_ms != null && Math.abs(a.shift_ms) >= 80 && a.shifted_s >= 30) {
-    const s = ss.find(x => x.in_pid === a.pid && !x.from_pid);
-    out.push(`audio${s && s.language ? " " + s.language.toUpperCase() : ""} timing moved ${a.shift_ms >= 0 ? "+" : ""}${Math.round(a.shift_ms)} ms (sync?)`);
-  }
   return out;
 }
 function healthOf(c) {
@@ -452,14 +448,12 @@ function codecLabel(s, input) {
 function mediaLine(s, input, sync) {
   const rate = input ? s.bitrate_in : s.bitrate;
   const bits = [codecLabel(s, input)];
-  const sy = input && sync && s.kind === "audio" ? (sync.audio || []).find(a => a.pid === s.in_pid) : null;
   if (!input && s.size) bits.push(s.size);
   if (s.language) bits.push(s.language.toUpperCase());
   const what = `<b class="k-${esc(s.kind || "data")}">${esc(s.kind || "data")}</b> ${esc(bits.join(" "))}`;
   const quiet = input && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio");
   const pid = input && s.src_pid ? `<span title="The source moved this stream from PID ${s.in_pid}; settings and output stay on ${s.in_pid}">pid ${s.src_pid} <span class="warn">(was ${s.in_pid})</span></span>` : `pid ${input ? s.in_pid : s.pid}`;
-  const syncTxt = sy ? (sy.baseline_ms == null ? `<span class="dim" title="Learning how the source times its audio against its video (two minutes)">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms…</span>`
-    : `<span class="dim" title="How far ahead of the video the source times its audio (for information: it follows how far ahead the video is sent, which changes with its bit rate; it is not lip sync)">A/V ${sy.offset_ms >= 0 ? "+" : ""}${Math.round(sy.offset_ms)} ms${Math.abs(sy.shift_ms) >= 80 ? ` (${sy.shift_ms >= 0 ? "+" : ""}${Math.round(sy.shift_ms)} from the start)` : ""}</span>`) : "";
+  const syncTxt = "";
   return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span>${syncTxt ? `<span class="pid">${syncTxt}</span>` : ""}</div>`;
 }
 function mediaHtml(c) {
