@@ -131,8 +131,9 @@ for line in sys.stdin:
         drop = sorted(s["pid"] for s in streams if s["pid"] not in k)
         if drop:
             c["drop"] = drop
-        if prog.get("scrambled"):
-            print(name, out, "NOTE", "scrambled on %s: it will show no data" % url, flush=True)
+        bad = [s["pid"] for s in streams if s["pid"] in k and s.get("scrambled")]
+        if bad:
+            print(name, out, "NOTE", "PID %s scrambled on %s: it will show no data" % (", ".join(map(str, bad)), url), flush=True)
     print(name, out, "OK", json.dumps(c, separators=(",", ":")))
 ')"
 
