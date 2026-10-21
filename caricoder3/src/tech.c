@@ -25,7 +25,7 @@
 
 #define QUEUE_MAX 32
 #define GPU_NEED_MB 7000        /* a 7B model at Q4 with its context, and some room */
-#define START_WAIT_S 180        /* loading a model from disk */
+#define START_WAIT_S 600        /* loading a model from disk (a 20 GB one can take minutes) */
 
 struct job {
     int64_t id;
@@ -52,7 +52,8 @@ static struct {
     struct job q[QUEUE_MAX];
     int qn;
     pid_t server;               /* llama-server, 0: not running */
-    char where[32];             /* "gpu1", "cpu" */
+    char where[32];             /* "gpu1", "all" (split), "cpu" */
+    char where_why[200];        /* why there, in words */
     char state[32];             /* "off", "idle", "starting", "thinking", "unavailable" */
     char last_error[300];
     int64_t last_used, started;
@@ -103,23 +104,16 @@ static bool server_cpu_only(void)
     return strlen(line) >= 4 && !strcmp(line + strlen(line) - 4, " cpu");
 }
 
-/* A card with room: the most memory free, at least GPU_NEED_MB, not flat out. -1: none. */
-static int pick_gpu(const char *want)
-{
-    int idx[8], free_mb[8], busy[8], n, best = -1;
+/* Where a model goes (a card, -2 all cards split, -1 the CPU): further down. */
+static int eval_place(const char *want, int need_mb, char *why, size_t len);
+static int64_t file_mb(const char *path);
 
-    if (!strcmp(want, "cpu") || server_cpu_only())
-        return -1;
-    n = sysstat_gpu_free(idx, free_mb, busy, 8);
-    for (int i = 0; i < n; i++) {
-        if (strcmp(want, "auto") && atoi(want) != idx[i])
-            continue;
-        if (free_mb[i] < GPU_NEED_MB || busy[i] > 90)
-            continue;
-        if (best < 0 || free_mb[i] > free_mb[best])
-            best = i;
-    }
-    return best >= 0 ? idx[best] : -1;
+/* Card memory a model needs: its file, a tenth more, and room for its context. */
+static int model_need_mb(const char *model)
+{
+    int64_t mb = file_mb(model);
+
+    return mb > 0 ? (int)(mb * 11 / 10 + 2500) : GPU_NEED_MB;
 }
 
 static bool server_up(void)
@@ -136,7 +130,8 @@ static bool server_up(void)
 /* Called with the lock released (it waits). */
 static bool server_start(struct tech_conf *c, char *err, size_t errlen)
 {
-    int gpu = pick_gpu(c->gpu);
+    char why[200];
+    int gpu = eval_place(c->gpu, model_need_mb(c->model), why, sizeof(why));
     char port[16], ctx[16], threads[16], ngl[8], logp[600];
     pid_t pid;
 
@@ -151,7 +146,7 @@ static bool server_start(struct tech_conf *c, char *err, size_t errlen)
     snprintf(port, sizeof(port), "%d", c->port);
     snprintf(ctx, sizeof(ctx), "%d", c->ctx);
     snprintf(threads, sizeof(threads), "%d", c->threads);
-    snprintf(ngl, sizeof(ngl), "%d", gpu >= 0 ? 99 : 0);
+    snprintf(ngl, sizeof(ngl), "%d", gpu != -1 ? 99 : 0);
     snprintf(logp, sizeof(logp), "/tmp/caricoder3-technician.log");
     pid = fork();
     if (pid < 0) {
@@ -160,7 +155,8 @@ static bool server_start(struct tech_conf *c, char *err, size_t errlen)
     }
     if (pid == 0) {
         char *argv[] = { c->server, "-m", c->model, "--host", "127.0.0.1", "--port", port, "-c", ctx, "-t", threads,
-                         "-ngl", ngl, "-np", "1", "--jinja", "--reasoning-budget", "0", "--no-webui", NULL };
+                         "-ngl", ngl, "-np", "1", "--jinja", "--reasoning-budget", "0", "--no-webui",
+                         gpu == -2 ? "--split-mode" : NULL, "layer", NULL };
         int fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC, 0644), nul = open("/dev/null", O_RDONLY);
         char dev[16];
 
@@ -175,9 +171,9 @@ static bool server_start(struct tech_conf *c, char *err, size_t errlen)
             snprintf(dev, sizeof(dev), "%d", gpu);
             setenv("CUDA_VISIBLE_DEVICES", dev, 1);
             setenv("GGML_VK_VISIBLE_DEVICES", dev, 1);
-        } else {
+        } else if (gpu == -1) {
             setenv("CUDA_VISIBLE_DEVICES", "", 1);
-        }
+        }                               /* -2: every card, split */
         /* on the CPU it never competes with the channels */
         setpriority(PRIO_PROCESS, 0, 19);
         execv(c->server, argv);
@@ -189,10 +185,11 @@ static bool server_start(struct tech_conf *c, char *err, size_t errlen)
     if (gpu >= 0)
         snprintf(T.where, sizeof(T.where), "gpu%d", gpu);
     else
-        snprintf(T.where, sizeof(T.where), "cpu");
+        snprintf(T.where, sizeof(T.where), "%s", gpu == -2 ? "all" : "cpu");
+    snprintf(T.where_why, sizeof(T.where_why), "%s", why);
     set_state("starting");
     pthread_mutex_unlock(&T.lock);
-    log_info("technician: starting the model on %s", gpu >= 0 ? "a card" : "the CPU");
+    log_info("technician: starting %s on %s", c->model, why);
     for (int i = 0; i < START_WAIT_S * 2; i++) {
         int status;
 
@@ -796,7 +793,7 @@ static void *thread_main(void *arg)
                 break;
             }
         if (!id) {
-            if (T.server > 0 && now - T.last_used > T.c.idle_s && now - T.started > T.c.idle_s) {
+            if (T.server > 0 && T.c.idle_s > 0 && now - T.last_used > T.c.idle_s && now - T.started > T.c.idle_s) {
                 server_stop();
                 set_state("off");
             }
@@ -815,6 +812,11 @@ static void *thread_main(void *arg)
 void tech_set(const struct tech_conf *c)
 {
     pthread_mutex_lock(&T.lock);
+    if (T.server > 0 && (strcmp(T.c.model, c->model) || strcmp(T.c.gpu, c->gpu) || T.c.threads != c->threads ||
+                         T.c.ctx != c->ctx)) {
+        log_info("technician: settings changed, the model server is started again when next needed");
+        server_stop();
+    }
     T.c = *c;
     if (T.c.port <= 0)
         T.c.port = 8551;
@@ -822,8 +824,8 @@ void tech_set(const struct tech_conf *c)
         T.c.ctx = 16384;
     if (T.c.threads <= 0)
         T.c.threads = 8;
-    if (T.c.idle_s <= 0)
-        T.c.idle_s = 600;
+    if (T.c.idle_s < 0)
+        T.c.idle_s = 600;                /* 0: kept loaded */
     if (!T.state[0])
         set_state(c->enabled ? "off" : "disabled");
     if (c->enabled && !T.running) {
@@ -1029,8 +1031,39 @@ void tech_state_json(FILE *f)
                "\"last_seconds\": %.0f, \"last_error\": ", T.qn, T.done, T.failed, (long long)T.last_id,
             (long long)T.last_t, T.last_seconds);
     jesc(f, T.last_error, sizeof(T.last_error));
-    fputc('}', f);
+    fprintf(f, ", \"model_path\": ");
+    jesc(f, T.c.model, sizeof(T.c.model));
+    fprintf(f, ", \"where_why\": ");
+    jesc(f, T.server > 0 ? T.where_why : "", sizeof(T.where_why));
+    fprintf(f, ", \"idle_s\": %d, \"models\": [", T.c.idle_s);
     pthread_mutex_unlock(&T.lock);
+    {
+        /* the models on this server to choose from */
+        static const char *const dirs[] = { "/var/lib/caricoder3/models", "/var/lib/caricoder3/models/eval" };
+        int n = 0;
+
+        for (size_t k = 0; k < sizeof(dirs) / sizeof(dirs[0]); k++) {
+            DIR *d = opendir(dirs[k]);
+            struct dirent *e;
+
+            while (d && (e = readdir(d))) {
+                size_t l = strlen(e->d_name);
+                char path[600];
+
+                if (l < 6 || strcmp(e->d_name + l - 5, ".gguf"))
+                    continue;
+                snprintf(path, sizeof(path), "%s/%.500s", dirs[k], e->d_name);
+                fprintf(f, "%s{\"path\": ", n++ ? ", " : "");
+                jesc(f, path, sizeof(path));
+                fprintf(f, ", \"name\": ");
+                jesc(f, e->d_name, l);
+                fprintf(f, ", \"mb\": %lld, \"need_mb\": %d}", (long long)file_mb(path), model_need_mb(path));
+            }
+            if (d)
+                closedir(d);
+        }
+    }
+    fprintf(f, "]}");
 }
 
 /* ---- testing models against the verdicts ----------------------------------------- */

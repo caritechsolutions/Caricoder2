@@ -875,8 +875,10 @@ function techCard() {
   const T = techInfo, states = { off: "resting (started when there is something to look at)", idle: "ready", starting: "loading the model", thinking: "looking at an incident", unavailable: "cannot run", disabled: "turned off" };
   const missing = T.setting_up ? "being set up now: the model server is built and the model downloaded (see /var/log/caricoder3-technician-setup.log)"
     : !T.server_present ? "the model server is not installed" : !T.model_present ? "the model file is not there" : "";
-  return `<section class="card"><header><h2>Technician</h2><span class="hint">A language model on this server, offline: it says what it thinks caused each incident</span></header><div class="body"><div class="stat">
-    <div class="box"><h4>State</h4><div class="big" style="font-size:18px">${esc(states[T.state] || T.state)}</div><div class="sub">${T.where ? `on ${T.where === "cpu" ? "the CPU (lowest priority)" : "card " + esc(T.where.slice(3))}` : `will run on ${T.gpu === "auto" ? "a card with room, else the CPU" : esc(T.gpu)}`}${T.queue ? ` · ${T.queue} waiting` : ""}</div></div>
+  const whereTxt = w => w === "cpu" ? "the CPU (lowest priority)" : w === "all" ? "both cards (split)" : "card " + esc(w.slice(3));
+  const wantTxt = g => g === "auto" ? "a card with room, else both cards, else the CPU" : g === "cpu" ? "the CPU" : g === "all" ? "both cards" : "card " + esc(g);
+  return `<section class="card"><header><h2>Technician</h2><span class="hint">A language model on this server, offline: it says what it thinks caused each incident</span><div class="sp"></div><button onclick="editTech()">Change</button></header><div class="body"><div class="stat">
+    <div class="box"><h4>State</h4><div class="big" style="font-size:18px">${esc(states[T.state] || T.state)}</div><div class="sub" title="${esc(T.where_why || "")}">${T.where ? `on ${whereTxt(T.where)}` : `will run on ${wantTxt(T.gpu)}`}${T.idle_s === 0 ? " · kept loaded" : ""}${T.queue ? ` · ${T.queue} waiting` : ""}</div></div>
     <div class="box"><h4>Model</h4><div class="sub mono" style="word-break:break-all">${esc(T.model)}</div>${missing ? `<div class="sub ${T.setting_up ? "warn" : "bad"}">${missing}${T.setting_up ? "" : " (the installer sets it up)"}</div>` : ""}</div>
     <div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at since the supervisor started${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>
     ${T.verdicts ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
@@ -886,6 +888,22 @@ function techCard() {
     <a href="#" onclick="$('#vimport').click(); return false">import verdicts…</a> (JSON lines: <span class="mono">{"id", "verdict", "category", "cause", "note"}</span>)
     <input type="file" id="vimport" accept=".jsonl,.json,.txt" style="display:none" onchange="importVerdicts(this)"> <span id="vimport_note">${importNote}</span></div>
   </div></section>`;
+}
+function editTech() {
+  const d = $("#dlg"), T = techInfo || {}, ms = T.models || [];
+  const gb = mb => (mb / 1024).toFixed(1) + " GB";
+  d.innerHTML = `<h3>Technician</h3><div class="f">
+    <label>Model</label><select id="t_model">${ms.map(m => `<option value="${esc(m.path)}" ${m.path === T.model_path ? "selected" : ""}>${esc(m.name)} (${gb(m.mb)}, needs about ${gb(m.need_mb)} on a card)</option>`).join("")}</select>
+    <label>Where it runs</label><select id="t_gpu">${[["auto", "A card with room, else both cards, else the CPU"], ["0", "Card 0"], ["1", "Card 1"], ["all", "Both cards, split"], ["cpu", "The CPU (slow, lowest priority)"]]
+      .map(([v, t]) => `<option value="${v}" ${v === T.gpu ? "selected" : ""}>${t}</option>`).join("")}</select>
+    <label><input type="checkbox" id="t_keep" ${T.idle_s === 0 ? "checked" : ""}> Keep it loaded (answers at once; otherwise it is unloaded after 10 idle minutes and loading a big model can take minutes)</label></div>
+    <div class="help">Models are the .gguf files in /var/lib/caricoder3/models and its eval folder (scripts/tech-eval-models.sh fetches more; caricoder3 tech-eval compares them). Changing it takes effect from the next answer.</div>
+    <div id="t_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="t_go">Save</button></div>`;
+  $("#t_go").onclick = async () => {
+    try { techInfo = await api("/api/technician", { method: "PUT", body: JSON.stringify({ model: $("#t_model").value, gpu: $("#t_gpu").value, keep_loaded: $("#t_keep").checked }) }); d.close(); renderServer(); }
+    catch(e) { $("#t_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
 }
 let importNote = "";
 async function importVerdicts(inp) {

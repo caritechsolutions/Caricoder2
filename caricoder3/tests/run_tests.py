@@ -3261,6 +3261,15 @@ def supervisor_technician():
         code, pj = api("/api/peers")
         chat = [m for m in pj["messages"] if m["incident"] is None and m["peer"] in ("person", "technician")]
         need(len(chat) >= 2, f"the question and answer are not in the conversation: {chat}")
+        # choosing the model and where it runs
+        code, j = api("/api/technician", "PUT", {"model": "/etc/passwd", "gpu": "auto"})
+        need(code == 400, f"a model outside the models folder was taken: {code}")
+        code, j = api("/api/technician", "PUT", {"model": model, "gpu": "somewhere"})
+        need(code == 400, f"a bad card was taken: {code}")
+        code, j = api("/api/technician", "PUT", {"model": model, "gpu": "cpu", "keep_loaded": True})
+        need(code == 200 and j["idle_s"] == 0 and j["gpu"] == "cpu", f"set: {code} {j}")
+        saved = json.load(open(cfg))["technician"]
+        need(saved["idle_s"] == 0 and saved["model"] == model, f"not saved: {saved}")
         # testing models against the verdicts, while the supervisor runs (the history read only)
         evout = os.path.join(root, "eval.jsonl")
         ev = subprocess.run([BIN, "tech-eval", "--config", cfg, "--model", model, "--model", "/nonexistent.gguf",

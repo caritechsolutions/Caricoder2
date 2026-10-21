@@ -596,6 +596,15 @@ rule, what it was, where, when it began, how long it lasted and whether
 it is over) ahead of the full report: a small model reads those more
 reliably than it finds them in a long JSON report.
 
+**Choosing the model.** The Technician card's **Change** picks the model
+(any `.gguf` in `/var/lib/caricoder3/models` or its `eval` folder), where
+it runs (a card with room for that model, else both cards split, else
+the CPU; or a card, both cards, or the CPU by name) and whether it is kept
+loaded (a 15-20 GB model takes minutes to load; unloaded after 10 idle
+minutes otherwise). `PUT /api/technician {"model", "gpu", "keep_loaded"}`
+does the same. Room is judged from the model's size: its file, a tenth
+more, and 2.5 GB for its context.
+
 **Trying other models** (`caricoder3 tech-eval`). Is another model better
 at this than the technician's own? The test answers that with your
 verdicts: it takes incidents you gave a verdict on (one or two of each

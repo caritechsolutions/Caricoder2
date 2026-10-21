@@ -359,14 +359,15 @@ static void make_password(char *out, size_t len)
 
 static void save_system_config(struct super *s)
 {
-    char text[16384], q[10][600], err[200];
+    char text[16384], q[12][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
              "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
              "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s,\n"
              "  \"name\": %s,\n  \"peer_key\": %s,\n"
-             "  \"technician\": {\"enabled\": %s, \"gpu\": %s, \"threads\": %d, \"model\": %s}\n}\n",
+             "  \"technician\": {\"enabled\": %s, \"gpu\": %s, \"threads\": %d, \"model\": %s, \"idle_s\": %d, "
+             "\"server\": %s, \"context\": %d, \"delay_s\": %d, \"port\": %d, \"knowledge\": %s}\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
              json_quote(s->channels_dir, q[1], sizeof(q[1])),
              json_quote(s->run_dir, q[2], sizeof(q[2])),
@@ -375,7 +376,9 @@ static void save_system_config(struct super *s)
              json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false",
              json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])),
              s->tech.enabled ? "true" : "false", json_quote(s->tech.gpu, q[8], sizeof(q[8])), s->tech.threads,
-             json_quote(s->tech.model, q[9], sizeof(q[9])));
+             json_quote(s->tech.model, q[9], sizeof(q[9])), s->tech.idle_s,
+             json_quote(s->tech.server, q[10], sizeof(q[10])), s->tech.ctx, s->tech.delay_s, s->tech.port,
+             json_quote(s->tech.knowledge[1], q[11], sizeof(q[11])));
     {
         /* the peers, before the closing brace */
         size_t n = strlen(text);
@@ -3673,6 +3676,62 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 return;
             }
             tech_queue(id, true);
+        } else if (!strcmp(req->method, "PUT")) {
+            /* {"model": a .gguf on this server, "gpu": "auto"|"cpu"|"all"|N, "keep_loaded": bool} */
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200], model[512], gpu[16];
+            int root = doc ? json_parse(doc, req->body ? req->body : "{}", err, sizeof(err)) : -1;
+            size_t ml;
+            bool gpu_ok, keep;
+
+            if (root < 0) {
+                free(doc);
+                api_error(resp, 400, "PUT {\"model\", \"gpu\", \"keep_loaded\"}");
+                return;
+            }
+            pthread_mutex_lock(&s->lock);
+            snprintf(model, sizeof(model), "%s", json_get_str(doc, root, "model", s->tech.model));
+            snprintf(gpu, sizeof(gpu), "%s", json_get_str(doc, root, "gpu", s->tech.gpu));
+            keep = json_get_bool(doc, root, "keep_loaded", s->tech.idle_s == 0);
+            pthread_mutex_unlock(&s->lock);
+            free(doc);
+            gpu_ok = !strcmp(gpu, "auto") || !strcmp(gpu, "cpu") || !strcmp(gpu, "all") ||
+                     (gpu[0] >= '0' && gpu[0] <= '9' && !gpu[1]);
+            {
+                /* under the models folder, or beside the model set now */
+                char cur[512], *sl;
+
+                pthread_mutex_lock(&s->lock);
+                snprintf(cur, sizeof(cur), "%s", s->tech.model);
+                pthread_mutex_unlock(&s->lock);
+                if ((sl = strrchr(cur, '/')))
+                    sl[1] = 0;
+                if (!strncmp(model, "/var/lib/caricoder3/models/", 27) || (sl && !strncmp(model, cur, strlen(cur))))
+                    ml = strlen(model);
+                else
+                    ml = 0;
+            }
+            if (!ml || strstr(model, "..") || ml < 6 || strcmp(model + ml - 5, ".gguf") || access(model, R_OK) != 0) {
+                api_error(resp, 400, "model: a .gguf file under /var/lib/caricoder3/models");
+                return;
+            }
+            if (!gpu_ok) {
+                api_error(resp, 400, "gpu: auto, cpu, all or a card's number");
+                return;
+            }
+            pthread_mutex_lock(&s->lock);
+            snprintf(s->tech.model, sizeof(s->tech.model), "%s", model);
+            snprintf(s->tech.gpu, sizeof(s->tech.gpu), "%s", gpu);
+            s->tech.idle_s = keep ? 0 : 600;
+            {
+                struct tech_conf tc = s->tech;
+
+                save_system_config(s);
+                pthread_mutex_unlock(&s->lock);
+                tech_set(&tc);
+            }
+            ev(NULL, "info", "technician", "model set to %s on %s%s", strrchr(model, '/') + 1, gpu,
+               keep ? ", kept loaded" : "");
         }
         f = open_memstream(&out, &len);
         if (!f)
