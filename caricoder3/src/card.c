@@ -33,6 +33,21 @@
 #define STATS_NS       1000000000LL
 #define FOLLOWERS_MAX  8
 #define LEADER_WAIT_NS 2000000000LL /* a rendition waits this long for the first to share its decoder */
+#define QUEUE_MAX      (8u * 1024 * 1024)   /* input read but not yet worked off, per session */
+#define IDLE_STATS_MS  250
+
+/*
+ * Each session reads its socket on a thread of its own and queues what it
+ * reads, so that the channel's sending never waits on the work here: a
+ * picture's encoders opening (hundreds of ms on a card), a leader's
+ * thread encoding for its followers, sixty sessions starting at once. A
+ * follower's input is dropped as it is read, while it follows.
+ */
+struct qmsg {
+    struct qmsg *next;
+    struct card_hdr h;
+    uint8_t *p;
+};
 
 /*
  * Sharing a decoder. The renditions of one stream of one channel are
@@ -61,7 +76,16 @@ struct sess {
     pthread_mutex_t vlock;
     pthread_mutex_t wlock;
     struct xcode_stats st;      /* under vlock */
-    struct xcode_stats pub;     /* a copy for the stats file, under g_lock */
+    struct xcode_stats pub;     /* a copy for the stats file, under plock */
+    pthread_mutex_t plock;
+    /* the reader's queue */
+    pthread_t rd;
+    bool rd_running;
+    pthread_mutex_t qlock;
+    pthread_cond_t qcond, qspace;
+    struct qmsg *qhead, *qtail;
+    size_t qbytes;
+    bool qend, qstop;
     bool thumb_want;
     bool dead;                  /* a send failed */
     bool finished;              /* under vlock: no more pictures from the leader */
@@ -135,13 +159,13 @@ static void send_stats(struct sess *s, bool force)
     int64_t now = clock_now_ns();
 
     stats_of(s, &c);
-    pthread_mutex_lock(&g_lock);
-    pthread_mutex_lock(&s->vlock);
-    s->pub = s->st;
-    if (c.decoder[0] == 's' && !strcmp(c.decoder, "shared"))
-        snprintf(s->pub.decoder, sizeof(s->pub.decoder), "shared");
-    pthread_mutex_unlock(&s->vlock);
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&s->plock);
+    s->pub.width = c.width;
+    s->pub.height = c.height;
+    s->pub.frames_out = c.frames_out;
+    snprintf(s->pub.decoder, sizeof(s->pub.decoder), "%s", c.decoder);
+    snprintf(s->pub.encoder, sizeof(s->pub.encoder), "%s", c.encoder);
+    pthread_mutex_unlock(&s->plock);
     if (!force && !memcmp(&c, &s->sent, sizeof(c)) && now - s->sent_ns < STATS_NS)
         return;
     if (!force && now - s->sent_ns < STATS_NS / 5 && c.failed == s->sent.failed &&
@@ -317,6 +341,104 @@ static void sess_unlink(struct sess *s)
     pthread_mutex_unlock(&g_lock);
 }
 
+static void *sess_reader(void *arg)
+{
+    struct sess *s = arg;
+    struct card_hdr h;
+    uint8_t *p;
+
+    while (card_recv(s->fd, &h, &p)) {
+        struct qmsg *m;
+
+        if (h.type == CM_UNIT && !s->hi.first_rendition) {
+            bool following;
+
+            pthread_mutex_lock(&g_share);
+            following = s->leader != NULL;
+            pthread_mutex_unlock(&g_share);
+            if (following) {
+                free(p);                    /* the leader decodes it */
+                continue;
+            }
+        }
+        m = malloc(sizeof(*m));
+        if (!m) {
+            free(p);
+            continue;
+        }
+        m->next = NULL;
+        m->h = h;
+        m->p = p;
+        pthread_mutex_lock(&s->qlock);
+        while (s->qbytes > QUEUE_MAX && !s->qstop)
+            pthread_cond_wait(&s->qspace, &s->qlock);
+        if (s->qtail)
+            s->qtail->next = m;
+        else
+            s->qhead = m;
+        s->qtail = m;
+        s->qbytes += h.len;
+        pthread_cond_signal(&s->qcond);
+        pthread_mutex_unlock(&s->qlock);
+    }
+    pthread_mutex_lock(&s->qlock);
+    s->qend = true;
+    pthread_cond_signal(&s->qcond);
+    pthread_mutex_unlock(&s->qlock);
+    return NULL;
+}
+
+/* The next message read; NULL after IDLE_STATS_MS with none (*end set when
+ * the connection is over and everything read is worked off). */
+static struct qmsg *sess_next(struct sess *s, bool *end)
+{
+    struct qmsg *m;
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_nsec += IDLE_STATS_MS * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&s->qlock);
+    while (!s->qhead && !s->qend)
+        if (pthread_cond_timedwait(&s->qcond, &s->qlock, &ts) == ETIMEDOUT)
+            break;
+    m = s->qhead;
+    if (m) {
+        s->qhead = m->next;
+        if (!s->qhead)
+            s->qtail = NULL;
+        s->qbytes -= m->h.len;
+        pthread_cond_signal(&s->qspace);
+    }
+    *end = !m && s->qend;
+    pthread_mutex_unlock(&s->qlock);
+    return m;
+}
+
+static void sess_reader_stop(struct sess *s)
+{
+    if (!s->rd_running)
+        return;
+    shutdown(s->fd, SHUT_RDWR);
+    pthread_mutex_lock(&s->qlock);
+    s->qstop = true;
+    pthread_cond_broadcast(&s->qspace);
+    pthread_mutex_unlock(&s->qlock);
+    pthread_join(s->rd, NULL);
+    s->rd_running = false;
+    while (s->qhead) {
+        struct qmsg *m = s->qhead;
+
+        s->qhead = m->next;
+        free(m->p);
+        free(m);
+    }
+    s->qtail = NULL;
+}
+
 static void *session(void *arg)
 {
     struct sess *s = arg;
@@ -395,8 +517,31 @@ static void *session(void *arg)
              codec_name(cfg.in), codec_name(cfg.out));
     if (!cfg.first_rendition)
         find_leader(s);
+    {
+        pthread_condattr_t ca;
 
-    while (!s->dead && card_recv(s->fd, &h, &p)) {
+        pthread_condattr_init(&ca);
+        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+        pthread_cond_init(&s->qcond, &ca);
+        pthread_cond_init(&s->qspace, &ca);
+        pthread_condattr_destroy(&ca);
+    }
+    pthread_mutex_init(&s->qlock, NULL);
+    s->rd_running = pthread_create(&s->rd, NULL, sess_reader, s) == 0;
+
+    while (s->rd_running && !s->dead) {
+        bool end = false;
+        struct qmsg *m = sess_next(s, &end);
+
+        if (end)
+            break;
+        if (!m) {
+            send_stats(s, false);       /* a follower's counters move without its input */
+            continue;
+        }
+        h = m->h;
+        p = m->p;
+        free(m);
         switch (h.type) {
         case CM_UNIT:
             if (h.len >= sizeof(struct card_unit)) {
@@ -463,7 +608,10 @@ static void *session(void *arg)
         p = NULL;
         send_stats(s, false);
     }
-    free(p);
+    sess_reader_stop(s);
+    pthread_cond_destroy(&s->qcond);
+    pthread_cond_destroy(&s->qspace);
+    pthread_mutex_destroy(&s->qlock);
     log_info("PID 0x%04X -> 0x%04X: session ended", s->hi.pid, s->hi.out_pid);
     share_leave(s);
     pthread_mutex_lock(&s->vlock);
@@ -476,6 +624,7 @@ out:
     close(s->fd);
     pthread_mutex_destroy(&s->vlock);
     pthread_mutex_destroy(&s->wlock);
+    pthread_mutex_destroy(&s->plock);
     free(s);
     return NULL;
 }
@@ -501,11 +650,17 @@ static void write_stats(const char *path)
         fprintf(f, "{\"card\": %d, \"pid\": %d, \"started\": %llu, \"ended\": %llu, \"decoders\": %d, "
                    "\"sessions\": [", g_card, (int)getpid(), g_started, g_ended, dec);
     }
-    for (struct sess *s = g_sessions; s; s = s->next)
+    for (struct sess *s = g_sessions; s; s = s->next) {
+        struct xcode_stats p;
+
+        pthread_mutex_lock(&s->plock);
+        p = s->pub;
+        pthread_mutex_unlock(&s->plock);
         fprintf(f, "%s\n  {\"channel\": \"%s\", \"pid\": %u, \"out_pid\": %u, \"width\": %d, "
                    "\"height\": %d, \"decoder\": \"%s\", \"encoder\": \"%s\", \"frames_out\": %llu}",
-                n++ ? "," : "", s->hi.channel, s->hi.pid, s->hi.out_pid, s->pub.width, s->pub.height,
-                s->pub.decoder, s->pub.encoder, (unsigned long long)s->pub.frames_out);
+                n++ ? "," : "", s->hi.channel, s->hi.pid, s->hi.out_pid, p.width, p.height,
+                p.decoder, p.encoder, (unsigned long long)p.frames_out);
+    }
     pthread_mutex_unlock(&g_lock);
     fprintf(f, "\n]}\n");
     fclose(f);
@@ -585,12 +740,14 @@ int card_main(int argc, char **argv)
                 s->fd = fd;
                 pthread_mutex_init(&s->vlock, NULL);
                 pthread_mutex_init(&s->wlock, NULL);
+                pthread_mutex_init(&s->plock, NULL);
                 pthread_attr_init(&at);
                 pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
                 if (pthread_create(&th, &at, session, s) != 0) {
                     close(fd);
                     pthread_mutex_destroy(&s->vlock);
                     pthread_mutex_destroy(&s->wlock);
+                    pthread_mutex_destroy(&s->plock);
                     free(s);
                 }
                 pthread_attr_destroy(&at);

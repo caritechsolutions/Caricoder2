@@ -34,7 +34,7 @@
 #define RETRY_NS        500000000LL     /* the socket tried again this often */
 #define WAIT_MAX_NS     30000000000LL   /* not reachable this long: do the work here */
 #define HANDSHAKE_S     5               /* the card process answers a session's start in this */
-#define SEND_TIMEOUT_S  2               /* a card process that takes no input this long is stuck */
+#define SEND_TIMEOUT_S  10              /* a card process that takes no input this long is stuck */
 #define FINISH_WAIT_NS  1500000000LL
 #define THUMB_STALE_NS  10000000000LL
 

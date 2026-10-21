@@ -5154,6 +5154,68 @@ def live_xc_card_process_renditions():
 
 
 @test
+def live_xc_card_process_slow_card():
+    """Stand-in card whose encoders take 1.5 s to open (a real card's do, with dozens
+    starting at once): eight channels of three renditions start together, and none of
+    them loses the card process, nor its decoder sharing, while it waits."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    nd = nvmock_dir()
+    if not nd:
+        return "SKIPPED: could not build the stand-in libraries"
+    env = dict(os.environ, LD_LIBRARY_PATH=nd, NVMOCK_CHECK_LEAKS="1", NVMOCK_SLOW_INIT="1500")
+    d = w("card_slow")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d, env=env)
+    src = v_source("xc_v_640", "h264", size="640x360", duration=8, extra=("-output_ts_offset", "100"))
+    procs = []
+    try:
+        for i in range(8):
+            pin = _port[0]
+            _port[0] += 2
+            procs.append((subprocess.Popen(
+                [BIN, "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://127.0.0.1:{pin + 1}", "--name", f"slow{i}",
+                 "--run-dir", d, "--video", "h264:900k", "--video", "426x240:h264:400k", "--video",
+                 "320x180:h264:200k", "--card-process", d, "--stats-file", os.path.join(d, f"slow{i}.json"),
+                 "--stats-interval", "0"], stderr=subprocess.PIPE, text=True, env=env), pin))
+        time.sleep(0.5)
+
+        def play(pin):
+            pl = Player("127.0.0.1", pin)
+            pl.play(src, rate=2_500_000)
+            pl.close()
+        th = [threading.Thread(target=play, args=(pin,)) for _, pin in procs]
+        for t in th:
+            t.start()
+        for t in th:
+            t.join()
+        time.sleep(2)
+        stats = [json.load(open(os.path.join(d, f"slow{i}.json"))) for i in range(8)]
+    finally:
+        logs = []
+        for p, _ in procs:
+            p.send_signal(signal.SIGTERM)
+        for p, _ in procs:
+            logs.append(p.communicate(timeout=20)[1])
+        rc = card.stop()
+    clog = card.log()
+    need(rc == 0 and "NVMOCK VIOLATION" not in clog, clog[-600:])
+    lost = sum(l.count("went away") for l in logs)
+    need(lost == 0, f"{lost} times a channel lost the card process:\n" +
+         next((l for l in logs if "went away" in l), "")[-600:])
+    need(clog.count("takes the pictures") == 16 and "decoding for itself" not in clog, clog[-600:])
+    for st in stats:
+        xs = [x for x in st["service"]["streams"] if x.get("kind") == "video" and x["mode"] == "transcode"]
+        need(len(xs) == 3 and all(x["frames_out"] > 100 and x.get("card_process") == "shared" for x in xs),
+             str([(x["out_pid"] if "out_pid" in x else x["pid"], x["frames_out"], x.get("card_process")) for x in xs]))
+    return "8 channels x 3 renditions with 1.5 s encoder opens: no connection lost, 8 decoders shared by 24 sessions"
+
+
+@test
 def live_xc_card_process_restart():
     """Live: the card process is killed mid-stream and started again. The channel's
     output keeps going (audio whole), the video stops and comes back at a key frame,

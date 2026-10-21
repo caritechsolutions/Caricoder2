@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../third_party/ffnvcodec/dynlink_cuda.h"
 #include "../third_party/ffnvcodec/dynlink_nvcuvid.h"
@@ -343,6 +344,10 @@ static NVENCSTATUS NVENCAPI m_init(void *enc, NV_ENC_INITIALIZE_PARAMS *p)
     struct m_enc *e = enc;
 
     NEED_CTX("nvEncInitializeEncoder");
+    /* NVMOCK_SLOW_INIT=ms: an encoder takes this long to open, as a real card's
+     * does with many sessions starting at once */
+    if (getenv("NVMOCK_SLOW_INIT"))
+        usleep((useconds_t)atoi(getenv("NVMOCK_SLOW_INIT")) * 1000);
     CHECK(p->version == NV_ENC_INITIALIZE_PARAMS_VER, "initialize params version");
     CHECK(p->encodeConfig && p->encodeConfig->version == NV_ENC_CONFIG_VER, "encode config version");
     CHECK(p->encodeWidth >= 16 && p->encodeHeight >= 16 && !(p->encodeWidth & 1) &&
