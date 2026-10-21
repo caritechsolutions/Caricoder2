@@ -128,7 +128,7 @@ caricoder3 ctl vacation remove-output out3
 | `--video SPEC` | Transcode video to `h264` or `hevc` with a bit rate (`h264:3M`). Default: copy |
 | `--decoder`, `--encoder` | Where video is decoded and encoded: `auto` (the card if there is one, else the CPU), `nvidia`, `cpu` |
 | `--gpu N` | Which NVIDIA card. Default 0 |
-| `--preset NAME` | Encoder speed, in the encoder's own words: x264/x265 `ultrafast` … `medium` (default `veryfast`), NVENC `p1` … `p7` (default `p4`) |
+| `--preset NAME` | Encoder speed, in the encoder's own words: x264/x265 `ultrafast` … `medium` (default `veryfast`), NVENC `p1` … `p7` (default `p2`: on a Tesla P40, 0.25 dB below `p4` on the same pictures for about 28 % less of the card's encoder; `scripts/preset-compare.sh` measures it on your own sources) |
 | `--gop MS` | Longest distance between key frames. Default 2000 |
 | `--vbv MS` | Video decoder buffer, as time at the bit rate. Default 1000 |
 | `--control PATH`, `--name NAME` | A Unix socket for adding and removing outputs while the channel runs; `--name` puts it at `/run/caricoder3/NAME.sock`. See "Outputs" |

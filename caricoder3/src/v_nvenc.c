@@ -254,7 +254,10 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     struct nve *e;
     GUID codec = cfg->codec == CODEC_HEVC ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
     uint32_t max_ver = 0;
-    int preset = 4, gop, g;
+    /* p2 unless asked: measured on a Tesla P40 against p4 on the same pictures
+     * (scripts/preset-compare.sh), 0.25 dB less PSNR for about 28 % less of the
+     * card's encoder; the same load per encode as Flussonic's */
+    int preset = 2, gop, g;
     int64_t dar_w, dar_h;
     double fps = cfg->fps_den > 0 ? (double)cfg->fps_num / cfg->fps_den : 25.0;
 
