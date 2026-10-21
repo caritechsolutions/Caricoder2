@@ -1094,6 +1094,11 @@ function renderServer() {
       ${gpus.map(g => `<div class="box"><h4>GPU ${g.index} · ${esc(g.name)}</h4><div class="big">${g.util >= 0 ? g.util + "%" : "—"}</div><div class="sub">encoder ${g.encoder >= 0 ? g.encoder + "%" : "—"} · decoder ${g.decoder >= 0 ? g.decoder + "%" : "—"}${g.mem_total > 0 ? ` · memory ${g.mem_used} of ${g.mem_total} MB` : ""}${g.temp >= 0 ? ` · ${g.temp} °C` : ""}${g.power >= 0 ? ` · ${g.power} W` : ""}</div><div class="bar"><i class="${barCls(Math.max(g.util||0, g.encoder||0, g.decoder||0))}" style="width:${Math.max(0, g.util||0)}%"></i></div></div>`).join("")}
       ${!gpus.length ? `<div class="box"><h4>GPU</h4><div class="big" style="font-size:16px;font-weight:400;color:var(--dim)">${st.nvidia_smi ? esc(st.gpu_error || "no card reported") : "no nvidia-smi on this machine"}</div></div>` : ""}
     </div></div></section>
+    ${(sys.card_processes || []).length ? `<section class="card"><header><h2>Card processes</h2><span class="hint">One per video card: the channels' video is transcoded there, sharing one workspace on the card</span></header>
+      <table><thead><tr><th>Card</th><th>Process</th><th>Video sessions</th><th>Channels</th></tr></thead><tbody>
+      ${sys.card_processes.map(x => { const ss = (x.process || {}).sessions || []; const chs = [...new Set(ss.map(y => y.channel))];
+        return `<tr><td>${x.card}${sys.card_mode === "test" ? ' <span style="color:var(--dim)">(test, CPU)</span>' : ""}</td><td>${x.running ? `running · up ${fmtUp(x.up_s)}` : "<span class='bad'>not running</span>"}${x.restarts ? ` · <span class="warn">${x.restarts} restart${x.restarts > 1 ? "s" : ""}</span>` : ""}</td><td>${ss.length}</td><td>${chs.map(esc).join(", ") || '<span style="color:var(--dim)">none</span>'}</td></tr>`; }).join("")}
+      </tbody></table></section>` : ""}
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     ${disksCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>
@@ -1164,7 +1169,7 @@ function pathParts(c) {
   const inp = st.input||{}, out = st.output||{}, clk = st.clock||{}, svc = st.service||{};
   const inBad = inp.last_packet_age_ms > 2000 || inp.bitrate === 0;
   const xs = (svc.streams||[]).filter(s => s.mode === "transcode");
-  const proc = !(svc.streams||[]).length ? `<span style="color:var(--dim)">Waiting for the source</span>` : xs.length ? xs.map(s => `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}${s.encoder?` <span style="color:var(--dim)">on ${s.encoder}</span>`:""}`).join("<br>") : "Copied as is";
+  const proc = !(svc.streams||[]).length ? `<span style="color:var(--dim)">Waiting for the source</span>` : xs.length ? xs.map(s => `${s.from||""} → ${s.codec||""}${s.size?" "+s.size:""}${s.encoder?` <span style="color:var(--dim)">on ${s.encoder}</span>`:""}${s.card_process === "shared" ? ` <span style="color:var(--dim)">· in the card process</span>` : s.card_process === "waiting" ? ` <span class="warn">· waiting for the card process</span>` : s.card_process === "own" ? ` <span class="warn">· on its own (lost the card process)</span>` : ""}`).join("<br>") : "Copied as is";
   const slack = xs.length ? Math.min(...xs.map(s => s.slack_min_ms ?? 1e9)) : null;
   const outs = ((c.outputs && c.outputs.outputs) || []).filter(o => o.id !== "pvtap" && !/^evrec/.test(o.id));
   const oerr = outs.reduce((a,o)=>a+(o.errors||0)+(o.overruns||0),0);

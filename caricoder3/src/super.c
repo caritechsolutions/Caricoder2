@@ -200,6 +200,18 @@ struct share {
     char *cfg_text;                         /* the outputs it was last given */
 };
 
+/* The card process of one NVIDIA card (caricoder3 card, card.h): the
+ * video transcoding of the channels on that card. */
+#define CARDS_MAX 8
+struct cardp {
+    int index;
+    pid_t pid;
+    int64_t next_start_ns;
+    int64_t started_ns;
+    int restarts;
+    bool stopping;
+};
+
 struct super {
     char config_path[512];
     char listen[64];
@@ -217,6 +229,10 @@ struct super {
     struct chan ch[CHANNELS_MAX];
     int n;
     struct share sh[SHARES_MAX];
+    char card_mode[8];                      /* "auto", "off", "test" (CPU, for tests) */
+    struct cardp cards[CARDS_MAX];
+    int n_cards;
+    bool stopping_all;                      /* the supervisor is ending: card processes go last */
     struct http_server *http;
 
     /* the disks (disk.h), main thread, read by the web under the lock */
@@ -365,7 +381,7 @@ static void save_system_config(struct super *s)
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
              "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
              "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s,\n"
-             "  \"name\": %s,\n  \"peer_key\": %s,\n"
+             "  \"name\": %s,\n  \"peer_key\": %s,\n  \"card_process\": %s,\n"
              "  \"technician\": {\"enabled\": %s, \"gpu\": %s, \"threads\": %d, \"model\": %s, \"idle_s\": %d, "
              "\"server\": %s, \"context\": %d, \"delay_s\": %d, \"port\": %d, \"knowledge\": %s}\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
@@ -375,6 +391,7 @@ static void save_system_config(struct super *s)
              json_quote(s->history_path, q[4], sizeof(q[4])), s->history_max_mb,
              json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false",
              json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])),
+             s->card_mode[0] ? (!strcmp(s->card_mode, "off") ? "\"off\"" : !strcmp(s->card_mode, "test") ? "\"test\"" : "\"auto\"") : "\"auto\"",
              s->tech.enabled ? "true" : "false", json_quote(s->tech.gpu, q[8], sizeof(q[8])), s->tech.threads,
              json_quote(s->tech.model, q[9], sizeof(q[9])), s->tech.idle_s,
              json_quote(s->tech.server, q[10], sizeof(q[10])), s->tech.ctx, s->tech.delay_s, s->tech.port,
@@ -480,6 +497,9 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
             snprintf(s->name, sizeof(s->name), "%s", nm);
     }
     snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(&doc, root, "peer_key", ""));
+    snprintf(s->card_mode, sizeof(s->card_mode), "%s", json_get_str(&doc, root, "card_process", "auto"));
+    if (strcmp(s->card_mode, "off") && strcmp(s->card_mode, "test"))
+        snprintf(s->card_mode, sizeof(s->card_mode), "auto");
     {
         int t = json_get(&doc, root, "technician");
 
@@ -562,6 +582,118 @@ static void chan_log_line(struct chan *c, const char *line)
     snprintf(c->log[slot], LOG_LINE_MAX, "%s", line);
 }
 
+/* ---- the card processes (card.h) ------------------------------------------- */
+
+static bool cards_on(const struct super *s)
+{
+    return strcmp(s->card_mode, "off") != 0;
+}
+
+/* The NVIDIA cards there are, from their device files (/dev/nvidia0 ...):
+ * one card process each. "test": one, card 0, transcoding on the CPU. */
+static void cards_detect(struct super *s)
+{
+    s->n_cards = 0;
+    if (!cards_on(s))
+        return;
+    if (!strcmp(s->card_mode, "test")) {
+        s->cards[s->n_cards++].index = 0;
+    } else {
+        for (int i = 0; i < 64 && s->n_cards < CARDS_MAX; i++) {
+            char dev[32];
+
+            snprintf(dev, sizeof(dev), "/dev/nvidia%d", i);
+            if (access(dev, F_OK) == 0)
+                s->cards[s->n_cards++].index = i;
+        }
+    }
+    for (int k = 0; k < s->n_cards; k++)
+        s->cards[k].pid = 0;
+    if (s->n_cards)
+        log_info("card processes: %d (%s)", s->n_cards, !strcmp(s->card_mode, "test") ? "test, on the CPU" : "one per NVIDIA card");
+}
+
+static const struct cardp *card_of(const struct super *s, int gpu)
+{
+    for (int k = 0; k < s->n_cards; k++)
+        if (s->cards[k].index == gpu)
+            return &s->cards[k];
+    return NULL;
+}
+
+static void card_paths(const struct super *s, int index, char *sock, size_t sl, char *stats, size_t stl)
+{
+    snprintf(sock, sl, "%.400s/card-%d.sock", s->run_dir, index);
+    snprintf(stats, stl, "%.400s/card-%d.json", s->run_dir, index);
+}
+
+/* Started, and started again when one ends; stopped (SIGTERM) when
+ * `stop` and no channel is left. */
+static void cards_update(struct super *s, int64_t now, bool stop)
+{
+    for (int k = 0; k < s->n_cards; k++) {
+        struct cardp *cp = &s->cards[k];
+        int status;
+
+        if (cp->pid > 0 && waitpid(cp->pid, &status, WNOHANG) == cp->pid) {
+            if (!cp->stopping) {
+                char what[200];
+                int64_t up = (now - cp->started_ns) / 1000000000LL;
+
+                snprintf(what, sizeof(what), "the card process of card %d ended (%s %d) after %lld s; "
+                         "its channels' video stopped until it was started again", cp->index,
+                         WIFSIGNALED(status) ? "signal" : "status",
+                         WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status), (long long)up);
+                log_err("%s", what);
+                ev(NULL, "error", "card", "%s", what);
+                {
+                    char subj[32];
+
+                    snprintf(subj, sizeof(subj), "server/card%d", cp->index);
+                    wd_instant_server(time(NULL), subj, WD_CARD_ENDED, what);
+                }
+                cp->restarts++;
+                /* soon, but not in a tight loop if it cannot start at all */
+                cp->next_start_ns = now + (up < 10 ? 2000000000LL : 300000000LL);
+            }
+            cp->pid = 0;
+            cp->stopping = false;
+        }
+        if (stop) {
+            if (cp->pid > 0 && !cp->stopping) {
+                kill(cp->pid, SIGTERM);
+                cp->stopping = true;
+            }
+            continue;
+        }
+        if (cp->pid <= 0 && now >= cp->next_start_ns) {
+            char sock[600], stats[600], idx[16];
+            pid_t pid;
+
+            card_paths(s, cp->index, sock, sizeof(sock), stats, sizeof(stats));
+            snprintf(idx, sizeof(idx), "%d", cp->index);
+            pid = fork();
+            if (pid == 0) {
+                sigset_t set;
+
+                sigemptyset(&set);
+                sigprocmask(SIG_SETMASK, &set, NULL);
+                signal(SIGHUP, SIG_DFL);
+                signal(SIGINT, SIG_DFL);
+                signal(SIGTERM, SIG_DFL);
+                execl(s->binary, s->binary, "card", "--card", idx, "--socket", sock,
+                      "--stats-file", stats, (char *)NULL);
+                _exit(127);
+            }
+            if (pid > 0) {
+                cp->pid = pid;
+                cp->started_ns = now;
+                log_info("card %d: card process started (pid %d)", cp->index, (int)pid);
+            }
+        }
+    }
+}
+
 static void chan_share_prepare(struct super *s, struct chan *c);
 
 /* Builds the command line from the channel's JSON. Returns the number
@@ -610,6 +742,14 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARGS(c->name);
     ARGS("--run-dir");
     ARGS(s->run_dir);
+    if (card_of(s, (int)json_get_num(&doc, root, "gpu", 0)) &&
+        json_get_bool(&doc, root, "card_process", true)) {
+        /* its video transcoded in the card process (card.h) */
+        ARGS("--card-process");
+        ARGS(s->run_dir);
+        if (!strcmp(s->card_mode, "test"))
+            ARGS("--card-process-all");
+    }
     ARGS("--config");
     ARG("%.400s/%s.outputs.json", s->channels_dir, c->name);
     ARGS("--streams-file");
@@ -1129,6 +1269,17 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         /* only while the rest arrives: no input at all is the other rule */
         wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
+    {
+        /* video the card process should transcode, transcoded by the channel itself:
+         * it lost the card process too often (xc_remote.c), and uses more card memory */
+        bool own = false;
+
+        for (int k = ss >= 0 ? d->node[ss].first_child : -1; k >= 0; k = d->node[k].next)
+            own |= !strcmp(json_get_str(d, k, "card_process", ""), "own");
+        wd_observe(t, c->name, c->name, G, WD_CARD_OWN, own,
+                   "video transcoded by the channel itself: it lost the card process too often "
+                   "(restart the channel to go back to it)", 0);
+    }
 }
 
 /* What the watchdog sees of a channel whatever its state: failing,
@@ -1139,7 +1290,8 @@ static void wd_channel_state(struct chan *c, int64_t t)
     int recent = 0;
     char what[200];
     static const enum wd_rule running_rules[] = { WD_NO_INPUT, WD_CC, WD_LOSS, WD_DROPPING, WD_OUT_STALLED,
-                                                  WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA };
+                                                  WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA,
+                                                  WD_CARD_OWN };
 
     if (!c->cfg || !c->want) {
         wd_forget(t, c->name);
@@ -2751,6 +2903,7 @@ static void tick(struct super *s)
     for (int i = 0; i < s->n; i++)
         chan_share_prepare(s, &s->ch[i]);
     shares_update(s, now);
+    cards_update(s, now, s->stopping_all);
     hist_tick(s);
     disk_tick(s);
     jobs_tick(s);
@@ -4015,6 +4168,19 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 free(st);
             }
         }
+        fprintf(f, "], \"card_mode\": \"%s\", \"card_processes\": [", s->card_mode[0] ? s->card_mode : "auto");
+        for (int k = 0; k < s->n_cards; k++) {
+            /* the card processes: running, restarts, and their own list of sessions */
+            char sock[600], path[600], *st;
+
+            card_paths(s, s->cards[k].index, sock, sizeof(sock), path, sizeof(path));
+            st = s->cards[k].pid > 0 ? read_file(path, NULL) : NULL;
+            fprintf(f, "%s{\"card\": %d, \"running\": %s, \"restarts\": %d, \"up_s\": %.0f, \"process\": %s}",
+                    k ? ", " : "", s->cards[k].index, s->cards[k].pid > 0 ? "true" : "false", s->cards[k].restarts,
+                    s->cards[k].pid > 0 ? (double)(clock_now_ns() - s->cards[k].started_ns) / 1e9 : 0.0,
+                    st && st[0] == '{' ? st : "null");
+            free(st);
+        }
         fprintf(f, "], \"history\": ");
         history_info(f);
         fprintf(f, ", \"disks\": ");
@@ -4707,6 +4873,7 @@ int super_main(int argc, char **argv)
     }
     mkdir(s.channels_dir, 0755);
     mkdir(s.run_dir, 0775);
+    cards_detect(&s);
     pthread_mutex_init(&s.lock, NULL);
     s.t_start = clock_now_ns();
 
@@ -4767,8 +4934,12 @@ int super_main(int argc, char **argv)
         tick(&s);
         for (int i = 0; i < s.n; i++)
             any |= s.ch[i].pid > 0;
+        /* the channels gone, their card processes follow */
+        s.stopping_all = !any;
         for (int j = 0; j < SHARES_MAX; j++)
             any |= s.sh[j].pid > 0;
+        for (int j = 0; j < s.n_cards; j++)
+            any |= s.cards[j].pid > 0;
         if (!any)
             break;
         pthread_mutex_unlock(&s.lock);

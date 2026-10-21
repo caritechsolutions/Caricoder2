@@ -65,6 +65,15 @@ struct xcode_stats {
                                          * since last read, ticks; INT64_MAX: none */
     int64_t  slack_ever;                /* the same since the transcoder started */
     bool     failed;                    /* could not be set up: stream is silent */
+    uint8_t  card;                      /* enum xcode_card */
+    uint32_t card_lost;                 /* times the card process went away */
+};
+
+enum xcode_card {
+    XC_CARD_NONE = 0,                   /* transcoded in this process */
+    XC_CARD_SHARED,                     /* in the card process */
+    XC_CARD_WAITING,                    /* the card process is away: no video for now */
+    XC_CARD_OWN,                        /* lost it too often: on the card in this process */
 };
 
 typedef void (*xcode_emit_fn)(void *opaque, struct es_unit *u);
@@ -147,5 +156,23 @@ void vxc_finish(struct vxc *v);
 void vxc_reset(struct vxc *v);
 bool vxc_last_out(const struct vxc *v, int64_t *dts90, stc_t *t1);
 void vxc_start_after(struct vxc *v, int64_t dts90, stc_t t1);
+typedef void (*vxc_tap_fn)(void *opaque, const struct vframe *f);
+void vxc_set_tap(struct vxc *v, vxc_tap_fn fn, void *opaque);
+
+/* The video half run in the card process instead (card.h, xc_remote.c).
+ * xcode_use_card() is told once, at the start, where the card processes'
+ * sockets are; "all" also sends transcoding that runs on the CPU there
+ * (for tests on a machine without a card). */
+void xcode_use_card(const char *run_dir, const char *channel, bool all);
+struct rvxc;
+struct rvxc *rvxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaque,
+                      struct xcode_stats *st, char *err, size_t errlen);
+bool rvxc_wanted(const struct xcode_cfg *cfg);
+void rvxc_free(struct rvxc *r);
+void rvxc_unit(struct rvxc *r, const struct es_unit *u);
+void rvxc_finish(struct rvxc *r);
+void rvxc_reset(struct rvxc *r);
+bool rvxc_last_out(const struct rvxc *r, int64_t *dts90, stc_t *t1);
+void rvxc_start_after(struct rvxc *r, int64_t dts90, stc_t t1);
 
 #endif

@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -3413,6 +3414,93 @@ def supervisor_shared_input():
 
 
 @test
+def supervisor_card_process():
+    """The supervisor runs the card process, the channel hands it its video; the card
+    process killed: started again, an incident, the channel's video back."""
+    import base64
+    import urllib.request
+    import urllib.error
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    root = w("super_card")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin = _port[0] + 1, _port[0] + 2
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "card_process": "test",
+               "history": os.path.join(root, "h.db")}, open(cfg, "w"))
+    src = v_source("xc_v_h264_14", "h264", duration=14)
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    def vstream():
+        st = api("/api/channels/v1")[1]["channel"].get("stats") or {}
+        return [x for x in st.get("service", {}).get("streams", []) if x.get("kind") == "video"]
+
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    card_pids = []
+    try:
+        time.sleep(0.7)
+        code, j = api("/api/channels/v1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "video": ["h264:500k"],
+                                                 "enabled": True})
+        need(code == 200, f"create: {code} {j}")
+        box = {}
+
+        def gate(t):
+            if t >= 4.0 and "a" not in box:
+                box["a"] = (api("/api/system")[1], vstream())
+                cp = box["a"][0]["card_processes"]
+                if cp and cp[0]["process"]:
+                    card_pids.append(cp[0]["process"]["pid"])
+                    os.kill(cp[0]["process"]["pid"], signal.SIGKILL)
+            if t >= 10.0 and "b" not in box:
+                box["b"] = (api("/api/system")[1], vstream(), api("/api/incidents?open=0")[1])
+            return True
+        p = Player("127.0.0.1", pin)
+        p.play(src, gate=gate)
+        p.close()
+        sys_a, v_a = box["a"]
+        cp = sys_a["card_processes"]
+        need(len(cp) == 1 and cp[0]["running"] and cp[0]["process"] and len(cp[0]["process"]["sessions"]) == 1,
+             f"card processes: {cp}")
+        need(v_a and v_a[0].get("card_process") == "shared", f"video: {v_a}")
+        sys_b, v_b, inc = box["b"]
+        cp = sys_b["card_processes"]
+        need(cp[0]["running"] and cp[0]["restarts"] == 1 and len(cp[0]["process"]["sessions"]) == 1, f"after the kill: {cp}")
+        need(v_b and v_b[0].get("card_process") == "shared" and v_b[0].get("card_process_lost") == 1, f"video: {v_b}")
+        ended = [x for x in inc["incidents"] if x["rule"] == "card_ended"]
+        need(len(ended) == 1, f"incidents: {[(x['rule'], x.get('channel')) for x in inc['incidents']]}")
+        card_pids.append(cp[0]["process"]["pid"])
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            _, log = sup.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+            _, log = sup.communicate()
+            raise Fail("the supervisor did not stop")
+    need(sup.returncode == 0, f"supervisor exit {sup.returncode}\n{log[-800:]}")
+    for pid in card_pids[1:]:
+        need(not os.path.exists(f"/proc/{pid}") or "zombie" in open(f"/proc/{pid}/status").read().lower(),
+             f"card process {pid} still running after the supervisor stopped")
+    need("card process started" in log and "session started" in log, log[-800:])
+    return "card process ran the channel's video, was killed, started again with an incident, " \
+           "the channel back on it; gone with the supervisor"
+
+
+@test
 def live_udp_multicast_loop():
     """A multicast UDP output reaches a receiver on this machine; with ?loop=0 it does not (Flussonic's multicast_loop=false)."""
     import socket
@@ -4804,6 +4892,239 @@ def live_xc_delay_too_short():
     need(x["frames_out"] >= 120, f"the transcoder stopped working: {x}")
     must_match(src, w("live_xc_shortdelay.ts"), only={0x101}, subset=True)
     return f"reported ({x['slack_min_ms']:.0f} ms to spare), no input discarded, audio untouched"
+
+
+class CardProc:
+    """A card process (caricoder3 card) for the tests, its log in a file."""
+    def __init__(self, d, env=None, binary=None):
+        self.d, self.env, self.binary = d, env, binary or BIN
+        os.makedirs(d, exist_ok=True)
+        self.sock = os.path.join(d, "card-0.sock")
+        self.logs, self.p = [], None
+        self.start()
+
+    def start(self):
+        lf = os.path.join(self.d, f"card-{len(self.logs)}.log")
+        self.logs.append(lf)
+        self.p = subprocess.Popen([self.binary, "card", "--card", "0", "--socket", self.sock,
+                                   "--stats-file", os.path.join(self.d, "card-0.json")],
+                                  stderr=open(lf, "w"), env=self.env)
+        for _ in range(100):
+            if os.path.exists(self.sock):
+                break
+            time.sleep(0.02)
+
+    def kill(self):
+        self.p.kill()
+        self.p.wait()
+
+    def stop(self):
+        self.p.send_signal(signal.SIGTERM)
+        try:
+            self.p.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            self.p.wait()
+            raise Fail("the card process did not stop on SIGTERM")
+        return self.p.returncode
+
+    def log(self):
+        return "".join(open(f).read() for f in self.logs)
+
+
+def card_args(d):
+    return ("--card-process", d, "--card-process-all")
+
+
+@test
+def live_xc_card_process():
+    """Live: the video transcoded in the card process (CPU encoders here), audio in
+    the channel: the same output as when the channel does it all, thumbnails too."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264", "h264")
+    d = w("card_basic")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d)
+    thumb = os.path.join(d, "thumb.jpg")
+    try:
+        st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "-r", "1200k",
+                            "--video", "h264:500k", "--audio", "aac:96k", *card_args(d),
+                            "--thumb", thumb, "--thumb-interval", "1",
+                            capture_name="live_xc_card.ts", tail=4.5)
+    finally:
+        rc = card.stop()
+    clog = card.log()
+    need(rc == 0, f"card process exit status {rc}\n{clog[-600:]}")
+    out = w("live_xc_card.ts")
+    must_pass(out, cbr=True)
+    decodes_clean(out)
+    a, b = video_pts(src), video_pts(out)
+    need(set(b) <= set(a), "pictures at times the source had none")
+    need(len(b) >= len(a) - 30, f"{len(b)} of {len(a)} pictures came out")
+    q = psnr(out, src)
+    need(q >= 27, f"PSNR {q:.1f} dB")
+    ms, n = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0, f"audio is {ms:+.2f} ms off")
+    xv = xstats(st, 0x100)
+    need(xv.get("card_process") == "shared" and xv.get("card_process_lost") == 0, str(xv))
+    need(xv["encoder"] == "x264" and not xv["failed"] and xv["input_dropped"] == 0, str(xv))
+    need(xv["frames_out"] >= len(a) - 30, f"frames_out {xv['frames_out']}")
+    need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+         f"late {st['output']['late_units']}, dropped {st['output']['dropped_units']}")
+    need("session started" in clog and "session ended" in clog, clog[-600:])
+    need(os.path.exists(thumb) and open(thumb, "rb").read(2) == b"\xff\xd8",
+         "no thumbnail written from the card process's picture")
+    need(st.get("content", {}).get("picture", {}).get("luma") is not None, f"picture watch: {st.get('content')}")
+    no_pause(cap)
+    return f"{len(b)}/{len(a)} pictures ({q:.0f} dB) via the card process, audio {ms:+.3f} ms, " \
+           f"thumbnail made, {xv['slack_min_ms']:.0f} ms to spare at worst"
+
+
+@test
+def live_xc_card_process_restart():
+    """Live: the card process is killed mid-stream and started again. The channel's
+    output keeps going (audio whole), the video stops and comes back at a key frame,
+    and its decode times still only move forward."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264_14", "h264", duration=14)
+    d = w("card_restart")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d)
+    t_kill = []
+
+    def feed(p):
+        def crash():
+            time.sleep(5.0)
+            t_kill.append(time.time())
+            card.kill()
+            time.sleep(1.5)
+            card.start()
+        th = threading.Thread(target=crash)
+        th.start()
+        p.play(src, rate=2_000_000)
+        th.join()
+
+    try:
+        st, cap, log = live(feed, "-r", "1200k", "--video", "h264:500k", "--audio", "aac:96k",
+                            *card_args(d), capture_name="live_xc_card_restart.ts", tail=4.5)
+    finally:
+        card.stop()
+    out = w("live_xc_card_restart.ts")
+    must_pass(out, cbr=True)
+    decodes_clean(out)
+    xv = xstats(st, 0x100)
+    need(xv.get("card_process") == "shared" and xv.get("card_process_lost") == 1, str(xv))
+    need("went away" in log and "is back" in log, log[-800:])
+    a, b = video_pts(src), video_pts(out)
+    need(b == sorted(b) and len(set(b)) == len(b), "picture times out of order")
+    gap = max(y - x for x, y in zip(b, b[1:])) / 90000
+    need(0.5 < gap < 4.5, f"longest gap in the video {gap:.2f} s")
+    after = [t for t in b if t > b[0] + 9 * 90000]
+    need(len(after) >= 3 * 25, f"only {len(after)} pictures in the last part")
+    an = Analysis(out)
+    dd = [r["dts"] for r in an.pes[0x100] if r["dts"] is not None]
+    need(all(y > x for x, y in zip(dd, dd[1:])), "video decode times go backwards")
+    ms, n = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0 and n > 48000 * 13, f"audio {ms:+.2f} ms off, {n / 48000:.1f} s")
+    no_pause(cap)
+    return f"video gap {gap:.1f} s around the restart, {len(b)}/{len(a)} pictures, " \
+           f"audio whole ({n / 48000:.1f} s), output never paused"
+
+
+@test
+def live_xc_card_process_gives_up():
+    """Live: the card process dies three times; the channel then transcodes its video
+    itself and carries on."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    src = v_source("xc_v_h264_14", "h264", duration=14)
+    d = w("card_giveup")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d)
+
+    def feed(p):
+        def crash():
+            for _ in range(3):
+                time.sleep(2.0)
+                card.kill()
+                time.sleep(0.8)
+                card.start()
+        th = threading.Thread(target=crash)
+        th.start()
+        p.play(src, rate=2_000_000)
+        th.join()
+
+    try:
+        st, cap, log = live(feed, "--video", "h264:500k", *card_args(d),
+                            capture_name="live_xc_card_giveup.ts", tail=4.5)
+    finally:
+        card.stop()
+    out = w("live_xc_card_giveup.ts")
+    must_pass(out)
+    xv = xstats(st, 0x100)
+    need(xv.get("card_process") == "own" and xv.get("card_process_lost") == 3, str(xv))
+    need("transcodes its video itself" in log, log[-800:])
+    b = video_pts(out)
+    after = [t for t in b if t > b[0] + 10 * 90000]
+    need(len(after) >= 2 * 25, f"only {len(after)} pictures after it took the work back")
+    an = Analysis(out)
+    dd = [r["dts"] for r in an.pes[0x100] if r["dts"] is not None]
+    need(all(y > x for x, y in zip(dd, dd[1:])), "video decode times go backwards")
+    return f"three losses, then on its own: {len(after)} pictures in the last 4 s"
+
+
+@test
+def live_xc_card_process_nvidia_standin():
+    """Live, NVIDIA stand-ins: two channels with two renditions between them in one
+    card process: one card context in all, none in the channels."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    nd = nvmock_dir()
+    if not nd:
+        return "SKIPPED: could not build the stand-in libraries"
+    src = v_source("xc_v_h264", "h264")
+    env = dict(os.environ, LD_LIBRARY_PATH=nd, NVMOCK_CHECK_LEAKS="1", NVMOCK_LOG_CTX="1")
+    d = w("card_nv")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d, env=env)
+    res = {}
+
+    def other():
+        res["b"] = live(lambda p: p.play(src, rate=2_000_000), "--video", "h264:500k",
+                        "--card-process", d, capture_name="live_xc_card_nv_b.ts", tail=1.0,
+                        env=env)
+    try:
+        th = threading.Thread(target=other)
+        th.start()
+        st, cap, log = live(lambda p: p.play(src, rate=2_000_000), "--video", "h264:500k",
+                            "--video", "160x120:h264:200k", "--card-process", d,
+                            capture_name="live_xc_card_nv_a.ts", tail=1.0, env=env)
+        th.join()
+    finally:
+        rc = card.stop()
+    clog = card.log()
+    need("NVMOCK VIOLATION" not in clog + log, (clog + log)[-600:])
+    need(rc == 0, f"card process: exit {rc}\n{clog[-600:]}")
+    need(clog.count("NVMOCK context created") == 1,
+         f"{clog.count('NVMOCK context created')} contexts in the card process")
+    stb, _, logb = res["b"]
+    need("NVMOCK context created" not in log + logb, "a channel made a card context of its own")
+    xs = [x for x in st["service"]["streams"] if x["mode"] == "transcode"] + \
+         [x for x in stb["service"]["streams"] if x["mode"] == "transcode"]
+    need(len(xs) == 3, f"{len(xs)} transcoders")
+    for x in xs:
+        need(x.get("card_process") == "shared" and (x["decoder"], x["encoder"]) == ("nvdec", "nvenc")
+             and x["frames_out"] > 150, str(x))
+    return "3 sessions from 2 channels on the stand-in card, 1 context in all, clean tear-down"
 
 
 @test

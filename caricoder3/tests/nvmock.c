@@ -98,6 +98,8 @@ CUresult cuCtxCreate_v2(CUcontext *pctx, unsigned int flags, CUdevice dev)
     (void)flags; (void)dev;
     *pctx = malloc(16);
     __sync_fetch_and_add(&live_ctx, 1);
+    if (getenv("NVMOCK_LOG_CTX"))
+        fprintf(stderr, "NVMOCK context created\n");
     ctx_depth++;                            /* a new context is current */
     return CUDA_SUCCESS;
 }

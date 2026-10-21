@@ -9,6 +9,7 @@ enum { LOG_ERR = 0, LOG_WARN = 1, LOG_INFO = 2, LOG_DBG = 3 };
 
 extern int log_level;
 
+void log_thread_prefix(const char *p);
 void log_msg(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 #define log_err(...)  log_msg(LOG_ERR, __VA_ARGS__)

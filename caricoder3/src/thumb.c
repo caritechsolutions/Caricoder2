@@ -430,38 +430,72 @@ static void write_file(const uint8_t *jpeg, size_t len)
     rename(tmp, g_path);
 }
 
-static void make_from_cpu(const struct vframe *f)
+/* The thumbnail's size for a picture, the shape of the picture kept. */
+static bool small_size(const struct vframe *f, int *tw, int *th)
 {
-    int tw = THUMB_WIDTH, th;
     double sar = f->sar_num > 0 && f->sar_den > 0 ? (double)f->sar_num / f->sar_den : 1.0;
-    uint8_t *Y, *U, *V, *jpeg = NULL;
-    size_t len;
 
     if (f->width < 16 || f->height < 16)
+        return false;
+    *tw = THUMB_WIDTH;
+    *th = (int)((double)f->height * *tw / ((double)f->width * sar) + 0.5);
+    *th = (*th + 1) & ~1;
+    if (*th < 16)
+        *th = 16;
+    if (*th > 4 * THUMB_WIDTH)
+        *th = 4 * THUMB_WIDTH;
+    return true;
+}
+
+/* From the small picture on: the picture watch, the JPEG, the file. */
+void thumb_from_small(const uint8_t *yuv, int tw, int th)
+{
+    const uint8_t *Y = yuv, *U = yuv + (size_t)tw * th, *V = U + (size_t)tw * th / 4;
+    uint8_t *jpeg = NULL;
+    size_t len;
+
+    if (!yuv || tw < 16 || th < 16)
         return;
-    th = (int)((double)f->height * tw / ((double)f->width * sar) + 0.5);
-    th = (th + 1) & ~1;
-    if (th < 16)
-        th = 16;
-    Y = malloc((size_t)tw * th);
-    U = malloc((size_t)tw * th / 4);
-    V = malloc((size_t)tw * th / 4);
-    if (Y && U && V && shrink(f, tw, th, Y, U, V)) {
-        watch_picture(Y, tw, th);
-        len = thumb_jpeg(Y, tw, U, tw / 2, V, tw / 2, tw, th, THUMB_QUALITY, &jpeg);
-        if (len)
-            write_file(jpeg, len);
-    }
+    watch_picture(Y, tw, th);
+    if (!g_path[0])
+        return;
+    len = thumb_jpeg(Y, tw, U, tw / 2, V, tw / 2, tw, th, THUMB_QUALITY, &jpeg);
+    if (len)
+        write_file(jpeg, len);
     free(jpeg);
-    free(Y);
-    free(U);
-    free(V);
+}
+
+static bool small_from_cpu(const struct vframe *f, uint8_t **out, int *w, int *h)
+{
+    int tw, th;
+    uint8_t *yuv;
+
+    if (!small_size(f, &tw, &th))
+        return false;
+    yuv = malloc((size_t)tw * th * 3 / 2);
+    if (!yuv)
+        return false;
+    shrink(f, tw, th, yuv, yuv + (size_t)tw * th, yuv + (size_t)tw * th + (size_t)tw * th / 4);
+    *out = yuv;
+    *w = tw;
+    *h = th;
+    return true;
+}
+
+static void make_from_cpu(const struct vframe *f)
+{
+    uint8_t *yuv = NULL;
+    int tw, th;
+
+    if (small_from_cpu(f, &yuv, &tw, &th))
+        thumb_from_small(yuv, tw, th);
+    free(yuv);
 }
 
 #ifdef HAVE_NVIDIA
-/* An NV12/P010 surface on the card: fetched to ordinary memory and
- * re-arranged into three planes. */
-static void make_from_cuda(const struct vframe *f)
+/* An NV12/P010 surface on the card: fetched to ordinary memory,
+ * re-arranged into three planes and made small. */
+static bool small_from_cuda(const struct vframe *f, uint8_t **out, int *w, int *h)
 {
     CudaFunctions *cu = nv_cu();
     int bps = f->depth > 8 ? 2 : 1;
@@ -469,6 +503,7 @@ static void make_from_cuda(const struct vframe *f)
     uint8_t *buf = malloc(row * (size_t)f->height * 3 / 2);
     CUDA_MEMCPY2D c;
     CUcontext dummy;
+    bool ok = false;
 
     if (!buf || !cu)
         goto out;
@@ -510,26 +545,44 @@ static void make_from_cuda(const struct vframe *f)
             g.plane[0] = buf; g.stride[0] = (int)row;
             g.plane[1] = u; g.stride[1] = (int)(cw * bps);
             g.plane[2] = v; g.stride[2] = (int)(cw * bps);
-            make_from_cpu(&g);
+            ok = small_from_cpu(&g, out, w, h);
         }
         free(u);
         free(v);
     }
 out:
     free(buf);
+    return ok;
 }
 #endif
 
+bool thumb_small(const struct vframe *f, uint8_t **yuv, int *w, int *h)
+{
+    *yuv = NULL;
+    if (f->mem == VMEM_CPU)
+        return small_from_cpu(f, yuv, w, h);
+#ifdef HAVE_NVIDIA
+    if (f->mem == VMEM_CUDA)
+        return small_from_cuda(f, yuv, w, h);
+#endif
+    return false;
+}
+
+bool thumb_due(void)
+{
+    return due();
+}
+
 void thumb_offer(const struct vframe *f)
 {
+    uint8_t *yuv = NULL;
+    int tw, th;
+
     if (!g_path[0] || !due())
         return;
-    if (f->mem == VMEM_CPU)
-        make_from_cpu(f);
-#ifdef HAVE_NVIDIA
-    else if (f->mem == VMEM_CUDA)
-        make_from_cuda(f);
-#endif
+    if (thumb_small(f, &yuv, &tw, &th))
+        thumb_from_small(yuv, tw, th);
+    free(yuv);
 }
 
 /* ---- a copied video stream: one key frame decoded now and then ---------- */

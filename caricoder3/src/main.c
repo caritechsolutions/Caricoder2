@@ -28,6 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "card.h"
 #include "cc3.h"
 #include "clock.h"
 #include "codec.h"
@@ -62,6 +63,8 @@ struct options {
     const char *output[OUTPUTS_MAX];
     int n_output;
     const char *control, *name, *config, *run_dir;
+    const char *card_dir;               /* --card-process: the card processes' sockets are here */
+    bool card_all;
     const char *stats_file;
     const char *thumb;                      /* JPEG of the picture, every few seconds */
     int thumb_interval;
@@ -488,6 +491,10 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
                 (unsigned long long)x->skipped_bytes, (unsigned long long)x->silence_ms,
                 (unsigned long long)x->cut_ms, (unsigned long long)x->restarts,
                 x->queued, x->failed ? "true" : "false");
+        if (x->card != XC_CARD_NONE)
+            fprintf(f, ", \"card_process\": \"%s\", \"card_process_lost\": %u",
+                    x->card == XC_CARD_SHARED ? "shared" : x->card == XC_CARD_WAITING ? "waiting" : "own",
+                    x->card_lost);
         if (x->slack_min != INT64_MAX)
             fprintf(f, ", \"slack_ms\": %.1f", (double)x->slack_min / STC_PER_MS);
         if (x->slack_ever != INT64_MAX)
@@ -1072,6 +1079,9 @@ static void usage(FILE *f)
 "      --decoder WHERE      video decoding on: auto, nvidia or cpu (default auto)\n"
 "      --encoder WHERE      video encoding on: auto, nvidia or cpu (default auto)\n"
 "      --gpu N              which NVIDIA card (default 0)\n"
+"      --card-process DIR   video for the card transcoded in the card process\n"
+"                           whose socket is DIR/card-N.sock (caricoder3 card)\n"
+"      --card-process-all   ... and video transcoded on the CPU too (for tests)\n"
 "      --preset NAME        encoder speed, in the encoder's own words\n"
 "      --bframes N          B-frames between references, 0 to 4 (default: the\n"
 "                           encoder's; 0 for receivers that cannot take them)\n"
@@ -1148,6 +1158,7 @@ enum {
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
+    OPT_CARD_PROCESS, OPT_CARD_ALL,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1233,6 +1244,8 @@ int main(int argc, char **argv)
         { "name", required_argument, 0, OPT_NAME_SOCK },
         { "config", required_argument, 0, OPT_CONFIG },
         { "run-dir", required_argument, 0, OPT_RUN_DIR },
+        { "card-process", required_argument, 0, OPT_CARD_PROCESS },
+        { "card-process-all", no_argument, 0, OPT_CARD_ALL },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -1258,6 +1271,8 @@ int main(int argc, char **argv)
         return probe_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "share"))
         return share_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "card"))
+        return card_main(argc, argv);
 
     memset(&o, 0, sizeof(o));
     memset(&c, 0, sizeof(c));
@@ -1296,6 +1311,8 @@ int main(int argc, char **argv)
         case OPT_NAME_SOCK: o.name = optarg; break;
         case OPT_CONFIG: o.config = optarg; break;
         case OPT_RUN_DIR: o.run_dir = optarg; break;
+        case OPT_CARD_PROCESS: o.card_dir = optarg; break;
+        case OPT_CARD_ALL: o.card_all = true; break;
         case 'p': o.eng.program = atoi(optarg); break;
         case 'r':
             if (!parse_rate(optarg, &o.eng.mux.muxrate)) {
@@ -1471,6 +1488,8 @@ int main(int argc, char **argv)
     }
     if (gpu_test)
         return nv_selftest(stdout, o.eng.gpu);
+    if (o.card_dir)
+        xcode_use_card(o.card_dir, o.name, o.card_all);
     {
         /* the output's PIDs must not meet */
         int pmt = o.eng.pmt_pid, pcr = o.eng.pcr_pid;

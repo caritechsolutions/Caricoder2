@@ -24,6 +24,7 @@ enum wd_rule {
     WD_NO_INPUT, WD_CC, WD_LOSS, WD_DROPPING, WD_OUT_STALLED, WD_RESTARTS, WD_FAILED,
     WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA, WD_PIDS,
     WD_CPU, WD_GPU, WD_NIC_DROP, WD_DISK_LOW, WD_DISK_CRITICAL, WD_DISK_FILLING, WD_AV_SHIFT,
+    WD_CARD_OWN, WD_CARD_ENDED,
     WD_RULES
 };
 
@@ -81,6 +82,8 @@ void wd_observe(int64_t t, const char *subject, const char *chan, const char *gr
 /* Something that happens at one moment (the source's PIDs changed): an
  * incident that opens and closes at `t`. */
 void wd_instant(int64_t t, const char *chan, const char *group, enum wd_rule r, const char *what);
+/* ... of the server, not of a channel */
+void wd_instant_server(int64_t t, const char *subject, enum wd_rule r, const char *what);
 
 /* The channel stopped or went: what it had open closes now. */
 void wd_forget(int64_t t, const char *subject);

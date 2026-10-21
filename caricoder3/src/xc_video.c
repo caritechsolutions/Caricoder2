@@ -74,6 +74,11 @@ struct vxc {
     /* pictures converted from 10 to 8 bits live here */
     uint8_t *conv;
     size_t conv_size;
+
+    /* who is shown the first rendition's pictures: the thumbnails here,
+     * or the card process's session (card.c) */
+    vxc_tap_fn tap;
+    void *tap_opaque;
 };
 
 /* ---- output --------------------------------------------------------- */
@@ -509,8 +514,12 @@ static void picture_in(struct vxc *v, const struct vframe *in)
     struct vframe f = *in, tmp;
 
     v->st->frames_in++;
-    if (v->cfg.first_rendition)
-        thumb_offer(in);
+    if (v->cfg.first_rendition) {
+        if (v->tap)
+            v->tap(v->tap_opaque, in);
+        else
+            thumb_offer(in);
+    }
     /* Another size wanted and the decoder did not make it: scaled here. */
     if (f.mem == VMEM_CPU && (v->cfg.width || v->cfg.height)) {
         int tw, th;
@@ -663,6 +672,12 @@ void vxc_unit(struct vxc *v, const struct es_unit *u)
         v->cfg.encoder = WHERE_CPU;
         v->enc_failed = false;
     }
+}
+
+void vxc_set_tap(struct vxc *v, vxc_tap_fn fn, void *opaque)
+{
+    v->tap = fn;
+    v->tap_opaque = opaque;
 }
 
 bool vxc_last_out(const struct vxc *v, int64_t *dts90, stc_t *t1)

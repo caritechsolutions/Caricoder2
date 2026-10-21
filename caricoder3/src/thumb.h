@@ -25,6 +25,14 @@ bool thumb_enabled(void);
 /* A decoded picture, from whoever has one. Cheap when not due. */
 void thumb_offer(const struct vframe *f);
 
+/* For a picture decoded in another process (card.h): is one due now (and
+ * if so it is counted as made); the picture made small there, 8-bit
+ * yuv420p, Y then U then V, malloc'd; and from that small picture here
+ * on to the picture watch and the file. */
+bool thumb_due(void);
+bool thumb_small(const struct vframe *f, uint8_t **yuv, int *w, int *h);
+void thumb_from_small(const uint8_t *yuv, int w, int h);
+
 /* A copied video stream's unit (PES), with its coding: the tap decodes
  * one key frame when a thumbnail is due. */
 void thumb_tap_unit(const struct es_unit *u, enum codec_id codec);

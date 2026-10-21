@@ -13,6 +13,15 @@
 
 int log_level = LOG_INFO;
 
+/* A word in front of every line from this thread (the card process: whose
+ * video a line is about). */
+static _Thread_local char t_prefix[96];
+
+void log_thread_prefix(const char *p)
+{
+    snprintf(t_prefix, sizeof(t_prefix), "%s", p ? p : "");
+}
+
 void log_msg(int level, const char *fmt, ...)
 {
     static const char *const names[] = { "ERROR", "WARN ", "INFO ", "DEBUG" };
@@ -36,8 +45,8 @@ void log_msg(int level, const char *fmt, ...)
     va_end(ap);
 
     /* Single fprintf so lines from different threads do not interleave. */
-    fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d.%03ld %s %s\n",
+    fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d.%03ld %s %s%s\n",
             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
-            names[level], line);
+            names[level], t_prefix, line);
 }

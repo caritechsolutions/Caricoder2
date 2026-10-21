@@ -53,6 +53,7 @@ struct xcode {
     bool video;
     struct axc *a;
     struct vxc *v;
+    struct rvxc *r;                 /* the video half in the card process instead */
 
     /* worker's own counters, and the copy others may read */
     struct xcode_stats work;
@@ -322,7 +323,9 @@ static void process(struct xcode *x, struct es_unit *u)
         }
         x->skip_to_key = false;
     }
-    if (x->video)
+    if (x->r)
+        rvxc_unit(x->r, u);
+    else if (x->video)
         vxc_unit(x->v, u);
     else
         axc_unit(x->a, u);
@@ -375,7 +378,10 @@ static void check_late(struct xcode *x)
             free(u);
         }
         if (x->video) {
-            vxc_reset(x->v);
+            if (x->r)
+                rvxc_reset(x->r);
+            else
+                vxc_reset(x->v);
             x->skip_to_key = true;
             x->skip_from = NOPTS;
         }
@@ -532,7 +538,9 @@ void xcode_finish(struct xcode *x)
             return;
         }
     }
-    if (x->video)
+    if (x->r)
+        rvxc_finish(x->r);
+    else if (x->video)
         vxc_finish(x->v);
     else
         axc_finish(x->a);
@@ -583,12 +591,16 @@ void xcode_note_slack(struct xcode *x, int64_t slack, int64_t pts90)
 
 bool xcode_last_out(const struct xcode *x, int64_t *dts90, stc_t *t1)
 {
+    if (x->r)
+        return rvxc_last_out(x->r, dts90, t1);
     return x->video && vxc_last_out(x->v, dts90, t1);
 }
 
 void xcode_start_after(struct xcode *x, int64_t dts90, stc_t t1)
 {
-    if (x->video)
+    if (x->r)
+        rvxc_start_after(x->r, dts90, t1);
+    else if (x->video)
         vxc_start_after(x->v, dts90, t1);
 }
 
@@ -635,11 +647,13 @@ struct xcode *xcode_new(const struct xcode_cfg *cfg, bool threaded,
         pthread_cond_init(&x->done_cond, &ca);
         pthread_condattr_destroy(&ca);
     }
-    if (x->video)
+    if (x->video && threaded && rvxc_wanted(cfg))
+        x->r = rvxc_new(cfg, emit, opaque, &x->work, err, errlen);
+    else if (x->video)
         x->v = vxc_new(cfg, emit, opaque, &x->work, err, errlen);
     else
         x->a = axc_new(cfg, emit, opaque, &x->work, err, errlen);
-    if (!x->a && !x->v) {
+    if (!x->a && !x->v && !x->r) {
         xcode_free(x);
         return NULL;
     }
@@ -674,6 +688,7 @@ void xcode_free(struct xcode *x)
     }
     axc_free(x->a);
     vxc_free(x->v);
+    rvxc_free(x->r);
     pthread_cond_destroy(&x->q_cond);
     pthread_cond_destroy(&x->done_cond);
     pthread_mutex_destroy(&x->q_lock);

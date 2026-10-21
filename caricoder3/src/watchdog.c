@@ -37,6 +37,8 @@ static const struct {
     [WD_DISK_CRITICAL] = { "disk_critical", "disk nearly full", "error", false },
     [WD_DISK_FILLING] = { "disk_filling", "disk filling up", "warn", false },
     [WD_AV_SHIFT]    = { "av_shift", "audio timing moved (sync)", "error", true },
+    [WD_CARD_OWN]    = { "card_own", "video not in the card process", "warn", false },
+    [WD_CARD_ENDED]  = { "card_ended", "card process ended", "error", false },
 };
 
 #define ENTRIES_MAX 2048
@@ -203,7 +205,7 @@ static int min_for(enum wd_rule r)
 {
     if (r == WD_CPU || r == WD_GPU)
         return W.lim.load_s;
-    if (r == WD_PIDS)
+    if (r == WD_PIDS || r == WD_CARD_ENDED)
         return 0;
     if (r == WD_AV_SHIFT)
         return W.lim.av_shift_s;
@@ -277,6 +279,21 @@ void wd_instant(int64_t t, const char *chan, const char *group, enum wd_rule r, 
     pthread_mutex_lock(&W.lock);
     ensure_lim();
     if (r < WD_RULES && !W.lim.off[r] && (e = add(chan, chan, group, r))) {
+        e->instant = true;
+        e->on = false;
+        e->since = e->last_on = t;
+        snprintf(e->what, sizeof(e->what), "%s", what ? what : "");
+    }
+    pthread_mutex_unlock(&W.lock);
+}
+
+void wd_instant_server(int64_t t, const char *subject, enum wd_rule r, const char *what)
+{
+    struct entry *e;
+
+    pthread_mutex_lock(&W.lock);
+    ensure_lim();
+    if (r < WD_RULES && !W.lim.off[r] && (e = add(subject, NULL, "", r))) {
         e->instant = true;
         e->on = false;
         e->since = e->last_on = t;

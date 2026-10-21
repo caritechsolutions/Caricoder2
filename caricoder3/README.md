@@ -26,6 +26,7 @@ rest of this repository.
 | 6 | HLS packager as an output (TS segments, master playlist for renditions, served by the process, optional directory) | done, tested; played by ffmpeg's HLS client |
 | 7 | Supervisor (`caricoder3 serve`): runs the channels, REST API, GUI on port 8550, HLS for every channel on that port | done, tested; side-by-side run against Flussonic not done |
 | 9 | Shared inputs (one reader per MPTS, `caricoder3 share`); HTTP TS input; output PIDs, PMT order, PMT/PCR PID, service/TS/network ids; preview player (300k H.264, audio choice), stream info and bit-rate graph | done, tested in the lab (2026-10-18); shared inputs and preview running on transcoder2 |
+| 10 | Card processes: one process per NVIDIA card transcodes every channel's video on that card (one CUDA context per card instead of one per channel) | done, tested in the lab on the CPU and against the stand-in card (2026-10-21); not yet run on a real card |
 | 8 | SRT and RIST inputs; MPEG-2 video decode; `caricoder3 probe` and "Scan source" in the GUI with stream selection (`--drop`); server page (CPU, memory, GPU, interfaces); list filter | done, tested in the lab (2026-10-16); not yet run on transcoder2 |
 
 Picture quality has been measured on real streams with `tests/quality.py`
@@ -801,6 +802,45 @@ as `failed` in the statistics. If the card refuses to encode interlaced
 video as fields, it encodes the fields together as frames, with a
 warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
 `--decoder nvidia --encoder cpu` is not built yet.
+
+### Card processes
+
+Every process that uses a card pays for a workspace on it (a CUDA
+context, about 150 MB) before it decodes a picture. With one process per
+channel that is paid per channel: about 220 MB of card memory a channel,
+against about 45 MB a session in Flussonic, which keeps one workspace per
+card. So the supervisor runs one **card process** per NVIDIA card
+(`caricoder3 card --card N`), and the channels hand their video
+transcoding to it over a Unix socket (`RUN_DIR/card-N.sock`): the source's
+video goes there as it arrives (PES packets, a few Mb/s), the encoded video
+comes back with its send times, and the pictures never leave the card.
+Everything else stays in the channel: input, timing, audio, multiplexing,
+outputs, the preview. The work in the card process is done by the same
+code as in a channel (`xc_video.c`), one thread per rendition, and the
+result is the same output.
+
+If a card process ends, the supervisor starts it again (within 2 s), an
+incident opens ("card process ended"), and its channels lose **video only,
+for a few seconds**: their outputs keep going (audio, PSI, null packets),
+so receivers and SRT/RIST sessions stay connected. The channels connect
+to the new card process by themselves and the video comes back at the
+next key frame, its decode times carrying on from where they stopped. A
+channel that loses the card process 3 times in 10 minutes, or cannot
+reach it for 30 s, transcodes its video itself from then on, on the card
+as before ("video not in the card process" incident); restarting the
+channel goes back to the card process.
+
+`"card_process": "auto"` (the default) in the supervisor's config runs a
+card process for each `/dev/nvidiaN`; `"off"` runs none and every channel
+does its own video; `"test"` runs one that also takes CPU transcoding (for
+the tests, on a machine without a card). `"card_process": false` on a
+channel keeps that one channel's video in the channel. The Server page
+lists the card processes, their restarts and which channels' video they
+carry; a stream on the channel page says "in the card process", "waiting
+for the card process" or "on its own".
+
+Next (not built yet): one decode per channel for all its renditions,
+scaled on the card, instead of one decoder per rendition.
 
 ## What it does to a stream
 
