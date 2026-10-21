@@ -3270,6 +3270,12 @@ def supervisor_technician():
         need(code == 200 and j["idle_s"] == 0 and j["gpu"] == "cpu", f"set: {code} {j}")
         saved = json.load(open(cfg))["technician"]
         need(saved["idle_s"] == 0 and saved["model"] == model, f"not saved: {saved}")
+        for _ in range(60):                 # kept loaded: loaded ahead, with no question asked
+            code, j = api("/api/technician")
+            if j and j.get("where") == "cpu" and j.get("state") == "idle":
+                break
+            time.sleep(1)
+        need(j.get("where") == "cpu" and j.get("state") == "idle", f"not loaded ahead: {j.get('state')} {j.get('where')} {j.get('last_error')}")
         # testing models against the verdicts, while the supervisor runs (the history read only)
         evout = os.path.join(root, "eval.jsonl")
         ev = subprocess.run([BIN, "tech-eval", "--config", cfg, "--model", model, "--model", "/nonexistent.gguf",

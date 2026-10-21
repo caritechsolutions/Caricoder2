@@ -54,6 +54,7 @@ static struct {
     pid_t server;               /* llama-server, 0: not running */
     char where[32];             /* "gpu1", "all" (split), "cpu" */
     char where_why[200];        /* why there, in words */
+    int64_t preload_t;          /* the last try at loading it ahead (kept loaded) */
     char state[32];             /* "off", "idle", "starting", "thinking", "unavailable" */
     char last_error[300];
     int64_t last_used, started;
@@ -797,6 +798,21 @@ static void *thread_main(void *arg)
                 server_stop();
                 set_state("off");
             }
+            if (T.c.idle_s == 0 && T.server <= 0 && now - T.preload_t > 300 && access(T.c.model, R_OK) == 0 &&
+                access(T.c.server, X_OK) == 0) {
+                /* kept loaded: load it now, not at the first question (a big model takes minutes) */
+                struct tech_conf c = T.c;
+
+                T.preload_t = now;
+                pthread_mutex_unlock(&T.lock);
+                if (ensure_server(&c)) {
+                    pthread_mutex_lock(&T.lock);
+                    T.last_used = time(NULL);
+                    set_state("idle");
+                    pthread_mutex_unlock(&T.lock);
+                }
+                continue;
+            }
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_sec += 1;
             pthread_cond_timedwait(&T.cond, &T.lock, &ts);
@@ -817,6 +833,8 @@ void tech_set(const struct tech_conf *c)
         log_info("technician: settings changed, the model server is started again when next needed");
         server_stop();
     }
+    T.preload_t = 0;
+    pthread_cond_signal(&T.cond);
     T.c = *c;
     if (T.c.port <= 0)
         T.c.port = 8551;
