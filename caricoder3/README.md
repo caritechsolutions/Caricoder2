@@ -506,6 +506,14 @@ disk is over the low mark again; then its cap is as set. Nothing that
 is not caricoder3's own is ever deleted: recordings and other files are
 only reported.
 
+### A channel's start
+
+Dropped pictures, streams without data and CC errors are not judged for
+a channel's first minute after it starts (`warmup_s` among the
+watchdog's limits, default 60): encoders opening, the clock locking and
+a source joined part-way through always give a few, and a restart or an
+install of many channels at once otherwise opens an incident for each.
+
 ### The leak watch
 
 Every minute the supervisor notes how much memory each of its processes

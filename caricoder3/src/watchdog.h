@@ -48,6 +48,8 @@ struct wd_limits {
     int mem_window_s;       /* a process's memory going up all through this long ... */
     int mem_growth_mb;      /* ... by at least this much ... */
     int mem_growth_pct;     /* ... and this share of where it was: a leak */
+    int warmup_s;           /* a channel's first this long after it starts: dropped pictures,
+                             * streams without data and CC errors are not judged */
     bool off[WD_RULES];     /* rules turned off */
 };
 

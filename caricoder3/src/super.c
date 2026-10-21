@@ -1195,11 +1195,13 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
             }
         }
         snprintf(what, sizeof(what), "CC errors: %lld in a minute", (long long)dcc);
-        wd_observe(t, c->name, c->name, G, WD_CC, dcc >= L.cc_per_min, what, 0);
+        /* (a channel's first minute is its start: a source joined part-way through a
+         * packet run, encoders opening, the clock locking. Not judged.) */
+        wd_observe(t, c->name, c->name, G, WD_CC, up >= L.warmup_s && dcc >= L.cc_per_min, what, 0);
         snprintf(what, sizeof(what), "packets lost on the way in: %lld in a minute", (long long)dloss);
         wd_observe(t, c->name, c->name, G, WD_LOSS, dloss > 0, what, 0);
         snprintf(what, sizeof(what), "dropped or late pictures: %lld in a minute", (long long)ddrop);
-        wd_observe(t, c->name, c->name, G, WD_DROPPING, ddrop > L.dropped_per_min, what, 0);
+        wd_observe(t, c->name, c->name, G, WD_DROPPING, up >= L.warmup_s && ddrop > L.dropped_per_min, what, 0);
     }
     {
         bool none = age > L.no_input_s * 1000.0 || (up > 10 && bi == 0);
@@ -1279,7 +1281,8 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         if (what[0])
             snprintf(what + strlen(what), sizeof(what) - strlen(what), ": in the PMT, no data");
         /* only while the rest arrives: no input at all is the other rule */
-        wd_observe(t, c->name, c->name, G, WD_NO_DATA, flowing && longest > 0, what, SINCE_FLOW(t - (int64_t)(longest / 1000)));
+        wd_observe(t, c->name, c->name, G, WD_NO_DATA, up >= L.warmup_s && flowing && longest > 0, what,
+                   SINCE_FLOW(t - (int64_t)(longest / 1000)));
     }
     {
         /* video the card process should transcode, transcoded by the channel itself:

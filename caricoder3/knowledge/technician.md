@@ -90,6 +90,43 @@ dress them up as provider faults.
   unless several channels of the same source had it at once.
 - The same short thing on the same channel many times in the past
   incidents: then it is a pattern worth a person's look; say how often.
+- A channel that had just started ("uptime_s" in what it reported, under
+  a minute or two): dropped or late pictures, a stream "with no data",
+  a few CC errors are the channel starting (encoders opening, the clock
+  locking, the source joined part-way). Many channels starting in the
+  same few seconds is a person restarting them, installing, or changing
+  their settings, or this server starting. Category "transcoder", no
+  ticket; say it was the start. It is not overload.
+
+## Things this server does that look like faults
+
+- "UDP packets lost on this server: socket buffers full" counts every
+  program on this server, not only the channels: Flussonic, RIST
+  receivers, test tools all have sockets here. When the channels report
+  no "socket_overflow" and no CC errors at the time, the loss was in
+  another program's sockets and the channels did not suffer. Category
+  "transcoder" (this server), confidence 0.5 at most, no ticket.
+- "network card dropping packets" from before 20 Oct counted frames the
+  kernel sets aside (no protocol for them), not lost packets: nothing was
+  wrong. The rule now counts only real losses on the card.
+- "video not in the card process" (card_own) and "card process ended":
+  this transcoder's own software, never the source.
+- Disk filling fast: something on this server writing a lot (logs of
+  another program, a recording, a test), not the sources.
+- A program whose streams are scrambled ("scrambled" in the probe) gives
+  no data to decode: the wrong source was chosen, or its decryption at
+  the IRD stopped. Not a channel fault.
+- A stream listed in the PMT that never carries data (a second language
+  that is never sent): harmless, the source as it is; no ticket.
+
+## CC errors on several sources at once
+
+CC errors on channels of different multiplexes in the same few seconds,
+while the channels report no socket overflows: the packets were lost
+before this server's software, on the network (switch, VLAN, the link)
+or this server's network card, not by one provider. Category "network".
+Several channels of one multiplex only: that multiplex's way here (its
+IRD's output or its switch port).
 - An incident still going on, or one that lasted minutes: take it
   seriously and follow the signal path below.
 

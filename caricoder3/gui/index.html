@@ -798,6 +798,7 @@ const WD_FIELDS_DISK = [["disk_warn_pct", "Disk space low under (% free)"], ["di
   ["mem_window_s", "Memory growing (a leak): going up all through (s) …"], ["mem_growth_mb", "… by at least (MB) …"], ["mem_growth_pct", "… and by at least (%)"]];
 const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["content_s", "… a black or frozen picture, silent audio: this long (s)"], ["clear_s", "It is over when gone for (s)"],
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
+  ["warmup_s", "A channel's first seconds after it starts, not judged for drops, missing data or CC errors (s)"],
   ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
 const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
