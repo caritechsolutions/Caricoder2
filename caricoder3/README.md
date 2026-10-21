@@ -310,12 +310,24 @@ described in `/etc/caricoder3/channels/*.json` as a child process,
 restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
 **8550** (set in `/etc/caricoder3/caricoder3.json`):
 
-- `/` — the GUI: plain HTML and JavaScript, built into the binary. Channel
-  list with state and rates, filtered by name or health; per channel the
-  live statistics, the outputs (add and remove while it runs), the
-  settings form with "Scan source…", the log; a Server page with CPU,
-  memory, the NVIDIA cards (through `nvidia-smi`) and the network
-  interfaces, sampled every two seconds.
+- `/` — the GUI: plain HTML and JavaScript, built into the binary; light,
+  or dark from the header's switch. Five pages along the top, each in the
+  address (`#/channels/bet`, so a reload or a link keeps the place):
+  **Overview** (is all well: the channels, incidents, server, cards and
+  disk in one row; a tile per channel with its picture, health and rates;
+  the latest incidents; the technician), **Channels** (the list beside a
+  channel's page: live statistics, history, streams, outputs added and
+  removed while it runs, the settings behind "Change settings", the log),
+  **Incidents** (the day's, what the watchdog is watching, the
+  technician's answers and your verdicts), **Server** (CPU, memory, the
+  NVIDIA cards, history, disks, network interfaces, shared inputs) and
+  **Settings** (watchdog rules, the technician's model, peers, this
+  build). The header shows the overall state ("All channels on air",
+  "2 incidents open") on every page. Each page asks only for what it
+  shows: the channel list comes short (`GET /api/channels?brief=1`, about
+  a quarter of the full list, and no question to each channel about its
+  outputs), the incident list without its snapshots, the server's state
+  every few seconds only where it is shown.
 - The **player** sits in the Source box of a channel, with the channel's
   snapshot as its poster (hls.js, built in, Apache-2.0). Play starts the
   *preview*: a separate small process makes the channel into 426x240

@@ -527,6 +527,21 @@ static void jesc(FILE *f, const char *s)
     fputc('"', f);
 }
 
+int wd_open_count(void)
+{
+    int n = 0;
+
+    pthread_mutex_lock(&W.lock);
+    for (int i = 0; i < ENTRIES_MAX; i++)
+        if (W.e[i].used && W.e[i].id > 0 && !W.e[i].parent)
+            n++;
+    for (int k = 0; k < GROUPS_MAX; k++)
+        if (W.g[k].used && W.g[k].id > 0)
+            n++;
+    pthread_mutex_unlock(&W.lock);
+    return n;
+}
+
 void wd_state_json(FILE *f, int64_t t)
 {
     int open = 0, pending = 0, n = 0;

@@ -2713,6 +2713,8 @@ def supervisor_api():
                 if seg:
                     box["pv_seg"] = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1.preview/" + seg[-1], timeout=5).read()
                 box["pv_chan"] = api("/api/channels/t1")[1]["channel"]
+                box["brief"] = api("/api/channels?brief=1")[1]
+                box["full"] = api("/api/channels")[1]
             if t >= 7.0 and "pl" not in box:
                 r = urllib.request.urlopen(f"http://127.0.0.1:{port}/hls/t1/index.m3u8", timeout=5)
                 box["pl"] = r.read().decode()
@@ -2731,6 +2733,11 @@ def supervisor_api():
             return True
         p.play(src, gate=gate)
         p.close()
+        br, fu = box.get("brief") or {}, box.get("full") or {}
+        b1 = (br.get("channels") or [{}])[0]
+        need(b1.get("stats", {}).get("input", {}).get("bitrate", 0) > 0 and "outputs" not in b1 and "open_incidents" in br
+             and b1.get("stats", {}).get("service", {}).get("streams"), f"brief list: {json.dumps(b1)[:600]}")
+        need(len(json.dumps(br)) < len(json.dumps(fu)) / 2, f"brief not smaller: {len(json.dumps(br))} of {len(json.dumps(fu))}")
         need("seg" in box and len(box["seg"]) > 100 * TS, f"HLS through the supervisor: {box.get('pl')}")
         if "probe_t" in box:
             box["probe_t"].join(timeout=20)

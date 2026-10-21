@@ -88,6 +88,9 @@ void wd_forget(int64_t t, const char *subject);
 /* Opens, closes and groups. Every couple of seconds. */
 void wd_tick(int64_t t);
 
+/* Incidents open now (a source's counts once, not its channels). */
+int wd_open_count(void);
+
 /* Problems being watched now: {"open": n, "pending": n, "items": [...]} */
 void wd_state_json(FILE *f, int64_t t);
 

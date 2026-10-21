@@ -3039,6 +3039,116 @@ static void chan_view_drop(struct chan_view *v)
     free(v->log);
 }
 
+/* JSON node `i` of `d` written out again (for the brief channel list). */
+static void jnode_write(FILE *f, const struct json_doc *d, int i)
+{
+    char q[1100];
+    const struct json_node *n = &d->node[i];
+
+    switch (n->type) {
+    case JSON_NULL: fputs("null", f); break;
+    case JSON_BOOL: fputs(n->boolean ? "true" : "false", f); break;
+    case JSON_NUMBER:
+        if (n->num == (double)(long long)n->num && n->num < 9e15 && n->num > -9e15)
+            fprintf(f, "%lld", (long long)n->num);
+        else
+            fprintf(f, "%.6g", n->num);
+        break;
+    case JSON_STRING: fputs(json_quote(n->str ? n->str : "", q, sizeof(q)), f); break;
+    case JSON_ARRAY: case JSON_OBJECT: {
+        int k = 0;
+
+        fputc(n->type == JSON_ARRAY ? '[' : '{', f);
+        for (int c = n->first_child; c >= 0; c = d->node[c].next, k++) {
+            if (k)
+                fputs(", ", f);
+            if (n->type == JSON_OBJECT)
+                fprintf(f, "%s: ", json_quote(d->node[c].key ? d->node[c].key : "", q, sizeof(q)));
+            jnode_write(f, d, c);
+        }
+        fputc(n->type == JSON_ARRAY ? ']' : '}', f);
+        break;
+    }
+    }
+}
+
+/* Only these members of object `obj` (those present), the braces left
+ * open (jpick_open) or closed (jpick). Returns how many were written. */
+static int jpick_open(FILE *f, const struct json_doc *d, int obj, const char *const *keys)
+{
+    char q[200];
+    int k = 0;
+
+    fputc('{', f);
+    for (int i = 0; obj >= 0 && keys[i]; i++) {
+        int c = json_get(d, obj, keys[i]);
+
+        if (c < 0)
+            continue;
+        fprintf(f, "%s%s: ", k++ ? ", " : "", json_quote(keys[i], q, sizeof(q)));
+        jnode_write(f, d, c);
+    }
+    return k;
+}
+
+static void jpick(FILE *f, const struct json_doc *d, int obj, const char *const *keys)
+{
+    jpick_open(f, d, obj, keys);
+    fputc('}', f);
+}
+
+/* A running channel's statistics, cut to what a list of channels needs
+ * (its health, rates, what it does): a tenth of the size, and no question
+ * to the channel itself. */
+static void stats_brief(FILE *f, struct json_doc *d, const char *st)
+{
+    static const char *const in_k[] = { "url", "shared", "bitrate", "last_packet_age_ms", "cc_errors", "socket_overflow",
+                                        "active", "switches", NULL };
+    static const char *const link_k[] = { "transport", "state", "connected", "lost", NULL };
+    static const char *const out_k[] = { "bitrate", "mode", "muxrate", "dropped_units", "late_units", NULL };
+    static const char *const clk_k[] = { "locked", "drift_ppm", NULL };
+    static const char *const s_k[] = { "kind", "language", "in_pid", "pid", "from_pid", "src_pid", "idle_ms", "failed",
+                                       "input_dropped", "codec", "from", "size", "mode", "encoder", "decoder", NULL };
+    char err[100];
+    int root = st && strlen(st) < JSON_TEXT_MAX ? json_parse(d, st, err, sizeof(err)) : -1;
+    int in, svc, ss, ct;
+
+    if (root < 0) {
+        fputs("null", f);
+        return;
+    }
+    in = json_get(d, root, "input");
+    fputs("{\"input\": ", f);
+    {
+        int k = jpick_open(f, d, in, in_k);
+
+        if (in >= 0 && json_get(d, in, "link") >= 0) {
+            fprintf(f, "%s\"link\": ", k ? ", " : "");
+            jpick(f, d, json_get(d, in, "link"), link_k);
+        }
+        fputc('}', f);
+    }
+    fputs(", \"output\": ", f);
+    jpick(f, d, json_get(d, root, "output"), out_k);
+    fputs(", \"clock\": ", f);
+    jpick(f, d, json_get(d, root, "clock"), clk_k);
+    fprintf(f, ", \"uptime_s\": %.0f", json_get_num(d, root, "uptime_s", 0));
+    if ((ct = json_get(d, root, "content")) >= 0) {
+        fputs(", \"content\": ", f);
+        jnode_write(f, d, ct);
+    }
+    svc = json_get(d, root, "service");
+    ss = svc >= 0 ? json_get(d, svc, "streams") : -1;
+    fprintf(f, ", \"service\": {\"number\": %.0f, \"streams\": [", svc >= 0 ? json_get_num(d, svc, "number", 0) : 0);
+    for (int j = ss >= 0 ? d->node[ss].first_child : -1, k = 0; j >= 0; j = d->node[j].next, k++) {
+        if (k)
+            fputs(", ", f);
+        jpick(f, d, j, s_k);
+    }
+    fputs("]}}", f);
+}
+
+static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, bool full);
 static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, bool full)
 {
     char q[200];
@@ -3865,18 +3975,23 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         size_t len = 0;
         FILE *f = open_memstream(&out, &len);
         char host[128] = "?";
-        int running = 0;
+        int running = 0, failed = 0, nch = 0;
 
         if (!f)
             return;
         gethostname(host, sizeof(host));
         pthread_mutex_lock(&s->lock);
-        for (int i = 0; i < s->n; i++)
+        for (int i = 0; i < s->n; i++) {
+            if (!s->ch[i].cfg)
+                continue;               /* a deleted channel's slot */
+            nch++;
             running += s->ch[i].state == CH_RUNNING;
+            failed += s->ch[i].state == CH_FAILED;
+        }
         fprintf(f, "{\"ok\": true, \"version\": \"%s\", \"host\": %s, \"uptime\": %.0f, \"channels\": %d, "
-                   "\"running\": %d, \"port\": %d, \"channels_dir\": ",
+                   "\"running\": %d, \"failed\": %d, \"open_incidents\": %d, \"port\": %d, \"channels_dir\": ",
                 CC3_VERSION, json_quote(host, q, sizeof(q)), (double)(clock_now_ns() - s->t_start) / 1e9,
-                s->n, running, s->port);
+                nch, running, failed, wd_open_count(), s->port);
         fprintf(f, "%s, \"shares\": [", json_quote(s->channels_dir, q, sizeof(q)));
         {
             /* the shared inputs: who uses them, and the reader's own stats */
@@ -4058,7 +4173,11 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         struct chan_view views[CHANNELS_MAX];
         int nv = 0;
 
-        fprintf(f, "{\"ok\": true, \"channels\": [");
+        char bv[8];
+        bool brief = query_param(req->query, "brief", bv, sizeof(bv)) && !strcmp(bv, "1");
+        struct json_doc *bd = brief ? malloc(sizeof(*bd)) : NULL;
+
+        fprintf(f, "{\"ok\": true, \"open_incidents\": %d, \"channels\": [", wd_open_count());
         pthread_mutex_lock(&s->lock);
         for (int i = 0; i < s->n; i++)
             if (s->ch[i].cfg)
@@ -4066,9 +4185,34 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         pthread_mutex_unlock(&s->lock);
         for (int i = 0; i < nv; i++) {
             fprintf(f, "%s\n", i ? "," : "");
-            json_chan_view(s, &views[i], f, false);
+            if (bd) {
+                /* ?brief=1: what a list needs; no question to each channel for its outputs */
+                char bq[200], *st = NULL;
+                struct chan tmp;
+                int cr;
+                char err[100];
+
+                memset(&tmp, 0, sizeof(tmp));
+                snprintf(tmp.name, sizeof(tmp.name), "%.63s", views[i].name);
+                fprintf(f, "{\"name\": %s, \"state\": \"%s\", \"enabled\": %s, \"uptime\": %.0f, \"restarts\": %d, \"why\": ",
+                        json_quote(views[i].name, bq, sizeof(bq)), state_name(views[i].state),
+                        views[i].enabled ? "true" : "false", views[i].uptime, views[i].restarts);
+                fputs(json_quote(views[i].why, bq, sizeof(bq)), f);
+                cr = views[i].cfg ? json_parse(bd, views[i].cfg, err, sizeof(err)) : -1;
+                fprintf(f, ", \"config\": {\"input\": %s}", json_quote(cr >= 0 ? json_get_str(bd, cr, "input", "") : "", bq, sizeof(bq)));
+                if (views[i].state == CH_RUNNING) {
+                    st = chan_stats(s, &tmp);
+                    fputs(", \"stats\": ", f);
+                    stats_brief(f, bd, st);
+                    free(st);
+                }
+                fputc('}', f);
+            } else {
+                json_chan_view(s, &views[i], f, false);
+            }
             chan_view_drop(&views[i]);
         }
+        free(bd);
         fprintf(f, "]}\n");
         fclose(f);
         resp->status = 200;
