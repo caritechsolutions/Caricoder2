@@ -160,7 +160,7 @@ static bool server_start(struct tech_conf *c, char *err, size_t errlen)
     }
     if (pid == 0) {
         char *argv[] = { c->server, "-m", c->model, "--host", "127.0.0.1", "--port", port, "-c", ctx, "-t", threads,
-                         "-ngl", ngl, "-np", "1", "--no-webui", NULL };
+                         "-ngl", ngl, "-np", "1", "--jinja", "--reasoning-budget", "0", "--no-webui", NULL };
         int fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC, 0644), nul = open("/dev/null", O_RDONLY);
         char dev[16];
 
@@ -499,7 +499,10 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
             jesc(f, answer, strlen(answer));
             fprintf(f, "}]}");
         } else {
-            snprintf(user, sizeof(user), "}], \"temperature\": 0.2, \"max_tokens\": 1500, \"stream\": false, ");
+            /* no "thinking" first (Qwen3 and later write their reasoning out before the
+             * answer, and filled the 1500 tokens with it): the answer straight away */
+            snprintf(user, sizeof(user), "}], \"temperature\": 0.2, \"max_tokens\": 1500, \"stream\": false, "
+                     "\"chat_template_kwargs\": {\"enable_thinking\": false}, ");
             fputs(user, f);
             fprintf(f, "\"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"diagnosis\", "
                        "\"schema\": %s}}}", SCHEMA);
@@ -604,7 +607,8 @@ static void answer(int k)
         jesc(f, sys ? sys : "", 120000);
         fprintf(f, "}, {\"role\": \"user\", \"content\": ");
         jesc(f, u ? u : "", ul);
-        fprintf(f, "}], \"temperature\": 0.3, \"max_tokens\": 700, \"stream\": false}");
+        fprintf(f, "}], \"temperature\": 0.3, \"max_tokens\": 700, \"stream\": false, "
+                   "\"chat_template_kwargs\": {\"enable_thinking\": false}}");
         fclose(f);
         free(u);
     }
@@ -1100,6 +1104,8 @@ static pid_t eval_spawn(const struct tech_conf *c, const char *model, int port, 
             argv[a++] = "--split-mode"; argv[a++] = "layer";
         }
         argv[a++] = "-np"; argv[a++] = "1";
+        argv[a++] = "--jinja";          /* the model's own chat template: it reads enable_thinking */
+        argv[a++] = "--reasoning-budget"; argv[a++] = "0";     /* and no thinking at all, whatever the template */
         argv[a++] = "--no-webui";
         argv[a] = NULL;
         if (fd >= 0)
@@ -1242,7 +1248,7 @@ int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o)
             const struct hist_case *h = &all[picked[k]];
             const char *expect = h->actual_category[0] ? h->actual_category
                                : !strcmp(h->verdict, "right") ? h->said_category : "";
-            char *resp = NULL, cat[48] = "", e2[100];
+            char *resp = NULL, cat[48] = "", e2[100], finish[24] = "";
             static struct json_doc doc, dd;
             struct timespec a, b;
             double secs, conf = -1;
@@ -1264,6 +1270,7 @@ int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o)
                     int msg = json_get(&doc, doc.node[ch].first_child, "message");
 
                     content = msg >= 0 ? json_get_str(&doc, msg, "content", NULL) : NULL;
+                    snprintf(finish, sizeof(finish), "%s", json_get_str(&doc, doc.node[ch].first_child, "finish_reason", ""));
                 }
                 if (us >= 0) {
                     ptok = (int)json_get_num(&doc, us, "prompt_tokens", 0);
@@ -1277,8 +1284,8 @@ int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o)
             fprintf(out, ", \"summary\": ");
             jesc(out, h->summary, strlen(h->summary));
             fprintf(out, ", \"lasted_s\": %lld, \"verdict\": \"%s\", \"expected\": \"%s\", \"seconds\": %.1f, "
-                         "\"prompt_tokens\": %d, \"completion_tokens\": %d, \"answer\": ",
-                    (long long)h->lasted_s, h->verdict, expect, secs, ptok, ctok);
+                         "\"prompt_tokens\": %d, \"completion_tokens\": %d, \"finish\": \"%s\", \"answer\": ",
+                    (long long)h->lasted_s, h->verdict, expect, secs, ptok, ctok, finish);
             if (content && *content == '{' && json_parse(&dd, content, e2, sizeof(e2)) >= 0) {
                 int r = json_parse(&dd, content, e2, sizeof(e2));
 
@@ -1308,7 +1315,8 @@ int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o)
                 sum[m].ticket_short++;
             if (conf >= 0)
                 sum[m].conf += conf <= 1 ? conf : conf <= 100 ? conf / 100 : 1;
-            printf("  %2d/%d  %-12s %5.0f s  %-16s %s%s\n", k + 1, n_pick, h->rule, secs, cat[0] ? cat : "(no answer)",
+            printf("  %2d/%d  %-12s %5.0f s  %-16s %s%s\n", k + 1, n_pick, h->rule, secs,
+                   cat[0] ? cat : !strcmp(finish, "length") ? "(cut off)" : "(no answer)",
                    !expect[0] ? "" : match ? "right" : "WRONG",
                    ticket && h->lasted_s >= 0 && h->lasted_s < 120 ? "  (ticket for a short one)" : "");
             fflush(stdout);
