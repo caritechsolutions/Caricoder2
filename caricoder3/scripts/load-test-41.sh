@@ -5,6 +5,7 @@
 #
 #   sudo bash /opt/caricoder3/scripts/load-test-41.sh           # add (or update) them
 #   sudo bash /opt/caricoder3/scripts/load-test-41.sh --remove  # take them away again
+#   sudo bash /opt/caricoder3/scripts/load-test-41.sh --preset p2 [NAME ...]  # encoder preset (default: p4)
 #
 # Each is set up as on 110.41 (its source program, only the streams it
 # keeps there (pids=: the video and the English audio), its renditions and
@@ -51,6 +52,27 @@ LIST
 for old in hbomun264 hboext264; do
     call -X DELETE "$API/channels/$old" >/dev/null 2>&1 && echo "removed $old (replaced)" || true
 done
+
+if [ "${1:-}" = "--preset" ]; then
+    # --preset p1..p7 [NAME ...]: the NVIDIA encoder preset of these channels (all 20 if
+    # none named; "default" takes it away); each channel restarts with it
+    want="${2:-}"
+    shift 2 || true
+    names="$*"
+    [ -n "$names" ] || names="$(while read -r name rest; do printf '%s ' "$name"; done <<<"$CHANNELS")"
+    for name in $names; do
+        cfg="$(call "$API/channels/$name" | WANT="$want" python3 -c '
+import json, os, sys
+c = json.load(sys.stdin)["channel"]["config"]
+if os.environ["WANT"] == "default":
+    c.pop("preset", None)
+else:
+    c["preset"] = os.environ["WANT"]
+print(json.dumps(c))' 2>/dev/null)" || { echo "$name: not there"; continue; }
+        call -X PUT "$API/channels/$name" -d "$cfg" >/dev/null && echo "$name: preset $want" || echo "$name: refused"
+    done
+    exit 0
+fi
 
 if [ "${1:-}" = "--remove" ]; then
     while read -r name out keep cfg; do
