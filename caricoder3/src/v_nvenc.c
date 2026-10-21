@@ -352,6 +352,14 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     }
     conf = pc.presetCfg;
     conf.version = NV_ENC_CONFIG_VER;
+    /* What NVIDIA's preset makes the card do, said once per encoder: the
+     * passes over each picture are most of what an encoder costs the card. */
+    log_info("nvenc: %dx%d %s preset p%d (high quality): %s, adaptive quantisation %s/%s",
+             cfg->width, cfg->height, cfg->codec == CODEC_H264 ? "H.264" : "HEVC", preset,
+             conf.rcParams.multiPass == NV_ENC_TWO_PASS_FULL_RESOLUTION ? "two passes, full size"
+             : conf.rcParams.multiPass == NV_ENC_TWO_PASS_QUARTER_RESOLUTION ? "two passes, the first at a quarter size"
+             : "one pass",
+             conf.rcParams.enableAQ ? "spatial" : "-", conf.rcParams.enableTemporalAQ ? "temporal" : "-");
 
     /* Key frames are asked for picture by picture (vframe.force_key); the
      * card's own interval is only a backstop, a little longer. */
