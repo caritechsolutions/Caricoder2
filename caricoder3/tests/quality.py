@@ -272,7 +272,7 @@ def match_frames(s_all, o_all, spts, opts, size, fps, work, limit):
             if 0 <= ii < len(s_th) and j < len(o_th) and spts[ii] is not None:
                 e += sum((s_th[ii][q] - o_th[j][q]) ** 2 for q in range(64))
                 n += 1
-        return e / n if n >= len(block) // 2 else None
+        return e / n if n and n >= len(block) // 2 else None
     step = max(1, int(round(fps)))
     fixed = []
     moved = 0
