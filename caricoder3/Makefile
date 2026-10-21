@@ -102,8 +102,8 @@ CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/engine.c src/codec.c src/xcode.c src/xc_audio.c src/xc_video.c src/xc_remote.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
        src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
-       src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_selftest.c src/follow.c src/watch.c src/thumb.c
-SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/input_http.c src/source.c src/probe.c src/share.c src/card.c src/keep.c src/history.c src/watchdog.c src/disk.c src/peer.c src/tech.c src/sysstat.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
+       src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_scale.c src/nv_selftest.c src/follow.c src/watch.c src/thumb.c
+SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/input_http.c src/source.c src/probe.c src/share.c src/card.c src/keep.c src/memwatch.c src/history.c src/watchdog.c src/disk.c src/peer.c src/tech.c src/sysstat.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
 
 # The first rule below is the GUI's, so the default goal is named here.
 .DEFAULT_GOAL := all
@@ -172,5 +172,10 @@ install: caricoder3
 clean:
 	rm -rf build caricoder3 caricoder3-asan
 
-.PHONY: all debug fuzz test install clean FORCE
+# The card's own program, kept built in the tree (src/nv_scale_ptx.h): this
+# only for a change to src/nv_scale.cu or nv_scale_px.h (needs clang).
+ptx:
+	sh scripts/make-ptx.sh
+
+.PHONY: all debug fuzz test install clean ptx FORCE
 -include $(OBJ:.o=.d) $(OBJ_ASAN:.o=.d)

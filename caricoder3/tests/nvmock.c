@@ -152,6 +152,89 @@ CUresult cuMemFree_v2(CUdeviceptr dptr)
     return CUDA_SUCCESS;
 }
 
+/* ---- the card's own programs: only caricoder3's scaler (src/nv_scale.cu),
+ * run here on the CPU by the same code the card runs (src/nv_scale_px.h) */
+
+#include "../src/nv_scale_px.h"
+
+static int live_mod, live_stream;
+
+CUresult cuModuleLoadData(CUmodule *mod, const void *image)
+{
+    NEED_CTX("cuModuleLoadData");
+    CHECK(image && strstr((const char *)image, ".entry cc3_scale"), "a module that is not caricoder3's scaler");
+    *mod = (CUmodule)malloc(8);
+    __sync_fetch_and_add(&live_mod, 1);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuModuleGetFunction(CUfunction *fn, CUmodule mod, const char *name)
+{
+    NEED_CTX("cuModuleGetFunction");
+    CHECK(mod != NULL && !strcmp(name, "cc3_scale"), "function %s", name);
+    *fn = (CUfunction)mod;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuModuleUnload(CUmodule mod)
+{
+    NEED_CTX("cuModuleUnload");
+    free(mod);
+    __sync_fetch_and_sub(&live_mod, 1);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamCreate(CUstream *st, unsigned int flags)
+{
+    (void)flags;
+    NEED_CTX("cuStreamCreate");
+    *st = (CUstream)malloc(8);
+    __sync_fetch_and_add(&live_stream, 1);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamSynchronize(CUstream st)
+{
+    NEED_CTX("cuStreamSynchronize");
+    CHECK(st != NULL, "synchronising no stream");
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamDestroy_v2(CUstream st)
+{
+    NEED_CTX("cuStreamDestroy");
+    free(st);
+    __sync_fetch_and_sub(&live_stream, 1);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuLaunchKernel(CUfunction f, unsigned int gx, unsigned int gy, unsigned int gz,
+                        unsigned int bx, unsigned int by, unsigned int bz, unsigned int shared,
+                        CUstream st, void **p, void **extra)
+{
+    const unsigned char *src;
+    unsigned char *dst;
+    int spitch, sw, sh, dpitch, dw, dh, comps, wide, blend;
+
+    NEED_CTX("cuLaunchKernel");
+    CHECK(f != NULL && p != NULL && extra == NULL && gz == 1 && bz == 1 && shared == 0 && st != NULL,
+          "launch arguments");
+    src = (const unsigned char *)(uintptr_t)*(CUdeviceptr *)p[0];
+    spitch = *(int *)p[1]; sw = *(int *)p[2]; sh = *(int *)p[3];
+    dst = (unsigned char *)(uintptr_t)*(CUdeviceptr *)p[4];
+    dpitch = *(int *)p[5]; dw = *(int *)p[6]; dh = *(int *)p[7];
+    comps = *(int *)p[8]; wide = *(int *)p[9]; blend = *(int *)p[10];
+    CHECK(src && dst && sw > 0 && sh > 0 && dw > 0 && dh > 0 && (comps == 1 || comps == 2),
+          "scale %dx%d -> %dx%d, %d components", sw, sh, dw, dh, comps);
+    CHECK(gx * bx >= (unsigned)dw && gy * by >= (unsigned)dh, "the grid does not cover the picture");
+    for (int y = 0; y < dh; y++)
+        for (int x = 0; x < dw; x++)
+            cc3_scale_px(src, spitch, sw, sh, dst, dpitch, dw, dh, comps, wide, blend, x, y);
+    if (getenv("NVMOCK_LOG_CTX"))
+        fprintf(stderr, "NVMOCK scaled %dx%d -> %dx%d\n", sw, sh, dw, dh);
+    return CUDA_SUCCESS;
+}
+
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *c)
 {
     const uint8_t *src;
@@ -723,6 +806,8 @@ CUresult cuvidCreateDecoder(CUvideodecoder *dec, CUVIDDECODECREATEINFO *ci)
     NEED_CTX("cuvidCreateDecoder");
     if (fails("decoder"))
         return CUDA_ERROR_UNKNOWN;
+    if (getenv("NVMOCK_LOG_CTX"))
+        fprintf(stderr, "NVMOCK decoder created %ux%u\n", (unsigned)ci->ulTargetWidth, (unsigned)ci->ulTargetHeight);
     CHECK(live_decoders < 32, "%d decoders at once: something is not closing them", live_decoders);
     CHECK(ci->ulWidth && ci->ulHeight && ci->ulTargetWidth && ci->ulTargetHeight &&
           !(ci->ulTargetWidth & 1) && !(ci->ulTargetHeight & 1), "decoder size");
@@ -797,6 +882,8 @@ CUresult cuvidUnmapVideoFrame64(CUvideodecoder dec, unsigned long long ptr)
 /* At unload: nothing of ours may be left behind by the caller. */
 __attribute__((destructor)) static void at_exit(void)
 {
+    if (getenv("NVMOCK_CHECK_LEAKS") && (live_mod || live_stream))
+        VIOLATION("left behind: %d modules, %d streams", live_mod, live_stream);
     if (getenv("NVMOCK_CHECK_LEAKS") && (live_ctx || live_mem || live_decoders))
         VIOLATION("%d contexts, %d card allocations and %d decoders were never released",
                   live_ctx, live_mem, live_decoders);

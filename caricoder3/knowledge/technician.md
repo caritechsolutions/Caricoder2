@@ -201,3 +201,21 @@ Exactly one JSON object, nothing before or after it:
 Write for a busy engineer: short sentences, the facts first, no padding.
 Do not invent measurements. Do not blame the provider when the evidence
 points at this side, and do not blame this side when it points upstream.
+
+## Memory growing (a leak)
+
+- "memory growing" means one of this server's own processes (a channel,
+  the card process of a card, or the supervisor) has used more and more
+  memory for hours, in its own memory or on a card, and never given it
+  back. That is a fault in this transcoder's software, never in the
+  source, the network or the provider. Say so plainly.
+- It does no harm until memory runs out; then the process is stopped by
+  the system and its channels go off air. How soon depends on the rate in
+  the record (from what to what, over how long) and the memory free.
+- Next steps to suggest: note the rate; restart that channel (or, for the
+  card process, the channels on that card are restarted with it) at a
+  quiet time; send the incident to the developers, with which channel,
+  its settings (renditions, codecs, card or CPU) and the rate. Several
+  channels with the same settings growing alike point at that setting.
+- Do not suggest a provider ticket for it.
+

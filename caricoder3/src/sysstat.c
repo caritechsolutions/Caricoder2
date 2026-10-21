@@ -21,6 +21,8 @@
 #define GPUS_MAX 8
 #define SAMPLE_S 2
 #define GPU_EVERY 5                     /* seconds */
+#define APPS_MAX 512                    /* processes using a card */
+#define APPS_EVERY 30                   /* seconds: their card memory, for the leak watch */
 
 struct iface {
     char name[32];
@@ -50,6 +52,8 @@ struct sample {
     int n_gpus;
     bool have_smi;
     char smi_error[80];
+    struct { int pid, mb; } apps[APPS_MAX];
+    int n_apps;
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -177,26 +181,26 @@ static void read_net(struct sample *s)
     fclose(f);
 }
 
-/* nvidia-smi, one line per card, with a 3 s limit on it. */
-static void read_gpus(struct sample *s)
+static const char *smi_exe(void)
 {
     static const char *const smi[] = { "/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", NULL };
-    const char *exe = NULL;
+
+    for (int i = 0; smi[i]; i++)
+        if (access(smi[i], X_OK) == 0)
+            return smi[i];
+    return NULL;
+}
+
+/* nvidia-smi with one query, its output in out; 3 s at most. The length,
+ * or -1 with a reason in err. */
+static int smi_query(const char *exe, const char *query, char *out, size_t cap, char *err, size_t errlen)
+{
     int pfd[2];
     pid_t pid;
-    char out[4096];
     size_t len = 0;
 
-    s->n_gpus = 0;
-    for (int i = 0; smi[i]; i++)
-        if (access(smi[i], X_OK) == 0) {
-            exe = smi[i];
-            break;
-        }
-    s->have_smi = exe != NULL;
-    s->smi_error[0] = 0;
-    if (!exe || pipe2(pfd, O_CLOEXEC) < 0)
-        return;
+    if (pipe2(pfd, O_CLOEXEC) < 0)
+        return -1;
     pid = fork();
     if (pid == 0) {
         int devnull = open("/dev/null", O_RDWR);
@@ -208,16 +212,13 @@ static void read_gpus(struct sample *s)
         }
         close(pfd[0]);
         close(pfd[1]);
-        execl(exe, "nvidia-smi",
-              "--query-gpu=index,name,utilization.gpu,utilization.encoder,utilization.decoder,"
-              "memory.used,memory.total,temperature.gpu,power.draw",
-              "--format=csv,noheader,nounits", (char *)NULL);
+        execl(exe, "nvidia-smi", query, "--format=csv,noheader,nounits", (char *)NULL);
         _exit(127);
     }
     close(pfd[1]);
     if (pid < 0) {
         close(pfd[0]);
-        return;
+        return -1;
     }
     {
         int64_t deadline = now_ns() + 3000000000LL;
@@ -229,11 +230,11 @@ static void read_gpus(struct sample *s)
 
             if (left <= 0 || poll(&pf, 1, (int)(left / 1000000)) <= 0)
                 break;
-            r = read(pfd[0], out + len, sizeof(out) - 1 - len);
+            r = read(pfd[0], out + len, cap - 1 - len);
             if (r <= 0)
                 break;
             len += (size_t)r;
-            if (len >= sizeof(out) - 1)
+            if (len >= cap - 1)
                 break;
         }
     }
@@ -249,15 +250,59 @@ static void read_gpus(struct sample *s)
             kill(pid, SIGKILL);
             for (k = 0; k < 20 && waitpid(pid, &status, WNOHANG) == 0; k++)
                 usleep(50000);          /* a process stuck in the driver may not die: not waited for */
-            snprintf(s->smi_error, sizeof(s->smi_error), "nvidia-smi did not answer");
-            return;
+            snprintf(err, errlen, "nvidia-smi did not answer");
+            return -1;
         }
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            snprintf(s->smi_error, sizeof(s->smi_error), "nvidia-smi failed (no driver?)");
-            return;
+            snprintf(err, errlen, "nvidia-smi failed (no driver?)");
+            return -1;
         }
     }
     out[len] = 0;
+    return (int)len;
+}
+
+/* The card memory of each process that uses a card (for the leak watch). */
+static void read_apps(struct sample *s)
+{
+    const char *exe = smi_exe();
+    char out[16384], err[80];
+
+    s->n_apps = 0;
+    if (!exe || smi_query(exe, "--query-compute-apps=pid,used_memory", out, sizeof(out), err, sizeof(err)) < 0)
+        return;
+    for (char *line = strtok(out, "\n"); line && s->n_apps < APPS_MAX; line = strtok(NULL, "\n")) {
+        int pid, mb;
+
+        if (sscanf(line, " %d , %d", &pid, &mb) == 2 && pid > 0) {
+            /* a process on two cards: the sum */
+            int k;
+
+            for (k = 0; k < s->n_apps && s->apps[k].pid != pid; k++)
+                ;
+            if (k == s->n_apps) {
+                s->apps[k].pid = pid;
+                s->apps[k].mb = 0;
+                s->n_apps++;
+            }
+            s->apps[k].mb += mb;
+        }
+    }
+}
+
+/* nvidia-smi, one line per card, with a 3 s limit on it. */
+static void read_gpus(struct sample *s)
+{
+    const char *exe = smi_exe();
+    char out[4096];
+
+    s->n_gpus = 0;
+    s->have_smi = exe != NULL;
+    s->smi_error[0] = 0;
+    if (!exe || smi_query(exe, "--query-gpu=index,name,utilization.gpu,utilization.encoder,utilization.decoder,"
+                          "memory.used,memory.total,temperature.gpu,power.draw", out, sizeof(out),
+                          s->smi_error, sizeof(s->smi_error)) < 0)
+        return;
     for (char *line = strtok(out, "\n"); line && s->n_gpus < GPUS_MAX; line = strtok(NULL, "\n")) {
         struct gpu *g = &s->gpus[s->n_gpus];
         char *fields[9];
@@ -302,6 +347,7 @@ static void *sampler(void *arg)
 {
     struct sample prev;
     int since_gpu = GPU_EVERY;
+    int since_apps = APPS_EVERY;
 
     (void)arg;
     memset(&prev, 0, sizeof(prev));
@@ -325,6 +371,14 @@ static void *sampler(void *arg)
                         s.ifs[i].tx_bps = (double)(s.ifs[i].tx_bytes - prev.ifs[k].tx_bytes) * 8.0 / dt;
                     }
         }
+        if (since_apps >= APPS_EVERY) {
+            read_apps(&s);
+            since_apps = 0;
+        } else {
+            s.n_apps = prev.n_apps;
+            memcpy(s.apps, prev.apps, sizeof(s.apps));
+        }
+        since_apps += SAMPLE_S;
         if (since_gpu >= GPU_EVERY) {
             read_gpus(&s);
             since_gpu = 0;
@@ -434,6 +488,20 @@ int sysstat_gpu_free(int *index, int *free_mb, int *busy_pct, int max)
     }
     pthread_mutex_unlock(&lock);
     return n;
+}
+
+int sysstat_card_mb(int pid)
+{
+    int mb = -1;
+
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < cur.n_apps; i++)
+        if (cur.apps[i].pid == pid)
+            mb = cur.apps[i].mb;
+    if (mb < 0 && cur.have_smi && cur.n_gpus > 0)
+        mb = 0;                         /* not on a card */
+    pthread_mutex_unlock(&lock);
+    return mb;
 }
 
 double sysstat_cpu_percent(void)

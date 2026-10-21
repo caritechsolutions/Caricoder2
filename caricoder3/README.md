@@ -506,6 +506,18 @@ disk is over the low mark again; then its cap is as set. Nothing that
 is not caricoder3's own is ever deleted: recordings and other files are
 only reported.
 
+### The leak watch
+
+Every minute the supervisor notes how much memory each of its processes
+uses (each channel, each card process, itself), in ordinary memory and
+on the cards (nvidia-smi), and keeps a day of it. A process whose low
+points have only gone up over the last 6 hours, by at least 100 MB and
+30 % (`mem_window_s`, `mem_growth_mb`, `mem_growth_pct` among the
+watchdog's limits), opens a "memory growing (a leak?)" incident: a
+buffer filling once and staying there does not, a slow steady climb
+does. The channel page shows a channel's memory, `/api/channels/NAME`
+has it as `memory_mb` and `card_memory_mb`.
+
 ### Evidence
 
 An incident carries what was found about it. When one opens for a
@@ -849,8 +861,19 @@ lists the card processes, their restarts and which channels' video they
 carry; a stream on the channel page says "in the card process", "waiting
 for the card process" or "on its own".
 
-Next (not built yet): one decode per channel for all its renditions,
-scaled on the card, instead of one decoder per rendition.
+**One decoder for all of a stream's renditions.** In the card process
+the first rendition's session decodes, and the other renditions of the
+same stream of the same channel take its pictures: each scales them on
+the card to its own size (a small program of our own, `src/nv_scale.cu`,
+built to PTX that the driver compiles for the card it meets; the same
+resampling as on the CPU, interlaced sources blended to progressive) and
+encodes them. Three renditions: one decoder instead of three, a third of
+the decoding and of the decoders' card memory. The renditions' key
+frames stay on the same pictures. A rendition that finds no first
+rendition to follow within 2 s (after a restart of the card process the
+sessions come back in any order), or loses it, decodes for itself again
+from the next key frame. The card process's stats (`decoders`) and a
+stream's `"decoder": "shared"` show it.
 
 ## What it does to a stream
 

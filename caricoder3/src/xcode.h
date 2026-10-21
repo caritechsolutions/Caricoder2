@@ -158,6 +158,10 @@ bool vxc_last_out(const struct vxc *v, int64_t *dts90, stc_t *t1);
 void vxc_start_after(struct vxc *v, int64_t dts90, stc_t t1);
 typedef void (*vxc_tap_fn)(void *opaque, const struct vframe *f);
 void vxc_set_tap(struct vxc *v, vxc_tap_fn fn, void *opaque);
+/* Decoder sharing (card.c): every picture this one decodes is shown to fn
+ * too; and a picture decoded elsewhere taken in as if decoded here. */
+void vxc_set_fanout(struct vxc *v, vxc_tap_fn fn, void *opaque);
+void vxc_picture(struct vxc *v, const struct vframe *f);
 
 /* The video half run in the card process instead (card.h, xc_remote.c).
  * xcode_use_card() is told once, at the start, where the card processes'

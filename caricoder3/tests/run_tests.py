@@ -1760,6 +1760,20 @@ def live_multicast():
     return "joined, received and sent on the loopback interface; other group kept out"
 
 
+def wait_up(port, timeout=10.0):
+    """Waits until the supervisor on `port` answers (not a fixed pause: a loaded
+    machine starts it slower)."""
+    import socket
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            return
+        except OSError:
+            time.sleep(0.05)
+    raise Fail(f"the supervisor did not answer on port {port}")
+
+
 def ctl(sock, *args):
     """caricoder3 ctl: returns (exit status, parsed reply)."""
     p = subprocess.run([BIN, "ctl", sock, *args], capture_output=True, text=True)
@@ -2738,7 +2752,7 @@ def supervisor_api():
                 return e.code, None
     sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
     try:
-        time.sleep(0.7)
+        wait_up(port)
         code, j = api("/api/system")
         need(code == 200 and j["ok"] and j["channels"] == 0, f"system: {code} {j}")
         code, j = api("/api/channels", headers={})
@@ -2938,7 +2952,7 @@ def supervisor_incidents():
             return e.code, None
     sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
     try:
-        time.sleep(0.7)
+        wait_up(port)
         code, j = api("/api/watchdog")
         need(code == 200 and j["limits"]["min_s"] == 5 and j["limits"]["off"] == ["cpu"], f"watchdog: {code} {j}")
         for name, prog in (("i1", 1650), ("i2", 2000)):
@@ -3087,7 +3101,7 @@ def supervisor_evidence():
     group = f"239.255.10.3:{pm}"
     sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
     try:
-        time.sleep(0.7)
+        wait_up(port)
         for name, url in (("m1", f"udp://{group}"), ("u1", f"udp://127.0.0.1:{pu}")):
             code, j = api(f"/api/channels/{name}", "PUT", {"input": url, "enabled": True})
             need(code == 200, f"create {name}: {code} {j}")
@@ -3398,7 +3412,7 @@ def supervisor_shared_input():
             return e.code, None
     sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
     try:
-        time.sleep(0.7)
+        wait_up(port)
         # a unicast input: without the reader only one of the two could have it
         for name, prog in (("s1", 1650), ("s2", 2000)):
             code, j = api(f"/api/channels/{name}", "PUT", {"input": f"udp://127.0.0.1:{pin}", "program": prog, "enabled": True})
@@ -3559,6 +3573,59 @@ def supervisor_card_process():
     need("card process started" in log and "session started" in log, log[-800:])
     return "card process ran the channel's video, was killed, started again with an incident, " \
            "the channel back on it; gone with the supervisor"
+
+
+@test
+def supervisor_memory_leak():
+    """A channel whose memory only goes up opens a "memory growing" incident; the others,
+    the card process and the supervisor do not."""
+    import base64
+    import urllib.request
+    root = w("super_leak")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin, pin2 = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 5
+    cfg = os.path.join(root, "caricoder3.json")
+    # a sample a second and a minute's window: the watch made to work in a test's time
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "memory_sample_s": 1, "card_process": "off",
+               "watchdog": {"min_s": 1, "mem_window_s": 30, "mem_growth_mb": 15, "mem_growth_pct": 10}},
+              open(cfg, "w"))
+    src = synth("syn_leak", duration=50.0)
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+    # one supervisor, one leaking channel: the leak is the channel's own
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True,
+                           env=dict(os.environ, CC3_TEST_LEAK_KB_S="2048"))
+    try:
+        for _ in range(50):
+            try:
+                api("/api/system")
+                break
+            except OSError:
+                time.sleep(0.1)
+        api("/api/channels/leaky", "PUT", {"input": f"udp://127.0.0.1:{pin}", "enabled": True})
+        p = Player("127.0.0.1", pin)
+        p.play(src)
+        p.close()
+        inc = api("/api/incidents?open=0")["incidents"]
+        ch = api("/api/channels/leaky")["channel"]
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        _, log = sup.communicate(timeout=15)
+    mem = [x for x in inc if x["rule"] == "memory_growing"]
+    need(len(mem) == 1 and mem[0]["channel"] == "leaky", f"incidents: {[(x['rule'], x['channel'], x.get('summary')) for x in inc]}")
+    need("rose steadily over 30 s" in (mem[0].get("summary") or ""), str(mem[0])[:400])
+    need(ch.get("memory_mb", 0) > 60, f"channel memory {ch.get('memory_mb')}")
+    return f"leak seen: {mem[0]['summary']}"
 
 
 @test
@@ -5044,6 +5111,49 @@ def live_xc_card_process():
 
 
 @test
+def live_xc_card_process_renditions():
+    """Live: three renditions through the card process (CPU here) share one decoder:
+    the second and third take the first's pictures; key frames still line up."""
+    skip = xc_ready("libavcodec", "x264", "fdk-aac", "mpg123")
+    if skip:
+        return skip
+    src = v_source("xc_v_640", "h264", size="640x360", duration=8, extra=("-output_ts_offset", "100"))
+    d = w("card_rend")
+    shutil.rmtree(d, ignore_errors=True)
+    card = CardProc(d)
+    box = {}
+
+    def feed(p):
+        def peek(t):
+            if t >= 5.0 and "st" not in box:
+                box["st"] = json.load(open(os.path.join(d, "card-0.json")))
+            return True
+        p.play(src, rate=2_500_000, gate=peek)
+    try:
+        st, cap, log = live(feed, "-r", "3000k", "--video", "h264:900k", "--video", "426x240:h264:400k",
+                            "--video", "320x180:h264:200k", "--audio", "aac:96k", *card_args(d),
+                            capture_name="live_xc_card_rend.ts", tail=4.5)
+    finally:
+        card.stop()
+    clog = card.log()
+    out = w("live_xc_card_rend.ts")
+    must_pass(out, cbr=True)
+    cs = box.get("st", {})
+    need(cs.get("decoders") == 1 and len(cs.get("sessions", [])) == 3, f"card process: {cs}")
+    xs = [x for x in st["service"]["streams"] if x["mode"] == "transcode" and x.get("kind") == "video"]
+    need(sorted(x["decoder"] for x in xs)[-2:] == ["shared", "shared"], f"decoders {[x['decoder'] for x in xs]}")
+    for x in xs:
+        need(not x["failed"] and x["frames_out"] >= 150, f"{x['pid']}: {x}")
+    need(clog.count("takes the pictures of the first rendition") == 2, clog[-600:])
+    keys = {n: key_frame_times(out, f"p:{n}:v")[1:] for n in (1, 2, 3)}
+    need(keys[1] == keys[2] == keys[3], "key frames differ between renditions")
+    sizes = sorted(x.get("size") for x in xs)
+    need(sizes == ["320x180", "426x240", "640x360"], f"sizes {sizes}")
+    no_pause(cap)
+    return f"3 renditions from 1 decoder, key frames aligned ({len(keys[1])}), sizes {', '.join(sizes)}"
+
+
+@test
 def live_xc_card_process_restart():
     """Live: the card process is killed mid-stream and started again. The channel's
     output keeps going (audio whole), the video stops and comes back at a key frame,
@@ -5183,9 +5293,17 @@ def live_xc_card_process_nvidia_standin():
          [x for x in stb["service"]["streams"] if x["mode"] == "transcode"]
     need(len(xs) == 3, f"{len(xs)} transcoders")
     for x in xs:
-        need(x.get("card_process") == "shared" and (x["decoder"], x["encoder"]) == ("nvdec", "nvenc")
+        need(x.get("card_process") == "shared" and x["decoder"] in ("nvdec", "shared") and x["encoder"] == "nvenc"
              and x["frames_out"] > 150, str(x))
-    return "3 sessions from 2 channels on the stand-in card, 1 context in all, clean tear-down"
+    # channel a's two renditions share one decoder: the second's pictures are the
+    # first's, scaled on the card
+    need(sorted(x["decoder"] for x in xs) == ["nvdec", "nvdec", "shared"], f"decoders: {[x['decoder'] for x in xs]}")
+    need(clog.count("NVMOCK decoder created") == 2, f"{clog.count('NVMOCK decoder created')} decoders made, not 2")
+    need("NVMOCK scaled 320x240 -> 160x120" in clog, "nothing scaled on the card")
+    small = [x for x in xs if x.get("size") == "160x120"]
+    need(small and small[0]["frames_out"] > 150, f"the small rendition: {small}")
+    return "3 sessions from 2 channels on the stand-in card, 1 context and 2 decoders in all " \
+           "(the second rendition scaled on the card from the first's pictures), clean tear-down"
 
 
 @test

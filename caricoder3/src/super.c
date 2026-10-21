@@ -68,6 +68,7 @@
 #include "sysstat.h"
 #include "history.h"
 #include "watchdog.h"
+#include "memwatch.h"
 #include "disk.h"
 #include "peer.h"
 #include "tech.h"
@@ -152,6 +153,7 @@ struct chan {
     int64_t wd_died[16];
     int wd_nd;
     char wd_group[512];                     /* its source, for grouping */
+    struct memtrack *mem;                   /* its process's memory, a sample a minute (memwatch.h) */
     char *wd_stats;                         /* the statistics the watchdog last judged (main thread) */
     char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
     int64_t wd_flow_since;                  /* input arriving since (0: it is not) */
@@ -212,6 +214,7 @@ struct cardp {
     int64_t started_ns;
     int restarts;
     bool stopping;
+    struct memtrack *mem;
 };
 
 struct super {
@@ -235,6 +238,9 @@ struct super {
     struct cardp cards[CARDS_MAX];
     int n_cards;
     bool stopping_all;                      /* the supervisor is ending: card processes go last */
+    struct memtrack *mem_self;              /* the supervisor's own memory */
+    int64_t mem_last;
+    int mem_test_s;                         /* tests: sample this often instead of a minute */
     struct http_server *http;
 
     /* the disks (disk.h), main thread, read by the web under the lock */
@@ -500,6 +506,7 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     }
     snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(&doc, root, "peer_key", ""));
     snprintf(s->card_mode, sizeof(s->card_mode), "%s", json_get_str(&doc, root, "card_process", "auto"));
+    s->mem_test_s = (int)json_get_num(&doc, root, "memory_sample_s", 0);   /* for the tests */
     if (strcmp(s->card_mode, "off") && strcmp(s->card_mode, "test"))
         snprintf(s->card_mode, sizeof(s->card_mode), "auto");
     {
@@ -1296,7 +1303,7 @@ static void wd_channel_state(struct chan *c, int64_t t)
     char what[200];
     static const enum wd_rule running_rules[] = { WD_NO_INPUT, WD_CC, WD_LOSS, WD_DROPPING, WD_OUT_STALLED,
                                                   WD_BACKUP, WD_CLOCK, WD_BLACK, WD_FROZEN, WD_SILENT, WD_NO_DATA,
-                                                  WD_CARD_OWN };
+                                                  WD_CARD_OWN, WD_MEM_GROWING };
 
     if (!c->cfg || !c->want) {
         wd_forget(t, c->name);
@@ -2752,6 +2759,15 @@ static void tech_context(FILE *f, void *op)
             fprintf(f, ", \"why\": %s", json_quote(c->why, q, sizeof(q)));
         if (c->restarts)
             fprintf(f, ", \"restarts\": %d", c->restarts);
+        if (c->mem && c->state == CH_RUNNING) {
+            double r, cm;
+
+            mw_last(c->mem, &r, &cm);
+            if (r >= 0)
+                fprintf(f, ", \"memory_mb\": %.0f", r);
+            if (cm > 0)
+                fprintf(f, ", \"card_memory_mb\": %.0f", cm);
+        }
         fputc('}', f);
     }
     fprintf(f, "], \"disks\": ");
@@ -2981,6 +2997,75 @@ static void disks_json(const struct super *s, FILE *f)
     fprintf(f, "], \"history_squeezed\": %s", s->squeezed ? "true" : "false");
 }
 
+/* ---- the leak watch (memwatch.h) ------------------------------------------- */
+
+static void mem_one(struct memtrack **mp, pid_t pid, int64_t t, const char *subject, const char *chan,
+                    const char *group, const char *who)
+{
+    struct wd_limits L;
+    double rss, from = 0, to = 0, cf = 0, ct = 0;
+    bool grow, cgrow;
+    char what[300];
+
+    if (!*mp && !(*mp = calloc(1, sizeof(**mp))))
+        return;
+    rss = pid > 0 ? mw_rss_mb(pid) : -1;
+    if (rss < 0)
+        return;
+    mw_add(*mp, pid, t, rss, pid > 0 ? sysstat_card_mb(pid) : -1);
+    wd_get_limits(&L);
+    grow = mw_growing(*mp, t, L.mem_window_s, L.mem_growth_mb, L.mem_growth_pct, false, &from, &to);
+    cgrow = mw_growing(*mp, t, L.mem_window_s, L.mem_growth_mb, L.mem_growth_pct, true, &cf, &ct);
+    {
+        char span[24];
+
+        if (L.mem_window_s >= 7200)
+            snprintf(span, sizeof(span), "%d h", L.mem_window_s / 3600);
+        else if (L.mem_window_s >= 120)
+            snprintf(span, sizeof(span), "%d min", L.mem_window_s / 60);
+        else
+            snprintf(span, sizeof(span), "%d s", L.mem_window_s);
+        if (grow && cgrow)
+            snprintf(what, sizeof(what), "%s: memory rose steadily over %s, from %.0f to %.0f MB (and on the card "
+                     "from %.0f to %.0f MB): a leak in this transcoder", who, span, from, to, cf, ct);
+        else if (cgrow)
+            snprintf(what, sizeof(what), "%s: card memory rose steadily over %s, from %.0f to %.0f MB: a leak in "
+                     "this transcoder", who, span, cf, ct);
+        else
+            snprintf(what, sizeof(what), "%s: memory rose steadily over %s, from %.0f to %.0f MB: a leak in this "
+                     "transcoder", who, span, from, to);
+    }
+    wd_observe(t, subject, chan, group, WD_MEM_GROWING, grow || cgrow, what, 0);
+}
+
+/* A sample a minute of every process of ours: the channels, the card
+ * processes, the supervisor. */
+static void mem_tick(struct super *s)
+{
+    int64_t t = time(NULL);
+    char subj[64], who[96];
+
+    if (t - s->mem_last < (s->mem_test_s ? s->mem_test_s : 60))
+        return;
+    s->mem_last = t;
+    for (int i = 0; i < s->n; i++) {
+        struct chan *c = &s->ch[i];
+
+        if (!c->cfg || c->state != CH_RUNNING || c->pid <= 0)
+            continue;
+        snprintf(who, sizeof(who), "channel %s", c->name);
+        mem_one(&c->mem, c->pid, t, c->name, c->name, c->wd_group, who);
+    }
+    for (int k = 0; k < s->n_cards; k++) {
+        if (s->cards[k].pid <= 0)
+            continue;
+        snprintf(subj, sizeof(subj), "server/card%d.process", s->cards[k].index);
+        snprintf(who, sizeof(who), "the card process of card %d", s->cards[k].index);
+        mem_one(&s->cards[k].mem, s->cards[k].pid, t, subj, NULL, "", who);
+    }
+    mem_one(&s->mem_self, getpid(), t, "server/supervisor", NULL, "", "the supervisor");
+}
+
 static void tick(struct super *s)
 {
     int64_t now = clock_now_ns();
@@ -2989,6 +3074,7 @@ static void tick(struct super *s)
         chan_share_prepare(s, &s->ch[i]);
     shares_update(s, now);
     cards_update(s, now, s->stopping_all);
+    mem_tick(s);
     hist_tick(s);
     disk_tick(s);
     jobs_tick(s);
@@ -3221,6 +3307,7 @@ struct chan_view {
     pid_t pid;
     double uptime;
     int restarts;
+    double rss_mb, card_mb;                 /* -1: not known */
     char why[160];
     char *cfg;
     char *log;                              /* JSON array text, or NULL */
@@ -3243,6 +3330,9 @@ static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
     v->pid = c->pid;
     v->uptime = c->state == CH_RUNNING || c->state == CH_STOPPING ? (double)(now - c->started_ns) / 1e9 : 0.0;
     v->restarts = c->restarts;
+    v->rss_mb = v->card_mb = -1;
+    if (c->mem && c->state == CH_RUNNING)
+        mw_last(c->mem, &v->rss_mb, &v->card_mb);
     snprintf(v->why, sizeof(v->why), "%s", c->why);
     v->cfg = c->cfg ? strdup(c->cfg) : NULL;
     for (int i = 0; i < c->hist_n; i++) {
@@ -3399,6 +3489,10 @@ static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, 
             json_quote(v->name, q, sizeof(q)), state_name(v->state), v->enabled ? "true" : "false",
             (int)v->pid, v->uptime, v->restarts);
     fprintf(f, "%s", json_quote(v->why, q, sizeof(q)));
+    if (v->rss_mb >= 0)
+        fprintf(f, ", \"memory_mb\": %.0f", v->rss_mb);
+    if (v->card_mb >= 0)
+        fprintf(f, ", \"card_memory_mb\": %.0f", v->card_mb);
     fprintf(f, ", \"config\": %s", v->cfg ? v->cfg : "null");
     if (v->state == CH_RUNNING || full) {
         char *st = chan_stats(s, &tmp);

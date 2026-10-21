@@ -978,6 +978,21 @@ static int run_live(struct options *o, struct ctx *c)
         }
         r.send_errors = sinks_errors(&c->sinks);
         write_stats(c, &st, &r);
+        {
+            /* the tests' stand-in for a leak (the leak watch must see it): this much
+             * memory a second, taken and never given back */
+            static long leak_kb = -1;
+
+            if (leak_kb < 0)
+                leak_kb = getenv("CC3_TEST_LEAK_KB_S") ? atol(getenv("CC3_TEST_LEAK_KB_S")) : 0;
+            if (leak_kb > 0) {
+                char *lk = malloc((size_t)leak_kb * 1024);
+
+                if (lk)
+                    memset(lk, 1, (size_t)leak_kb * 1024);
+                (void)lk;
+            }
+        }
         idle_check(&st, r.input_age_ms);
         content_check(&st, r.input_age_ms);
 

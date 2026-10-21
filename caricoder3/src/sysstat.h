@@ -19,7 +19,10 @@ void sysstat_json(FILE *f);
  * mem.used_pct, gpuN.util/encoder/decoder/mem_mb/temp_c/power_w,
  * net.IF.rx_mbps/tx_mbps, and net.IF.rx_drop/rx_err as increments since
  * the previous call. Nothing before the first sample. */
-double sysstat_cpu_percent(void);        /* -1: not sampled yet */
+double sysstat_cpu_percent(void);
+/* The card memory a process uses (MB, all cards): -1 when not known (no
+ * nvidia-smi), 0 when it uses none. */
+int sysstat_card_mb(int pid);        /* -1: not sampled yet */
 /* The cards as last seen by nvidia-smi: index, memory free (MB, -1
  * unknown) and how busy (%); returns how many. */
 int sysstat_gpu_free(int *index, int *free_mb, int *busy_pct, int max);

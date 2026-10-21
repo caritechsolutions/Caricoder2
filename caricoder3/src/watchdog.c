@@ -39,6 +39,7 @@ static const struct {
     [WD_AV_SHIFT]    = { "av_shift", "audio timing moved (sync)", "error", true },
     [WD_CARD_OWN]    = { "card_own", "video not in the card process", "warn", false },
     [WD_CARD_ENDED]  = { "card_ended", "card process ended", "error", false },
+    [WD_MEM_GROWING] = { "memory_growing", "memory growing (a leak?)", "warn", false },
 };
 
 #define ENTRIES_MAX 2048
@@ -100,6 +101,9 @@ void wd_defaults(struct wd_limits *l)
     l->content_s = 30;
     l->av_shift_ms = 80;
     l->av_shift_s = 30;
+    l->mem_window_s = 6 * 3600;
+    l->mem_growth_mb = 100;
+    l->mem_growth_pct = 30;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -122,7 +126,7 @@ int wd_rule_by_id(const char *id)
 
 #define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
-    X(av_shift_ms) X(av_shift_s)
+    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {

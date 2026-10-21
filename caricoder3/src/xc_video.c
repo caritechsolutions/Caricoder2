@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "log.h"
+#include "nv_scale.h"
 #include "thumb.h"
 #include "xcode.h"
 
@@ -79,6 +80,14 @@ struct vxc {
      * or the card process's session (card.c) */
     vxc_tap_fn tap;
     void *tap_opaque;
+    /* who else is shown every picture decoded here: the other renditions
+     * of the stream, which share this decoder (card.c) */
+    vxc_tap_fn fanout;
+    void *fanout_opaque;
+    /* pictures on the card scaled on the card (a rendition fed by another's
+     * decoder) */
+    struct nv_scaler *nvs;
+    bool nvs_failed;
 };
 
 /* ---- output --------------------------------------------------------- */
@@ -514,6 +523,8 @@ static void picture_in(struct vxc *v, const struct vframe *in)
     struct vframe f = *in, tmp;
 
     v->st->frames_in++;
+    if (v->fanout)
+        v->fanout(v->fanout_opaque, in);
     if (v->cfg.first_rendition) {
         if (v->tap)
             v->tap(v->tap_opaque, in);
@@ -530,6 +541,25 @@ static void picture_in(struct vxc *v, const struct vframe *in)
         if (f.width != tw || f.height != th) {
             if (!scale_picture(v, &f, &tmp, tw, th))
                 return;
+            f = tmp;
+        }
+    } else if (f.mem == VMEM_CUDA && (v->cfg.width || v->cfg.height)) {
+        /* a picture another rendition's decoder made, at its size: scaled on the card */
+        int tw, th;
+        char why[160];
+
+        video_size(v->cfg.width, v->cfg.height, v->cfg.fit, f.width, f.height,
+                   f.sar_num > 0 && f.sar_den > 0 ? f.width * f.sar_num : 0,
+                   f.sar_num > 0 && f.sar_den > 0 ? f.height * f.sar_den : 0, &tw, &th);
+        if (f.width != tw || f.height != th) {
+            if (!nv_scale(&v->nvs, &f, tw, th, &tmp, why, sizeof(why))) {
+                if (!v->nvs_failed)
+                    log_err("PID 0x%04X: %s", v->cfg.pid, why);
+                v->nvs_failed = true;
+                v->st->errors++;
+                return;
+            }
+            v->nvs_failed = false;
             f = tmp;
         }
     }
@@ -674,6 +704,17 @@ void vxc_unit(struct vxc *v, const struct es_unit *u)
     }
 }
 
+void vxc_picture(struct vxc *v, const struct vframe *f)
+{
+    picture_in(v, f);
+}
+
+void vxc_set_fanout(struct vxc *v, vxc_tap_fn fn, void *opaque)
+{
+    v->fanout = fn;
+    v->fanout_opaque = opaque;
+}
+
 void vxc_set_tap(struct vxc *v, vxc_tap_fn fn, void *opaque)
 {
     v->tap = fn;
@@ -780,6 +821,7 @@ void vxc_free(struct vxc *v)
         v->eb->venc->close(v->ectx);
     if (v->dctx)
         v->db->vdec->close(v->dctx);
+    nv_scaler_free(v->nvs);
     free(v->conv);
     free(v->scaled);
     free(v);
