@@ -634,7 +634,7 @@ async function loadIncidents(force) {
   if (!force && Date.now() - incAt < 8000) return;
   incAt = Date.now();
   const to = Math.floor(Date.now() / 1000);
-  try { incAll = (await api(`/api/incidents?from=${to - 86400}&to=${to + 1}&limit=300`)).incidents; } catch(e) { incAll = null; }
+  try { incAll = (await api(`/api/incidents?from=${to - 86400}&to=${to + 1}&limit=300&brief=1`)).incidents; } catch(e) { incAll = null; }
   if (!view.name && view.page === "list") renderOverview();
 }
 /* rows: the source's incidents with their channels' under them; the rest on their own */

@@ -2893,6 +2893,9 @@ def supervisor_incidents():
         need(len(group) == 1 and "2 channels" in group[0]["summary"], f"source incident: {inc}")
         need(len(mine) == 2 and all(x["parent"] == group[0]["id"] for x in mine), f"channel incidents: {mine}")
         need(mine[0]["detail"].get("then", {}).get("input"), f"no evidence kept: {mine[0]['detail']}")
+        code, jb = api("/api/incidents?open=1&brief=1")
+        need(code == 200 and len(jb["incidents"]) == len(inc) and all(x["detail"] == {} for x in jb["incidents"]),
+             f"brief list: {code} {[x.get('detail') for x in (jb or {}).get('incidents', [])][:2]}")
         code, one = api(f"/api/incidents/{group[0]['id']}")
         need(code == 200 and len(one["members"]) == 2 and any("no input" in e["text"] for e in one["events"]),
              f"one incident: {one}")

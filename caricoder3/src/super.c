@@ -3412,7 +3412,12 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             bool has = query_param(req->query, "channel", chan, sizeof(chan));
             bool open_only = query_param(req->query, "open", v, sizeof(v)) && !strcmp(v, "1");
 
-            ok = history_query_incidents(f, has ? chan : NULL, from, to, open_only, limit);
+            /* ?brief=1: without each one's evidence snapshot (the list needs none; it is
+             * most of the size: 690 kB a day on transcoder2, fetched every few seconds) */
+            if (query_param(req->query, "brief", v, sizeof(v)) && !strcmp(v, "1") && !has)
+                ok = history_query_incidents_brief(f, from, to, open_only, limit);
+            else
+                ok = history_query_incidents(f, has ? chan : NULL, from, to, open_only, limit);
         }
         fclose(f);
         if (!ok) {
