@@ -4359,12 +4359,14 @@ int super_tech_eval(int argc, char **argv)
             o.port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--context") && i + 1 < argc)
             o.ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
+            o.threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc)
             snprintf(outp, sizeof(outp), "%s", argv[++i]);
         else {
             fprintf(stderr,
                     "usage: caricoder3 tech-eval [--model FILE.gguf ...] [--cases 12] [--gpu auto|cpu|all|N]\n"
-                    "                            [--context TOKENS] [--port 8561] [--out FILE] [--config FILE]\n"
+                    "                            [--threads N] [--context TOKENS] [--port 8561] [--out FILE] [--config FILE]\n"
                     "  Tries each model on incidents you gave a verdict on (one or two of each kind), with\n"
                     "  exactly what the technician is sent, and scores the answers against your verdicts.\n"
                     "  Without --model: the technician's own model and every .gguf in\n"
@@ -4405,6 +4407,8 @@ int super_tech_eval(int argc, char **argv)
         strftime(outp, sizeof(outp), "/var/lib/caricoder3/tech-eval-%Y%m%d-%H%M.jsonl", &tm);
     }
     o.out = outp;
+    if (o.threads > 0)
+        s.tech.threads = o.threads;     /* CPU threads for the test's model server */
     sysstat_start();
     sleep(6);                       /* the cards' free memory, from the first samples */
     return tech_eval(&s.tech, &o);

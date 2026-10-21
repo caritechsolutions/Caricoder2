@@ -71,6 +71,7 @@ struct tech_eval_opts {
     const char *gpu;    /* "auto", "cpu", "all" (split across the cards) or a card's index */
     int port;           /* the test's model server, on 127.0.0.1 (8561) */
     int ctx;            /* context, tokens (0: the technician's) */
+    int threads;        /* CPU threads (0: the technician's) */
     const char *out;
 };
 int tech_eval(const struct tech_conf *c, const struct tech_eval_opts *o);
