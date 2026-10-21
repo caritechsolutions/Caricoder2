@@ -90,8 +90,9 @@ u = next((o["url"] for o in outs if o.get("url", "").startswith("udp://")), "")
 print(u.split("?", 1)[1] if "?" in u else "")')"
 echo "output options (from godtv): ${OPTS:-none}"
 
-# Only the streams 110.41 keeps: each source probed once here, and every other
-# stream of the program dropped ("drop"). A channel whose source cannot be
+# Only the video and the English audio: the streams 110.41 keeps (pids=), or,
+# where it lists none, the video and the audio marked English; each source
+# probed once here, and every other stream of the program dropped ("drop"). A channel whose source cannot be
 # probed is left out rather than set up with all its audio.
 echo "probing the sources (a few seconds each)..."
 PLAN="$(printf '%s\n' "$CHANNELS" | python3 -c '
@@ -102,21 +103,32 @@ for line in sys.stdin:
         continue
     name, out, keep, cfg = line.split(" ", 3)
     c = json.loads(cfg)
+    url = c["input"]
+    if url not in seen:
+        r = subprocess.run(["caricoder3", "probe", url, "--seconds", "3"], capture_output=True, text=True)
+        try:
+            seen[url] = json.loads(r.stdout)
+        except ValueError:
+            seen[url] = {}
+    progs = seen[url].get("programs") or []
+    prog = next((p for p in progs if p.get("number") == c.get("program")), None) if c.get("program") else (progs[0] if progs else None)
+    if not prog:
+        print(name, out, "SKIP", "program %s not found in %s" % (c.get("program"), url))
+        continue
+    streams = prog.get("streams", [])
     if keep != "-":
-        url = c["input"]
-        if url not in seen:
-            r = subprocess.run(["caricoder3", "probe", url, "--seconds", "3"], capture_output=True, text=True)
-            try:
-                seen[url] = json.loads(r.stdout)
-            except ValueError:
-                seen[url] = {}
-        progs = seen[url].get("programs") or []
-        prog = next((p for p in progs if p.get("number") == c.get("program")), None) if c.get("program") else (progs[0] if progs else None)
-        if not prog:
-            print(name, out, "SKIP", "program %s not found in %s" % (c.get("program"), url))
-            continue
         k = {int(x) for x in keep.split(",")}
-        drop = sorted(s["pid"] for s in prog.get("streams", []) if s["pid"] not in k)
+    else:
+        # no list on 110.41: the video and the English audio, as for the others
+        vid = [s["pid"] for s in streams if s.get("kind") == "video"][:1]
+        aud = [s for s in streams if s.get("kind") == "audio"]
+        eng = [s["pid"] for s in aud if (s.get("language") or "").lower() in ("eng", "en")]
+        if not eng and aud:
+            eng = [aud[0]["pid"]]
+            print(name, out, "NOTE", "no audio marked English; keeping PID %d (%s)" % (aud[0]["pid"], aud[0].get("language") or "no language"), flush=True)
+        k = set(vid + eng[:1])
+    if True:
+        drop = sorted(s["pid"] for s in streams if s["pid"] not in k)
         if drop:
             c["drop"] = drop
         if prog.get("scrambled"):
