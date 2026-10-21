@@ -7,11 +7,12 @@
 #   sudo bash /opt/caricoder3/scripts/load-test-41.sh --remove  # take them away again
 #
 # Each is set up as on 110.41 (its source program, its renditions and
-# rates, audio copied; HBO Mundi and HBO Extreme from the IRD feeds on
-# 224.5.5.5 that 110.41 prefers, the MPTS copies of them being scrambled)
-# and sent to 224.100.200.N:5000, a group neither
+# rates, audio copied) and sent to 224.100.200.N:5000, a group neither
 # 110.41 nor 110.42 uses, with the same output options (interface, TTL)
 # as godtv's first UDP output here. All 60 renditions on card 0.
+# (HBO Mundi and HBO Extreme were in the first list: their MPTS copies are
+# scrambled and their IRD feeds on 224.5.5.5 do not reach this server, so
+# MTV and VH1 took their places; the two old ones are removed.)
 #
 set -euo pipefail
 
@@ -35,8 +36,8 @@ nickelodeon264 udp://224.100.200.10:5000 {"input":"udp://224.100.1.6:49500","vid
 comedy264 udp://224.100.200.11:5000 {"input":"udp://224.100.1.6:49500","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":2250}
 tcm264 udp://224.100.200.12:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2000k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1210}
 natgeo264 udp://224.100.200.13:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1230}
-hbomun264 udp://224.100.200.14:5000 {"input":"udp://224.5.5.5:8012","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true}
-hboext264 udp://224.100.200.15:5000 {"input":"udp://224.5.5.5:8013","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true}
+mtv264 udp://224.100.200.14:5000 {"input":"udp://224.2.2.3:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1830}
+vh1264 udp://224.100.200.15:5000 {"input":"udp://224.2.2.3:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1770}
 espn2264 udp://224.100.200.16:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":510}
 tnt264 udp://224.100.200.17:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":990}
 history264 udp://224.100.200.18:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2000k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1120}
@@ -44,6 +45,10 @@ axn264 udp://224.100.200.19:5000 {"input":"udp://224.2.2.3:2000","video":["h264:
 bbcw264 udp://224.100.200.20:5000 {"input":"udp://224.2.2.3:2000","video":["h264:2500k","960x540:fit:h264:2200k","-1x360:h264:864k","512x288:fit:h264:500k"],"enabled":true,"program":1810,"bframes":2,"gop":2000}
 LIST
 )
+
+for old in hbomun264 hboext264; do
+    call -X DELETE "$API/channels/$old" >/dev/null 2>&1 && echo "removed $old (replaced)" || true
+done
 
 if [ "${1:-}" = "--remove" ]; then
     while read -r name out cfg; do
