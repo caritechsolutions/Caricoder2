@@ -1771,6 +1771,61 @@ def ctl(sock, *args):
 
 
 @test
+def live_keep_input():
+    """Live, --keep-input: asked for the input from 4 s back to 2 s on, the channel
+    writes just that, its own program only, as received."""
+    src = synth("syn_mpts_keep", duration=12.0, mpts=True)
+    pin = _port[0]
+    _port[0] += 4
+    sock = w("keep.sock")
+    out = w("keep_saved.ts")
+    for f in (sock, out, out + ".json"):
+        if os.path.exists(f):
+            os.remove(f)
+    proc = subprocess.Popen(
+        [BIN, "-q", "-i", f"udp://127.0.0.1:{pin}", "-o", f"udp://127.0.0.1:{pin + 1}", "--program", "2000",
+         "--keep-input", "--control", sock, "--stats-file", w("keep.stats.json"), "--stats-interval", "0"],
+        stderr=subprocess.PIPE, text=True)
+    asked = {}
+    try:
+        time.sleep(0.3)
+
+        def gate(t):
+            if t >= 7.0 and "rep" not in asked:
+                asked["rep"] = ctl(sock, "keep-input", out, "4", "2")
+                asked["again"] = ctl(sock, "keep-input", out + "2", "4", "2")
+            return True
+        p = Player("127.0.0.1", pin)
+        p.play(src, gate=gate)
+        p.close()
+        time.sleep(0.5)
+        st = json.load(open(w("keep.stats.json")))
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        _, log = proc.communicate(timeout=10)
+    need(proc.returncode == 0, f"exit {proc.returncode}\n{log[-600:]}")
+    rc, rep = asked["rep"]
+    need(rc == 0 and rep["ok"], f"keep-input: {rep}")
+    rc, rep = asked["again"]
+    need(rc == 1 and "under way" in rep.get("error", ""), f"a second save at once: {rep}")
+    need(os.path.exists(out), "nothing written")
+    note = json.load(open(out + ".json"))
+    need(note["ok"] and -4.3 < note["from_s"] < -3.7 and 1.5 < note["to_s"] <= 2.2, f"note: {note}")
+    a = Analysis(out)
+    need(a.pat and 2000 in a.pat["programs"] and a.pmt and a.pmt["program"] == 2000, f"PAT {a.pat}, PMT {a.pmt}")
+    def pids(path):
+        d = open(path, "rb").read()
+        return {((d[i + 1] & 0x1F) << 8) | d[i + 2] for i in range(0, len(d) - 187, 188)}
+    kept, every = pids(out), pids(src)
+    need(kept <= {0, 0x11, 2000, 2001, 2002, 2003} and kept < every, f"kept {sorted(kept)} of {sorted(every)}")
+    need(a.sync_errors == 0 and sum(a.cc_errors.values()) == 0, f"damaged: CC {a.cc_errors}")
+    ki = st.get("kept_input", {})
+    need(ki.get("seconds", 0) >= 6 and ki.get("saves") == 1, f"kept_input: {ki}")
+    return f"{note['packets']} packets, {note['from_s']:.1f} s to +{note['to_s']:.1f} s, program 2000 only, " \
+           f"{ki['memory_bytes'] / 1e6:.1f} MB held for {ki['seconds']} s"
+
+
+@test
 def live_outputs_add_remove():
     """Outputs added and removed over the control socket while the channel runs."""
     src = synth("live_src", duration=10.0)
@@ -3052,7 +3107,7 @@ def supervisor_evidence():
         need(code == 400, f"a unicast source was probed beside its channel: {code}")
         for t in th:
             t.join()
-        # the recording began when the incident opened (about 10 s in) and lasts 20 s
+        # the recording is saved 20 s after the incident opened (about 10 s in)
         for _ in range(30):
             time.sleep(1)
             code, j = api("/api/evidence?channel=m1")
@@ -3067,11 +3122,17 @@ def supervisor_evidence():
         rec = tools.get("record")
         need(rec and rec["args"]["from"] == "source" and rec["file_bytes"] > 100000 and rec["result"].get("ok"),
              f"recording: {one['evidence']}")
+        # from what the channel kept: it starts before the incident opened, so the
+        # beginning of the black picture is in it
+        need(rec["args"].get("kept") and rec["result"]["from_s"] < -5, f"recording starts too late: {rec}")
         code, data = api(f"/api/evidence/{rec['id']}/file", raw=True)
         need(code == 200 and data[:1] == b"\x47" and len(data) == rec["file_bytes"], f"fetch: {code} {len(data or b'')}")
         code, j = api("/api/evidence?channel=u1")
         urec = [e for e in j["evidence"] if e["tool"] == "record"]
-        need(urec and urec[0]["args"]["from"] == "output" and urec[0]["file_bytes"] > 10000, f"u1: {j}")
+        # a unicast source cannot be read twice: what the channel kept of it, with the time
+        # before the button was pressed
+        need(urec and urec[0]["args"]["from"] == "source" and urec[0]["args"].get("kept") and
+             urec[0]["result"]["from_s"] < -1 and urec[0]["file_bytes"] > 10000, f"u1: {j}")
         code, j = api("/api/evidence")
         ping = [e for e in j["evidence"] if e["tool"] == "ping"]
         need(ping and (ping[0]["result"].get("loss_pct") == 0 or (not shutil.which("ping") and "not installed" in ping[0]["result"].get("error", ""))),

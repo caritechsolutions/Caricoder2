@@ -36,6 +36,26 @@ you better. So be plain, be specific, and point at the evidence.
   asked whether they see the same source from their side, a recording, a
   picture, a ping.
 - Events from a minute before to a minute after.
+
+What the evidence covers, and what it does not:
+- A recording of the source with "kept": true is what the channel itself
+  received, from "from_s" seconds before the incident opened ("from_s" is
+  negative) to "to_s" after. A picture or sound incident opens only after
+  the problem has lasted a while, so such a recording holds the start of
+  the problem. A person can listen to it and see whether the fault was
+  there; you cannot, you only see its size and how long it is.
+- A probe of the source is made after the incident opened. It says
+  whether the source still arrives and at what rate, nothing about whether
+  the sound was silent or the picture black at the time: audio packets at
+  a normal rate can carry digital silence. Never use a probe's rates as a
+  sign that the sound or picture was fine.
+- A sound level of -120 dBFS is digital silence (every sample zero): the
+  sound was not quiet, it was absent from the samples. When the record
+  also shows that stream arriving and no CC errors, the zeros were in the
+  source as sent: the programme, or something before it (an ad break done
+  badly, a muted feed). Whether that is a fault, only someone listening
+  to the kept recording can say; without a person's verdict on a case
+  like it, keep your confidence at or below 0.5.
 - Past incidents like this one, with what you said then and what a person
   said ("person_said": right, partly or wrong, and when wrong "it_was":
   what it really was). Weigh these above everything else in these notes:

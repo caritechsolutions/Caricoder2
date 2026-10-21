@@ -511,8 +511,18 @@ only reported.
 An incident carries what was found about it. When one opens for a
 black, frozen or silent picture or sound, a stream without data, CC
 errors, a PID change, the clock or a backup source, the channel's
-picture is kept and 20 s of its source recorded (TS, that service
-only); a channel gets at most one such recording in ten minutes. When
+picture is kept and its source recorded (TS, that service only) from
+**60 s before the incident opened to 20 s after**; a channel gets at
+most one such recording in ten minutes. A picture or sound incident
+opens only once the problem has lasted (30 s by default), so a
+recording started at that moment would show the stream after the fault;
+this one holds its start. It comes from what the channel keeps of its
+own input: the last 90 s in memory (`--keep-input`, set by the
+supervisor whenever evidence is kept), its program only, at most 128 MB
+a channel (about 16 MB for a 1.5 Mb/s service, 90 MB at 8 Mb/s; one at a
+higher rate keeps fewer seconds, and the evidence says how many it had).
+"Record 20 s" by hand likewise includes the minute before the button was
+pressed. When the channel is not running, the old ways below apply. When
 input is lost, the source is probed from the supervisor's own socket
 for 3 s (does anything arrive at all?), once per source a minute. Only
 a source that can be read beside the channel without taking from it is

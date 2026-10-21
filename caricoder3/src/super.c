@@ -163,7 +163,9 @@ struct chan {
 #define JOBS_MAX 8
 struct job {
     bool used;
-    pid_t pid;                              /* 0: a recording through the channel's output */
+    pid_t pid;                              /* 0: a recording through the channel's output,
+                                             * or of what it kept of its input (kept) */
+    bool kept;
     char tool[16];
     char chan[64];
     int64_t incident;
@@ -695,6 +697,7 @@ static void cards_update(struct super *s, int64_t now, bool stop)
 }
 
 static void chan_share_prepare(struct super *s, struct chan *c);
+static bool evidence_on(const struct super *s);
 
 /* Builds the command line from the channel's JSON. Returns the number
  * of arguments, -1 with a reason. */
@@ -742,6 +745,8 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     ARGS(c->name);
     ARGS("--run-dir");
     ARGS(s->run_dir);
+    if (evidence_on(s))
+        ARGS("--keep-input");               /* the last 90 s, for evidence (keep.h) */
     if (card_of(s, (int)json_get_num(&doc, root, "gpu", 0)) &&
         json_get_bool(&doc, root, "card_process", true)) {
         /* its video transcoded in the card process (card.h) */
@@ -2099,6 +2104,62 @@ static bool tool_record_output(struct super *s, struct chan *c, int seconds, int
     return true;
 }
 
+/* What the channel received from `before` seconds ago to `after` seconds on,
+ * from what it keeps of its input (keep.h): the start of a fault is in it,
+ * though the incident opened only once the fault had lasted. */
+static bool tool_record_input(struct super *s, struct chan *c, int before, int after, int64_t incident, char *err,
+                              size_t errlen)
+{
+    int k = job_slot(s);
+    char req[900], *reply, q[700], file[600];
+    struct job *j;
+
+    if (k < 0) {
+        snprintf(err, errlen, "%d tools are running already", JOBS_MAX);
+        return false;
+    }
+    if (!evidence_on(s)) {
+        snprintf(err, errlen, "no evidence is kept (see \"evidence\" in the config)");
+        return false;
+    }
+    if (c->state != CH_RUNNING) {
+        snprintf(err, errlen, "the channel is not running");
+        return false;
+    }
+    j = &s->jobs[k];
+    memset(j, 0, sizeof(*j));
+    evidence_path(s, c->name, "source", "ts", file, sizeof(file));
+    snprintf(req, sizeof(req), "{\"cmd\": \"keep-input\", \"path\": %s, \"before\": %d, \"after\": %d}",
+             json_quote(file, q, sizeof(q)), before, after);
+    reply = chan_ctl(s, c, req);
+    if (!reply || !strstr(reply, "\"ok\": true")) {
+        snprintf(err, errlen, "the channel did not save its input%s%.150s", reply ? ": " : "", reply ? reply : "");
+        free(reply);
+        return false;
+    }
+    free(reply);
+    j->used = true;
+    j->pid = 0;
+    j->kept = true;
+    snprintf(j->tool, sizeof(j->tool), "record");
+    snprintf(j->chan, sizeof(j->chan), "%s", c->name);
+    snprintf(j->file, sizeof(j->file), "%s", file);
+    {
+        time_t t0 = time(NULL) - before;
+        struct tm tm;
+        char when[32];
+
+        localtime_r(&t0, &tm);
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+        snprintf(j->args, sizeof(j->args), "{\"from\": \"source\", \"kept\": true, \"before_s\": %d, "
+                 "\"after_s\": %d, \"starts\": \"%s\", \"seconds\": %d}", before, after, when, before + after);
+    }
+    j->incident = incident;
+    j->started_ns = clock_now_ns();
+    j->deadline_ns = j->started_ns + (int64_t)(after + 4) * 1000000000LL;
+    return true;
+}
+
 static bool host_ok(const char *h)
 {
     if (!*h || strlen(h) > 253 || *h == '-')
@@ -2228,6 +2289,27 @@ static void jobs_tick(struct super *s)
                 unlink(j->out);
             }
             j->used = false;
+        } else if (j->kept && now > j->deadline_ns) {
+            /* the channel's kept input: written by the channel, with a note beside it */
+            char side[700], res[400];
+            char *note;
+
+            snprintf(side, sizeof(side), "%s.json", j->file);
+            note = read_whole(side, NULL, 4096);
+            if (note && note[0] == '{') {
+                char *e = note + strlen(note);
+
+                while (e > note && (e[-1] == '\n' || e[-1] == ' '))
+                    *--e = 0;
+                snprintf(res, sizeof(res), "%s", note);
+            } else {
+                snprintf(res, sizeof(res), "{\"ok\": false, \"error\": \"the channel wrote nothing\"}");
+            }
+            free(note);
+            unlink(side);
+            history_evidence_add(time(NULL), j->incident, j->chan, "record", j->args, res,
+                                 access(j->file, F_OK) == 0 ? j->file : "");
+            j->used = false;
         } else if (now > j->deadline_ns) {
             /* an output recording: the output goes, the file stays */
             struct chan *c = find_chan(s, j->chan);
@@ -2296,7 +2378,10 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
             return;
         c->ev_last = t;
         chan_source(c, url, sizeof(url), &program);
-        if (!(source_readable(url) && tool_probe(s, c->name, url, program, 20, true, id, err, sizeof(err))) &&
+        /* what the channel kept: from a minute back, so that the start is in it
+         * (a picture or sound fault opens an incident only after content_s) */
+        if (!tool_record_input(s, c, 60, 20, id, err, sizeof(err)) &&
+            !(source_readable(url) && tool_probe(s, c->name, url, program, 20, true, id, err, sizeof(err))) &&
             !tool_record_output(s, c, 20, id, err, sizeof(err)))
             log_info("evidence for %s: %s", c->name, err);
         break;
@@ -3759,6 +3844,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
 
                 if (!c)
                     snprintf(err, sizeof(err), "record needs \"channel\"");
+                else if (strcmp(from, "output") &&
+                         tool_record_input(s, c, 60, seconds > 30 ? 30 : seconds, incident, err, sizeof(err)))
+                    ok = true;              /* with the minute before the button was pressed */
                 else if (strcmp(from, "output") && source_readable(url))
                     ok = tool_probe(s, c->name, url, program, seconds, true, incident, err, sizeof(err));
                 else

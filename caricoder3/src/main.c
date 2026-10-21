@@ -36,6 +36,7 @@
 #include "engine.h"
 #include "input.h"
 #include "json.h"
+#include "keep.h"
 #include "log.h"
 #include "ring.h"
 #include "sink.h"
@@ -65,6 +66,7 @@ struct options {
     const char *control, *name, *config, *run_dir;
     const char *card_dir;               /* --card-process: the card processes' sockets are here */
     bool card_all;
+    bool keep_input;
     const char *stats_file;
     const char *thumb;                      /* JPEG of the picture, every few seconds */
     int thumb_interval;
@@ -95,6 +97,7 @@ struct ctx {
     struct sinks sinks;
     struct control *ctl;
     struct sources *src;                    /* live: the input(s) */
+    struct keep *keep;                      /* --keep-input: the last 90 s of it (keep.h) */
     pthread_mutex_t stats_lock;             /* the last statistics as JSON, for the control socket */
     char *stats_json;
     size_t stats_len;
@@ -125,6 +128,7 @@ static void *input_thread(void *arg)
         }
         if (n > 0) {
             engine_push_datagram(c->eng, buf, (size_t)n, now);
+            keep_datagram(c->keep, buf, (size_t)n, now);
             atomic_store(&c->last_rx, now);
         }
         if (now - last_tick > 1000000000LL) {
@@ -502,6 +506,11 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
         fprintf(f, "}");
     }
     fprintf(f, "\n    ]\n  },\n");
+    if (c->keep) {
+        fprintf(f, "  \"kept_input\": ");
+        keep_json(c->keep, f);
+        fprintf(f, ",\n");
+    }
     {
         /* what the picture and the sound look like (watch.h) */
         struct watch_stats ws;
@@ -813,6 +822,22 @@ static void on_control(void *opaque, const struct json_doc *req, FILE *f)
         if (saved && c->opt->config && !config_save(c, err, sizeof(err)))
             log_err("config: %s", err);
         fprintf(f, "{\"ok\": true}");
+    } else if (!strcmp(cmd, "keep-input")) {
+        /* {"path": FILE, "before": 60, "after": 20}: what was received from `before`
+         * seconds ago until `after` seconds from now, written to FILE once that
+         * has passed (FILE.json beside it says how much it holds) */
+        const char *path = json_get_str(req, 0, "path", NULL);
+        int before = (int)json_get_num(req, 0, "before", 60), after = (int)json_get_num(req, 0, "after", 20);
+
+        if (!path || path[0] != '/') {
+            reply_error(f, "keep-input needs \"path\", a full file name");
+            return;
+        }
+        if (!keep_save(c->keep, path, before, after, err, sizeof(err))) {
+            reply_error(f, err);
+            return;
+        }
+        fprintf(f, "{\"ok\": true}");
     } else if (!strcmp(cmd, "stats")) {
         pthread_mutex_lock(&c->stats_lock);
         if (c->stats_json) {
@@ -887,6 +912,14 @@ static int ctl_main(int argc, char **argv)
         }
         snprintf(req, sizeof(req), "{\"cmd\": \"remove-output\", \"id\": %s}",
                  json_quote(argv[4], q, sizeof(q)));
+    } else if (!strcmp(cmd, "keep-input")) {
+        /* keep-input FILE [BEFORE_S [AFTER_S]] */
+        if (argc < 5) {
+            fprintf(stderr, "usage: caricoder3 ctl SOCKET keep-input FILE [BEFORE_S [AFTER_S]]\n");
+            return 2;
+        }
+        snprintf(req, sizeof(req), "{\"cmd\": \"keep-input\", \"path\": %s, \"before\": %d, \"after\": %d}",
+                 json_quote(argv[4], q, sizeof(q)), argc > 5 ? atoi(argv[5]) : 60, argc > 6 ? atoi(argv[6]) : 20);
     } else {
         snprintf(req, sizeof(req), "{\"cmd\": %s}", json_quote(cmd, q, sizeof(q)));
     }
@@ -1082,6 +1115,8 @@ static void usage(FILE *f)
 "      --card-process DIR   video for the card transcoded in the card process\n"
 "                           whose socket is DIR/card-N.sock (caricoder3 card)\n"
 "      --card-process-all   ... and video transcoded on the CPU too (for tests)\n"
+"      --keep-input         keep the last 90 s of the input (its program) in memory,\n"
+"                           for the control socket's keep-input (evidence of a fault)\n"
 "      --preset NAME        encoder speed, in the encoder's own words\n"
 "      --bframes N          B-frames between references, 0 to 4 (default: the\n"
 "                           encoder's; 0 for receivers that cannot take them)\n"
@@ -1158,7 +1193,7 @@ enum {
     OPT_SWITCH_AFTER, OPT_RETRY_PRIMARY, OPT_THUMB, OPT_THUMB_INTERVAL,
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
-    OPT_CARD_PROCESS, OPT_CARD_ALL,
+    OPT_CARD_PROCESS, OPT_CARD_ALL, OPT_KEEP_INPUT,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1246,6 +1281,7 @@ int main(int argc, char **argv)
         { "run-dir", required_argument, 0, OPT_RUN_DIR },
         { "card-process", required_argument, 0, OPT_CARD_PROCESS },
         { "card-process-all", no_argument, 0, OPT_CARD_ALL },
+        { "keep-input", no_argument, 0, OPT_KEEP_INPUT },
         { "verbose", no_argument, 0, 'v' },
         { "quiet", no_argument, 0, 'q' },
         { "version", no_argument, 0, 'V' },
@@ -1313,6 +1349,7 @@ int main(int argc, char **argv)
         case OPT_RUN_DIR: o.run_dir = optarg; break;
         case OPT_CARD_PROCESS: o.card_dir = optarg; break;
         case OPT_CARD_ALL: o.card_all = true; break;
+        case OPT_KEEP_INPUT: o.keep_input = true; break;
         case 'p': o.eng.program = atoi(optarg); break;
         case 'r':
             if (!parse_rate(optarg, &o.eng.mux.muxrate)) {
@@ -1618,6 +1655,8 @@ int main(int argc, char **argv)
     }
     if (o.config && !config_load(&c, err, sizeof(err)))
         log_err("config: %s", err);
+    if (o.keep_input && o.eng.live)
+        c.keep = keep_new(o.eng.program);
     if (o.control) {
         if (o.name)
             mkdir(o.run_dir ? o.run_dir : SOCK_DIR, 0775);
@@ -1681,6 +1720,7 @@ int main(int argc, char **argv)
         fclose(in_fp);
     control_stop(c.ctl);
     sources_free(c.src);
+    keep_free(c.keep);
     engine_free(c.eng);
     sinks_destroy(&c.sinks);
     ring_destroy(&c.ring);

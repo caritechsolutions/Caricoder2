@@ -846,7 +846,13 @@ function evidenceList(list) {
     if (e.tool === "picture") { what = "Picture"; body = file ? `<a href="${file}" target="_blank"><img class="evpic" src="${file}" alt="picture"></a>` : `<span class="dim">the file is gone</span>`; }
     else if (e.tool === "record" || e.tool === "probe") {
       what = e.tool === "record" ? `${a.seconds || ""} s of the ${a.from === "output" ? "output" : "source"}` : `Probe of the source (${a.seconds || 3} s)`;
-      if (a.from === "output") body = r.ok ? "" : `<span class="bad">nothing was written</span>`;
+      if (a.kept && r.ok) {
+        /* what the channel kept of its input: it begins before the moment it was asked for */
+        const span = (r.to_s || 0) - (r.from_s || 0);
+        what = `${span.toFixed(0)} s of the source`;
+        body = `from ${(-(r.from_s || 0)).toFixed(0)} s before ${e.incident ? "the incident opened" : "it was asked for"} to ${(r.to_s || 0).toFixed(0)} s after · ${(r.packets || 0).toLocaleString()} packets` +
+          (-(r.from_s || 0) < (a.before_s || 0) - 2 ? ` <span class="dim">(the channel had only ${(-(r.from_s || 0)).toFixed(0)} s)</span>` : "");
+      } else if (a.from === "output") body = r.ok ? "" : `<span class="bad">nothing was written</span>`;
       else if (r.ok === false) body = `<span class="bad">${esc(r.error || "no answer")}</span>`;
       else if (r.programs) {
         const progs = r.programs.filter(p => !a.program || p.number === a.program);
