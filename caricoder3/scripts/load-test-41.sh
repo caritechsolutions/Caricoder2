@@ -7,7 +7,9 @@
 #   sudo bash /opt/caricoder3/scripts/load-test-41.sh --remove  # take them away again
 #
 # Each is set up as on 110.41 (its source program, its renditions and
-# rates, audio copied) and sent to 224.100.200.N:5000, a group neither
+# rates, audio copied; HBO Mundi and HBO Extreme from the IRD feeds on
+# 224.5.5.5 that 110.41 prefers, the MPTS copies of them being scrambled)
+# and sent to 224.100.200.N:5000, a group neither
 # 110.41 nor 110.42 uses, with the same output options (interface, TTL)
 # as godtv's first UDP output here. All 60 renditions on card 0.
 #
@@ -33,8 +35,8 @@ nickelodeon264 udp://224.100.200.10:5000 {"input":"udp://224.100.1.6:49500","vid
 comedy264 udp://224.100.200.11:5000 {"input":"udp://224.100.1.6:49500","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":2250}
 tcm264 udp://224.100.200.12:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2000k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1210}
 natgeo264 udp://224.100.200.13:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1230}
-hbomun264 udp://224.100.200.14:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1240}
-hboext264 udp://224.100.200.15:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1260}
+hbomun264 udp://224.100.200.14:5000 {"input":"udp://224.5.5.5:8012","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true}
+hboext264 udp://224.100.200.15:5000 {"input":"udp://224.5.5.5:8013","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true}
 espn2264 udp://224.100.200.16:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":510}
 tnt264 udp://224.100.200.17:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2500k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":990}
 history264 udp://224.100.200.18:5000 {"input":"udp://224.2.2.2:2000","video":["h264:2000k","-1x480:h264:1000k","-1x360:h264:700k"],"enabled":true,"program":1120}
