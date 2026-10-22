@@ -276,6 +276,21 @@ points at this side, and do not blame this side when it points upstream.
   not the provider: the fix is on the IRD (rebuild that service's remux
   entry; for scrambled, the CI card). No provider ticket.
 
+## Audio in the wrong language
+
+- "audio in the wrong language": Whisper, on this server, listened to clips
+  of the channel's output and heard another language than the channel
+  should carry, twice running, each time sure of it. A clip is kept with
+  the incident for a person to listen to.
+- The usual cause here: the uplink swapped or moved a service's audio
+  tracks (look for "a service changed on the satellite" on its IRD just
+  before), and the channel still takes the old PID. Next: listen to the
+  clip; then either a ticket to the uplink to put the tracks back, or the
+  channel's audio PID changed here.
+- One channel only, its IRD's tables unchanged: the channel's own settings
+  (the PID it keeps) may be wrong. Several channels of one source at once:
+  the uplink.
+
 ## Memory growing (a leak)
 
 - "memory growing" means one of this server's own processes (a channel,

@@ -670,6 +670,21 @@ service leaving an output. A channel's incident carries the readings of
 the IRD it reads from ("ird" in what it reported), so the technician sees
 the signal at that moment. `GET/PUT /api/irds`, `POST /api/irds/check`.
 
+**The language check** (`caricoder3 listen URL`). Every 6 hours each
+running channel's output (a multicast UDP one) is listened to: a 20 s clip,
+its sound taken out with ffmpeg, and Whisper (whisper.cpp, "base" model,
+on the CPU, offline; set up by `scripts/whisper-setup.sh`, which the
+installer runs in the background) says which language is spoken and how
+sure it is. Not sure (below 50 %, or no sound: music, a pause) changes
+nothing. Another language than the channel's ("language" in its settings,
+"-" for none; else `language_check.expect` in the config, "eng"), sure,
+is heard again a minute later, with the clip kept; twice running is a
+`wrong_language` incident, with a fresh clip as its evidence, and it is
+heard every 10 minutes until it is right again. The channel page shows
+the last answer and "listen now" (`POST /api/channels/NAME/listen`).
+Settings: `"language_check": {"every_h": 6, "expect": "eng",
+"min_probability": 0.5, "clip_s": 20}` (`every_h` 0: off).
+
 **What it is shown** (`caricoder3 tech-prompt --id N`). Prints exactly
 what the technician would be sent about incident N, with no model needed:
 its notes, the incident and its evidence, and the past incidents it is

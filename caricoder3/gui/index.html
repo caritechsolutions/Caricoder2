@@ -1238,7 +1238,21 @@ function pathParts(c) {
       ${c.memory_mb != null ? `<div class="sub" title="This channel's process: its memory, and on the cards (the card process's is on the Server page)">memory ${c.memory_mb} MB${c.card_memory_mb ? ` · ${c.card_memory_mb} MB on the card` : ""}</div>` : ""}`,
     out: `<h3>Outputs</h3><div class="big">${fmtRate(out.bitrate)}</div>
       <div class="sub">${esc(out.mode==="cbr"?`constant ${fmtRate(out.muxrate)}, ${(out.null_percent||0).toFixed(0)}% padding`:"variable rate")}</div>
-      <div class="sub">${outs.length} output${outs.length===1?"":"s"}${oerr?` · <span class="flag">${oerr} send errors</span>`:""}${out.late_units?` · <span class="flag">${out.late_units} late</span>`:""}${out.dropped_units?` · <span class="flag bad">${out.dropped_units} dropped</span>`:""}</div>` };
+      <div class="sub">${outs.length} output${outs.length===1?"":"s"}${oerr?` · <span class="flag">${oerr} send errors</span>`:""}${out.late_units?` · <span class="flag">${out.late_units} late</span>`:""}${out.dropped_units?` · <span class="flag bad">${out.dropped_units} dropped</span>`:""}</div>
+      ${langLine(c)}` };
+}
+
+/* The language check: what Whisper last heard on its output */
+function langLine(c) {
+  const L = c.language;
+  if (!L || (!L.can && !L.checked)) return "";
+  const when = L.checked ? ` <span style="color:var(--dim)">(${fmtDur(Math.round(Date.now() / 1000 - L.checked))} ago)</span>` : "";
+  return `<div class="sub" title="Whisper, on this server, listening to a clip of its output">language: ${L.listening ? "listening…" : L.note ? `<span class="${L.wrong ? "flag bad" : ""}">${esc(L.note)}</span>${when}` : `<span style="color:var(--dim)">not heard yet</span>`}
+    ${L.can && !L.listening ? ` · <a onclick="listenNow('${esc(c.name)}')">listen now</a>` : ""}</div>`;
+}
+async function listenNow(name) {
+  try { await api(`/api/channels/${encodeURIComponent(name)}/listen`, { method: "POST" }); toolNote("Listening: the answer shows here in about half a minute."); }
+  catch(e) { alert(e.message); }
 }
 
 /* ---------- outputs ---------- */

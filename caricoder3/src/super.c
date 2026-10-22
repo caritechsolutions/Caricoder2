@@ -154,11 +154,20 @@ struct chan {
     int64_t wd_died[16];
     int wd_nd;
     char wd_group[512];                     /* its source, for grouping */
+    char lang_url[300];                     /* an output of it the language check can read beside it */
     struct memtrack *mem;                   /* its process's memory, a sample a minute (memwatch.h) */
     char *wd_stats;                         /* the statistics the watchdog last judged (main thread) */
     char out_dirs[4][256];                  /* folders its outputs write to (HLS dir=, file://) */
     int64_t wd_flow_since;                  /* input arriving since (0: it is not) */
     int64_t ev_last;                        /* the last recording made for it without being asked */
+    /* the language check (Whisper, caricoder3 listen) */
+    int64_t lang_t, lang_due;               /* last answer; next check (wall clock) */
+    char lang_heard[8];                     /* the last confident answer ("eng") */
+    double lang_p, lang_vol;
+    int lang_wrong_n;                       /* confident answers in a row that were not what it should be */
+    bool lang_wrong;                        /* two of them: an incident */
+    bool lang_busy;
+    char lang_note[160];                    /* the last answer in words */
     int n_out_dirs;
 };
 
@@ -240,6 +249,12 @@ struct super {
     struct ird_conf irds[IRDS_MAX];         /* the satellite receivers (ird.h) */
     int n_irds;
     struct ird_opts ird_o;                  /* how often (tests set them short) */
+    int lang_every_s;                       /* the language check, every (6 h; 0: off) */
+    char lang_expect[8];                    /* what the channels speak unless theirs says ("eng") */
+    double lang_min_p;                      /* Whisper this sure, or the answer is "not sure" (0.5) */
+    int lang_clip_s;                        /* each clip (20 s) */
+    int64_t lang_have_t;                    /* when Whisper's presence was last looked at */
+    bool lang_have;
     struct cardp cards[CARDS_MAX];
     int n_cards;
     bool stopping_all;                      /* the supervisor is ending: card processes go last */
@@ -559,6 +574,16 @@ static void save_system_config(struct super *s)
         }
     }
     {
+        /* the language check, before the closing brace */
+        size_t n = strlen(text);
+        char lq[40];
+
+        if (n > 3)
+            snprintf(text + n - 3, sizeof(text) - (n - 3),
+                     ",\n  \"language_check\": {\"every_h\": %g, \"expect\": %s, \"min_probability\": %.2f, \"clip_s\": %d}\n}\n",
+                     s->lang_every_s / 3600.0, json_quote(s->lang_expect, lq, sizeof(lq)), s->lang_min_p, s->lang_clip_s);
+    }
+    {
         /* the watchdog's limits, before the closing brace */
         struct wd_limits L;
         char *wbuf = NULL;
@@ -676,6 +701,22 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         s->ird_o.remux_s = (int)json_get_num(&doc, root, "ird_remux_s", 3 * 3600);   /* the tables are read every minute */
         s->ird_o.baseline_n = (int)json_get_num(&doc, root, "ird_baseline_n", 30);
         s->ird_o.probe_s = (int)json_get_num(&doc, root, "ird_probe_s", 5);
+    }
+    {
+        int l = json_get(&doc, root, "language_check");
+
+        s->lang_every_s = 6 * 3600;
+        snprintf(s->lang_expect, sizeof(s->lang_expect), "eng");
+        s->lang_min_p = 0.5;
+        s->lang_clip_s = 20;
+        if (l >= 0) {
+            s->lang_every_s = (int)(json_get_num(&doc, l, "every_h", 6) * 3600);
+            snprintf(s->lang_expect, sizeof(s->lang_expect), "%s", json_get_str(&doc, l, "expect", "eng"));
+            s->lang_min_p = json_get_num(&doc, l, "min_probability", 0.5);
+            s->lang_clip_s = (int)json_get_num(&doc, l, "clip_s", 20);
+            if (json_get(&doc, l, "every_s") >= 0)          /* the tests */
+                s->lang_every_s = (int)json_get_num(&doc, l, "every_s", 0);
+        }
     }
     {
         int a = json_get(&doc, root, "peers");
@@ -1285,6 +1326,8 @@ static void wd_snapshot(FILE *f, const char *chan, void *op)
     free(st);
 }
 
+static bool source_readable(const char *url);
+
 /* The watchdog's view of one sample of a running channel (watchdog.h). */
 static void wd_channel(struct chan *c, const struct json_doc *d, int root, double bi, double bo)
 {
@@ -1307,9 +1350,14 @@ static void wd_channel(struct chan *c, const struct json_doc *d, int root, doubl
         int outs = json_get(d, root, "outputs");
 
         c->n_out_dirs = 0;
+        c->lang_url[0] = 0;
         for (int j = outs >= 0 ? d->node[outs].first_child : -1; j >= 0 && c->n_out_dirs < 4; j = d->node[j].next) {
             const char *u = json_get_str(d, j, "url", ""), *p = NULL;
             char dir[256];
+
+            if (!c->lang_url[0] && !strncmp(u, "udp://", 6) && strncmp(json_get_str(d, j, "id", ""), "evrec", 5) &&
+                source_readable(u))
+                snprintf(c->lang_url, sizeof(c->lang_url), "%s", u);
 
             if (!strncmp(json_get_str(d, j, "id", ""), "evrec", 5))
                 continue;                   /* an evidence recording: the evidence folder is watched already */
@@ -1491,6 +1539,8 @@ static void wd_channel_state(struct chan *c, int64_t t)
     wd_observe(t, c->name, c->name, c->wd_group, WD_RESTARTS, recent >= L.restarts, what, 0);
     snprintf(what, sizeof(what), "channel failed: %s", c->why);
     wd_observe(t, c->name, c->name, c->wd_group, WD_FAILED, c->state == CH_FAILED, what, 0);
+    snprintf(what, sizeof(what), "audio in the wrong language: %.150s", c->lang_note);
+    wd_observe(t, c->name, c->name, c->wd_group, WD_LANGUAGE, c->state == CH_RUNNING && c->lang_wrong, what, 0);
     if (c->state != CH_RUNNING)
         for (size_t i = 0; i < sizeof(running_rules) / sizeof(running_rules[0]); i++)
             wd_observe(t, c->name, c->name, c->wd_group, running_rules[i], false, NULL, 0);
@@ -2422,6 +2472,155 @@ static void ping_result(const char *out, char *res, size_t len)
 }
 
 /* Each tick: tools that are done leave their evidence. */
+/* ---- the language check: Whisper on each channel's output (caricoder3 listen) --------- */
+
+static const char *lang_name(const char *iso)
+{
+    static const struct { const char *iso, *name; } N[] = {
+        { "eng", "English" }, { "spa", "Spanish" }, { "fra", "French" }, { "por", "Portuguese" }, { "deu", "German" },
+        { "ita", "Italian" }, { "nld", "Dutch" }, { "hat", "Haitian Creole" }, { NULL, NULL }
+    };
+
+    for (int i = 0; N[i].iso; i++)
+        if (!strcmp(N[i].iso, iso))
+            return N[i].name;
+    return iso;
+}
+
+/* What channel c should speak: its own "language", else the site's; ""
+ * or "-": not checked. */
+static void lang_expected(struct super *s, struct chan *c, char *out, size_t len)
+{
+    static struct json_doc doc;             /* main thread only */
+    char err[100];
+    int root = c->cfg ? json_parse(&doc, c->cfg, err, sizeof(err)) : -1;
+
+    snprintf(out, len, "%s", root >= 0 && json_get(&doc, root, "language") >= 0
+             ? json_get_str(&doc, root, "language", "") : s->lang_expect);
+    if (!strcmp(out, "-"))
+        out[0] = 0;
+}
+
+static bool lang_listen(struct super *s, struct chan *c, int64_t incident, bool keep, char *err, size_t errlen)
+{
+    char secs[16], file[600] = "", args[700], q[400];
+    char *argv[10];
+    int n = 0;
+
+    if (!c->lang_url[0]) {
+        snprintf(err, errlen, "no output of it can be read beside it (a multicast UDP output)");
+        return false;
+    }
+    if (keep && !evidence_on(s))
+        keep = false;
+    snprintf(secs, sizeof(secs), "%d", s->lang_clip_s);
+    argv[n++] = s->binary;
+    argv[n++] = "listen";
+    argv[n++] = c->lang_url;
+    argv[n++] = "--seconds";
+    argv[n++] = secs;
+    if (keep) {
+        evidence_path(s, c->name, "listen", "wav", file, sizeof(file));
+        argv[n++] = "--save";
+        argv[n++] = file;
+    }
+    argv[n] = NULL;
+    snprintf(args, sizeof(args), "{\"url\": %s, \"seconds\": %d, \"from\": \"output\"}", json_quote(c->lang_url, q, sizeof(q)),
+             s->lang_clip_s);
+    if (!job_spawn(s, "listen", c->name, incident, argv, file, args, s->lang_clip_s + 120, err, errlen))
+        return false;
+    c->lang_busy = incident == 0;
+    return true;
+}
+
+/* A check's answer (caricoder3 listen's JSON). */
+static void lang_result(struct super *s, struct chan *c, const char *result)
+{
+    static struct json_doc doc;             /* main thread only */
+    char err[100], want[8];
+    int root = result ? json_parse(&doc, result, err, sizeof(err)) : -1;
+    int64_t t = time(NULL);
+    const char *heard;
+    double p, vol;
+    int every = s->lang_every_s > 0 ? s->lang_every_s : 6 * 3600;
+
+    c->lang_busy = false;
+    c->lang_t = t;
+    lang_expected(s, c, want, sizeof(want));
+    if (root < 0 || !json_get_bool(&doc, root, "ok", false)) {
+        snprintf(c->lang_note, sizeof(c->lang_note), "could not listen: %.120s",
+                 root >= 0 ? json_get_str(&doc, root, "error", "?") : "no answer");
+        c->lang_due = t + (every < 1800 ? every : 1800);
+        return;
+    }
+    heard = json_get_str(&doc, root, "language", "");
+    p = json_get_num(&doc, root, "probability", 0);
+    vol = json_get_num(&doc, root, "mean_volume_db", -91);
+    c->lang_p = p;
+    c->lang_vol = vol;
+    if (p < s->lang_min_p || vol < -60) {
+        /* music, silence, a few words: says little either way */
+        snprintf(c->lang_note, sizeof(c->lang_note), "not sure (%s %.0f%%, sound at %.0f dB): heard again later",
+                 lang_name(heard), p * 100, vol);
+        c->lang_due = t + (every < 1800 ? every : 1800);
+        return;
+    }
+    snprintf(c->lang_heard, sizeof(c->lang_heard), "%s", heard);
+    if (!strcmp(heard, want)) {
+        c->lang_wrong_n = 0;
+        c->lang_wrong = false;
+        snprintf(c->lang_note, sizeof(c->lang_note), "%s, as it should be (%.0f%% sure)", lang_name(heard), p * 100);
+        c->lang_due = t + every;
+        return;
+    }
+    c->lang_wrong_n++;
+    snprintf(c->lang_note, sizeof(c->lang_note), "heard %s (%.0f%% sure), should be %s%s", lang_name(heard), p * 100,
+             lang_name(want), c->lang_wrong_n < 2 ? ": listening again in a minute" : "");
+    if (c->lang_wrong_n >= 2)
+        c->lang_wrong = true;
+    /* once is not enough: again soon, and while it is wrong, every 10 minutes */
+    c->lang_due = t + (c->lang_wrong ? (every < 600 ? every : 600) : (every < 60 ? every : 60));
+    log_info("%s: language check: %s", c->name, c->lang_note);
+}
+
+static void lang_tick(struct super *s)
+{
+    int64_t t = time(NULL), now = clock_now_ns();
+
+    if (s->lang_every_s <= 0)
+        return;
+    if (t - s->lang_have_t >= 60) {
+        const char *cli = getenv("CC3_WHISPER_CLI"), *model = getenv("CC3_WHISPER_MODEL");
+
+        s->lang_have_t = t;
+        s->lang_have = !access(cli ? cli : "/usr/local/bin/caricoder3-whisper-cli", X_OK) &&
+                       !access(model ? model : "/var/lib/caricoder3/models/whisper/ggml-base.bin", R_OK);
+    }
+    if (!s->lang_have)
+        return;
+    for (int i = 0; i < JOBS_MAX; i++)
+        if (s->jobs[i].used && !strcmp(s->jobs[i].tool, "listen"))
+            return;                         /* one at a time */
+    for (int i = 0; i < s->n; i++) {
+        struct chan *c = &s->ch[i];
+        char want[8], err[200];
+
+        /* not in its first two minutes (the tests check more often than that) */
+        int64_t warm = s->lang_every_s < 120 ? s->lang_every_s : 120;
+
+        if (c->state != CH_RUNNING || now - c->started_ns < warm * 1000000000LL || t < c->lang_due || !c->lang_url[0])
+            continue;
+        lang_expected(s, c, want, sizeof(want));
+        if (!want[0])
+            continue;
+        if (!lang_listen(s, c, 0, c->lang_wrong_n > 0, err, sizeof(err))) {
+            snprintf(c->lang_note, sizeof(c->lang_note), "could not listen: %.120s", err);
+            c->lang_due = t + 1800;
+        }
+        return;
+    }
+}
+
 static void jobs_tick(struct super *s)
 {
     int64_t now = clock_now_ns();
@@ -2464,8 +2663,19 @@ static void jobs_tick(struct super *s)
                 }
                 if (j->file[0] && access(j->file, F_OK) != 0)
                     j->file[0] = 0;
-                history_evidence_add(time(NULL), j->incident, j->chan[0] ? j->chan : NULL, j->tool, j->args, result,
-                                     j->file);
+                if (!strcmp(j->tool, "listen") && !j->incident) {
+                    /* the language check: its answer goes to the channel; a clip
+                     * kept (a second hearing) goes to the evidence */
+                    struct chan *c = find_chan(s, j->chan);
+
+                    if (c)
+                        lang_result(s, c, result);
+                    if (j->file[0])
+                        history_evidence_add(time(NULL), 0, j->chan, j->tool, j->args, result, j->file);
+                } else {
+                    history_evidence_add(time(NULL), j->incident, j->chan[0] ? j->chan : NULL, j->tool, j->args,
+                                         result, j->file);
+                }
                 free(out);
                 unlink(j->out);
             }
@@ -2564,6 +2774,11 @@ static void on_incident(int64_t id, const char *chan, const char *group, enum wd
         if (!tool_record_input(s, c, 60, 20, id, err, sizeof(err)) &&
             !(source_readable(url) && tool_probe(s, c->name, url, program, 20, true, id, err, sizeof(err))) &&
             !tool_record_output(s, c, 20, id, err, sizeof(err)))
+            log_info("evidence for %s: %s", c->name, err);
+        break;
+    case WD_LANGUAGE:
+        /* a clip of what it says now, kept for a person to listen to */
+        if (c && !lang_listen(s, c, id, true, err, sizeof(err)))
             log_info("evidence for %s: %s", c->name, err);
         break;
     case WD_NO_INPUT:
@@ -3257,6 +3472,7 @@ static void tick(struct super *s)
     hist_tick(s);
     disk_tick(s);
     jobs_tick(s);
+    lang_tick(s);
     {
         static int64_t wd_last;
         int64_t t = time(NULL);
@@ -3502,6 +3718,9 @@ struct chan_view {
     char pv_drop[128];
     char pv_why[120];
     double pv_uptime;
+    int64_t lang_t;
+    char lang_note[160], lang_heard[8];
+    bool lang_wrong, lang_busy, lang_can;
 };
 
 static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
@@ -3529,6 +3748,12 @@ static void chan_view_take(struct chan *c, struct chan_view *v, bool with_log)
     v->pv_uptime = c->pv_pid > 0 ? (double)(now - c->pv_started_ns) / 1e9 : 0;
     snprintf(v->pv_drop, sizeof(v->pv_drop), "%s", c->pv_drop);
     snprintf(v->pv_why, sizeof(v->pv_why), "%s", c->pv_why);
+    v->lang_t = c->lang_t;
+    snprintf(v->lang_note, sizeof(v->lang_note), "%s", c->lang_note);
+    snprintf(v->lang_heard, sizeof(v->lang_heard), "%s", c->lang_heard);
+    v->lang_wrong = c->lang_wrong;
+    v->lang_busy = c->lang_busy;
+    v->lang_can = c->lang_url[0] != 0;
     if (with_log) {
         char *out = NULL;
         size_t len = 0;
@@ -3678,6 +3903,11 @@ static void json_chan_view(struct super *s, const struct chan_view *v, FILE *f, 
         fprintf(f, ", \"memory_mb\": %.0f", v->rss_mb);
     if (v->card_mb >= 0)
         fprintf(f, ", \"card_memory_mb\": %.0f", v->card_mb);
+    fprintf(f, ", \"language\": {\"checked\": %lld, \"heard\": %s, ", (long long)v->lang_t,
+            json_quote(v->lang_heard, q, sizeof(q)));
+    fprintf(f, "\"note\": %s, \"wrong\": %s, \"listening\": %s, \"can\": %s}",
+            json_quote(v->lang_note, q, sizeof(q)), v->lang_wrong ? "true" : "false", v->lang_busy ? "true" : "false",
+            v->lang_can ? "true" : "false");
     fprintf(f, ", \"config\": %s", v->cfg ? v->cfg : "null");
     if (v->state == CH_RUNNING || full) {
         char *st = chan_stats(s, &tmp);
@@ -4935,6 +5165,19 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             if (c->state == CH_FAILED)
                 c->state = CH_STOPPED;
             http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+        } else if (!strcmp(rest, "listen") && !strcmp(req->method, "POST")) {
+            /* the language check, now */
+            char lerr[200];
+
+            if (c->state != CH_RUNNING) {
+                api_error(resp, 409, "the channel is not running");
+            } else if (c->lang_busy) {
+                http_resp_text(resp, 200, "application/json", "{\"ok\": true, \"note\": \"listening already\"}\n");
+            } else if (!lang_listen(s, c, 0, true, lerr, sizeof(lerr))) {
+                api_error(resp, 409, lerr);
+            } else {
+                http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
+            }
         } else if (!strcmp(rest, "restart") && !strcmp(req->method, "POST")) {
             ev(c->name, "info", "user", "restart asked for");
             c->want = true;

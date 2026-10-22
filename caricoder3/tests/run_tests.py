@@ -3485,6 +3485,98 @@ def supervisor_irds():
 
 
 @test
+def supervisor_language():
+    """The language check: Whisper (a stand-in here) on a clip of each channel's output, through caricoder3 listen; heard wrong twice running is an incident with the clip kept; right again, it closes."""
+    import base64
+    import urllib.request
+    if not shutil.which("ffmpeg"):
+        return "SKIPPED: ffmpeg not installed"
+    root = w("super_lang")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin, pout = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    # a source with real sound and pictures (ffmpeg), and a Whisper that says what it is told
+    media = os.path.join(root, "media.ts")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=8",
+                    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=8", "-c:v", "libx264", "-g", "25",
+                    "-c:a", "aac", "-muxrate", "1500000", "-f", "mpegts", media], check=True)
+    said = os.path.join(root, "whisper-says")
+    open(said, "w").write("en 0.95")
+    fake = os.path.join(root, "whisper-cli")
+    open(fake, "w").write("#!/bin/sh\nset -- $(cat %s)\necho \"whisper_full_with_state: auto-detected language: $1 (p = $2)\"\n" % said)
+    os.chmod(fake, 0o755)
+    model = os.path.join(root, "model.bin")
+    open(model, "w").write("x")
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "evidence": os.path.join(root, "evidence"),
+               "language_check": {"every_s": 4, "clip_s": 5, "expect": "eng"},
+               "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth, method=method,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+
+    def wait_for(fn, secs, what):
+        end = time.time() + secs
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.5)
+        raise Fail(f"{what}: not within {secs} s")
+    env = dict(os.environ, CC3_WHISPER_CLI=fake, CC3_WHISPER_MODEL=model)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True, env=env)
+    stop = threading.Event()
+
+    def play():
+        p = Player("127.0.0.1", pin)
+        while not stop.is_set():
+            p.play(media)
+        p.close()
+    threading.Thread(target=play, daemon=True).start()
+    try:
+        wait_up(port)
+        api("/api/channels/c1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "enabled": True})
+        wait_for(lambda: api("/api/channels/c1")["channel"]["state"] == "running", 15, "the channel running")
+        api("/api/channels/c1/outputs", "POST", {"url": f"udp://239.77.3.1:{pout}?iface=lo&ttl=1", "save": True})
+        lang = lambda: api("/api/channels/c1")["channel"]["language"]
+        ok = wait_for(lambda: (lambda L: L if "English, as it should be" in L["note"] else None)(lang()), 60, "heard English")
+        need(ok["heard"] == "eng" and not ok["wrong"], f"first: {ok}")
+        # the audio turns Spanish: twice running is an incident, with a clip of it kept
+        open(said, "w").write("es 0.93")
+        inc = wait_for(lambda: [x for x in api("/api/incidents")["incidents"] if x["rule"] == "wrong_language"], 60,
+                       "the wrong language incident")[0]
+        need(inc["channel"] == "c1" and "heard Spanish (93% sure), should be English" in inc["summary"], f"incident: {inc}")
+        ev = wait_for(lambda: [e for e in api(f"/api/incidents/{inc['id']}")["evidence"] if e["tool"] == "listen" and e.get("file")],
+                      40, "the clip kept with it")[0]
+        clip = os.path.join(root, "evidence", ev["file"])
+        need(ev["file"].endswith(".wav") and os.path.getsize(clip) > 10000 and ev["result"]["language"] == "spa", f"evidence: {ev}")
+        # not sure (music, a few words): no change either way
+        open(said, "w").write("en 0.20")
+        wait_for(lambda: "not sure" in lang()["note"], 30, "not sure")
+        need(lang()["wrong"], "a 'not sure' cleared it")
+        # English again: over
+        open(said, "w").write("en 0.97")
+        wait_for(lambda: all(x["closed"] for x in api("/api/incidents")["incidents"] if x["rule"] == "wrong_language"), 40,
+                 "the incident closed")
+    finally:
+        stop.set()
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"heard English, then Spanish twice: incident with a {os.path.getsize(clip) // 1000} kB clip; not sure left it; English closed it"
+
+
+@test
 def supervisor_technician():
     """The technician: an incident opens, the model server is started for it, and the answer (JSON to the schema) is kept on the incident and said in the conversation. Needs CC3_LLAMA_SERVER and CC3_TEST_MODEL (any small GGUF)."""
     import base64

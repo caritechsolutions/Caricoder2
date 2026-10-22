@@ -201,6 +201,24 @@ install_fdk_aac() {
 # The technician's notes (shipped: replaced on each install; the site's
 # own in /etc/caricoder3/knowledge: never touched), and in the background
 # llama.cpp's server and the model (scripts/technician-setup.sh).
+# The ears: whisper.cpp and its model, for the language check
+# (scripts/whisper-setup.sh), in the background.
+install_whisper() {
+    local mark=/var/lib/caricoder3/whisper-setup.running
+    if [ -f "$mark" ] && kill -0 "$(cat "$mark" 2>/dev/null)" 2>/dev/null; then
+        note "the language check (Whisper) is still being set up (/var/log/caricoder3-whisper-setup.log)"
+        return 0
+    fi
+    if [ -x /usr/local/bin/caricoder3-whisper-cli ] && [ -f /var/lib/caricoder3/models/whisper/ggml-base.bin ] &&
+       grep -q "^v1.8.7$" "$LIBS_DIR/whisper-cli.version" 2>/dev/null && command -v ffmpeg >/dev/null 2>&1; then
+        note "language check (Whisper) installed"
+        return 0
+    fi
+    setsid nohup bash "$SRC_DIR/scripts/whisper-setup.sh" >>/var/log/caricoder3-whisper-setup.log 2>&1 </dev/null &
+    note "the language check (Whisper) is being built and its model (142 MB) downloaded, in the background:"
+    note "  tail -f /var/log/caricoder3-whisper-setup.log"
+}
+
 install_technician() {
     install -d "$PREFIX/share/caricoder3/knowledge" /etc/caricoder3/knowledge
     rm -f "$PREFIX/share/caricoder3/knowledge/"*.md
@@ -381,6 +399,7 @@ main() {
     if [ "$WITH_TECHNICIAN" -eq 1 ]; then
         say "Technician"
         install_technician
+        install_whisper
     fi
 
     say "Done: $("$PREFIX/bin/caricoder3" --version)"

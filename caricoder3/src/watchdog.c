@@ -45,6 +45,7 @@ static const struct {
     [WD_IRD_CN]      = { "ird_cn_low", "IRD signal (C/N) low", "warn", false },
     [WD_REMUX]       = { "remux_mismatch", "IRD output differs from the satellite", "warn", false },
     [WD_SAT_CHANGED] = { "satellite_changed", "a service changed on the satellite", "warn", false },
+    [WD_LANGUAGE]    = { "wrong_language", "audio in the wrong language", "error", true },
 };
 
 #define ENTRIES_MAX 2048

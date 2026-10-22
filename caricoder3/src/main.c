@@ -863,6 +863,7 @@ int super_main(int argc, char **argv);      /* super.c */
 int super_tech_eval(int argc, char **argv); /* super.c */
 int super_tech_prompt(int argc, char **argv); /* super.c */
 int probe_main(int argc, char **argv);      /* probe.c */
+int listen_main(int argc, char **argv);     /* listen.c */
 int share_main(int argc, char **argv);      /* share.c */
 
 static int ctl_main(int argc, char **argv)
@@ -1087,6 +1088,7 @@ static void usage(FILE *f)
 "       caricoder3 ctl SOCKET|NAME COMMAND ...   (outputs at run time; ctl -h)\n"
 "       caricoder3 serve [--config PATH]          (the supervisor, API and GUI; serve -h)\n"
 "       caricoder3 probe URL [--seconds N]        (what is in a source, as JSON; probe -h)\n"
+"       caricoder3 listen URL [--pid P]           (which language is spoken in it: Whisper; listen -h)\n"
 "\n"
 "  -i, --input URL          udp://[source@]group:port[?iface=eth0&buf=BYTES]\n"
 "                           rtp://... (RTP is also detected automatically)\n"
@@ -1323,6 +1325,8 @@ int main(int argc, char **argv)
         return super_tech_prompt(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "probe"))
         return probe_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "listen"))
+        return listen_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "share"))
         return share_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "card"))
