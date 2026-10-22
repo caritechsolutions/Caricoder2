@@ -844,10 +844,12 @@ void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o)
 {
     pthread_mutex_lock(&I.lock);
     {
-        struct ird old[IRDS_MAX];
-        int old_n = I.n;
+        /* on the heap: a few hundred kB, called from the web threads */
+        struct ird *old = malloc(sizeof(I.ird));
+        int old_n = old ? I.n : 0;
 
-        memcpy(old, I.ird, sizeof(old));
+        if (old)
+            memcpy(old, I.ird, sizeof(I.ird));
         I.o = *o;
         snprintf(I.binary, sizeof(I.binary), "%s", o->binary ? o->binary : "caricoder3");
         I.o.binary = I.binary;
@@ -867,6 +869,15 @@ void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o)
             }
             d->st.c = list[k];
         }
+        for (int j = 0; j < old_n; j++) {
+            bool kept = false;
+
+            for (int k = 0; k < I.n; k++)
+                kept |= I.ird[k].prev == old[j].prev;
+            if (!kept)
+                free(old[j].prev);      /* an IRD that went: its tables */
+        }
+        free(old);
     }
     if (!I.started && I.n) {
         I.started = true;
@@ -919,10 +930,19 @@ int ird_get(struct ird_state *out, int max)
     return n;
 }
 
+/* Every IRD's state, on the heap (the callers run on threads with modest stacks). */
+static struct ird_state *states(int *n)
+{
+    struct ird_state *st = malloc(sizeof(*st) * IRDS_MAX);
+
+    *n = st ? ird_get(st, IRDS_MAX) : 0;
+    return st;
+}
+
 void ird_watch(int64_t t, int cn_drop_db)
 {
-    struct ird_state st[IRDS_MAX];
-    int n = ird_get(st, IRDS_MAX);
+    int n;
+    struct ird_state *st = states(&n);
 
     for (int k = 0; k < n; k++) {
         const struct ird_state *s = &st[k];
@@ -943,6 +963,7 @@ void ird_watch(int64_t t, int cn_drop_db)
         snprintf(what, sizeof(what), "IRD %.40s: the remux differs from the satellite: %.380s", s->c.name, s->tables_what);
         wd_observe(t, subj, NULL, "", WD_REMUX, s->answering && s->tables_bad >= 2, what, 0);
     }
+    free(st);
 }
 
 static void jstr(FILE *f, const char *s)
@@ -1033,24 +1054,28 @@ static bool same_url(const char *a, const char *b)
 
 bool ird_for_url(FILE *f, const char *url)
 {
-    struct ird_state st[IRDS_MAX];
-    int n = ird_get(st, IRDS_MAX);
+    int n;
+    struct ird_state *st = states(&n);
 
-    if (!url || !*url)
+    if (!url || !*url) {
+        free(st);
         return false;
+    }
     for (int k = 0; k < n; k++)
         for (int i = 0; i < st[k].c.n_out; i++)
             if (same_url(url, st[k].c.outputs[i])) {
                 one_json(f, &st[k]);
+                free(st);
                 return true;
             }
+    free(st);
     return false;
 }
 
 void ird_json(FILE *f)
 {
-    struct ird_state st[IRDS_MAX];
-    int n = ird_get(st, IRDS_MAX);
+    int n;
+    struct ird_state *st = states(&n);
 
     fputc('[', f);
     for (int k = 0; k < n; k++) {
@@ -1058,4 +1083,5 @@ void ird_json(FILE *f)
         one_json(f, &st[k]);
     }
     fputc(']', f);
+    free(st);
 }

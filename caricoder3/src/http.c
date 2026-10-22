@@ -336,7 +336,7 @@ static void *accept_thread(void *arg)
         c->fd = fd;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        pthread_attr_setstacksize(&attr, 512 * 1024);
+        pthread_attr_setstacksize(&attr, 2 * 1024 * 1024);      /* the API handler's frame is large (~370 kB) */
         if (pthread_create(&th, &attr, conn_thread, c) != 0) {
             close(fd);
             free(c);
