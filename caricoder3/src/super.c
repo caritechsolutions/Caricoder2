@@ -429,6 +429,22 @@ static bool ird_conf_read(const struct json_doc *d, int j, struct ird_conf *c, c
         return false;
     }
     {
+        /* the tuners in use: ...?tuners=1 (the others are not judged) */
+        const char *q = strstr(c->address, "?tuners=");
+
+        c->tuners = 0;
+        for (const char *p = q ? q + 8 : NULL; p;) {
+            char *end;
+            long n = strtol(p, &end, 10);
+
+            if (end == p)
+                break;
+            if (n >= 1 && n <= IRD_TUNERS)
+                c->tuners |= 1u << (n - 1);
+            p = *end == ',' ? end + 1 : NULL;
+        }
+    }
+    {
         /* the kind may be said in the address: mcr://admin:admin@192.168.110.15 */
         const char *sep = strstr(c->address, "://");
 

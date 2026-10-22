@@ -66,9 +66,9 @@ static void ird_base_url(const char *address, char *url, size_t len)
     size_t hl;
 
     at = strchr(h, '@');
-    if (at && at < h + strcspn(h, "/"))
+    if (at && at < h + strcspn(h, "/?"))
         h = at + 1;                     /* user:password@ */
-    hl = strcspn(h, "/");
+    hl = strcspn(h, "/?");
     snprintf(url, len, "http://%.*s%s", (int)hl, h, memchr(h, ':', hl) ? "" : ":80");
 }
 
@@ -80,7 +80,7 @@ static void ird_auth(const char *address, const char *dflt, char *out, size_t le
     char up[128];
     size_t n, o = 0;
 
-    if (at && at < h + strcspn(h, "/"))
+    if (at && at < h + strcspn(h, "/?"))
         snprintf(up, sizeof(up), "%.*s", (int)(at - h), h);
     else
         snprintf(up, sizeof(up), "%s", dflt);
@@ -295,10 +295,13 @@ static void poll_one(int k)
                     double nn;
 
                     tu->low = tu->cn_normal >= 0 && tu->cn < tu->cn_normal - L.ird_cn_drop_db ? tu->low + 1 : 0;
-                    nn = series_add(&d->cn[i], tu->cn);
-                    tu->n_samples = d->cn[i].n;
-                    if (nn >= 0)
-                        tu->cn_normal = nn;
+                    if (!tu->low) {
+                        /* a low reading is not let into the normal (a long fade would drag it down) */
+                        nn = series_add(&d->cn[i], tu->cn);
+                        tu->n_samples = d->cn[i].n;
+                        if (nn >= 0)
+                            tu->cn_normal = nn;
+                    }
                 } else {
                     tu->low = 0;
                 }
@@ -320,9 +323,11 @@ static void poll_one(int k)
                     double nn;
 
                     st->temp_high = limit > 0 && temp > limit ? st->temp_high + 1 : 0;
-                    nn = series_add(&d->temp, temp);
-                    if (nn >= 0)
-                        st->temp_normal = nn;
+                    if (!st->temp_high) {
+                        nn = series_add(&d->temp, temp);
+                        if (nn >= 0)
+                            st->temp_normal = nn;
+                    }
                 }
             }
         } else {
@@ -1252,8 +1257,10 @@ void ird_watch(int64_t t, int cn_drop_db)
             if (s->n_tuners > 1)
                 snprintf(tn, sizeof(tn), " tuner %d", i + 1);
             snprintf(what, sizeof(what), "IRD %.40s%s: tuner not locked (no signal)", s->c.name, tn);
-            wd_observe(t, subj, NULL, "", WD_IRD_UNLOCKED, i < s->n_tuners && s->answering && tu->have && !tu->locked,
-                       what, 0);
+            bool used = !s->c.tuners || (s->c.tuners >> i & 1);
+
+            wd_observe(t, subj, NULL, "", WD_IRD_UNLOCKED,
+                       used && i < s->n_tuners && s->answering && tu->have && !tu->locked, what, 0);
             if (isnan(tu->ebn0))
                 snprintf(what, sizeof(what), "IRD %.40s%s: C/N %.1f dB, normally %.1f dB (level %.1f dBm, BER %.1e)",
                          s->c.name, tn, tu->cn, tu->cn_normal, tu->strength, tu->ber);
@@ -1261,7 +1268,7 @@ void ird_watch(int64_t t, int cn_drop_db)
                 snprintf(what, sizeof(what), "IRD %.40s%s: C/N %.1f dB, normally %.1f dB (Eb/N0 %.1f dB, BER %.1e)",
                          s->c.name, tn, tu->cn, tu->cn_normal, tu->ebn0, tu->ber);
             wd_observe(t, subj, NULL, "", WD_IRD_CN,
-                       i < s->n_tuners && s->answering && tu->locked && tu->low >= 2 && cn_drop_db > 0, what, 0);
+                       used && i < s->n_tuners && s->answering && tu->locked && tu->low >= 2 && cn_drop_db > 0, what, 0);
         }
         snprintf(subj, sizeof(subj), "ird/%.40s", s->c.name);
         snprintf(what, sizeof(what), "IRD %.40s: %.1f °C inside, normally %.1f °C", s->c.name, s->temp_c, s->temp_normal);
@@ -1342,7 +1349,8 @@ static void one_json(FILE *f, const struct ird_state *s)
         fprintf(f, ", \"cn_normal_db\": null");
     fprintf(f, ", \"readings\": %d, \"tuners\": [", s->t[0].n_samples);
     for (int i = 0; i < s->n_tuners; i++) {
-        fprintf(f, "%s{\"tuner\": %d, \"have\": %s", i ? ", " : "", i + 1, s->t[i].have ? "true" : "false");
+        fprintf(f, "%s{\"tuner\": %d, \"used\": %s, \"have\": %s", i ? ", " : "", i + 1,
+                !s->c.tuners || (s->c.tuners >> i & 1) ? "true" : "false", s->t[i].have ? "true" : "false");
         if (s->t[i].have)
             tuner_json(f, &s->t[i]);
         fprintf(f, ", \"readings\": %d}", s->t[i].n_samples);

@@ -50,6 +50,7 @@ struct ird_conf {
     char raw[256];              /* its raw tuner output (udp://...): "" none */
     char outputs[IRD_OUTS][256]; /* what our channels read from it */
     int n_out;
+    unsigned tuners;            /* the tuners in use, a bit each (1: tuner 1); 0: all. Address ...?tuners=1,2 */
 };
 
 struct ird_opts {

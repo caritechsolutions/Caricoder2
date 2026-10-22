@@ -1097,13 +1097,13 @@ function irdsCard() {
   const rows = L.map(x => {
     const r = x.remux || {}, T = (x.tuners && x.tuners.length) ? x.tuners : [x];
     const lowOf = u => u.locked && u.cn_db != null && u.cn_normal_db != null && u.cn_db < u.cn_normal_db - 3;
-    const low = T.some(lowOf), unlocked = T.some(u => !u.locked);
+    const low = T.some(u => u.used !== false && lowOf(u)), unlocked = T.some(u => u.used !== false && !u.locked);
     const one = u => !u.locked ? `<span class="bad">not locked</span>`
       : `C/N <b class="${lowOf(u) ? "warn" : ""}">${f1(u.cn_db)} dB</b> <span class="dim">(normally ${u.cn_normal_db == null ? "not known yet: " + (u.readings || 0) + " readings" : f1(u.cn_normal_db) + " dB"})</span>${u.ebn0_db != null ? ` · Eb/N0 ${f1(u.ebn0_db)} dB` : ""} · BER ${u.ber == null ? "—" : u.ber.toExponential(1)} · ${f1(u.strength_dbm)} dBm`;
     const up = s => s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
     const health = x.uptime_s != null ? `<div class="dim">up ${up(x.uptime_s)}${x.temperature_c != null ? ` · <span class="${x.temperature_normal_c != null && x.temperature_c > x.temperature_normal_c + 10 ? "warn" : ""}">${f1(x.temperature_c)} °C</span>${x.temperature_normal_c != null ? ` (normally ${f1(x.temperature_normal_c)} °C)` : ""}` : ""}${x.restarted ? ` · <span class="warn">restarted ${fmtDur(Math.round(now - x.restarted))} ago</span>` : ""}</div>` : "";
     const tun = !x.answering ? `<span class="bad">not answering${x.error ? ": " + esc(x.error) : ""}</span>`
-      : (T.length > 1 ? T.map((u, i) => `<div>tuner ${i + 1}: ${one(u)}</div>`).join("") : one(T[0])) + health;
+      : (T.length > 1 ? T.map((u, i) => `<div>tuner ${i + 1}: ${u.used === false ? `<span class="dim">not used</span>` : one(u)}</div>`).join("") : one(T[0])) + health;
     const tb = x.tables || {};
     const tables = !tb.checked ? ""
       : tb.error ? `<div><span class="warn">its tables: ${esc(tb.error)}</span></div>`
@@ -1129,7 +1129,7 @@ function editIrds() {
   const d = $("#dlg"), L = (sys && sys.irds) || [];
   d.innerHTML = `<h3>IRDs</h3><div class="f"><label>One a line: name, address, raw output, outputs our channels read</label>
     <textarea id="i_list" rows="6" placeholder="ird10 192.168.110.10 udp://224.100.100.7:33500 udp://224.100.1.5:49500">${esc(L.map(x => [x.name, x.address, x.raw || "-", ...(x.outputs || [])].join(" ")).join("\n"))}</textarea></div>
-    <div class="help">The raw output is the whole transponder as the tuner receives it ("-" if the IRD has none); the outputs are what our channels read (the remux). Kinds of IRD understood: Upcom UC-IRD+ (just its address), and the Multi-Channel CI-Receiver as mcr://192.168.110.15 (mcr://user:password@... if not admin/admin).</div>
+    <div class="help">The raw output is the whole transponder as the tuner receives it ("-" if the IRD has none); the outputs are what our channels read (the remux). Kinds of IRD understood: Upcom UC-IRD+ (just its address), and the Multi-Channel CI-Receiver as mcr://192.168.110.15 (mcr://user:password@... if not admin/admin; ...?tuners=1 when only tuner 1 is in use).</div>
     <div id="i_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="i_go">Save</button></div>`;
   $("#i_go").onclick = async () => {
     const irds = $("#i_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return { name: m[0], address: m[1] || "", kind: /^mcr:\/\//.test(m[1] || "") ? "mcr" : "upcom", raw: m[2] && m[2] !== "-" ? m[2] : "", outputs: m.slice(3) }; });

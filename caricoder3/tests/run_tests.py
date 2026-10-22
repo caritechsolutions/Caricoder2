@@ -3531,7 +3531,8 @@ def supervisor_irds_mcr():
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
                "ird_poll_s": 1, "ird_remux_s": 5, "ird_baseline_n": 4, "ird_probe_s": 2,
-               "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]}],
+               "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]},
+                        {"name": "ird16", "address": f"mcr://admin:admin@127.0.0.1:{web}/?tuners=1", "outputs": []}],
                "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
 
@@ -3563,6 +3564,14 @@ def supervisor_irds_mcr():
     try:
         wait_up(port)
         x = wait_for(lambda: [i for i in api("/api/irds")["irds"] if i.get("cn_normal_db") is not None], 20, "a normal C/N")[0]
+        # one with only tuner 1 in use: its second tuner, not locked, is no problem
+        tuners["tuner"][1]["status"].update({"lock": 0, "c_n_100": "0.00 dB", "power": "-94.86 dBm"})
+        time.sleep(6)
+        y = [i for i in api("/api/irds")["irds"] if i["name"] == "ird16"][0]
+        need(y["answering"] and [t["used"] for t in y["tuners"]] == [True, False], f"ird16: {y}")
+        unl = incidents("ird_unlocked")
+        need(len(unl) == 1 and "ird15 tuner 2" in unl[0]["summary"], f"unlocked: {[i['summary'] for i in unl]}")
+        tuners["tuner"][1]["status"].update({"lock": 1, "c_n_100": "12.25 dB", "power": "-29.21 dBm"})
         need(x["kind"] == "mcr" and len(x["tuners"]) == 2 and x["tuners"][1]["strength_dbm"] == -29.2 and
              x["tuners"][0]["cn_db"] in (12.2, 12.3), f"tuners: {x['tuners']}")
         need(x["uptime_s"] == 91881 and x["temperature_c"] == 67.1, f"health: {x.get('uptime_s')} {x.get('temperature_c')}")
@@ -3575,7 +3584,7 @@ def supervisor_irds_mcr():
         tuners["tuner"][1]["status"]["c_n_100"] = "12.25 dB"
         # a power cut: up for 2 minutes now
         status["uptime"] = "00:02:05"
-        rs = wait_for(lambda: incidents("ird_restarted"), 15, "the restart")[0]
+        rs = wait_for(lambda: [i for i in incidents("ird_restarted") if "ird15 " in i["summary"]], 15, "the restart")[0]
         need("IRD ird15 restarted: up 2 min (it had been up 25 h 31 min)" in rs["summary"], f"restart: {rs['summary']}")
         # its output changes: said, against the probe before
         playing["file"] = b
