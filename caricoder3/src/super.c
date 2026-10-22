@@ -1283,6 +1283,8 @@ static char *chan_stats(struct super *s, struct chan *c);
 /* Evidence for a new incident: the channel's statistics as they are. */
 static char *chan_stats(struct super *s, struct chan *c);
 static struct chan *find_chan(struct super *s, const char *name);
+static void chan_source(const struct chan *c, char *url, size_t len, int *program);
+
 static void wd_snapshot(FILE *f, const char *chan, void *op)
 {
     struct super *s = op;
@@ -1301,7 +1303,12 @@ static void wd_snapshot(FILE *f, const char *chan, void *op)
             char *ib = NULL;
             size_t il = 0;
             FILE *m = open_memstream(&ib, &il);
-            bool have = m && ird_for_url(m, c->wd_group);
+            char src[512];
+            int prog;
+            bool have;
+
+            chan_source(c, src, sizeof(src), &prog);    /* its source: not a shared reader's port */
+            have = m && ird_for_url(m, src);
 
             if (m)
                 fclose(m);

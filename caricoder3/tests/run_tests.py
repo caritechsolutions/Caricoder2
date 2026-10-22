@@ -3451,7 +3451,10 @@ def supervisor_irds():
         pc.close()
         ni = wait_for(lambda: [x for x in incidents("no_input") if x["channel"] == "c1"], 20, "the channel's no input")[0]
         got = (ni["detail"].get("then") or {}).get("ird") or {}
-        need(got.get("name") == "ird10" and got.get("cn_db") == 12.1, f"the channel's incident without the IRD: {list(ni['detail'].get('then', {}).keys())}")
+        need(got.get("name") == "ird10" and got.get("cn_db") == 12.1,
+             f"the channel's incident without the IRD: {list(ni['detail'].get('then', {}).keys())}; "
+             f"its input {ni['detail'].get('then', {}).get('input', {}).get('url')}; the IRDs' outputs "
+             f"{[x['outputs'] for x in api('/api/irds')['irds']]}")
         # rain: the C/N falls
         tuner["cn"] = 6.0
         low = wait_for(lambda: incidents("ird_cn_low"), 15, "low C/N")[0]
