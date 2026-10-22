@@ -27,7 +27,9 @@ them as more is known; keep each fact on its own line.
 
 - Four IRDs, management interfaces 192.168.110.10, .11, .15, .16.
 - Their outputs go to the multicast VLAN. Setup to be described one IRD
-  at a time.
+  at a time: 192.168.110.10 is in ird-110-10.md.
+- "The provider" is United Teleports, the uplink (Eutelsat 65W, 3
+  transponders): rain at their end can hit many channels at once.
 - Known source multiplexes: 224.100.1.5:49500 (about 40 Mb/s, carries
   bet 1840, wbtv 2090, godtv ...), 224.10.10.10:10000 (dischd 201).
 - 3 or 4 MPTS of about 40 Mb/s each, about 30 channels per MPTS, most of
