@@ -44,6 +44,9 @@ void tech_queue(int64_t id, bool now);
 /* The request the model would be sent about incident `id` (system and
  * user messages, schema): to read and improve the prompt. */
 bool tech_prompt(FILE *f, int64_t id);
+/* The same with a given configuration (no technician running: the
+ * tech-prompt command, with history_open_readonly). */
+bool tech_prompt_with(const struct tech_conf *c, FILE *f, int64_t id);
 
 /* Training data: one JSON line per incident a person gave a verdict on
  * ({"incident", "verdict", "messages": [system, user, assistant]}, the

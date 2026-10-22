@@ -63,6 +63,10 @@ What the evidence covers, and what it does not:
   cause again. When a person said you were wrong, do not repeat that
   answer for a case like it unless the evidence is clearly different, and
   say so.
+- Each past incident says "where" it was: "same channel or source" (the
+  strongest guide), or "elsewhere": the same kind of incident on another
+  channel, shown for how a person judged such a case. What it was there
+  need not be what it is here; use it for how to reason, not as the answer.
 
 ## Read the record, never add to it
 

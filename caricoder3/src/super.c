@@ -4973,6 +4973,119 @@ int super_tech_eval(int argc, char **argv)
     return tech_eval(&s.tech, &o);
 }
 
+/* The JSON string starting at `p` (just after its opening quote),
+ * unescaped onto `f`; returns where it ended. */
+static const char *put_unescaped(FILE *f, const char *p)
+{
+    for (; *p && *p != '"'; p++) {
+        if (*p != '\\' || !p[1]) {
+            fputc(*p, f);
+            continue;
+        }
+        switch (*++p) {
+        case 'n': fputc('\n', f); break;
+        case 't': fputc('\t', f); break;
+        case 'r': break;
+        case 'u': {
+            unsigned v = 0;
+
+            if (sscanf(p + 1, "%4x", &v) == 1)
+                p += 4;
+            if (v < 0x80)
+                fputc((int)v, f);
+            else if (v < 0x800) {
+                fputc(0xc0 | (v >> 6), f);
+                fputc(0x80 | (v & 0x3f), f);
+            } else {
+                fputc(0xe0 | (v >> 12), f);
+                fputc(0x80 | ((v >> 6) & 0x3f), f);
+                fputc(0x80 | (v & 0x3f), f);
+            }
+            break;
+        }
+        default: fputc(*p, f); break;
+        }
+    }
+    return p;
+}
+
+int super_tech_prompt(int argc, char **argv);
+
+/* caricoder3 tech-prompt: exactly what the technician would be sent about
+ * an incident, without a model: to read it, and check the past cases it
+ * is shown. */
+int super_tech_prompt(int argc, char **argv)
+{
+    static struct super s;
+    char err[300], *out = NULL;
+    size_t len = 0;
+    int64_t id = 0;
+    bool raw = false, ok;
+    FILE *m;
+
+    snprintf(s.config_path, sizeof(s.config_path), DEFAULT_CONFIG);
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc)
+            snprintf(s.config_path, sizeof(s.config_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--id") && i + 1 < argc)
+            id = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--json"))
+            raw = true;
+        else
+            id = -1;
+    }
+    if (id <= 0) {
+        fprintf(stderr,
+                "usage: caricoder3 tech-prompt --id INCIDENT [--json] [--config FILE]\n"
+                "  Prints what the technician would be sent about that incident: its notes, the\n"
+                "  incident, and the past cases it is shown. --json: the request as sent.\n");
+        return 2;
+    }
+    if (!load_system_config(&s, err, sizeof(err))) {
+        fprintf(stderr, "%s\n", err);
+        return 1;
+    }
+    if (!history_open_readonly(s.history_path, err, sizeof(err))) {
+        fprintf(stderr, "history: %s\n", err);
+        return 1;
+    }
+    snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
+    m = open_memstream(&out, &len);
+    if (!m)
+        return 1;
+    ok = tech_prompt_with(&s.tech, m, id);
+    fclose(m);
+    if (!ok || !out || !len) {
+        fprintf(stderr, "no incident %lld in the history\n", (long long)id);
+        free(out);
+        return 1;
+    }
+    if (raw || out[0] != '{' || strstr(out, "\"ok\": false")) {
+        fputs(out, stdout);
+        fputc('\n', stdout);
+    } else {
+        /* each message's role and content, as plain text */
+        const char *p = out;
+
+        while ((p = strstr(p, "\"role\"")) != NULL) {
+            const char *r = strchr(p + 6, '"'), *c;
+
+            if (!r)
+                break;
+            printf("===== ");
+            r = put_unescaped(stdout, r + 1);
+            printf(" =====\n");
+            c = strstr(r, "\"content\"");
+            if (!c || !(c = strchr(c + 9, '"')))
+                break;
+            p = put_unescaped(stdout, c + 1);
+            printf("\n\n");
+        }
+    }
+    free(out);
+    return ok ? 0 : 1;
+}
+
 int super_main(int argc, char **argv)
 {
     static struct super s;

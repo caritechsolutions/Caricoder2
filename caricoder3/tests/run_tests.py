@@ -3240,6 +3240,58 @@ def supervisor_peers():
 
 
 @test
+def supervisor_tech_prompt():
+    """tech-prompt prints what the technician would be sent, with no model: past cases on the same channel first, then one judged case of each kind from elsewhere, never later ones or other rules."""
+    import sqlite3
+    root = w("super_tprompt")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    cfg = os.path.join(root, "cfg.json")
+    db = os.path.join(root, "h.db")
+    port = 18779
+    json.dump({"name": "t2", "port": port, "channels_dir": os.path.join(root, "channels"), "history": db}, open(cfg, "w"))
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            if os.path.exists(db):
+                break
+            time.sleep(0.1)
+        time.sleep(1)
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        sup.wait(timeout=10)
+    c = sqlite3.connect(db)
+    def add(t, chan, rule, summary, diag, verdict=None, actual=None):
+        c.execute("INSERT INTO incidents (t, closed, chan, rule, level, grp, summary, detail, diagnosis, verdict, actual)"
+                  " VALUES (?, ?, ?, ?, 'warning', '', ?, '{}', ?, ?, ?)",
+                  (t, t + 30, chan, rule, summary, json.dumps(diag), verdict, json.dumps(actual) if actual else None))
+    b = 1790000000
+    add(b, "godtv", "silent_audio", "g1", {"category": "source_provider"}, "wrong", {"category": "normal_content", "cause": "ad break"})
+    add(b + 100, "godtv", "silent_audio", "g2", {"category": "normal_content"}, "right")
+    add(b + 200, "bet", "silent_audio", "e_bet", {"category": "source_provider"}, "right")
+    add(b + 300, "cnn", "silent_audio", "e_cnn", {"category": "source_provider"}, "right")
+    add(b + 400, "tnt", "silent_audio", "e_tnt", {"category": "source_provider"}, "wrong", {"category": "transcoder", "cause": "x"})
+    add(b + 500, "hbo", "cc_errors", "other_rule", {"category": "network"}, "right")
+    add(b + 600, "godtv", "silent_audio", "now", {"category": "unknown"})
+    add(b + 700, "mtv", "silent_audio", "later", {"category": "unknown"}, "right")
+    c.commit()
+    now = c.execute("SELECT id FROM incidents WHERE summary = 'now'").fetchone()[0]
+    c.close()
+    r = subprocess.run([BIN, "tech-prompt", "--config", cfg, "--id", str(now), "--json"], capture_output=True, text=True, timeout=20)
+    need(r.returncode == 0, f"tech-prompt: {r.returncode} {r.stderr}")
+    req = json.loads(r.stdout)
+    user = req["messages"][1]["content"]
+    past = json.loads(user.split("(JSON; null where nobody said):\n", 1)[1].split("\n\n", 1)[0])
+    got = [(x["summary"], x["where"]) for x in past]
+    need(got == [("g2", "same channel or source"), ("g1", "same channel or source"), ("e_tnt", "elsewhere"), ("e_cnn", "elsewhere")],
+         f"past cases: {got}")
+    r = subprocess.run([BIN, "tech-prompt", "--config", cfg, "--id", str(now)], capture_output=True, text=True, timeout=20)
+    need(r.returncode == 0 and "===== system =====" in r.stdout and "===== user =====" in r.stdout and "Key facts" in r.stdout,
+         f"text form: {r.stdout[:300]}")
+    return f"{len(past)} past cases: {', '.join(s for s, _ in got)}; same channel first, one per kind from elsewhere"
+
+
+@test
 def supervisor_technician():
     """The technician: an incident opens, the model server is started for it, and the answer (JSON to the schema) is kept on the incident and said in the conversation. Needs CC3_LLAMA_SERVER and CC3_TEST_MODEL (any small GGUF)."""
     import base64

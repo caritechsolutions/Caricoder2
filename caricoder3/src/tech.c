@@ -451,7 +451,7 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
     }
     compact(rep);
     if ((f = open_memstream(&sim, &ml))) {
-        history_similar(f, id, 6);
+        history_similar(f, id, 8);
         fclose(f);
         if (sim)
             compact(sim);
@@ -901,12 +901,19 @@ void tech_queue(int64_t id, bool now)
 bool tech_prompt(FILE *f, int64_t id)
 {
     struct tech_conf c;
-    int64_t parent = 0;
-    char *req;
 
     pthread_mutex_lock(&T.lock);
     c = T.c;
     pthread_mutex_unlock(&T.lock);
+    return tech_prompt_with(&c, f, id);
+}
+
+bool tech_prompt_with(const struct tech_conf *cp, FILE *f, int64_t id)
+{
+    struct tech_conf c = *cp;
+    int64_t parent = 0;
+    char *req;
+
     req = build_request(&c, id, &parent);
     if (!req) {
         if (parent)

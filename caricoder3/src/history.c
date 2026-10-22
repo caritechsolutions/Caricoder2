@@ -1370,14 +1370,61 @@ bool history_report_incident(FILE *f, int64_t id, int64_t now)
     return ok;
 }
 
+/* One past incident as the technician is shown it. */
+static void similar_row(FILE *f, sqlite3_stmt *st, const char *where, int n)
+{
+    const char *dg = (const char *)sqlite3_column_text(st, 6);
+
+    fprintf(f, "%s\n{\"where\": \"%s\", \"began\": %lld, \"lasted_s\": %lld, \"channel\": ", n ? "," : "", where,
+            (long long)sqlite3_column_int64(st, 0),
+            sqlite3_column_type(st, 1) == SQLITE_NULL ? -1LL
+                : (long long)(sqlite3_column_int64(st, 1) - sqlite3_column_int64(st, 0)));
+    if (sqlite3_column_type(st, 2) == SQLITE_NULL)
+        fprintf(f, "null");
+    else
+        jstr(f, (const char *)sqlite3_column_text(st, 2));
+    fprintf(f, ", \"rule\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 3));
+    fprintf(f, ", \"source\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 4));
+    fprintf(f, ", \"summary\": ");
+    jstr(f, (const char *)sqlite3_column_text(st, 5));
+    fprintf(f, ", \"technician_said\": %s, \"person_said\": ", dg && *dg == '{' ? dg : "null");
+    if (sqlite3_column_type(st, 7) == SQLITE_NULL) {
+        fprintf(f, "null");
+    } else {
+        fprintf(f, "{\"verdict\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 7));
+        fprintf(f, ", \"note\": ");
+        jstr(f, sqlite3_column_type(st, 8) == SQLITE_NULL ? "" : (const char *)sqlite3_column_text(st, 8));
+        {
+            const char *ac = (const char *)sqlite3_column_text(st, 9);
+
+            fprintf(f, ", \"it_was\": %s", ac && *ac == '{' && strcmp(ac, "{}") ? ac : "null");
+        }
+        fputc('}', f);
+    }
+    fputc('}', f);
+}
+
+/*
+ * The past incidents most like this one, before it:
+ *   - the same rule on the same channel or the same source, those with a
+ *     person's verdict first, then the newest ("same channel or source");
+ *   - and the same rule elsewhere, only those a person has judged, one for
+ *     each different thing a person said it was, the newest of each
+ *     ("elsewhere"): what was learnt on other channels reaches a channel
+ *     that has had no such incident judged yet.
+ * `limit` in all, at most two thirds of it from the first kind.
+ */
 bool history_similar(FILE *f, int64_t id, int limit)
 {
     sqlite3 *db = reader();
     sqlite3_stmt *st;
+    int n = 0, near = limit - limit / 3;
 
     if (!db)
         return false;
-    /* the same rule on the same channel or source, before this one, those with a person's verdict first */
     if (sqlite3_prepare_v2(db,
             "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note, o.actual FROM incidents o,"
             " incidents i WHERE i.id = ? AND o.id != i.id AND o.t < i.t AND o.rule = i.rule AND"
@@ -1387,44 +1434,29 @@ bool history_similar(FILE *f, int64_t id, int limit)
         return false;
     }
     sqlite3_bind_int64(st, 1, id);
-    sqlite3_bind_int(st, 2, limit);
+    sqlite3_bind_int(st, 2, near);
     fprintf(f, "[");
-    for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
-        const char *dg = (const char *)sqlite3_column_text(st, 6);
-
-        fprintf(f, "%s\n{\"began\": %lld, \"lasted_s\": %lld, \"channel\": ", n ? "," : "",
-                (long long)sqlite3_column_int64(st, 0),
-                sqlite3_column_type(st, 1) == SQLITE_NULL ? -1LL
-                    : (long long)(sqlite3_column_int64(st, 1) - sqlite3_column_int64(st, 0)));
-        if (sqlite3_column_type(st, 2) == SQLITE_NULL)
-            fprintf(f, "null");
-        else
-            jstr(f, (const char *)sqlite3_column_text(st, 2));
-        fprintf(f, ", \"rule\": ");
-        jstr(f, (const char *)sqlite3_column_text(st, 3));
-        fprintf(f, ", \"source\": ");
-        jstr(f, (const char *)sqlite3_column_text(st, 4));
-        fprintf(f, ", \"summary\": ");
-        jstr(f, (const char *)sqlite3_column_text(st, 5));
-        fprintf(f, ", \"technician_said\": %s, \"person_said\": ", dg && *dg == '{' ? dg : "null");
-        if (sqlite3_column_type(st, 7) == SQLITE_NULL) {
-            fprintf(f, "null");
-        } else {
-            fprintf(f, "{\"verdict\": ");
-            jstr(f, (const char *)sqlite3_column_text(st, 7));
-            fprintf(f, ", \"note\": ");
-            jstr(f, sqlite3_column_type(st, 8) == SQLITE_NULL ? "" : (const char *)sqlite3_column_text(st, 8));
-            {
-                const char *ac = (const char *)sqlite3_column_text(st, 9);
-
-                fprintf(f, ", \"it_was\": %s", ac && *ac == '{' && strcmp(ac, "{}") ? ac : "null");
-            }
-            fputc('}', f);
-        }
-        fputc('}', f);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        similar_row(f, st, "same channel or source", n++);
+    sqlite3_finalize(st);
+    if (n < limit && sqlite3_prepare_v2(db,
+            "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note, o.actual FROM incidents o,"
+            " incidents i WHERE i.id = ? AND o.id != i.id AND o.t < i.t AND o.rule = i.rule AND o.parent IS NULL"
+            " AND o.verdict IS NOT NULL AND NOT (o.chan IS i.chan OR (o.grp = i.grp AND o.grp != ''))"
+            " AND o.id IN (SELECT max(x.id) FROM incidents x, incidents y WHERE y.id = ? AND x.verdict IS NOT NULL"
+            " AND x.t < y.t AND x.rule = y.rule AND x.parent IS NULL"
+            " AND NOT (x.chan IS y.chan OR (x.grp = y.grp AND x.grp != ''))"
+            " GROUP BY x.verdict, coalesce(CASE WHEN json_valid(x.actual) THEN json_extract(x.actual, '$.category') END,"
+            " CASE WHEN json_valid(x.diagnosis) THEN json_extract(x.diagnosis, '$.category') END, ''))"
+            " ORDER BY o.t DESC LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, id);
+        sqlite3_bind_int64(st, 2, id);
+        sqlite3_bind_int(st, 3, limit - n);
+        while (sqlite3_step(st) == SQLITE_ROW)
+            similar_row(f, st, "elsewhere", n++);
+        sqlite3_finalize(st);
     }
     fprintf(f, "]");
-    sqlite3_finalize(st);
     sqlite3_close(db);
     return true;
 }

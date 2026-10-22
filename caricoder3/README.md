@@ -648,6 +648,18 @@ minutes otherwise). `PUT /api/technician {"model", "gpu", "keep_loaded"}`
 does the same. Room is judged from the model's size: its file, a tenth
 more, and 2.5 GB for its context.
 
+**What it is shown** (`caricoder3 tech-prompt --id N`). Prints exactly
+what the technician would be sent about incident N, with no model needed:
+its notes, the incident and its evidence, and the past incidents it is
+shown. Those are, first, the same kind of incident on the same channel or
+source (the ones you judged first, then the newest), and then, from other
+channels, one judged incident for each way you judged that kind (right,
+partly, or wrong and what it really was), newest first, marked
+`"where": "elsewhere"`. Only incidents before N are shown. `--json`: the
+request as sent.
+
+    sudo caricoder3 tech-prompt --id 1234 | less
+
 **Trying other models** (`caricoder3 tech-eval`). Is another model better
 at this than the technician's own? The test answers that with your
 verdicts: it takes incidents you gave a verdict on (one or two of each
