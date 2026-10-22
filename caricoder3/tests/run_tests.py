@@ -3458,6 +3458,9 @@ def supervisor_irds():
         # the list through the API, kept
         api("/api/irds", "PUT", {"irds": [{"name": "ird10", "address": f"127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]}]})
         need(json.load(open(cfg))["irds"][0]["raw"] == "", "not saved")
+        # an address without a port is the IRD's web page on port 80 (not the peers' 8550)
+        api("/api/irds", "PUT", {"irds": [{"name": "ird11", "address": "192.0.2.11"}]})
+        need(api("/api/irds")["irds"][0]["url"] == "http://192.0.2.11:80", f"url: {api('/api/irds')['irds'][0].get('url')}")
     finally:
         stop.set()
         sup.send_signal(signal.SIGTERM)

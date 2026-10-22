@@ -50,6 +50,16 @@ static struct {
 
 /* ---- reading an Upcom's tuner ---------------------------------------------------- */
 
+/* "192.168.110.10" -> "http://192.168.110.10:80" (the HTTP client's own
+ * default port is the peers', 8550) */
+static void ird_base_url(const char *address, char *url, size_t len)
+{
+    const char *h = !strncmp(address, "http://", 7) ? address + 7 : address;
+    size_t hl = strcspn(h, "/");
+
+    snprintf(url, len, "http://%.*s%s", (int)hl, h, memchr(h, ':', hl) ? "" : ":80");
+}
+
 static double num(const char *s)
 {
     return s && *s ? atof(s) : NAN;
@@ -123,7 +133,7 @@ static void poll_one(int k)
     c = I.ird[k].st.c;
     pthread_mutex_unlock(&I.lock);
     memset(&got, 0, sizeof(got));
-    snprintf(url, sizeof(url), "%s%s", strncmp(c.address, "http://", 7) ? "http://" : "", c.address);
+    ird_base_url(c.address, url, sizeof(url));
     status = http_call(url, "POST", "/goform/subBoard.cgi", "application/x-www-form-urlencoded; charset=UTF-8", NULL,
                        "json=%7B%22120%22%3A%7B%22method%22%3A0%2C%22data%22%3A%7B%220000%22%3A%7B%7D%7D%7D%7D",
                        5000, &out);
@@ -255,7 +265,7 @@ static void tables_one(int k)
     pthread_mutex_unlock(&I.lock);
     if (strcmp(c.kind, "upcom"))
         return;
-    snprintf(url, sizeof(url), "%s%s", strncmp(c.address, "http://", 7) ? "http://" : "", c.address);
+    ird_base_url(c.address, url, sizeof(url));
     body = upcom_ask(url, 8, 0, err, sizeof(err));
     if (body && !upcom_parse(body, &remux))
         snprintf(err, sizeof(err), "its remux has no tables");
@@ -877,6 +887,13 @@ static void one_json(FILE *f, const struct ird_state *s)
     jstr(f, s->c.address);
     fprintf(f, ", \"kind\": ");
     jstr(f, s->c.kind);
+    {
+        char u[300];
+
+        ird_base_url(s->c.address, u, sizeof(u));
+        fprintf(f, ", \"url\": ");
+        jstr(f, u);
+    }
     fprintf(f, ", \"raw\": ");
     jstr(f, s->c.raw);
     fprintf(f, ", \"outputs\": [");
