@@ -800,6 +800,8 @@ const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], 
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
   ["warmup_s", "A channel's first seconds after it starts, not judged for drops, missing data or CC errors (s)"],
   ["ird_cn_drop_db", "An IRD's C/N this far below its own normal is low (dB)"],
+  ["ird_temp_rise_c", "An IRD this much hotter than its own normal is too hot (°C)"],
+  ["ird_temp_max_c", "... or hotter than this, if set (°C; 0: by its normal)"],
   ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
 const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
@@ -1093,10 +1095,15 @@ function irdsCard() {
   const L = (sys && sys.irds) || [], now = Date.now() / 1000;
   const f1 = v => v == null ? "—" : v.toFixed(1);
   const rows = L.map(x => {
-    const r = x.remux || {}, low = x.locked && x.cn_db != null && x.cn_normal_db != null && x.cn_db < x.cn_normal_db - 3;
+    const r = x.remux || {}, T = (x.tuners && x.tuners.length) ? x.tuners : [x];
+    const lowOf = u => u.locked && u.cn_db != null && u.cn_normal_db != null && u.cn_db < u.cn_normal_db - 3;
+    const low = T.some(lowOf), unlocked = T.some(u => !u.locked);
+    const one = u => !u.locked ? `<span class="bad">not locked</span>`
+      : `C/N <b class="${lowOf(u) ? "warn" : ""}">${f1(u.cn_db)} dB</b> <span class="dim">(normally ${u.cn_normal_db == null ? "not known yet: " + (u.readings || 0) + " readings" : f1(u.cn_normal_db) + " dB"})</span>${u.ebn0_db != null ? ` · Eb/N0 ${f1(u.ebn0_db)} dB` : ""} · BER ${u.ber == null ? "—" : u.ber.toExponential(1)} · ${f1(u.strength_dbm)} dBm`;
+    const up = s => s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
+    const health = x.uptime_s != null ? `<div class="dim">up ${up(x.uptime_s)}${x.temperature_c != null ? ` · <span class="${x.temperature_normal_c != null && x.temperature_c > x.temperature_normal_c + 10 ? "warn" : ""}">${f1(x.temperature_c)} °C</span>${x.temperature_normal_c != null ? ` (normally ${f1(x.temperature_normal_c)} °C)` : ""}` : ""}${x.restarted ? ` · <span class="warn">restarted ${fmtDur(Math.round(now - x.restarted))} ago</span>` : ""}</div>` : "";
     const tun = !x.answering ? `<span class="bad">not answering${x.error ? ": " + esc(x.error) : ""}</span>`
-      : !x.locked ? `<span class="bad">not locked</span>`
-      : `C/N <b class="${low ? "warn" : ""}">${f1(x.cn_db)} dB</b> <span class="dim">(normally ${x.cn_normal_db == null ? "not known yet: " + x.readings + " readings" : f1(x.cn_normal_db) + " dB"})</span> · Eb/N0 ${f1(x.ebn0_db)} dB · BER ${x.ber == null ? "—" : x.ber.toExponential(1)} · ${f1(x.strength_dbm)} dBm`;
+      : (T.length > 1 ? T.map((u, i) => `<div>tuner ${i + 1}: ${one(u)}</div>`).join("") : one(T[0])) + health;
     const tb = x.tables || {};
     const tables = !tb.checked ? ""
       : tb.error ? `<div><span class="warn">its tables: ${esc(tb.error)}</span></div>`
@@ -1108,7 +1115,7 @@ function irdsCard() {
       : r.error ? `<div><span class="warn">probe: could not compare: ${esc(r.error)}</span></div>`
       : `<div class="dim">probe: ${r.services} services match the satellite (${fmtDur(Math.round(now - r.checked))} ago)</div>`)
       + (r.notes ? `<div class="dim">probe, noted only: ${esc(r.notes)}</div>` : "");
-    return `<tr><td><span class="lamp ${x.answering && x.locked && !low ? "ok" : "bad"}"></span> ${esc(x.name)}</td><td class="mono">${esc(x.address)}</td><td>${tun}</td><td>${rmx}</td></tr>`;
+    return `<tr><td><span class="lamp ${x.answering && !unlocked && !low ? "ok" : "bad"}"></span> ${esc(x.name)}</td><td class="mono">${esc(x.address)}</td><td>${tun}</td><td>${rmx}</td></tr>`;
   }).join("");
   return `<section class="card"><header><h2>IRDs</h2><span class="hint">The satellite receivers: each tuner and its own tables read every minute; every few hours what they send probed and compared with what comes down</span><div class="sp"></div>${L.length ? `<button onclick="checkIrds()">Check now</button> ` : ""}<button onclick="editIrds()">Change</button></header>
     ${L.length ? `<div class="tw"><table><thead><tr><th>IRD</th><th>Address</th><th>Tuner</th><th>Outputs</th></tr></thead><tbody>${rows}</tbody></table></div>`
@@ -1122,10 +1129,10 @@ function editIrds() {
   const d = $("#dlg"), L = (sys && sys.irds) || [];
   d.innerHTML = `<h3>IRDs</h3><div class="f"><label>One a line: name, address, raw output, outputs our channels read</label>
     <textarea id="i_list" rows="6" placeholder="ird10 192.168.110.10 udp://224.100.100.7:33500 udp://224.100.1.5:49500">${esc(L.map(x => [x.name, x.address, x.raw || "-", ...(x.outputs || [])].join(" ")).join("\n"))}</textarea></div>
-    <div class="help">The raw output is the whole transponder as the tuner receives it ("-" if the IRD has none); the outputs are what our channels read (the remux). Kind of IRD understood: Upcom UC-IRD+.</div>
+    <div class="help">The raw output is the whole transponder as the tuner receives it ("-" if the IRD has none); the outputs are what our channels read (the remux). Kinds of IRD understood: Upcom UC-IRD+ (just its address), and the Multi-Channel CI-Receiver as mcr://192.168.110.15 (mcr://user:password@... if not admin/admin).</div>
     <div id="i_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="i_go">Save</button></div>`;
   $("#i_go").onclick = async () => {
-    const irds = $("#i_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return { name: m[0], address: m[1] || "", kind: "upcom", raw: m[2] && m[2] !== "-" ? m[2] : "", outputs: m.slice(3) }; });
+    const irds = $("#i_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return { name: m[0], address: m[1] || "", kind: /^mcr:\/\//.test(m[1] || "") ? "mcr" : "upcom", raw: m[2] && m[2] !== "-" ? m[2] : "", outputs: m.slice(3) }; });
     try { await api("/api/irds", { method: "PUT", body: JSON.stringify({ irds }) }); d.close(); setTimeout(refresh, 1500); }
     catch(e) { $("#i_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };

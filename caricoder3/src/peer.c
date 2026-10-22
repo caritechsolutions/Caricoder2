@@ -158,7 +158,8 @@ int http_call(const char *url, const char *method, const char *path, const char 
         }
         snprintf(req, len, "%s %s HTTP/1.1\r\nHost: %s:%s\r\n%s%s%sContent-Type: %s\r\n"
                  "Content-Length: %zu\r\nConnection: close\r\n\r\n%s", method, path, host, port,
-                 key && *key ? "Authorization: CC3-Peer " : "", key && *key ? key : "", key && *key ? "\r\n" : "",
+                 key && *key ? (strncmp(key, "Basic ", 6) ? "Authorization: CC3-Peer " : "Authorization: ") : "",
+                 key && *key ? key : "", key && *key ? "\r\n" : "",
                  ctype, blen, body ? body : "");
         len = strlen(req);
         while (n < len) {

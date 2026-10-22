@@ -22,7 +22,12 @@
  * minute before: a service whose streams or labels change on the
  * satellite is said at once.
  *
- * Kinds of IRD understood: "upcom" (Upcom UC-IRD+, /goform/subBoard.cgi).
+ * Kinds of IRD understood: "upcom" (Upcom UC-IRD+, /goform/subBoard.cgi) and
+ * "mcr" (the Multi-Channel CI-Receiver: /cgi.php, HTTP basic authentication,
+ * two tuners; its uptime and temperature too: a restart is said at once).
+ * An IRD with no raw output given has each output's probe compared with the
+ * one before: a service whose streams change, or that turns scrambled, is
+ * said.
  * The supervisor turns the state into the watchdog's observations
  * (ird_watch) and gives an incident the readings of the IRD its channel
  * reads from (ird_for_url).
@@ -36,11 +41,12 @@
 
 #define IRDS_MAX 16
 #define IRD_OUTS 4
+#define IRD_TUNERS 4
 
 struct ird_conf {
     char name[48];
-    char address[128];          /* its web interface: host or http://host:port */
-    char kind[16];              /* "upcom" */
+    char address[128];          /* its web interface: host[:port], or KIND://[user:password@]host[:port] */
+    char kind[16];              /* "upcom", "mcr" */
     char raw[256];              /* its raw tuner output (udp://...): "" none */
     char outputs[IRD_OUTS][256]; /* what our channels read from it */
     int n_out;
@@ -60,12 +66,21 @@ struct ird_state {
     int fails;                  /* polls without one, in a row */
     int64_t last_try, last_ok;
     char error[160];
-    bool have;                  /* tuner readings below */
-    bool locked;
-    double cn, ebn0, ber, strength, total_mbps, valid_mbps;
-    double cn_normal;           /* < 0: not known yet */
-    int n_samples;
-    int low;                    /* readings in a row below the normal by the limit */
+    int n_tuners;               /* an IRD may have several, each on its own transponder */
+    struct ird_tuner {
+        bool have;              /* readings below */
+        bool locked;
+        double cn, ebn0, ber, strength, quality, total_mbps, valid_mbps;     /* NAN: not given */
+        double cn_normal;       /* < 0: not known yet */
+        int n_samples;
+        int low;                /* readings in a row below the normal by the limit */
+    } t[IRD_TUNERS];
+    /* how the box itself is, when it says (the "mcr" kind) */
+    bool have_health;
+    int64_t uptime_s;           /* -1: not known */
+    double temp_c, temp_normal; /* NAN, -1: not known */
+    int temp_high;              /* readings in a row above the limit */
+    int64_t restarted_t;        /* when it was last seen to have restarted (0: not) */
     /* the comparison */
     int64_t remux_t;            /* last done (0: never) */
     int remux_bad;              /* comparisons in a row with differences */
@@ -108,7 +123,12 @@ void ird_json(FILE *f);
 int ird_compare(const char *raw_json, const char *out_json, const char *url, char *what, size_t len, char *notes,
                 size_t nlen, int *services);
 
-/* Parses an Upcom tuner answer ({"120": {"0": {...}}}); false if it is not one. */
+/* Parses an Upcom tuner answer ({"120": {"0": {...}}}) into st->t[0];
+ * false if it is not one. */
 bool ird_parse_upcom(const char *body, struct ird_state *st);
+/* The Multi-Channel CI-Receiver's: its tuners (proctype=tuner), and its
+ * uptime and temperature (proctype=runstatus). */
+bool ird_parse_mcr_tuners(const char *body, struct ird_state *st);
+bool ird_parse_mcr_status(const char *body, int64_t *uptime_s, double *temp_c);
 
 #endif

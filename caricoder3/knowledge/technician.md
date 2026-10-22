@@ -270,6 +270,15 @@ points at this side, and do not blame this side when it points upstream.
 - Audio language labels on these sources are not to be trusted, on the
   satellite or in an IRD's remux: only listening says which language a PID
   carries. Never reason from a label alone.
+- "IRD restarted": the IRD's own uptime went back (it says how long it is
+  up now and had been). With other machines restarting at the same time:
+  the power (a breaker, a cut). Its channels lose input for a minute or
+  two while it starts.
+- "IRD running hot": its own temperature well above its normal (or a set
+  limit): the room's cooling, its fans, dust. Left alone it may hang or
+  restart.
+- An IRD with several tuners says which ("IRD ird15 tuner 2: ..."): each
+  tuner is its own transponder.
 - "IRD output differs from the satellite": the IRD's output carries a
   service with other streams (PIDs, codecs) than the satellite sends, still
   scrambled, or without data the satellite has. The IRD's remux or CI card,

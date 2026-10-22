@@ -651,9 +651,16 @@ more, and 2.5 GB for its context.
 **The IRDs.** The server page's IRDs card lists the satellite receivers
 ("Change": one a line, `name address raw-output outputs...`, e.g.
 `ird10 192.168.110.10 udp://224.100.100.7:33500 udp://224.100.1.5:49500`).
-Each tuner is read every minute from the IRD's own web interface (Upcom
-UC-IRD+ today): lock, C/N, Eb/N0, BER, level, kept in the history as
-`ird.NAME.cn` and so on. Its normal C/N is the median of the last day's
+Each tuner is read every minute from the IRD's own web interface: lock,
+C/N, Eb/N0, BER, level, kept in the history as `ird.NAME.cn` and so on.
+Kinds: the Upcom UC-IRD+ (just its address), and the Multi-Channel
+CI-Receiver as `mcr://192.168.110.15` (`mcr://user:password@host` when not
+admin/admin): its two tuners (`ird.NAME.t2.cn` for the second), its uptime
+(`ird_restarted` the moment it goes back) and its temperature (`ird_hot`:
+`ird_temp_rise_c` above its normal, or above `ird_temp_max_c` when set).
+An IRD given no raw output ("-") has each output's probe compared with the
+one before: a service whose streams change, or that turns scrambled or
+clear, is said. Its normal C/N is the median of the last day's
 readings. Every poll an Upcom is also asked for its own tables (the PSI
 it holds for each input and for its remux, `remux.cgi`; src/ird_upcom.c,
 the template for this kind of IRD): each service of the remux is compared

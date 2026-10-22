@@ -428,9 +428,16 @@ static bool ird_conf_read(const struct json_doc *d, int j, struct ird_conf *c, c
             snprintf(err, errlen, "an IRD needs a name and an address");
         return false;
     }
-    if (strcmp(c->kind, "upcom")) {
+    {
+        /* the kind may be said in the address: mcr://admin:admin@192.168.110.15 */
+        const char *sep = strstr(c->address, "://");
+
+        if (sep && sep - c->address < (long)sizeof(c->kind) && strncmp(c->address, "http://", 7))
+            snprintf(c->kind, sizeof(c->kind), "%.*s", (int)(sep - c->address), c->address);
+    }
+    if (strcmp(c->kind, "upcom") && strcmp(c->kind, "mcr")) {
         if (err)
-            snprintf(err, errlen, "IRD %s: kind %s is not known (upcom)", c->name, c->kind);
+            snprintf(err, errlen, "IRD %s: kind %s is not known (upcom, mcr)", c->name, c->kind);
         return false;
     }
     return true;

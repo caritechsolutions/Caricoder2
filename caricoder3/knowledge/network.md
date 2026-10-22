@@ -27,7 +27,11 @@ them as more is known; keep each fact on its own line.
 
 - Four IRDs, management interfaces 192.168.110.10, .11, .15, .16.
 - Their outputs go to the multicast VLAN. Setup to be described one IRD
-  at a time: 192.168.110.10 is in ird-110-10.md.
+  at a time: 192.168.110.10 is in ird-110-10.md, 192.168.110.11 in
+  ird-110-11.md, 192.168.110.15 in ird-110-15.md.
+- The chain: 110.10's remux -> 224.100.1.5:49500; 110.11's remux ->
+  224.100.1.6:49500; 110.15 (two tuners) -> 224.2.2.2:2000 -> 110.11's CI-2
+  -> 224.2.2.3:2000. 110.10 and 110.11 share one transponder (11304 MHz).
 - "The provider" is United Teleports, the uplink (Eutelsat 65W, 3
   transponders): rain at their end can hit many channels at once.
 - Known source multiplexes: 224.100.1.5:49500 (about 40 Mb/s, carries

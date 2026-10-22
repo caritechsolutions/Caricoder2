@@ -26,14 +26,20 @@
 #define SAMPLES 1440                    /* a day of minutes */
 #define PROGS_MAX 64
 
+struct series {                         /* a day of readings, for a normal (median) */
+    float v[SAMPLES];
+    int n, next;
+};
+
 struct ird {
     struct ird_state st;
-    float samples[SAMPLES];             /* C/N while locked */
-    int n_samples, next_sample;
+    struct series cn[IRD_TUNERS];       /* each tuner's C/N while locked */
+    struct series temp;
     int out_progs[IRD_OUTS][PROGS_MAX]; /* the services in each output at the last comparison */
     int n_out_progs[IRD_OUTS];
     bool out_known[IRD_OUTS];
     struct upcom_tables *prev;          /* each input's tables at the last read (16, by source number) */
+    char *ref[IRD_OUTS];                /* with no raw output: each output's last probe (brief JSON) */
     bool prev_known[16];
 };
 
@@ -56,10 +62,43 @@ static struct {
  * default port is the peers', 8550) */
 static void ird_base_url(const char *address, char *url, size_t len)
 {
-    const char *h = !strncmp(address, "http://", 7) ? address + 7 : address;
-    size_t hl = strcspn(h, "/");
+    const char *h = strstr(address, "://") ? strstr(address, "://") + 3 : address, *at;
+    size_t hl;
 
+    at = strchr(h, '@');
+    if (at && at < h + strcspn(h, "/"))
+        h = at + 1;                     /* user:password@ */
+    hl = strcspn(h, "/");
     snprintf(url, len, "http://%.*s%s", (int)hl, h, memchr(h, ':', hl) ? "" : ":80");
+}
+
+/* "Basic <base64 of user:password>" from KIND://user:password@host, else `dflt` ("" none) */
+static void ird_auth(const char *address, const char *dflt, char *out, size_t len)
+{
+    static const char B[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const char *h = strstr(address, "://") ? strstr(address, "://") + 3 : address, *at = strchr(h, '@');
+    char up[128];
+    size_t n, o = 0;
+
+    if (at && at < h + strcspn(h, "/"))
+        snprintf(up, sizeof(up), "%.*s", (int)(at - h), h);
+    else
+        snprintf(up, sizeof(up), "%s", dflt);
+    out[0] = 0;
+    if (!up[0])
+        return;
+    n = strlen(up);
+    o = (size_t)snprintf(out, len, "Basic ");
+    for (size_t i = 0; i < n && o + 5 < len; i += 3) {
+        unsigned v = (unsigned char)up[i] << 16 | (i + 1 < n ? (unsigned char)up[i + 1] << 8 : 0) |
+                     (i + 2 < n ? (unsigned char)up[i + 2] : 0);
+
+        out[o++] = B[v >> 18 & 63];
+        out[o++] = B[v >> 12 & 63];
+        out[o++] = i + 1 < n ? B[v >> 6 & 63] : '=';
+        out[o++] = i + 2 < n ? B[v & 63] : '=';
+    }
+    out[o] = 0;
 }
 
 static double num(const char *s)
@@ -94,14 +133,70 @@ bool ird_parse_upcom(const char *body, struct ird_state *st)
     r = 0;
     if ((g = json_get(&d, r, "120")) < 0 || (t = json_get(&d, g, "0")) < 0)
         return false;
-    st->locked = json_get_num(&d, t, "lock", 0) != 0;
-    st->cn = num(json_get_str(&d, t, "CN", ""));
-    st->ebn0 = num(json_get_str(&d, t, "EbN0", ""));
-    st->ber = sci(json_get_str(&d, t, "ber", ""));
-    st->strength = num(json_get_str(&d, t, "strength", ""));
-    st->total_mbps = num(json_get_str(&d, t, "totalBR", ""));
-    st->valid_mbps = num(json_get_str(&d, t, "validBR", ""));
-    st->have = true;
+    st->n_tuners = 1;
+    st->t[0].locked = json_get_num(&d, t, "lock", 0) != 0;
+    st->t[0].cn = num(json_get_str(&d, t, "CN", ""));
+    st->t[0].ebn0 = num(json_get_str(&d, t, "EbN0", ""));
+    st->t[0].ber = sci(json_get_str(&d, t, "ber", ""));
+    st->t[0].strength = num(json_get_str(&d, t, "strength", ""));
+    st->t[0].quality = NAN;
+    st->t[0].total_mbps = num(json_get_str(&d, t, "totalBR", ""));
+    st->t[0].valid_mbps = num(json_get_str(&d, t, "validBR", ""));
+    st->t[0].have = true;
+    return true;
+}
+
+/* {"tuner_count": 2, "tuner": [{"index", "status": {"lock", "c_n_100": "12.25 dB",
+ * "power": "-33.12 dBm", "ber": "0.00e+00", "strength", "quality", "bitrate_valid", ...}}]} */
+bool ird_parse_mcr_tuners(const char *body, struct ird_state *st)
+{
+    static struct json_doc d;           /* the IRD thread, or the tests */
+    char err[100];
+    int a, n = 0;
+
+    if (!body || json_parse(&d, body, err, sizeof(err)) < 0 || (a = json_get(&d, 0, "tuner")) < 0)
+        return false;
+    for (int j = d.node[a].first_child; j >= 0 && n < IRD_TUNERS; j = d.node[j].next) {
+        int x = json_get(&d, j, "status");
+        struct ird_tuner *t = &st->t[n++];
+
+        if (x < 0)
+            return false;
+        t->locked = json_get_num(&d, x, "lock", 0) != 0;
+        t->cn = num(json_get_str(&d, x, "c_n_100", ""));
+        t->ebn0 = NAN;
+        t->ber = sci(json_get_str(&d, x, "ber", ""));
+        t->strength = num(json_get_str(&d, x, "power", ""));
+        t->quality = json_get_num(&d, x, "quality", NAN);
+        t->total_mbps = json_get_num(&d, x, "bitrate_total", NAN);
+        t->valid_mbps = json_get_num(&d, x, "bitrate_valid", NAN);
+        t->have = true;
+    }
+    st->n_tuners = n;
+    return n > 0;
+}
+
+/* {"uptime": "1 Day-01:31:21", "Temperature": "67.06 Degree Celsius\n", ...} */
+bool ird_parse_mcr_status(const char *body, int64_t *uptime_s, double *temp_c)
+{
+    static struct json_doc d;
+    char err[100];
+    const char *u, *p;
+    int days = 0, h = 0, m = 0, sec = 0;
+
+    if (!body || json_parse(&d, body, err, sizeof(err)) < 0 || json_get(&d, 0, "uptime") < 0)
+        return false;
+    u = json_get_str(&d, 0, "uptime", "");
+    p = u;
+    if (strstr(u, "Day")) {
+        days = atoi(u);
+        p = strchr(u, '-');
+        p = p ? p + 1 : u;
+    }
+    if (sscanf(p, "%d:%d:%d", &h, &m, &sec) != 3)
+        return false;
+    *uptime_s = (int64_t)days * 86400 + h * 3600 + m * 60 + sec;
+    *temp_c = num(json_get_str(&d, 0, "Temperature", ""));
     return true;
 }
 
@@ -112,35 +207,61 @@ static int cmpf(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-static double median(const struct ird *d)
+static double median(const struct series *s)
 {
     static float tmp[SAMPLES];
 
-    memcpy(tmp, d->samples, sizeof(float) * (size_t)d->n_samples);
-    qsort(tmp, (size_t)d->n_samples, sizeof(float), cmpf);
-    return tmp[d->n_samples / 2];
+    memcpy(tmp, s->v, sizeof(float) * (size_t)s->n);
+    qsort(tmp, (size_t)s->n, sizeof(float), cmpf);
+    return tmp[s->n / 2];
 }
 
-/* One poll of IRD k; called without the lock (the request takes time). */
+/* Adds a reading; the normal once there are enough. */
+static double series_add(struct series *s, double v)
+{
+    s->v[s->next] = (float)v;
+    s->next = (s->next + 1) % SAMPLES;
+    if (s->n < SAMPLES)
+        s->n++;
+    return s->n >= (I.o.baseline_n > 0 ? I.o.baseline_n : 30) ? median(s) : -1;
+}
+
+/* One poll of IRD k; called without the lock (the requests take time). */
 static void poll_one(int k)
 {
     struct ird_conf c;
     struct ird_state got;
-    char url[300], *out = NULL;
+    char url[300], auth[200], *out = NULL;
     int status;
-    int64_t t = time(NULL);
+    int64_t t = time(NULL), uptime = -1;
+    double temp = NAN;
     struct wd_limits L;
+    char restart[200] = "";
 
     pthread_mutex_lock(&I.lock);
     c = I.ird[k].st.c;
     pthread_mutex_unlock(&I.lock);
     memset(&got, 0, sizeof(got));
     ird_base_url(c.address, url, sizeof(url));
-    status = http_call(url, "POST", "/goform/subBoard.cgi", "application/x-www-form-urlencoded; charset=UTF-8", NULL,
-                       "json=%7B%22120%22%3A%7B%22method%22%3A0%2C%22data%22%3A%7B%220000%22%3A%7B%7D%7D%7D%7D",
-                       5000, &out);
-    if (status == 200 && !ird_parse_upcom(out, &got)) {
-        status = -2;
+    if (!strcmp(c.kind, "mcr")) {
+        ird_auth(c.address, "admin:admin", auth, sizeof(auth));
+        status = http_call(url, "POST", "/cgi.php?proctype=tuner", "application/x-www-form-urlencoded; charset=UTF-8",
+                           auth, "op_code=status&ch_index=0", 5000, &out);
+        if (status == 200 && !ird_parse_mcr_tuners(out, &got))
+            status = -2;
+        if (status == 200) {
+            free(out);
+            out = NULL;
+            if (http_call(url, "POST", "/cgi.php?proctype=runstatus", "application/x-www-form-urlencoded; charset=UTF-8",
+                          auth, "", 5000, &out) == 200)
+                got.have_health = ird_parse_mcr_status(out, &uptime, &temp);
+        }
+    } else {
+        status = http_call(url, "POST", "/goform/subBoard.cgi", "application/x-www-form-urlencoded; charset=UTF-8", NULL,
+                           "json=%7B%22120%22%3A%7B%22method%22%3A0%2C%22data%22%3A%7B%220000%22%3A%7B%7D%7D%7D%7D",
+                           5000, &out);
+        if (status == 200 && !ird_parse_upcom(out, &got))
+            status = -2;
     }
     wd_get_limits(&L);
     pthread_mutex_lock(&I.lock);
@@ -159,38 +280,65 @@ static void poll_one(int k)
             st->fails = 0;
             st->last_ok = t;
             st->error[0] = 0;
-            st->have = true;
-            st->locked = got.locked;
-            st->cn = got.cn;
-            st->ebn0 = got.ebn0;
-            st->ber = got.ber;
-            st->strength = got.strength;
-            st->total_mbps = got.total_mbps;
-            st->valid_mbps = got.valid_mbps;
-            if (st->locked && !isnan(st->cn)) {
-                /* below the normal: judged against the normal before this reading */
-                bool below = st->cn_normal >= 0 && st->cn < st->cn_normal - L.ird_cn_drop_db;
+            st->n_tuners = got.n_tuners;
+            for (int i = 0; i < got.n_tuners; i++) {
+                struct ird_tuner *tu = &st->t[i];
+                double normal = tu->cn_normal;
+                int low = tu->low, ns = tu->n_samples;
 
-                st->low = below ? st->low + 1 : 0;
-                d->samples[d->next_sample] = (float)st->cn;
-                d->next_sample = (d->next_sample + 1) % SAMPLES;
-                if (d->n_samples < SAMPLES)
-                    d->n_samples++;
-                st->n_samples = d->n_samples;
-                if (d->n_samples >= (I.o.baseline_n > 0 ? I.o.baseline_n : 30))
-                    st->cn_normal = median(d);
-            } else {
-                st->low = 0;
+                *tu = got.t[i];
+                tu->cn_normal = normal;
+                tu->low = low;
+                tu->n_samples = ns;
+                if (tu->locked && !isnan(tu->cn)) {
+                    /* below the normal: judged against the normal before this reading */
+                    double nn;
+
+                    tu->low = tu->cn_normal >= 0 && tu->cn < tu->cn_normal - L.ird_cn_drop_db ? tu->low + 1 : 0;
+                    nn = series_add(&d->cn[i], tu->cn);
+                    tu->n_samples = d->cn[i].n;
+                    if (nn >= 0)
+                        tu->cn_normal = nn;
+                } else {
+                    tu->low = 0;
+                }
+            }
+            if (got.have_health) {
+                /* a restart: up less than it was, more than the time between two looks can explain */
+                if (st->have_health && st->uptime_s >= 0 && uptime + 120 < st->uptime_s + (t - st->last_ok)) {
+                    st->restarted_t = t;
+                    snprintf(restart, sizeof(restart), "IRD %.40s restarted: up %lld min (it had been up %lld h %02lld min)",
+                             c.name, (long long)(uptime / 60), (long long)(st->uptime_s / 3600),
+                             (long long)(st->uptime_s / 60 % 60));
+                }
+                st->have_health = true;
+                st->uptime_s = uptime;
+                st->temp_c = temp;
+                if (!isnan(temp)) {
+                    double limit = L.ird_temp_max_c > 0 ? L.ird_temp_max_c
+                                 : st->temp_normal >= 0 ? st->temp_normal + L.ird_temp_rise_c : -1;
+                    double nn;
+
+                    st->temp_high = limit > 0 && temp > limit ? st->temp_high + 1 : 0;
+                    nn = series_add(&d->temp, temp);
+                    if (nn >= 0)
+                        st->temp_normal = nn;
+                }
             }
         } else {
             st->answering = false;
             st->fails++;
-            st->have = false;
-            st->low = 0;
+            for (int i = 0; i < st->n_tuners; i++) {
+                st->t[i].have = false;
+                st->t[i].low = 0;
+            }
+            st->temp_high = 0;
             snprintf(st->error, sizeof(st->error), "%s",
-                     status == -2 ? "the answer is not an Upcom tuner's" : status < 0 && out ? out
+                     status == -2 ? "the answer is not the one this kind of IRD gives" : status < 0 && out ? out
                      : status > 0 ? "an HTTP error" : "no answer");
-            if (status > 0)
+            if (status == 401)
+                snprintf(st->error, sizeof(st->error), "HTTP 401: the user or password is not the IRD's");
+            else if (status > 0)
                 snprintf(st->error, sizeof(st->error), "HTTP %d", status);
         }
     }
@@ -198,17 +346,39 @@ static void poll_one(int k)
         struct ird_state st = I.ird[k].st;
 
         pthread_mutex_unlock(&I.lock);
+        if (restart[0]) {
+            char subj[96];
+
+            snprintf(subj, sizeof(subj), "ird/%.40s/restart", c.name);
+            wd_instant_server(t, subj, WD_IRD_RESTART, restart);
+            log_info("%s", restart);
+        }
         if (st.answering && history_enabled()) {
             char m[96];
 
-#define MET(key, v) do { if (!isnan(v)) { snprintf(m, sizeof(m), "ird.%s." key, st.c.name); history_metric(t, m, v); } } while (0)
-            MET("cn", st.cn);
-            MET("ebn0", st.ebn0);
-            MET("ber", st.ber);
-            MET("strength", st.strength);
-            MET("total_mbps", st.total_mbps);
-            MET("lock", st.locked ? 1.0 : 0.0);
+            for (int i = 0; i < st.n_tuners; i++) {
+                const struct ird_tuner *tu = &st.t[i];
+                char pre[64];
+
+                /* tuner 1's under the IRD's own name (as before there were several) */
+                snprintf(pre, sizeof(pre), i ? "%.40s.t%d" : "%.40s", st.c.name, i + 1);
+#define MET(key, v) do { if (!isnan(v)) { snprintf(m, sizeof(m), "ird.%s." key, pre); history_metric(t, m, v); } } while (0)
+                MET("cn", tu->cn);
+                MET("ebn0", tu->ebn0);
+                MET("ber", tu->ber);
+                MET("strength", tu->strength);
+                MET("total_mbps", tu->total_mbps);
+                MET("lock", tu->locked ? 1.0 : 0.0);
 #undef MET
+            }
+            if (st.have_health) {
+                snprintf(m, sizeof(m), "ird.%.40s.uptime_s", st.c.name);
+                history_metric(t, m, (double)st.uptime_s);
+                if (!isnan(st.temp_c)) {
+                    snprintf(m, sizeof(m), "ird.%.40s.temp_c", st.c.name);
+                    history_metric(t, m, st.temp_c);
+                }
+            }
         }
     }
     free(out);
@@ -693,6 +863,118 @@ int ird_compare(const char *raw_json, const char *out_json, const char *url, cha
     return diffs;
 }
 
+/* What changed in an output since the last probe of it: streams, or a
+ * service that was clear and is scrambled now. */
+static int reference_changes(const char *was_json, const char *now_json, char *what, size_t len, int *services)
+{
+    static struct prog was[PROGS_MAX], now[PROGS_MAX];
+    char err[160];
+    int nw = read_progs(was_json, was, PROGS_MAX, err, sizeof(err)), nn, n = 0;
+
+    what[0] = 0;
+    *services = 0;
+    nn = read_progs(now_json, now, PROGS_MAX, err, sizeof(err));
+    if (nn < 0) {
+        snprintf(what, len, "the output: %s", err);
+        return -1;
+    }
+    for (int i = 0; i < nn; i++) {
+        const struct prog *o = &now[i], *p = nw >= 0 ? find_prog(was, nw, o->n) : NULL;
+        int scr_now = 0, scr_was = 0;
+        char a[200], b[200];
+
+        if (!o->n)
+            continue;
+        (*services)++;
+        if (!p)
+            continue;                   /* new in it: said by the comparison of the service lists */
+        if (!same_streams(o, p)) {
+            char both[420];
+
+            streams_text(p, a, sizeof(a));
+            streams_text(o, b, sizeof(b));
+            snprintf(both, sizeof(both), "was %s; now %s", a, b);
+            add_diff(what, len, &n, ": changed in the output: %s", o->name, o->n, both);
+            continue;
+        }
+        for (int k = 0; k < o->ns; k++)
+            scr_now += o->s[k].scrambled > 20;
+        for (int k = 0; k < p->ns; k++)
+            scr_was += p->s[k].scrambled > 20;
+        if (scr_now && !scr_was)
+            add_diff(what, len, &n, ": was clear and is scrambled now%s", o->name, o->n, "");
+        else if (!scr_now && scr_was)
+            add_diff(what, len, &n, ": was scrambled and is clear now%s", o->name, o->n, "");
+    }
+    return n;
+}
+
+/* With no raw output: each output probed and compared with its last probe; without the lock. */
+static void reference_one(int k)
+{
+    struct ird_conf c;
+    const char *urls[IRD_OUTS];
+    char *outs[IRD_OUTS], err[160] = "", changes[IRD_OUTS][480];
+    int services = 0;
+    int64_t t = time(NULL);
+
+    pthread_mutex_lock(&I.lock);
+    c = I.ird[k].st.c;
+    pthread_mutex_unlock(&I.lock);
+    if (!c.n_out)
+        return;
+    for (int i = 0; i < c.n_out; i++)
+        urls[i] = c.outputs[i];
+    probe_many(urls, c.n_out, I.o.probe_s > 0 ? I.o.probe_s : 5, outs);
+    pthread_mutex_lock(&I.lock);
+    {
+        struct ird *d = &I.ird[k];
+
+        for (int i = 0; i < c.n_out; i++) {
+            int sv = 0, n;
+
+            changes[i][0] = 0;
+            if (strcmp(d->st.c.name, c.name))
+                break;
+            if (!strstr(outs[i], "\"ok\": true")) {
+                snprintf(err, sizeof(err), "%.100s: nothing could be read from it", c.outputs[i]);
+                continue;
+            }
+            n = d->ref[i] ? reference_changes(d->ref[i], outs[i], changes[i], sizeof(changes[i]), &sv)
+                          : reference_changes(outs[i], outs[i], changes[i], sizeof(changes[i]), &sv);
+            if (n < 0) {
+                snprintf(err, sizeof(err), "%.150s", changes[i]);
+                changes[i][0] = 0;
+                continue;
+            }
+            services += sv;
+            free(d->ref[i]);
+            d->ref[i] = strdup(outs[i]);
+        }
+        if (!strcmp(d->st.c.name, c.name)) {
+            d->st.remux_t = t;
+            d->st.remux_services = services;
+            d->st.remux_bad = 0;
+            d->st.remux_what[0] = 0;
+            snprintf(d->st.remux_error, sizeof(d->st.remux_error), "%s", err);
+            snprintf(d->st.remux_notes, sizeof(d->st.remux_notes), "%s",
+                     services ? "no raw output: each probe is compared with the one before" : "");
+        }
+    }
+    pthread_mutex_unlock(&I.lock);
+    for (int i = 0; i < c.n_out; i++) {
+        if (changes[i][0]) {
+            char subj[96], w[600];
+
+            snprintf(subj, sizeof(subj), "ird/%.40s/output", c.name);
+            snprintf(w, sizeof(w), "IRD %.40s, %.60s: %.400s", c.name, c.outputs[i], changes[i]);
+            wd_instant_server(t, subj, WD_SAT_CHANGED, w);
+            log_info("%s", w);
+        }
+        free(outs[i]);
+    }
+}
+
 /* One comparison of IRD k; without the lock. */
 static void compare_one(int k)
 {
@@ -808,8 +1090,7 @@ static void *run(void *arg)
                 st->last_try = 0, st->remux_t = 0;
             if (todo_poll < 0 && t - st->last_try >= (I.o.poll_s > 0 ? I.o.poll_s : 60))
                 todo_poll = k;
-            if (todo_cmp < 0 && I.o.remux_s > 0 && st->c.raw[0] && st->c.n_out && t - st->remux_t >= I.o.remux_s &&
-                st->last_try)
+            if (todo_cmp < 0 && I.o.remux_s > 0 && st->c.n_out && t - st->remux_t >= I.o.remux_s && st->last_try)
                 todo_cmp = k;
         }
         if (todo_poll >= 0) {
@@ -824,7 +1105,10 @@ static void *run(void *arg)
         if (todo_cmp >= 0) {
             I.ird[todo_cmp].st.remux_t = t;
             pthread_mutex_unlock(&I.lock);
-            compare_one(todo_cmp);
+            if (I.ird[todo_cmp].st.c.raw[0])
+                compare_one(todo_cmp);
+            else
+                reference_one(todo_cmp);
             pthread_mutex_lock(&I.lock);
             continue;
         }
@@ -865,7 +1149,11 @@ void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o)
                 *d = old[keep];         /* its readings and its normal stay */
             } else {
                 memset(d, 0, sizeof(*d));
-                d->st.cn_normal = -1;
+                for (int i = 0; i < IRD_TUNERS; i++)
+                    d->st.t[i].cn_normal = -1;
+                d->st.temp_normal = -1;
+                d->st.temp_c = NAN;
+                d->st.uptime_s = -1;
             }
             d->st.c = list[k];
         }
@@ -873,9 +1161,12 @@ void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o)
             bool kept = false;
 
             for (int k = 0; k < I.n; k++)
-                kept |= I.ird[k].prev == old[j].prev;
-            if (!kept)
-                free(old[j].prev);      /* an IRD that went: its tables */
+                kept |= !strcmp(I.ird[k].st.c.name, old[j].st.c.name) && !strcmp(I.ird[k].st.c.address, old[j].st.c.address);
+            if (!kept) {
+                free(old[j].prev);      /* an IRD that went: its tables, its last probes */
+                for (int i = 0; i < IRD_OUTS; i++)
+                    free(old[j].ref[i]);
+            }
         }
         free(old);
     }
@@ -951,11 +1242,30 @@ void ird_watch(int64_t t, int cn_drop_db)
         snprintf(subj, sizeof(subj), "ird/%.40s", s->c.name);
         snprintf(what, sizeof(what), "IRD %.40s (%.100s) not answering: %.150s", s->c.name, s->c.address, s->error);
         wd_observe(t, subj, NULL, "", WD_IRD_DOWN, s->fails >= 3, what, s->last_ok ? s->last_ok : 0);
-        snprintf(what, sizeof(what), "IRD %.40s: tuner not locked (no signal)", s->c.name);
-        wd_observe(t, subj, NULL, "", WD_IRD_UNLOCKED, s->answering && s->have && !s->locked, what, 0);
-        snprintf(what, sizeof(what), "IRD %.40s: C/N %.1f dB, normally %.1f dB (Eb/N0 %.1f dB, BER %.1e)", s->c.name, s->cn,
-                 s->cn_normal, s->ebn0, s->ber);
-        wd_observe(t, subj, NULL, "", WD_IRD_CN, s->answering && s->locked && s->low >= 2 && cn_drop_db > 0, what, 0);
+        for (int i = 0; i < IRD_TUNERS; i++) {
+            const struct ird_tuner *tu = &s->t[i];
+            char tn[16] = "";
+
+            /* tuner 1 under the IRD's own subject (as before there were several) */
+            if (i)
+                snprintf(subj, sizeof(subj), "ird/%.40s/t%d", s->c.name, i + 1);
+            if (s->n_tuners > 1)
+                snprintf(tn, sizeof(tn), " tuner %d", i + 1);
+            snprintf(what, sizeof(what), "IRD %.40s%s: tuner not locked (no signal)", s->c.name, tn);
+            wd_observe(t, subj, NULL, "", WD_IRD_UNLOCKED, i < s->n_tuners && s->answering && tu->have && !tu->locked,
+                       what, 0);
+            if (isnan(tu->ebn0))
+                snprintf(what, sizeof(what), "IRD %.40s%s: C/N %.1f dB, normally %.1f dB (level %.1f dBm, BER %.1e)",
+                         s->c.name, tn, tu->cn, tu->cn_normal, tu->strength, tu->ber);
+            else
+                snprintf(what, sizeof(what), "IRD %.40s%s: C/N %.1f dB, normally %.1f dB (Eb/N0 %.1f dB, BER %.1e)",
+                         s->c.name, tn, tu->cn, tu->cn_normal, tu->ebn0, tu->ber);
+            wd_observe(t, subj, NULL, "", WD_IRD_CN,
+                       i < s->n_tuners && s->answering && tu->locked && tu->low >= 2 && cn_drop_db > 0, what, 0);
+        }
+        snprintf(subj, sizeof(subj), "ird/%.40s", s->c.name);
+        snprintf(what, sizeof(what), "IRD %.40s: %.1f °C inside, normally %.1f °C", s->c.name, s->temp_c, s->temp_normal);
+        wd_observe(t, subj, NULL, "", WD_IRD_HOT, s->answering && s->have_health && s->temp_high >= 2, what, 0);
         snprintf(subj, sizeof(subj), "ird/%.40s/remux", s->c.name);
         snprintf(what, sizeof(what), "IRD %.40s: %.400s", s->c.name, s->remux_what);
         wd_observe(t, subj, NULL, "", WD_REMUX, s->remux_bad >= 2, what, 0);
@@ -980,6 +1290,22 @@ static void jnum(FILE *f, const char *key, double v, const char *fmt)
         fputs("null", f);
     else
         fprintf(f, fmt, v);
+}
+
+static void tuner_json(FILE *f, const struct ird_tuner *t)
+{
+    fprintf(f, ", \"locked\": %s", t->locked ? "true" : "false");
+    jnum(f, "cn_db", t->cn, "%.1f");
+    jnum(f, "ebn0_db", t->ebn0, "%.1f");
+    jnum(f, "ber", t->ber, "%.2g");
+    jnum(f, "strength_dbm", t->strength, "%.1f");
+    jnum(f, "quality", t->quality, "%.0f");
+    jnum(f, "total_mbps", t->total_mbps, "%.2f");
+    jnum(f, "valid_mbps", t->valid_mbps, "%.2f");
+    if (t->cn_normal >= 0)
+        fprintf(f, ", \"cn_normal_db\": %.1f", t->cn_normal);
+    else
+        fprintf(f, ", \"cn_normal_db\": null");
 }
 
 static void one_json(FILE *f, const struct ird_state *s)
@@ -1007,20 +1333,30 @@ static void one_json(FILE *f, const struct ird_state *s)
     fprintf(f, "], \"answering\": %s, \"fails\": %d, \"last_ok\": %lld, \"error\": ", s->answering ? "true" : "false",
             s->fails, (long long)s->last_ok);
     jstr(f, s->error);
-    if (s->have) {
-        fprintf(f, ", \"locked\": %s", s->locked ? "true" : "false");
-        jnum(f, "cn_db", s->cn, "%.1f");
-        jnum(f, "ebn0_db", s->ebn0, "%.1f");
-        jnum(f, "ber", s->ber, "%.2g");
-        jnum(f, "strength_dbm", s->strength, "%.1f");
-        jnum(f, "total_mbps", s->total_mbps, "%.2f");
-        jnum(f, "valid_mbps", s->valid_mbps, "%.2f");
-    }
-    if (s->cn_normal >= 0)
-        fprintf(f, ", \"cn_normal_db\": %.1f", s->cn_normal);
+    /* tuner 1 at the top (as before there were several), and each in "tuners" */
+    if (s->t[0].have)
+        tuner_json(f, &s->t[0]);
+    else if (s->t[0].cn_normal >= 0)
+        fprintf(f, ", \"cn_normal_db\": %.1f", s->t[0].cn_normal);
     else
         fprintf(f, ", \"cn_normal_db\": null");
-    fprintf(f, ", \"readings\": %d, \"remux\": {\"checked\": %lld, \"services\": %d, \"differences\": ", s->n_samples,
+    fprintf(f, ", \"readings\": %d, \"tuners\": [", s->t[0].n_samples);
+    for (int i = 0; i < s->n_tuners; i++) {
+        fprintf(f, "%s{\"tuner\": %d, \"have\": %s", i ? ", " : "", i + 1, s->t[i].have ? "true" : "false");
+        if (s->t[i].have)
+            tuner_json(f, &s->t[i]);
+        fprintf(f, ", \"readings\": %d}", s->t[i].n_samples);
+    }
+    fprintf(f, "]");
+    if (s->have_health) {
+        fprintf(f, ", \"uptime_s\": %lld", (long long)s->uptime_s);
+        jnum(f, "temperature_c", s->temp_c, "%.1f");
+        if (s->temp_normal >= 0)
+            fprintf(f, ", \"temperature_normal_c\": %.1f", s->temp_normal);
+        if (s->restarted_t)
+            fprintf(f, ", \"restarted\": %lld", (long long)s->restarted_t);
+    }
+    fprintf(f, ", \"remux\": {\"checked\": %lld, \"services\": %d, \"differences\": ",
             (long long)s->remux_t, s->remux_services);
     jstr(f, s->remux_what);
     fprintf(f, ", \"notes\": ");

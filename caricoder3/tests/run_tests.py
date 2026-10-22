@@ -3488,6 +3488,113 @@ def supervisor_irds():
 
 
 @test
+def supervisor_irds_mcr():
+    """The Multi-Channel CI-Receiver kind: both tuners read with the password, each with its own normal; its uptime and temperature; a restart said at once; with no raw output, each probe of its output compared with the one before."""
+    import base64
+    import http.server
+    import urllib.request
+    root = w("super_mcr")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, web, pout = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    tdir = os.path.join(HERE, "data", "mcr")
+    tuners = json.load(open(os.path.join(tdir, "tuner.json")))         # what 192.168.110.15 answered on 22 Oct
+    status = json.load(open(os.path.join(tdir, "runstatus.json")))
+    seen = {"auth": []}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            seen["auth"].append(self.headers.get("Authorization"))
+            if self.headers.get("Authorization") != "Basic YWRtaW46YWRtaW4=":
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = json.dumps(tuners if "proctype=tuner" in self.path else status if "proctype=runstatus" in self.path
+                              else {}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", web), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    a = synth("ird_raw", duration=6.0, programs=[gen_ts.default_program(1650, sections=False),
+              gen_ts.default_program(2000, video_rate=1_500_000, sections=False, name="Other")])
+    b = synth("ird_rmx", duration=6.0, programs=[gen_ts.default_program(1650, sections=False),
+              gen_ts.default_program(2000, base_pid=2100, video_rate=1_500_000, sections=False, name="Other")])
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "ird_poll_s": 1, "ird_remux_s": 5, "ird_baseline_n": 4, "ird_probe_s": 2,
+               "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]}],
+               "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path):
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth), timeout=10) as r:
+            return json.load(r)
+
+    def incidents(rule):
+        return [x for x in api("/api/incidents")["incidents"] if x["rule"] == rule]
+
+    def wait_for(fn, secs, what):
+        end = time.time() + secs
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.5)
+        raise Fail(f"{what}: not within {secs} s")
+    playing = {"file": a}
+    stop = threading.Event()
+
+    def play():
+        p = Player("127.0.0.1", pout)
+        while not stop.is_set():
+            p.play(playing["file"])
+        p.close()
+    threading.Thread(target=play, daemon=True).start()
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"))
+    try:
+        wait_up(port)
+        x = wait_for(lambda: [i for i in api("/api/irds")["irds"] if i.get("cn_normal_db") is not None], 20, "a normal C/N")[0]
+        need(x["kind"] == "mcr" and len(x["tuners"]) == 2 and x["tuners"][1]["strength_dbm"] == -29.2 and
+             x["tuners"][0]["cn_db"] in (12.2, 12.3), f"tuners: {x['tuners']}")
+        need(x["uptime_s"] == 91881 and x["temperature_c"] == 67.1, f"health: {x.get('uptime_s')} {x.get('temperature_c')}")
+        need(all(h == "Basic YWRtaW46YWRtaW4=" for h in seen["auth"]), "asked without the password")
+        # its second tuner's signal falls: said with the tuner
+        tuners["tuner"][1]["status"]["c_n_100"] = "6.10 dB"
+        low = wait_for(lambda: incidents("ird_cn_low"), 15, "tuner 2 low")[0]
+        need("IRD ird15 tuner 2: C/N 6.1 dB, normally 12.2 dB" in low["summary"] or
+             "IRD ird15 tuner 2: C/N 6.1 dB, normally 12.3 dB" in low["summary"], f"low: {low['summary']}")
+        tuners["tuner"][1]["status"]["c_n_100"] = "12.25 dB"
+        # a power cut: up for 2 minutes now
+        status["uptime"] = "00:02:05"
+        rs = wait_for(lambda: incidents("ird_restarted"), 15, "the restart")[0]
+        need("IRD ird15 restarted: up 2 min (it had been up 25 h 31 min)" in rs["summary"], f"restart: {rs['summary']}")
+        # its output changes: said, against the probe before
+        playing["file"] = b
+        ch = wait_for(lambda: [i for i in incidents("satellite_changed") if "changed in the output" in i["summary"]], 40,
+                      "the output's change")[0]
+        need("Other (2000): changed in the output: was 2001 h264, 2002 aac, 2003 ac3; now 2101 h264, 2102 aac, 2103 ac3"
+             in ch["summary"], f"change: {ch['summary']}")
+    finally:
+        stop.set()
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+        srv.shutdown()
+    return f"2 tuners, up {x['uptime_s']} s, {x['temperature_c']} °C; tuner 2 low, the restart and the output's change said"
+
+
+@test
 def supervisor_language():
     """The language check: Whisper (a stand-in here) on a clip of each channel's output, through caricoder3 listen; heard wrong twice running is an incident with the clip kept; right again, it closes."""
     import base64
