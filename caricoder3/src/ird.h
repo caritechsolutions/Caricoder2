@@ -8,12 +8,19 @@
  * in the history ("ird.NAME.cn", ...). The C/N it normally has is the
  * median of the last day's readings while locked.
  *
- * Every 10 minutes, when the IRD's raw tuner output (the whole transponder
+ * Every few hours (3 by default), when the IRD's raw tuner output (the whole transponder
  * as received) and its outputs (the remux our channels read) are known,
  * both are probed at the same time and compared service by service: the
  * same streams (PID and codec), nothing still scrambled, nothing without
  * data that the satellite has. A difference seen twice running is a
  * problem; a service that leaves an output is said once.
+ *
+ * Every poll an Upcom is also asked for its own tables (ird_upcom.h): the
+ * PSI of each of its inputs and of its remux. Each service of the remux is
+ * compared with the same service from the input it comes from (the same
+ * streams; language labels only noted), and each input with what it was a
+ * minute before: a service whose streams or labels change on the
+ * satellite is said at once.
  *
  * Kinds of IRD understood: "upcom" (Upcom UC-IRD+, /goform/subBoard.cgi).
  * The supervisor turns the state into the watchdog's observations
@@ -42,7 +49,7 @@ struct ird_conf {
 struct ird_opts {
     const char *binary;         /* this program, for the probes */
     int poll_s;                 /* the tuner, every (60) */
-    int remux_s;                /* the comparison, every (600; 0: never) */
+    int remux_s;                /* the probe comparison, every (3 h; 0: never) */
     int baseline_n;             /* readings before there is a normal C/N (30) */
     int probe_s;                /* each probe this long (5) */
 };
@@ -65,6 +72,13 @@ struct ird_state {
     int remux_services;         /* services compared */
     char remux_what[480];       /* the differences, in words ("" none) */
     char remux_error[160];      /* could not compare */
+    /* the IRD's own tables (an Upcom's: ird_upcom.h), every poll */
+    int64_t tables_t;           /* last read (0: never) */
+    int tables_services;        /* services of the remux compared */
+    int tables_bad;             /* reads in a row with differences */
+    char tables_what[480];      /* how the remux differs from the satellite ("" not) */
+    char tables_labels[480];    /* audio language labels that differ (a note only: labels are not to be trusted) */
+    char tables_error[160];
 };
 
 void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o);

@@ -1097,14 +1097,19 @@ function irdsCard() {
     const tun = !x.answering ? `<span class="bad">not answering${x.error ? ": " + esc(x.error) : ""}</span>`
       : !x.locked ? `<span class="bad">not locked</span>`
       : `C/N <b class="${low ? "warn" : ""}">${f1(x.cn_db)} dB</b> <span class="dim">(normally ${x.cn_normal_db == null ? "not known yet: " + x.readings + " readings" : f1(x.cn_normal_db) + " dB"})</span> · Eb/N0 ${f1(x.ebn0_db)} dB · BER ${x.ber == null ? "—" : x.ber.toExponential(1)} · ${f1(x.strength_dbm)} dBm`;
-    const rmx = !x.raw ? `<span class="dim">no raw output given: not compared</span>`
-      : !r.checked ? `<span class="dim">not compared yet</span>`
-      : r.differences ? `<span class="warn">${esc(r.differences)}</span>`
-      : r.error ? `<span class="warn">could not compare: ${esc(r.error)}</span>`
-      : `${r.services} services match the satellite <span class="dim">(${fmtDur(Math.round(now - r.checked))} ago)</span>`;
+    const tb = x.tables || {};
+    const tables = !tb.checked ? ""
+      : tb.error ? `<div><span class="warn">its tables: ${esc(tb.error)}</span></div>`
+      : `<div>${tb.differences ? `<span class="warn">remux differs from the satellite: ${esc(tb.differences)}</span>` : `remux: ${tb.services} services as the satellite sends them`} <span class="dim">(its tables, ${fmtDur(Math.round(now - tb.checked))} ago)</span></div>
+         ${tb.labels ? `<div class="dim">audio labels differ (labels are not to be trusted; only listening decides): ${esc(tb.labels)}</div>` : ""}`;
+    const rmx = tables + (!x.raw ? (tables ? "" : `<span class="dim">no raw output given: not compared</span>`)
+      : !r.checked ? `<div class="dim">probe comparison: not done yet</div>`
+      : r.differences ? `<div><span class="warn">probe: ${esc(r.differences)}</span></div>`
+      : r.error ? `<div><span class="warn">probe: could not compare: ${esc(r.error)}</span></div>`
+      : `<div class="dim">probe: ${r.services} services match the satellite (${fmtDur(Math.round(now - r.checked))} ago)</div>`);
     return `<tr><td><span class="lamp ${x.answering && x.locked && !low ? "ok" : "bad"}"></span> ${esc(x.name)}</td><td class="mono">${esc(x.address)}</td><td>${tun}</td><td>${rmx}</td></tr>`;
   }).join("");
-  return `<section class="card"><header><h2>IRDs</h2><span class="hint">The satellite receivers: each tuner read every minute; every 10 minutes the raw output and the outputs our channels read compared service by service</span><div class="sp"></div>${L.length ? `<button onclick="checkIrds()">Check now</button> ` : ""}<button onclick="editIrds()">Change</button></header>
+  return `<section class="card"><header><h2>IRDs</h2><span class="hint">The satellite receivers: each tuner and its own tables read every minute; every few hours what they send probed and compared with what comes down</span><div class="sp"></div>${L.length ? `<button onclick="checkIrds()">Check now</button> ` : ""}<button onclick="editIrds()">Change</button></header>
     ${L.length ? `<div class="tw"><table><thead><tr><th>IRD</th><th>Address</th><th>Tuner</th><th>Outputs</th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="body"><div class="empty" style="padding:6px">No IRDs yet. "Change" adds them: their address, and the outputs they send.</div></div>`}</section>`;
 }

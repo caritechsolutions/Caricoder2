@@ -654,10 +654,16 @@ more, and 2.5 GB for its context.
 Each tuner is read every minute from the IRD's own web interface (Upcom
 UC-IRD+ today): lock, C/N, Eb/N0, BER, level, kept in the history as
 `ird.NAME.cn` and so on. Its normal C/N is the median of the last day's
-readings. Every 10 minutes the raw tuner output and the outputs are
-probed at the same moment and compared service by service: the same PIDs
-and codecs, nothing still scrambled, no stream without data that the
-satellite has. Incidents: `ird_down` (3 polls unanswered), `ird_unlocked`,
+readings. Every poll an Upcom is also asked for its own tables (the PSI
+it holds for each input and for its remux, `remux.cgi`; src/ird_upcom.c,
+the template for this kind of IRD): each service of the remux is compared
+with the same service from the input it comes from (streams and types;
+audio language labels only noted, since on these sources they cannot be
+trusted), and each input with the minute before, so a service the uplink
+changes is said at once (`satellite_changed`, before and after). Every 3
+hours the raw tuner output and the outputs are also probed at the same
+moment and compared: the same PIDs and codecs, nothing still scrambled, no
+stream without data that the satellite has. Incidents: `ird_down` (3 polls unanswered), `ird_unlocked`,
 `ird_cn_low` (the watchdog's `ird_cn_drop_db`, 3 dB below normal, two
 readings running), `remux_mismatch` (two comparisons running), and a
 service leaving an output. A channel's incident carries the readings of

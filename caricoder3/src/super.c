@@ -627,7 +627,7 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
             if (ird_conf_read(&doc, j, &s->irds[s->n_irds], NULL, 0))
                 s->n_irds++;
         s->ird_o.poll_s = (int)json_get_num(&doc, root, "ird_poll_s", 60);          /* the tests make these short */
-        s->ird_o.remux_s = (int)json_get_num(&doc, root, "ird_remux_s", 600);
+        s->ird_o.remux_s = (int)json_get_num(&doc, root, "ird_remux_s", 3 * 3600);   /* the tables are read every minute */
         s->ird_o.baseline_n = (int)json_get_num(&doc, root, "ird_baseline_n", 30);
         s->ird_o.probe_s = (int)json_get_num(&doc, root, "ird_probe_s", 5);
     }

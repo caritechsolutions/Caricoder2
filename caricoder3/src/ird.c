@@ -21,6 +21,7 @@
 #include "history.h"
 #include "peer.h"
 #include "watchdog.h"
+#include "ird_upcom.h"
 
 #define SAMPLES 1440                    /* a day of minutes */
 #define PROGS_MAX 64
@@ -32,6 +33,8 @@ struct ird {
     int out_progs[IRD_OUTS][PROGS_MAX]; /* the services in each output at the last comparison */
     int n_out_progs[IRD_OUTS];
     bool out_known[IRD_OUTS];
+    struct upcom_tables *prev;          /* each input's tables at the last read (16, by source number) */
+    bool prev_known[16];
 };
 
 static struct {
@@ -197,6 +200,152 @@ static void poll_one(int k)
         }
     }
     free(out);
+}
+
+/* ---- an Upcom's own tables ------------------------------------------------------- */
+
+static char *upcom_ask(const char *base, int form, int key, char *err, size_t errlen)
+{
+    char body[200], *out = NULL;
+    int status;
+
+    /* json={"F":{"method":0,"data":{"K":{}}}} */
+    snprintf(body, sizeof(body), "json=%%7B%%22%d%%22%%3A%%7B%%22method%%22%%3A0%%2C%%22data%%22%%3A%%7B%%22%d%%22%%3A%%7B%%7D%%7D%%7D%%7D",
+             form, key);
+    status = http_call(base, "POST", "/goform/remux.cgi", "application/x-www-form-urlencoded; charset=UTF-8", NULL, body,
+                       8000, &out);
+    if (status != 200) {
+        snprintf(err, errlen, "its tables: %s", status < 0 && out ? out : "an HTTP error");
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+static void add_text(char *dst, size_t len, const char *fmt, const char *name, int n, const char *rest)
+{
+    size_t at = strlen(dst);
+
+    if (at + 30 >= len) {
+        if (at + 6 < len && (at < 3 || strcmp(dst + at - 3, "...")))
+            snprintf(dst + at, len - at, "; ...");
+        return;
+    }
+    snprintf(dst + at, len - at, "%s%s (%d)", at ? "; " : "", name[0] ? name : "program", n);
+    at = strlen(dst);
+    snprintf(dst + at, len - at, fmt, rest);
+}
+
+/* One read of IRD k's tables; without the lock. */
+static void tables_one(int k)
+{
+    static struct upcom_tables remux, src[16];
+    bool have[16] = { false }, said[UPCOM_SVC_MAX * 2] = { false };
+    int said_n[UPCOM_SVC_MAX * 2], n_said = 0;
+    struct ird_conf c;
+    char url[300], err[160] = "", what[480] = "", labels[480] = "", w[600];
+    char *body;
+    int services = 0, diffs = 0;
+    int64_t t = time(NULL);
+    struct { char text[300]; } changes[8];
+    int n_changes = 0;
+
+    pthread_mutex_lock(&I.lock);
+    c = I.ird[k].st.c;
+    pthread_mutex_unlock(&I.lock);
+    if (strcmp(c.kind, "upcom"))
+        return;
+    snprintf(url, sizeof(url), "%s%s", strncmp(c.address, "http://", 7) ? "http://" : "", c.address);
+    body = upcom_ask(url, 8, 0, err, sizeof(err));
+    if (body && !upcom_parse(body, &remux))
+        snprintf(err, sizeof(err), "its remux has no tables");
+    free(body);
+    if (!err[0]) {
+        for (int i = 0; i < remux.n_src; i++) {
+            int s = remux.src[i][0];
+
+            if (s < 0 || s >= 16 || have[s])
+                continue;
+            body = upcom_ask(url, 3, s, err, sizeof(err));
+            if (!body)
+                break;
+            have[s] = upcom_parse(body, &src[s]);
+            free(body);
+        }
+    }
+    if (!err[0]) {
+        for (int i = 0; i < remux.n; i++) {
+            const struct upcom_svc *o = &remux.svc[i], *in;
+            int s = upcom_source_of(&remux, o->n);
+
+            in = s >= 0 && s < 16 && have[s] ? upcom_find(&src[s], o->n) : NULL;
+            if (!in) {
+                char sv[300];
+
+                upcom_streams_text(o, sv, sizeof(sv));
+                add_text(what, sizeof(what), " is in the remux (%s) but not on the satellite", o->name, o->n, sv);
+                diffs++;
+                continue;
+            }
+            services++;
+            if (!upcom_same(&remux, o, s, in, w, sizeof(w))) {
+                add_text(what, sizeof(what), ": %s", o->name, o->n, w);
+                diffs++;
+            } else if (upcom_labels_differ(o, in, w, sizeof(w))) {
+                add_text(labels, sizeof(labels), ": %s", o->name, o->n, w);
+            }
+        }
+    }
+    pthread_mutex_lock(&I.lock);
+    {
+        struct ird *d = &I.ird[k];
+
+        if (!strcmp(d->st.c.name, c.name)) {
+            if (!err[0]) {
+                /* what changed on the satellite since the last read: each service once */
+                if (!d->prev)
+                    d->prev = calloc(16, sizeof(*d->prev));
+                for (int s = 0; d->prev && s < 16; s++) {
+                    if (!have[s])
+                        continue;
+                    if (d->prev_known[s]) {
+                        for (int i = 0; i < src[s].n; i++) {
+                            const struct upcom_svc *now = &src[s].svc[i], *was = upcom_find(&d->prev[s], now->n);
+                            bool done = false;
+
+                            for (int j = 0; j < n_said; j++)
+                                done |= said_n[j] == now->n && said[j];
+                            if (done || !was || !upcom_changed(was, now, w, sizeof(w)) || n_changes == 8)
+                                continue;
+                            snprintf(changes[n_changes++].text, sizeof(changes[0].text),
+                                     "IRD %.30s: %.40s (%d) changed on the satellite: %.180s", c.name,
+                                     now->name[0] ? now->name : "service", now->n, w);
+                            if (n_said < UPCOM_SVC_MAX * 2) {
+                                said_n[n_said] = now->n;
+                                said[n_said++] = true;
+                            }
+                        }
+                    }
+                    d->prev[s] = src[s];
+                    d->prev_known[s] = true;
+                }
+                d->st.tables_bad = diffs ? d->st.tables_bad + 1 : 0;
+                d->st.tables_services = services;
+                snprintf(d->st.tables_what, sizeof(d->st.tables_what), "%s", what);
+                snprintf(d->st.tables_labels, sizeof(d->st.tables_labels), "%s", labels);
+            }
+            d->st.tables_t = t;
+            snprintf(d->st.tables_error, sizeof(d->st.tables_error), "%s", err);
+        }
+    }
+    pthread_mutex_unlock(&I.lock);
+    for (int i = 0; i < n_changes; i++) {
+        char subj[96];
+
+        snprintf(subj, sizeof(subj), "ird/%.40s/satellite", c.name);
+        wd_instant_server(t, subj, WD_SAT_CHANGED, changes[i].text);
+        log_info("%s", changes[i].text);
+    }
 }
 
 /* ---- comparing what comes down with what is sent ---------------------------------- */
@@ -583,6 +732,8 @@ static void *run(void *arg)
             I.ird[todo_poll].st.last_try = t;
             pthread_mutex_unlock(&I.lock);
             poll_one(todo_poll);
+            if (I.ird[todo_poll].st.answering)
+                tables_one(todo_poll);
             pthread_mutex_lock(&I.lock);
             continue;
         }
@@ -696,6 +847,9 @@ void ird_watch(int64_t t, int cn_drop_db)
         snprintf(subj, sizeof(subj), "ird/%.40s/remux", s->c.name);
         snprintf(what, sizeof(what), "IRD %.40s: %.400s", s->c.name, s->remux_what);
         wd_observe(t, subj, NULL, "", WD_REMUX, s->remux_bad >= 2, what, 0);
+        snprintf(subj, sizeof(subj), "ird/%.40s/tables", s->c.name);
+        snprintf(what, sizeof(what), "IRD %.40s: the remux differs from the satellite: %.380s", s->c.name, s->tables_what);
+        wd_observe(t, subj, NULL, "", WD_REMUX, s->answering && s->tables_bad >= 2, what, 0);
     }
 }
 
@@ -751,6 +905,13 @@ static void one_json(FILE *f, const struct ird_state *s)
     jstr(f, s->remux_what);
     fprintf(f, ", \"times_in_a_row\": %d, \"error\": ", s->remux_bad);
     jstr(f, s->remux_error);
+    fprintf(f, "}, \"tables\": {\"checked\": %lld, \"services\": %d, \"differences\": ", (long long)s->tables_t,
+            s->tables_services);
+    jstr(f, s->tables_what);
+    fprintf(f, ", \"labels\": ");
+    jstr(f, s->tables_labels);
+    fprintf(f, ", \"times_in_a_row\": %d, \"error\": ", s->tables_bad);
+    jstr(f, s->tables_error);
     fprintf(f, "}}");
 }
 

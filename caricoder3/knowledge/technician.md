@@ -260,6 +260,16 @@ points at this side, and do not blame this side when it points upstream.
   channels still have input before calling it a source fault.
 - "IRD tuner not locked": no signal at that IRD: its dish, LNB, cable, or
   the transponder is off. All its channels lose their input.
+- All the IRDs here share one dish. C/N falling on every IRD at once: the
+  dish, its LNB, or rain here or at the uplink, or the satellite. On one
+  IRD only: that IRD, its cable from the dish, or its transponder.
+- "a service changed on the satellite": the uplink changed a service's
+  streams or their language labels (says before and after). Our channels
+  take audio by PID, so a swap of two audio tracks puts the wrong language
+  on air: a ticket to the uplink, or the channel's PID changed here.
+- Audio language labels on these sources are not to be trusted, on the
+  satellite or in an IRD's remux: only listening says which language a PID
+  carries. Never reason from a label alone.
 - "IRD output differs from the satellite": the IRD's output carries a
   service with other streams (PIDs, codecs) than the satellite sends, still
   scrambled, or without data the satellite has. The IRD's remux or CI card,

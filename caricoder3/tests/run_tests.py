@@ -3310,6 +3310,7 @@ def supervisor_irds():
     """IRDs: the tuner read every poll (a stand-in Upcom), C/N low against its own normal, lock lost and not answering are incidents with the readings; the raw output and the remux compared, a service whose streams differ said."""
     import base64
     import http.server
+    import urllib.parse
     import urllib.request
     root = w("super_ird")
     shutil.rmtree(root, ignore_errors=True)
@@ -3319,11 +3320,25 @@ def supervisor_irds():
     praw, pout, pch = _port[0] + 3, _port[0] + 4, _port[0] + 5
     _port[0] += 6
     tuner = {"lock": 1, "cn": 12.1, "up": True}
+    # the IRD's own tables: what 192.168.110.10 answered on 22 Oct (its remux had stale entries)
+    tdir = os.path.join(HERE, "data", "upcom")
+    tables = {k: open(os.path.join(tdir, f)).read() for k, f in
+              (("8/0", "remux.json"), ("3/2", "src-2.json"), ("3/4", "src-4.json"), ("3/5", "src-5.json"))}
 
     class H(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n).decode()
+            if tuner["up"] and self.path == "/goform/remux.cgi":
+                q = json.loads(urllib.parse.unquote_plus(body.split("=", 1)[1]))
+                form = next(iter(q))
+                key = next(iter(q[form]["data"]))
+                out = tables.get(f"{form}/{key}", '{"%s": {"%s": {}}}' % (form, key)).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+                return
             if not tuner["up"] or "%22120%22" not in body:
                 self.send_response(404)
                 self.end_headers()
@@ -3389,8 +3404,31 @@ def supervisor_irds():
         ird = wait_for(lambda: [x for x in api("/api/irds")["irds"] if x.get("cn_normal_db") is not None], 20, "a normal C/N")[0]
         need(ird["locked"] and abs(ird["cn_db"] - 12.1) < 0.01 and ird["ber"] == 1.5e-7 and ird["strength_dbm"] == -32.9,
              f"readings: {ird}")
+        # the IRD's own tables: the stale entries of its remux, from a read a minute
+        tb = wait_for(lambda: [x for x in incidents("remux_mismatch") if "differs from the satellite" in x["summary"]], 20,
+                      "the tables' difference")[0]
+        ti = api("/api/irds")["irds"][0]["tables"]
+        need("TRAVEL (2020)" in ti["differences"] and "TLCL (2070)" in ti["differences"] and "(1650)" in ti["differences"]
+             and "2074 AAC eng" in ti["differences"], f"tables: {ti}")
+        need("AE-LAT (2160)" in ti["labels"] and "2162 spa" in ti["labels"] and "AE-LAT" not in ti["differences"],
+             f"labels: {ti['labels']}")
+        need(ti["services"] == 25, f"compared: {ti['services']}")
+        # the satellite swaps A&E's audio labels: said at once
+        def swap_ae(text):
+            d = json.loads(text)
+            for sec in d["3"]["2"]["PMT"]:
+                if (sec[3] << 8) | sec[4] == 2160:
+                    b = bytes(sec)
+                    eng, spa = b.find(b"eng"), b.find(b"spa")
+                    sec[eng:eng + 3], sec[spa:spa + 3] = list(b"spa"), list(b"eng")
+            return json.dumps(d)
+        tables["3/2"] = swap_ae(tables["3/2"])
+        sw = wait_for(lambda: incidents("satellite_changed"), 15, "the change on the satellite")[0]
+        need("A&E (2160) changed on the satellite" in sw["summary"] and "now 2161 H.265, 2162 AAC eng" in sw["summary"],
+             f"change: {sw['summary']}")
         # the remux differs: said after two comparisons
-        mm = wait_for(lambda: incidents("remux_mismatch"), 40, "the remux difference")[0]
+        mm = wait_for(lambda: [x for x in incidents("remux_mismatch") if "Other (2000)" in x["summary"]], 40,
+                      "the remux difference")[0]
         need("Other (2000)" in mm["summary"] and "2101" in mm["summary"], f"remux: {mm['summary']}")
         one = api("/api/irds")["irds"][0]
         need(one["remux"]["services"] >= 2, f"compared: {one['remux']}")
@@ -3428,7 +3466,8 @@ def supervisor_irds():
         except subprocess.TimeoutExpired:
             sup.kill()
         srv.shutdown()
-    return f"normal C/N {ird['cn_normal_db']} dB; remux: {mm['summary'][:90]}; C/N low, lock lost and not answering opened"
+    return (f"normal C/N {ird['cn_normal_db']} dB; tables: {ti['differences'][:80]}...; satellite: {sw['summary'][:80]}; "
+            f"probe: {mm['summary'][:60]}; C/N low, lock lost and not answering opened")
 
 
 @test
