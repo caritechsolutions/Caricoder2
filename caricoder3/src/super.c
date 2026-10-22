@@ -235,6 +235,7 @@ struct super {
     int n;
     struct share sh[SHARES_MAX];
     char card_mode[8];                      /* "auto", "off", "test" (CPU, for tests) */
+    char timezone[64];                      /* the site's, e.g. "America/Barbados" ("": the server's) */
     struct cardp cards[CARDS_MAX];
     int n_cards;
     bool stopping_all;                      /* the supervisor is ending: card processes go last */
@@ -381,15 +382,36 @@ static void make_password(char *out, size_t len)
     out[n] = 0;
 }
 
+/* The site's time zone, for the times the technician is told and writes
+ * in tickets (this server's clock may be on UTC). A name in the system's
+ * zone files, or "" for the server's own. Returns false for an unknown one. */
+static bool set_timezone(struct super *s, const char *tz)
+{
+    char path[200];
+
+    if (*tz && (strstr(tz, "..") || *tz == '/' || strlen(tz) >= sizeof(s->timezone)))
+        return false;
+    snprintf(path, sizeof(path), "/usr/share/zoneinfo/%s", tz);
+    if (*tz && access(path, R_OK))
+        return false;
+    snprintf(s->timezone, sizeof(s->timezone), "%s", tz);
+    if (*tz)
+        setenv("TZ", tz, 1);
+    else
+        unsetenv("TZ");
+    tzset();
+    return true;
+}
+
 static void save_system_config(struct super *s)
 {
-    char text[16384], q[12][600], err[200];
+    char text[16384], q[13][600], err[200];
 
     snprintf(text, sizeof(text),
              "{\n  \"listen\": %s,\n  \"port\": %d,\n  \"channels_dir\": %s,\n"
              "  \"run_dir\": %s,\n  \"password\": %s,\n  \"history\": %s,\n  \"history_max_mb\": %d,\n"
              "  \"evidence\": %s,\n  \"evidence_max_mb\": %d,\n  \"evidence_auto\": %s,\n"
-             "  \"name\": %s,\n  \"peer_key\": %s,\n  \"card_process\": %s,\n"
+             "  \"name\": %s,\n  \"peer_key\": %s,\n  \"card_process\": %s,\n  \"timezone\": %s,\n"
              "  \"technician\": {\"enabled\": %s, \"gpu\": %s, \"threads\": %d, \"model\": %s, \"idle_s\": %d, "
              "\"server\": %s, \"context\": %d, \"delay_s\": %d, \"port\": %d, \"knowledge\": %s}\n}\n",
              json_quote(s->listen, q[0], sizeof(q[0])), s->port,
@@ -400,6 +422,7 @@ static void save_system_config(struct super *s)
              json_quote(s->evidence_dir, q[5], sizeof(q[5])), s->evidence_max_mb, s->evidence_auto ? "true" : "false",
              json_quote(s->name, q[6], sizeof(q[6])), json_quote(s->peer_key, q[7], sizeof(q[7])),
              s->card_mode[0] ? (!strcmp(s->card_mode, "off") ? "\"off\"" : !strcmp(s->card_mode, "test") ? "\"test\"" : "\"auto\"") : "\"auto\"",
+             json_quote(s->timezone, q[12], sizeof(q[12])),
              s->tech.enabled ? "true" : "false", json_quote(s->tech.gpu, q[8], sizeof(q[8])), s->tech.threads,
              json_quote(s->tech.model, q[9], sizeof(q[9])), s->tech.idle_s,
              json_quote(s->tech.server, q[10], sizeof(q[10])), s->tech.ctx, s->tech.delay_s, s->tech.port,
@@ -507,6 +530,7 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(&doc, root, "peer_key", ""));
     snprintf(s->card_mode, sizeof(s->card_mode), "%s", json_get_str(&doc, root, "card_process", "auto"));
     s->mem_test_s = (int)json_get_num(&doc, root, "memory_sample_s", 0);   /* for the tests */
+    set_timezone(s, json_get_str(&doc, root, "timezone", ""));
     if (strcmp(s->card_mode, "off") && strcmp(s->card_mode, "test"))
         snprintf(s->card_mode, sizeof(s->card_mode), "auto");
     {
@@ -2453,14 +2477,18 @@ static bool apply_verdict(const struct json_doc *doc, int root, int64_t id, char
 
     for (size_t k = 0; k < sizeof(cats) / sizeof(cats[0]); k++)
         cat_ok |= !strcmp(cat, cats[k]);
-    if ((strcmp(v, "right") && strcmp(v, "partly") && strcmp(v, "wrong")) || !cat_ok) {
-        snprintf(err, errlen, "verdict: right, partly or wrong; category: one of the technician's");
+    if ((strcmp(v, "right") && strcmp(v, "partly") && strcmp(v, "wrong") && strcmp(v, "exclude") && strcmp(v, "none"))
+        || !cat_ok) {
+        snprintf(err, errlen, "verdict: right, partly, wrong, exclude (not a real case) or none (taken back);"
+                 " category: one of the technician's");
         return false;
     }
     snprintf(actual, sizeof(actual), "{\"category\": %s, \"cause\": %s}", json_quote(cat, q1, sizeof(q1)),
              json_quote(cause, q2, sizeof(q2)));
     history_incident_verdict(id, time(NULL), v, note, *cat || *cause ? actual : "{}");
-    snprintf(text, sizeof(text), "%s%s%.300s%s%.300s", !strcmp(v, "right") ? "Right." : !strcmp(v, "partly") ? "Partly." : "Wrong.",
+    snprintf(text, sizeof(text), "%s%s%.300s%s%.300s",
+             !strcmp(v, "right") ? "Right." : !strcmp(v, "partly") ? "Partly." : !strcmp(v, "exclude")
+             ? "Not a real case: not to learn from." : !strcmp(v, "none") ? "Verdict taken back." : "Wrong.",
              *cause ? " It was: " : "", cause, *note ? " " : "", note);
     history_message(time(NULL), "person", "in", text, "{}", id);
     return true;
@@ -2799,7 +2827,8 @@ static void peers_json(struct super *s, FILE *f)
     int n = peer_get(st, PEERS_MAX);
     char q[600];
 
-    fprintf(f, "{\"ok\": true, \"name\": %s, \"key_set\": %s, \"peers\": [", json_quote(s->name, q, sizeof(q)),
+    fprintf(f, "{\"ok\": true, \"name\": %s, ", json_quote(s->name, q, sizeof(q)));
+    fprintf(f, "\"timezone\": %s, \"key_set\": %s, \"peers\": [", json_quote(s->timezone, q, sizeof(q)),
             s->peer_key[0] ? "true" : "false");
     for (int i = 0; i < n; i++) {
         fprintf(f, "%s{\"name\": %s", i ? ", " : "", json_quote(st[i].name, q, sizeof(q)));
@@ -4226,6 +4255,12 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 snprintf(s->name, sizeof(s->name), "%s", json_get_str(doc, root, "name", ""));
             if (json_get(doc, root, "key") >= 0)
                 snprintf(s->peer_key, sizeof(s->peer_key), "%s", json_get_str(doc, root, "key", ""));
+            if (json_get(doc, root, "timezone") >= 0 && !set_timezone(s, json_get_str(doc, root, "timezone", ""))) {
+                pthread_mutex_unlock(&s->lock);
+                free(doc);
+                api_error(resp, 400, "timezone: a name such as America/Barbados, or empty for the server's own");
+                return;
+            }
             if ((a = json_get(doc, root, "peers")) >= 0) {
                 s->n_peers = 0;
                 for (int j = doc->node[a].first_child; j >= 0 && s->n_peers < PEERS_MAX; j = doc->node[j].next) {

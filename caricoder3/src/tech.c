@@ -410,8 +410,8 @@ static void key_facts(FILE *f, const char *rep, int64_t now)
         struct tm tm;
 
         localtime_r(&tt, &tm);
-        strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S", &tm);
-        fprintf(f, "- began: %s (this server's local time)\n", tb);
+        strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S %Z", &tm);
+        fprintf(f, "- began: %s (the site's local time)\n", tb);
     }
     if (has_closed)
         fprintf(f, "- it lasted %lld s and is OVER: it ended by itself\n", closed - opened);

@@ -914,6 +914,7 @@ function peersCard() {
 function editPeers() {
   const d = $("#dlg"), P = peersInfo || { name: "", peers: [] };
   d.innerHTML = `<h3>Peers</h3><div class="f"><label>This server's name</label><input id="p_name" value="${esc(P.name)}">
+    <label>Site time zone</label><input id="p_tz" value="${esc(P.timezone || "")}" placeholder="America/Barbados (empty: the server's own clock zone)">
     <label>Shared key</label><input id="p_key" type="password" placeholder="${P.key_set ? "(set; leave empty to keep)" : "the same on every transcoder"}">
     <label>Peers</label><textarea id="p_list" rows="5" placeholder="transcoder1 http://192.168.110.41:8550">${esc(P.peers.map(p => `${p.name} ${p.url}`).join("\n"))}</textarea></div>
     <div class="help">One a line: a name and its address. Every transcoder needs the others in its list and the same key.</div>
@@ -922,7 +923,7 @@ function editPeers() {
     const peers = $("#p_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return m.length > 1 ? { name: m[0], url: m[1] } : { name: m[0].replace(/^https?:\/\//, ""), url: m[0] }; });
     const bad = peers.find(p => !/^http:\/\/[^\s/]+(:\d+)?\/?$/.test(p.url));
     if (bad) { $("#p_msg").innerHTML = `<div class="msg err">Not an address like http://192.168.110.41:8550: ${esc(bad.url)}</div>`; return; }
-    const body = { name: $("#p_name").value.trim(), peers };
+    const body = { name: $("#p_name").value.trim(), timezone: $("#p_tz").value.trim(), peers };
     if ($("#p_key").value) body.key = $("#p_key").value;
     try { peersInfo = await api("/api/peers", { method: "PUT", body: JSON.stringify(body) }); d.close(); setTimeout(() => loadPeers(true), 1500); rerender(); }
     catch(e) { $("#p_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
@@ -945,8 +946,8 @@ function techView(x) {
 }
 /* A person's word on the technician's answer: what makes it better */
 function verdictView(x) {
-  if (!x.diagnosis || x.parent) return "";
-  const V = { right: "Right", partly: "Partly right", wrong: "Wrong" };
+  if (x.parent || (!x.diagnosis && x.verdict !== "exclude")) return "";
+  const V = { right: "Right", partly: "Partly right", wrong: "Wrong", exclude: "Excluded (not a real case: not learnt from)" };
   if (x.verdict) {
     const a = x.actual || {};
     return `<div class="verdict"><b>Your verdict: ${V[x.verdict] || esc(x.verdict)}</b>${a.cause ? ` · it was: ${esc(a.cause)}` : ""}${a.category ? ` <span class="dim">(${esc(CATEGORY[a.category] || a.category)})</span>` : ""}${x.note ? ` · ${esc(x.note)}` : ""}
@@ -954,11 +955,12 @@ function verdictView(x) {
   }
   return `<div class="verdict"><span class="dim">Was the technician right?</span>
     <button type="button" onclick="sendVerdict(${x.id}, 'right')">Right</button> <button type="button" onclick="verdictForm(${x.id}, 'partly')">Partly</button> <button type="button" onclick="verdictForm(${x.id}, 'wrong')">Wrong…</button>
+    <button type="button" title="A test, a restart, a false alarm: kept, but never learnt from" onclick="sendVerdict(${x.id}, 'exclude')">Exclude</button>
     <div id="vform"></div></div>`;
 }
 function verdictForm(id, v) {
   const el = $("#vform");
-  el.innerHTML = `<div class="f" style="margin-top:10px"><label>Verdict</label><select id="v_v"><option value="right">Right</option><option value="partly">Partly right</option><option value="wrong">Wrong</option></select>
+  el.innerHTML = `<div class="f" style="margin-top:10px"><label>Verdict</label><select id="v_v"><option value="right">Right</option><option value="partly">Partly right</option><option value="wrong">Wrong</option><option value="exclude">Exclude: not a real case (a test, a restart)</option><option value="none">No verdict (take it back)</option></select>
     <label>It was actually</label><input id="v_cause" placeholder="in a sentence: what really caused it (leave empty if it was right)">
     <label>Which is</label><select id="v_cat"><option value="">—</option>${Object.entries(CATEGORY).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select>
     <label>Note</label><input id="v_note" placeholder="what told you, what fixed it (optional)"></div>
@@ -993,7 +995,7 @@ function techCard(where) {
     <div class="box"><h4>State</h4><div class="big" style="font-size:18px">${esc(states[T.state] || T.state)}</div><div class="sub" title="${esc(T.where_why || "")}">${T.where ? `on ${whereTxt(T.where)}` : `will run on ${wantTxt(T.gpu)}`}${T.idle_s === 0 ? " · kept loaded" : ""}${T.queue ? ` · ${T.queue} waiting` : ""}</div></div>
     ${where === "settings" || missing ? `<div class="box"><h4>Model</h4><div class="sub mono" style="word-break:break-all">${esc(T.model)}</div>${missing ? `<div class="sub ${T.setting_up ? "warn" : "bad"}">${missing}${T.setting_up ? "" : " (the installer sets it up)"}</div>` : ""}</div>` : ""}
     ${where === "settings" ? "" : `<div class="box"><h4>So far</h4><div class="big">${T.done}</div><div class="sub">incidents looked at since the supervisor started${T.failed ? ` · <span class="warn">${T.failed} could not be</span>` : ""}${T.last_t ? ` · last ${fmtWhen(T.last_t)}${T.last_seconds ? ` in ${fmtDur(T.last_seconds)}` : ""}` : ""}</div>${T.last_error ? `<div class="sub bad">${esc(T.last_error)}</div>` : ""}</div>`}
-    ${T.verdicts && where !== "settings" ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
+    ${T.verdicts && where !== "settings" ? `<div class="box"><h4>Your verdicts</h4><div class="big">${T.verdicts.right + T.verdicts.partly + T.verdicts.wrong}</div><div class="sub">${T.verdicts.right} right · ${T.verdicts.partly} partly · ${T.verdicts.wrong} wrong${T.verdicts.excluded ? ` · ${T.verdicts.excluded} excluded` : ""}${T.verdicts.waiting_looked_at ? ` · <span class="warn">${T.verdicts.waiting_looked_at} answer${T.verdicts.waiting_looked_at > 1 ? "s" : ""} waiting for yours</span>` : ""}</div>
       <div class="sub"><a href="/api/training/export">Download them as training data</a> (JSON lines)</div></div>` : ""}
   </div>
   ${where === "settings" ? "" : `<div class="sub" style="margin-top:10px">Reviewing many at once: <a href="/api/incidents?limit=2000&download=1">download the last week's incidents</a> (JSON, with the technician's answers) ·

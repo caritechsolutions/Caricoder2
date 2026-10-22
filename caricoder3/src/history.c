@@ -380,7 +380,10 @@ static void write_batch(struct rec *q, int n)
             sqlite3_step(si);
             sqlite3_reset(si);
         } else if (r->type == R_INC_VERDICT && sx) {
-            sqlite3_bind_text(sx, 1, r->kind, -1, SQLITE_STATIC);
+            if (!strcmp(r->kind, "none"))      /* the verdict taken back */
+                sqlite3_bind_null(sx, 1);
+            else
+                sqlite3_bind_text(sx, 1, r->kind, -1, SQLITE_STATIC);
             sqlite3_bind_text(sx, 2, r->text ? r->text : "", -1, SQLITE_STATIC);
             sqlite3_bind_text(sx, 3, r->detail ? r->detail : "{}", -1, SQLITE_STATIC);
             sqlite3_bind_int64(sx, 4, r->t);
@@ -1245,7 +1248,7 @@ int history_verdict_ids(int64_t *ids, int max)
 
     if (!db)
         return 0;
-    if (sqlite3_prepare_v2(db, "SELECT id FROM incidents WHERE verdict IS NOT NULL AND diagnosis IS NOT NULL ORDER BY t",
+    if (sqlite3_prepare_v2(db, "SELECT id FROM incidents WHERE verdict IS NOT NULL AND verdict != 'exclude' AND diagnosis IS NOT NULL ORDER BY t",
                            -1, &st, NULL) == SQLITE_OK) {
         while (n < max && sqlite3_step(st) == SQLITE_ROW)
             ids[n++] = sqlite3_column_int64(st, 0);
@@ -1281,7 +1284,7 @@ int history_eval_cases(struct hist_case *out, int max)
     if (!db)
         return 0;
     if (sqlite3_prepare_v2(db, "SELECT id, rule, COALESCE(chan, grp, ''), summary, verdict, actual, diagnosis, t, closed"
-                               " FROM incidents WHERE verdict IS NOT NULL AND diagnosis IS NOT NULL AND parent IS NULL"
+                               " FROM incidents WHERE verdict IS NOT NULL AND verdict != 'exclude' AND diagnosis IS NOT NULL AND parent IS NULL"
                                " ORDER BY t DESC", -1, &st, NULL) == SQLITE_OK) {
         while (n < max && sqlite3_step(st) == SQLITE_ROW) {
             struct hist_case *c = &out[n++];
@@ -1325,7 +1328,7 @@ void history_verdict_counts(FILE *f)
 {
     sqlite3 *db = reader();
     sqlite3_stmt *st;
-    int right = 0, partly = 0, wrong = 0, open = 0, looked = 0;
+    int right = 0, partly = 0, wrong = 0, excluded = 0, open = 0, looked = 0;
 
     if (db && sqlite3_prepare_v2(db, "SELECT verdict, COUNT(*), SUM(diagnosis IS NOT NULL) FROM incidents"
                                      " WHERE parent IS NULL GROUP BY verdict", -1, &st, NULL) == SQLITE_OK) {
@@ -1341,13 +1344,15 @@ void history_verdict_counts(FILE *f)
                 partly = n;
             else if (!strcmp(v, "wrong"))
                 wrong = n;
+            else if (!strcmp(v, "exclude"))
+                excluded = n;
         }
         sqlite3_finalize(st);
     }
     if (db)
         sqlite3_close(db);
-    fprintf(f, "{\"right\": %d, \"partly\": %d, \"wrong\": %d, \"waiting\": %d, \"waiting_looked_at\": %d}",
-            right, partly, wrong, open, looked);
+    fprintf(f, "{\"right\": %d, \"partly\": %d, \"wrong\": %d, \"excluded\": %d, \"waiting\": %d, \"waiting_looked_at\": %d}",
+            right, partly, wrong, excluded, open, looked);
 }
 
 bool history_query_incidents_brief(FILE *f, int64_t from, int64_t to, bool open_only, int limit)
@@ -1421,7 +1426,7 @@ bool history_similar(FILE *f, int64_t id, int limit)
 {
     sqlite3 *db = reader();
     sqlite3_stmt *st;
-    int n = 0, near = limit - limit / 3;
+    int n = 0, judged = 0, near = limit - limit / 3;
 
     if (!db)
         return false;
@@ -1429,6 +1434,7 @@ bool history_similar(FILE *f, int64_t id, int limit)
             "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note, o.actual FROM incidents o,"
             " incidents i WHERE i.id = ? AND o.id != i.id AND o.t < i.t AND o.rule = i.rule AND"
             " (o.chan IS i.chan OR (o.grp = i.grp AND o.grp != '')) AND o.parent IS NULL"
+            " AND (o.verdict IS NULL OR o.verdict != 'exclude')"
             " ORDER BY o.verdict IS NULL, o.t DESC LIMIT ?", -1, &st, NULL) != SQLITE_OK) {
         sqlite3_close(db);
         return false;
@@ -1436,14 +1442,19 @@ bool history_similar(FILE *f, int64_t id, int limit)
     sqlite3_bind_int64(st, 1, id);
     sqlite3_bind_int(st, 2, near);
     fprintf(f, "[");
-    while (sqlite3_step(st) == SQLITE_ROW)
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        /* ones nobody judged teach little: only while there are few judged ones */
+        if (sqlite3_column_type(st, 7) == SQLITE_NULL && judged >= 3)
+            break;
+        judged += sqlite3_column_type(st, 7) != SQLITE_NULL;
         similar_row(f, st, "same channel or source", n++);
+    }
     sqlite3_finalize(st);
     if (n < limit && sqlite3_prepare_v2(db,
             "SELECT o.t, o.closed, o.chan, o.rule, o.grp, o.summary, o.diagnosis, o.verdict, o.note, o.actual FROM incidents o,"
             " incidents i WHERE i.id = ? AND o.id != i.id AND o.t < i.t AND o.rule = i.rule AND o.parent IS NULL"
-            " AND o.verdict IS NOT NULL AND NOT (o.chan IS i.chan OR (o.grp = i.grp AND o.grp != ''))"
-            " AND o.id IN (SELECT max(x.id) FROM incidents x, incidents y WHERE y.id = ? AND x.verdict IS NOT NULL"
+            " AND o.verdict IS NOT NULL AND o.verdict != 'exclude' AND NOT (o.chan IS i.chan OR (o.grp = i.grp AND o.grp != ''))"
+            " AND o.id IN (SELECT max(x.id) FROM incidents x, incidents y WHERE y.id = ? AND x.verdict IS NOT NULL AND x.verdict != 'exclude'"
             " AND x.t < y.t AND x.rule = y.rule AND x.parent IS NULL"
             " AND NOT (x.chan IS y.chan OR (x.grp = y.grp AND x.grp != ''))"
             " GROUP BY x.verdict, coalesce(CASE WHEN json_valid(x.actual) THEN json_extract(x.actual, '$.category') END,"

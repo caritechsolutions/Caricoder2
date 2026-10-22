@@ -3249,7 +3249,8 @@ def supervisor_tech_prompt():
     cfg = os.path.join(root, "cfg.json")
     db = os.path.join(root, "h.db")
     port = 18779
-    json.dump({"name": "t2", "port": port, "channels_dir": os.path.join(root, "channels"), "history": db}, open(cfg, "w"))
+    json.dump({"name": "t2", "port": port, "channels_dir": os.path.join(root, "channels"), "history": db,
+               "timezone": "America/Barbados"}, open(cfg, "w"))
     sup = subprocess.Popen([BIN, "serve", "--config", cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(50):
@@ -3268,6 +3269,8 @@ def supervisor_tech_prompt():
     b = 1790000000
     add(b, "godtv", "silent_audio", "g1", {"category": "source_provider"}, "wrong", {"category": "normal_content", "cause": "ad break"})
     add(b + 100, "godtv", "silent_audio", "g2", {"category": "normal_content"}, "right")
+    add(b + 110, "godtv", "silent_audio", "g_restart", {"category": "transcoder"}, "exclude")
+    add(b + 120, "tnt", "silent_audio", "e_restart", {"category": "network"}, "exclude")
     add(b + 200, "bet", "silent_audio", "e_bet", {"category": "source_provider"}, "right")
     add(b + 300, "cnn", "silent_audio", "e_cnn", {"category": "source_provider"}, "right")
     add(b + 400, "tnt", "silent_audio", "e_tnt", {"category": "source_provider"}, "wrong", {"category": "transcoder", "cause": "x"})
@@ -3286,9 +3289,20 @@ def supervisor_tech_prompt():
     need(got == [("g2", "same channel or source"), ("g1", "same channel or source"), ("e_tnt", "elsewhere"), ("e_cnn", "elsewhere")],
          f"past cases: {got}")
     r = subprocess.run([BIN, "tech-prompt", "--config", cfg, "--id", str(now)], capture_output=True, text=True, timeout=20)
+    need("(the site's local time)" in user and " AST " in user, f"time: {[l for l in user.splitlines() if 'began' in l]}")
     need(r.returncode == 0 and "===== system =====" in r.stdout and "===== user =====" in r.stdout and "Key facts" in r.stdout,
          f"text form: {r.stdout[:300]}")
-    return f"{len(past)} past cases: {', '.join(s for s, _ in got)}; same channel first, one per kind from elsewhere"
+    # with three judged on the channel, one nobody judged is left out; excluded ones never shown
+    c = sqlite3.connect(db)
+    add(b + 150, "godtv", "silent_audio", "g3", {"category": "normal_content"}, "partly")
+    add(b + 160, "godtv", "silent_audio", "g_unjudged", {"category": "unknown"})
+    c.commit()
+    c.close()
+    r = subprocess.run([BIN, "tech-prompt", "--config", cfg, "--id", str(now), "--json"], capture_output=True, text=True, timeout=20)
+    user = json.loads(r.stdout)["messages"][1]["content"]
+    past2 = [x["summary"] for x in json.loads(user.split("(JSON; null where nobody said):\n", 1)[1].split("\n\n", 1)[0])]
+    need(past2[:3] == ["g3", "g2", "g1"] and "g_unjudged" not in past2 and not any("restart" in x for x in past2), f"then: {past2}")
+    return f"{len(past)} past cases: {', '.join(s for s, _ in got)}; same channel first, one per kind from elsewhere; excluded and (with enough judged) unjudged ones left out; times in AST"
 
 
 @test
