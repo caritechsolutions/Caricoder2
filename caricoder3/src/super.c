@@ -421,6 +421,52 @@ static bool ird_conf_read(const struct json_doc *d, int j, struct ird_conf *c, c
     return true;
 }
 
+/* "udp://224.100.1.5:49500?..." and "udp://@224.100.1.5:49500": the same */
+static bool same_source(const char *a, const char *b)
+{
+    size_t la, lb;
+
+    if (!strncmp(a, "udp://", 6))
+        a += 6 + (a[6] == '@');
+    if (!strncmp(b, "udp://", 6))
+        b += 6 + (b[6] == '@');
+    la = strcspn(a, "?");
+    lb = strcspn(b, "?");
+    return la == lb && !strncmp(a, b, la);
+}
+
+/* ird.h's question: does one of our channels take this PID of this program
+ * from this source? (Its input that, its program that or all of them, the
+ * PID not dropped.) */
+static bool chan_uses(const char *url, int program, int pid, void *op)
+{
+    struct super *s = op;
+    static struct json_doc doc;         /* under the supervisor's lock */
+    bool yes = false;
+
+    pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < s->n && !yes; i++) {
+        char err[100];
+        int root = s->ch[i].cfg ? json_parse(&doc, s->ch[i].cfg, err, sizeof(err)) : -1, d;
+        int prog;
+
+        if (root < 0 || !json_get_bool(&doc, root, "enabled", true))
+            continue;
+        if (!same_source(json_get_str(&doc, root, "input", ""), url))
+            continue;
+        prog = (int)json_get_num(&doc, root, "program", 0);
+        if (prog && prog != program)
+            continue;
+        yes = true;
+        d = json_get(&doc, root, "drop");
+        for (int j = d >= 0 ? doc.node[d].first_child : -1; j >= 0; j = doc.node[j].next)
+            if ((int)doc.node[j].num == pid)
+                yes = false;
+    }
+    pthread_mutex_unlock(&s->lock);
+    return yes;
+}
+
 static void irds_apply(struct super *s)
 {
     s->ird_o.binary = s->binary;
@@ -5409,6 +5455,7 @@ int super_main(int argc, char **argv)
     wd_set_snapshot(wd_snapshot, &s);
     wd_set_on_open(on_incident, &s);
     peers_apply(&s);
+    ird_set_uses(chan_uses, &s);
     irds_apply(&s);
     snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
     tech_set_context(tech_context, &s);

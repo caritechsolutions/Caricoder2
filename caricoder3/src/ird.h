@@ -71,6 +71,7 @@ struct ird_state {
     int remux_bad;              /* comparisons in a row with differences */
     int remux_services;         /* services compared */
     char remux_what[480];       /* the differences, in words ("" none) */
+    char remux_notes[480];      /* the same in streams none of our channels take: noted only */
     char remux_error[160];      /* could not compare */
     /* the IRD's own tables (an Upcom's: ird_upcom.h), every poll */
     int64_t tables_t;           /* last read (0: never) */
@@ -84,6 +85,10 @@ struct ird_state {
 void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o);
 void ird_stop(void);
 int ird_get(struct ird_state *out, int max);
+/* Whether one of our channels takes PID `pid` of program `program` from
+ * `url`: a difference in a stream nobody takes is said as a note, not a
+ * problem. Called from the IRD thread. */
+void ird_set_uses(bool (*fn)(const char *url, int program, int pid, void *op), void *op);
 /* Asks every IRD now, and compares now. */
 void ird_check_now(void);
 
@@ -100,7 +105,8 @@ void ird_json(FILE *f);
 
 /* The comparison itself (probe --brief JSON of the raw output and of an
  * output): how many differences; `what` says them. */
-int ird_compare(const char *raw_json, const char *out_json, char *what, size_t len, int *services);
+int ird_compare(const char *raw_json, const char *out_json, const char *url, char *what, size_t len, char *notes,
+                size_t nlen, int *services);
 
 /* Parses an Upcom tuner answer ({"120": {"0": {...}}}); false if it is not one. */
 bool ird_parse_upcom(const char *body, struct ird_state *st);

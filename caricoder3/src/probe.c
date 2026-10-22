@@ -605,7 +605,7 @@ static void jstr(FILE *f, const char *s)
 
 /* --brief: the programs and their streams only, small (for comparing two
  * sources: the IRD check). {"ok", "bitrate", "programs": [{"n", "name",
- * "scr", "br", "st": [[pid, stream type, codec, b/s, scrambled packets]]}]} */
+ * "scr", "br", "st": [[pid, stream type, codec, b/s, scrambled packets, language]]}]} */
 static void report_brief(struct probe *p, FILE *f, double span)
 {
     fprintf(f, "{\"ok\": true, \"bitrate\": %.0f, \"programs\": [", (double)p->bytes * 8.0 / span);
@@ -627,10 +627,14 @@ static void report_brief(struct probe *p, FILE *f, double span)
                 (double)pbytes * 8.0 / span);
         for (int k = 0; k < pr->n_es; k++) {
             const struct pid_stat *st = p->pid[pr->es[k].pid];
+            char lang[8];
 
-            fprintf(f, "%s[%u, %u, \"%s\", %.0f, %llu]", k ? ", " : "", pr->es[k].pid, pr->es[k].stream_type,
+            es_language(pr, k, lang, sizeof(lang));
+            fprintf(f, "%s[%u, %u, \"%s\", %.0f, %llu, ", k ? ", " : "", pr->es[k].pid, pr->es[k].stream_type,
                     es_codec(pr, k), st ? (double)st->bytes * 8.0 / span : 0.0,
                     (unsigned long long)(st ? st->scrambled : 0));
+            jstr(f, lang);
+            fputc(']', f);
         }
         fprintf(f, "]}");
     }

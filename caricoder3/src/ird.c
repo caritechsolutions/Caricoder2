@@ -46,6 +46,8 @@ static struct {
     int n;
     struct ird_opts o;
     char binary[512];
+    bool (*uses)(const char *url, int program, int pid, void *op);
+    void *uses_op;
 } I = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER };
 
 /* ---- reading an Upcom's tuner ---------------------------------------------------- */
@@ -458,7 +460,7 @@ struct prog {
     bool scr;
     double br;
     int ns;
-    struct { int pid, type; char codec[16]; double br; double scrambled; } s[16];
+    struct { int pid, type; char codec[16]; double br; double scrambled; char lang[8]; } s[16];
 };
 
 static int read_progs(const char *json, struct prog *out, int max, char *err, size_t errlen)
@@ -500,6 +502,7 @@ static int read_progs(const char *json, struct prog *out, int max, char *err, si
                 else if (idx == 2) snprintf(p->s[p->ns].codec, sizeof(p->s[0].codec), "%s", nd->str ? nd->str : "");
                 else if (idx == 3) p->s[p->ns].br = nd->num;
                 else if (idx == 4) p->s[p->ns].scrambled = nd->num;
+                else if (idx == 5) snprintf(p->s[p->ns].lang, sizeof(p->s[0].lang), "%s", nd->str ? nd->str : "");
             }
             p->ns++;
         }
@@ -563,13 +566,43 @@ static void add_diff(char *what, size_t len, int *n, const char *fmt, const char
     snprintf(what + at, len - at, fmt, rest);
 }
 
-int ird_compare(const char *raw_json, const char *out_json, char *what, size_t len, int *services)
+static const char *kind_of(const char *codec)
+{
+    static const char *const video[] = { "h264", "hevc", "mpeg2video", "mpeg1video", NULL };
+    static const char *const audio[] = { "aac", "aac_latm", "ac3", "eac3", "mp2", "mp3", NULL };
+
+    for (int i = 0; video[i]; i++)
+        if (!strcmp(codec, video[i]))
+            return "video";
+    for (int i = 0; audio[i]; i++)
+        if (!strcmp(codec, audio[i]))
+            return "audio";
+    return "stream";
+}
+
+/* "audio PID 2023 (labelled spa)" */
+static void stream_words(const struct prog *p, int k, char *out, size_t len)
+{
+    snprintf(out, len, "%s PID %d%s%s%s", kind_of(p->s[k].codec), p->s[k].pid, p->s[k].lang[0] ? " (labelled " : "",
+             p->s[k].lang, p->s[k].lang[0] ? ")" : "");
+}
+
+static bool used(const char *url, int program, int pid)
+{
+    bool (*fn)(const char *, int, int, void *) = I.uses;
+
+    return !fn || !url || fn(url, program, pid, I.uses_op);       /* not known: as if it were */
+}
+
+int ird_compare(const char *raw_json, const char *out_json, const char *url, char *what, size_t len, char *notes,
+                size_t nlen, int *services)
 {
     static struct prog raw[PROGS_MAX], out[PROGS_MAX];
     char err[160];
-    int nr = read_progs(raw_json, raw, PROGS_MAX, err, sizeof(err)), no, diffs = 0;
+    int nr = read_progs(raw_json, raw, PROGS_MAX, err, sizeof(err)), no, diffs = 0, nnotes = 0;
 
     what[0] = 0;
+    notes[0] = 0;
     *services = 0;
     if (nr < 0) {
         snprintf(what, len, "the raw output: %s", err);
@@ -606,20 +639,54 @@ int ird_compare(const char *raw_json, const char *out_json, char *what, size_t l
             add_diff(what, len, &diffs, ": streams differ: %s", o->name[0] ? o->name : r->name, o->n, both);
             continue;
         }
-        for (int k = 0; k < o->ns; k++) {
-            /* this many scrambled packets in a few seconds: not decrypted */
-            if (o->s[k].scrambled > 20) {
-                snprintf(a, sizeof(a), "%d", o->s[k].pid);
-                add_diff(what, len, &diffs, ": still scrambled in the output (PID %s)", o->name, o->n, a);
-                break;
+        {
+            /* this many scrambled packets in a few seconds: not decrypted. Said
+             * per stream, and whether our channels take it */
+            int n_scr = 0;
+
+            for (int k = 0; k < o->ns; k++)
+                n_scr += o->s[k].scrambled > 20;
+            if (n_scr && n_scr == o->ns) {
+                bool any = false;
+
+                for (int k = 0; k < o->ns; k++)
+                    any |= used(url, o->n, o->s[k].pid);
+                if (any)
+                    add_diff(what, len, &diffs, ": the whole service is still scrambled in the output%s", o->name, o->n,
+                             "");
+                else
+                    add_diff(notes, nlen, &nnotes, ": the whole service is still scrambled in the output%s", o->name,
+                             o->n, " (none of our channels takes it)");
+            } else {
+                for (int k = 0; k < o->ns; k++) {
+                    char sw[80], msg[200];
+
+                    if (o->s[k].scrambled <= 20)
+                        continue;
+                    stream_words(o, k, sw, sizeof(sw));
+                    if (used(url, o->n, o->s[k].pid)) {
+                        snprintf(msg, sizeof(msg), "%s is still scrambled in the output; its other streams are clear", sw);
+                        add_diff(what, len, &diffs, ": %s", o->name, o->n, msg);
+                    } else {
+                        snprintf(msg, sizeof(msg), "%s is still scrambled in the output; its other streams are clear; "
+                                 "none of our channels takes it", sw);
+                        add_diff(notes, nlen, &nnotes, ": %s", o->name, o->n, msg);
+                    }
+                }
             }
         }
         for (int k = 0; k < o->ns; k++) {
             for (int j = 0; j < r->ns; j++)
                 if (r->s[j].pid == o->s[k].pid && r->s[j].br >= 8000 && o->s[k].br < 1) {
-                    snprintf(a, sizeof(a), "%d", o->s[k].pid);
-                    add_diff(what, len, &diffs, ": PID %s has data on the satellite but none in the output", o->name,
-                             o->n, a);
+                    char sw[80], msg[200];
+
+                    stream_words(o, k, sw, sizeof(sw));
+                    snprintf(msg, sizeof(msg), "%s has data on the satellite but none in the output%s", sw,
+                             used(url, o->n, o->s[k].pid) ? "" : "; none of our channels takes it");
+                    if (used(url, o->n, o->s[k].pid))
+                        add_diff(what, len, &diffs, ": %s", o->name, o->n, msg);
+                    else
+                        add_diff(notes, nlen, &nnotes, ": %s", o->name, o->n, msg);
                 }
         }
     }
@@ -632,7 +699,7 @@ static void compare_one(int k)
     struct ird_conf c;
     const char *urls[IRD_OUTS + 1];
     char *outs[IRD_OUTS + 1];
-    char what[480] = "", err[160] = "";
+    char what[480] = "", notes[480] = "", err[160] = "";
     int total = 0, services = 0, nurls;
     int left[IRD_OUTS][PROGS_MAX], n_left[IRD_OUTS] = { 0 };
     static struct prog now_progs[PROGS_MAX];
@@ -649,8 +716,8 @@ static void compare_one(int k)
     nurls = c.n_out + 1;
     probe_many(urls, nurls, I.o.probe_s > 0 ? I.o.probe_s : 5, outs);
     for (int i = 0; i < c.n_out; i++) {
-        char w[480];
-        int sv = 0, d = ird_compare(outs[0], outs[i + 1], w, sizeof(w), &sv);
+        char w[480], nw[480];
+        int sv = 0, d = ird_compare(outs[0], outs[i + 1], c.outputs[i], w, sizeof(w), nw, sizeof(nw), &sv);
 
         if (d < 0) {
             snprintf(err, sizeof(err), "%.150s", w);
@@ -663,6 +730,12 @@ static void compare_one(int k)
 
             snprintf(what + at, sizeof(what) - at, "%s%.100s: %.300s", at ? " | " : "",
                      c.n_out > 1 ? c.outputs[i] : "the output", w);
+        }
+        if (nw[0]) {
+            size_t at = strlen(notes);
+
+            snprintf(notes + at, sizeof(notes) - at, "%s%.100s: %.300s", at ? " | " : "",
+                     c.n_out > 1 ? c.outputs[i] : "the output", nw);
         }
         /* which services it had last time and has not now */
         {
@@ -701,6 +774,7 @@ static void compare_one(int k)
                 st->remux_bad = total ? st->remux_bad + 1 : 0;
                 st->remux_services = services;
                 snprintf(st->remux_what, sizeof(st->remux_what), "%s", what);
+                snprintf(st->remux_notes, sizeof(st->remux_notes), "%s", notes);
             }
         }
     }
@@ -817,6 +891,14 @@ void ird_stop(void)
     I.started = false;
 }
 
+void ird_set_uses(bool (*fn)(const char *url, int program, int pid, void *op), void *op)
+{
+    pthread_mutex_lock(&I.lock);
+    I.uses = fn;
+    I.uses_op = op;
+    pthread_mutex_unlock(&I.lock);
+}
+
 void ird_check_now(void)
 {
     pthread_mutex_lock(&I.lock);
@@ -920,6 +1002,8 @@ static void one_json(FILE *f, const struct ird_state *s)
     fprintf(f, ", \"readings\": %d, \"remux\": {\"checked\": %lld, \"services\": %d, \"differences\": ", s->n_samples,
             (long long)s->remux_t, s->remux_services);
     jstr(f, s->remux_what);
+    fprintf(f, ", \"notes\": ");
+    jstr(f, s->remux_notes);
     fprintf(f, ", \"times_in_a_row\": %d, \"error\": ", s->remux_bad);
     jstr(f, s->remux_error);
     fprintf(f, "}, \"tables\": {\"checked\": %lld, \"services\": %d, \"differences\": ", (long long)s->tables_t,

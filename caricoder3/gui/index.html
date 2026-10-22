@@ -1106,7 +1106,8 @@ function irdsCard() {
       : !r.checked ? `<div class="dim">probe comparison: not done yet</div>`
       : r.differences ? `<div><span class="warn">probe: ${esc(r.differences)}</span></div>`
       : r.error ? `<div><span class="warn">probe: could not compare: ${esc(r.error)}</span></div>`
-      : `<div class="dim">probe: ${r.services} services match the satellite (${fmtDur(Math.round(now - r.checked))} ago)</div>`);
+      : `<div class="dim">probe: ${r.services} services match the satellite (${fmtDur(Math.round(now - r.checked))} ago)</div>`)
+      + (r.notes ? `<div class="dim">probe, noted only: ${esc(r.notes)}</div>` : "");
     return `<tr><td><span class="lamp ${x.answering && x.locked && !low ? "ok" : "bad"}"></span> ${esc(x.name)}</td><td class="mono">${esc(x.address)}</td><td>${tun}</td><td>${rmx}</td></tr>`;
   }).join("");
   return `<section class="card"><header><h2>IRDs</h2><span class="hint">The satellite receivers: each tuner and its own tables read every minute; every few hours what they send probed and compared with what comes down</span><div class="sp"></div>${L.length ? `<button onclick="checkIrds()">Check now</button> ` : ""}<button onclick="editIrds()">Change</button></header>
