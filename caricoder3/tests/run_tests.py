@@ -3401,7 +3401,7 @@ def supervisor_irds():
         while not stop.is_set():
             p.play(path)
         p.close()
-    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"))
     threads = [threading.Thread(target=play, args=(raw, praw), daemon=True),
                threading.Thread(target=play, args=(rmx, pout), daemon=True)]
     for t in threads:
