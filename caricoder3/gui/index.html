@@ -799,6 +799,7 @@ const WD_FIELDS_DISK = [["disk_warn_pct", "Disk space low under (% free)"], ["di
 const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], ["content_s", "… a black or frozen picture, silent audio: this long (s)"], ["clear_s", "It is over when gone for (s)"],
   ["group_s", "Channels of one source starting within this of each other: one source incident (s)"], ["no_input_s", "No input after (s)"],
   ["warmup_s", "A channel's first seconds after it starts, not judged for drops, missing data or CC errors (s)"],
+  ["ird_cn_drop_db", "An IRD's C/N this far below its own normal is low (dB)"],
   ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
 const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
@@ -1087,6 +1088,43 @@ async function chatSend() {
 /* ---------- the server ---------- */
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
 const barCls = p => p >= 90 ? "bad" : p >= 75 ? "warn" : "";
+/* The IRDs: their tuners, and whether their outputs match what comes down */
+function irdsCard() {
+  const L = (sys && sys.irds) || [], now = Date.now() / 1000;
+  const f1 = v => v == null ? "—" : v.toFixed(1);
+  const rows = L.map(x => {
+    const r = x.remux || {}, low = x.locked && x.cn_db != null && x.cn_normal_db != null && x.cn_db < x.cn_normal_db - 3;
+    const tun = !x.answering ? `<span class="bad">not answering${x.error ? ": " + esc(x.error) : ""}</span>`
+      : !x.locked ? `<span class="bad">not locked</span>`
+      : `C/N <b class="${low ? "warn" : ""}">${f1(x.cn_db)} dB</b> <span class="dim">(normally ${x.cn_normal_db == null ? "not known yet: " + x.readings + " readings" : f1(x.cn_normal_db) + " dB"})</span> · Eb/N0 ${f1(x.ebn0_db)} dB · BER ${x.ber == null ? "—" : x.ber.toExponential(1)} · ${f1(x.strength_dbm)} dBm`;
+    const rmx = !x.raw ? `<span class="dim">no raw output given: not compared</span>`
+      : !r.checked ? `<span class="dim">not compared yet</span>`
+      : r.differences ? `<span class="warn">${esc(r.differences)}</span>`
+      : r.error ? `<span class="warn">could not compare: ${esc(r.error)}</span>`
+      : `${r.services} services match the satellite <span class="dim">(${fmtDur(Math.round(now - r.checked))} ago)</span>`;
+    return `<tr><td><span class="lamp ${x.answering && x.locked && !low ? "ok" : "bad"}"></span> ${esc(x.name)}</td><td class="mono">${esc(x.address)}</td><td>${tun}</td><td>${rmx}</td></tr>`;
+  }).join("");
+  return `<section class="card"><header><h2>IRDs</h2><span class="hint">The satellite receivers: each tuner read every minute; every 10 minutes the raw output and the outputs our channels read compared service by service</span><div class="sp"></div>${L.length ? `<button onclick="checkIrds()">Check now</button> ` : ""}<button onclick="editIrds()">Change</button></header>
+    ${L.length ? `<div class="tw"><table><thead><tr><th>IRD</th><th>Address</th><th>Tuner</th><th>Outputs</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="body"><div class="empty" style="padding:6px">No IRDs yet. "Change" adds them: their address, and the outputs they send.</div></div>`}</section>`;
+}
+async function checkIrds() {
+  try { await api("/api/irds/check", { method: "POST" }); toolNote("Asked: the readings show here in a few seconds, the comparison within half a minute."); }
+  catch(e) { alert(e.message); }
+}
+function editIrds() {
+  const d = $("#dlg"), L = (sys && sys.irds) || [];
+  d.innerHTML = `<h3>IRDs</h3><div class="f"><label>One a line: name, address, raw output, outputs our channels read</label>
+    <textarea id="i_list" rows="6" placeholder="ird10 192.168.110.10 udp://224.100.100.7:33500 udp://224.100.1.5:49500">${esc(L.map(x => [x.name, x.address, x.raw || "-", ...(x.outputs || [])].join(" ")).join("\n"))}</textarea></div>
+    <div class="help">The raw output is the whole transponder as the tuner receives it ("-" if the IRD has none); the outputs are what our channels read (the remux). Kind of IRD understood: Upcom UC-IRD+.</div>
+    <div id="i_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="i_go">Save</button></div>`;
+  $("#i_go").onclick = async () => {
+    const irds = $("#i_list").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => { const m = l.split(/\s+/); return { name: m[0], address: m[1] || "", kind: "upcom", raw: m[2] && m[2] !== "-" ? m[2] : "", outputs: m.slice(3) }; });
+    try { await api("/api/irds", { method: "PUT", body: JSON.stringify({ irds }) }); d.close(); setTimeout(refresh, 1500); }
+    catch(e) { $("#i_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
+}
 function renderServer() {
   if (!sys) { $("#main").innerHTML = `<div class="head"><h1>Server</h1></div><div class="msg err">Cannot reach the supervisor.</div>`; return; }
   const st = sys.system || {}, cpu = st.cpu || {}, mem = st.memory || {};
@@ -1109,6 +1147,7 @@ function renderServer() {
       ${sys.card_processes.map(x => { const ss = (x.process || {}).sessions || []; const chs = [...new Set(ss.map(y => y.channel))];
         return `<tr><td>${x.card}${sys.card_mode === "test" ? ' <span style="color:var(--dim)">(test, CPU)</span>' : ""}</td><td>${x.running ? `running · up ${fmtUp(x.up_s)}` : "<span class='bad'>not running</span>"}${x.restarts ? ` · <span class="warn">${x.restarts} restart${x.restarts > 1 ? "s" : ""}</span>` : ""}</td><td>${ss.length}</td><td>${chs.map(esc).join(", ") || '<span style="color:var(--dim)">none</span>'}</td></tr>`; }).join("")}
       </tbody></table></section>` : ""}
+    ${irdsCard()}
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     ${disksCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>

@@ -648,6 +648,22 @@ minutes otherwise). `PUT /api/technician {"model", "gpu", "keep_loaded"}`
 does the same. Room is judged from the model's size: its file, a tenth
 more, and 2.5 GB for its context.
 
+**The IRDs.** The server page's IRDs card lists the satellite receivers
+("Change": one a line, `name address raw-output outputs...`, e.g.
+`ird10 192.168.110.10 udp://224.100.100.7:33500 udp://224.100.1.5:49500`).
+Each tuner is read every minute from the IRD's own web interface (Upcom
+UC-IRD+ today): lock, C/N, Eb/N0, BER, level, kept in the history as
+`ird.NAME.cn` and so on. Its normal C/N is the median of the last day's
+readings. Every 10 minutes the raw tuner output and the outputs are
+probed at the same moment and compared service by service: the same PIDs
+and codecs, nothing still scrambled, no stream without data that the
+satellite has. Incidents: `ird_down` (3 polls unanswered), `ird_unlocked`,
+`ird_cn_low` (the watchdog's `ird_cn_drop_db`, 3 dB below normal, two
+readings running), `remux_mismatch` (two comparisons running), and a
+service leaving an output. A channel's incident carries the readings of
+the IRD it reads from ("ird" in what it reported), so the technician sees
+the signal at that moment. `GET/PUT /api/irds`, `POST /api/irds/check`.
+
 **What it is shown** (`caricoder3 tech-prompt --id N`). Prints exactly
 what the technician would be sent about incident N, with no model needed:
 its notes, the incident and its evidence, and the past incidents it is

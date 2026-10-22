@@ -3306,6 +3306,132 @@ def supervisor_tech_prompt():
 
 
 @test
+def supervisor_irds():
+    """IRDs: the tuner read every poll (a stand-in Upcom), C/N low against its own normal, lock lost and not answering are incidents with the readings; the raw output and the remux compared, a service whose streams differ said."""
+    import base64
+    import http.server
+    import urllib.request
+    root = w("super_ird")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, web = _port[0] + 1, _port[0] + 2
+    praw, pout, pch = _port[0] + 3, _port[0] + 4, _port[0] + 5
+    _port[0] += 6
+    tuner = {"lock": 1, "cn": 12.1, "up": True}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n).decode()
+            if not tuner["up"] or "%22120%22" not in body:
+                self.send_response(404)
+                self.end_headers()
+                return
+            out = json.dumps({"120": {"0": {"type": 7, "lock": tuner["lock"], "validBR": "51.4 Mbps", "totalBR": "59.15 Mbps",
+                                           "strength": "-32.9 dBm", "ber": "1.5 E-7", "EbN0": "9.6 dB",
+                                           "CN": f"{tuner['cn']:.1f} dB", "freqOffs": "1855 KHz"}}}, indent=8).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", web), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # what comes down, and the remux: the second service's streams on other PIDs there
+    raw = synth("ird_raw", duration=6.0, programs=[gen_ts.default_program(1650, sections=False),
+                gen_ts.default_program(2000, video_rate=1_500_000, sections=False, name="Other")])
+    rmx = synth("ird_rmx", duration=6.0, programs=[gen_ts.default_program(1650, sections=False),
+                gen_ts.default_program(2000, base_pid=2100, video_rate=1_500_000, sections=False, name="Other")])
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "ird_poll_s": 1, "ird_remux_s": 6, "ird_baseline_n": 4, "ird_probe_s": 2,
+               "irds": [{"name": "ird10", "address": f"127.0.0.1:{web}", "kind": "upcom",
+                         "raw": f"udp://127.0.0.1:{praw}", "outputs": [f"udp://127.0.0.1:{pout}", f"udp://127.0.0.1:{pch}"]}],
+               "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth, method=method,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+
+    def incidents(rule):
+        return [x for x in api("/api/incidents")["incidents"] if x["rule"] == rule]
+
+    def wait_for(fn, secs, what):
+        end = time.time() + secs
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.5)
+        raise Fail(f"{what}: not within {secs} s")
+    stop = threading.Event()
+
+    def play(path, prt):
+        p = Player("127.0.0.1", prt)
+        while not stop.is_set():
+            p.play(path)
+        p.close()
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=subprocess.PIPE, text=True)
+    threads = [threading.Thread(target=play, args=(raw, praw), daemon=True),
+               threading.Thread(target=play, args=(rmx, pout), daemon=True)]
+    for t in threads:
+        t.start()
+    try:
+        wait_up(port)
+        ird = wait_for(lambda: [x for x in api("/api/irds")["irds"] if x.get("cn_normal_db") is not None], 20, "a normal C/N")[0]
+        need(ird["locked"] and abs(ird["cn_db"] - 12.1) < 0.01 and ird["ber"] == 1.5e-7 and ird["strength_dbm"] == -32.9,
+             f"readings: {ird}")
+        # the remux differs: said after two comparisons
+        mm = wait_for(lambda: incidents("remux_mismatch"), 40, "the remux difference")[0]
+        need("Other (2000)" in mm["summary"] and "2101" in mm["summary"], f"remux: {mm['summary']}")
+        one = api("/api/irds")["irds"][0]
+        need(one["remux"]["services"] >= 2, f"compared: {one['remux']}")
+        # a channel fed by the IRD: its incident carries the IRD's readings
+        api("/api/channels/c1", "PUT", {"input": f"udp://127.0.0.1:{pch}", "program": 1650, "enabled": True})
+        time.sleep(1.5)
+        pc = Player("127.0.0.1", pch)
+        pc.play(raw, stop_after=4.0)
+        pc.close()
+        ni = wait_for(lambda: [x for x in incidents("no_input") if x["channel"] == "c1"], 20, "the channel's no input")[0]
+        got = (ni["detail"].get("then") or {}).get("ird") or {}
+        need(got.get("name") == "ird10" and got.get("cn_db") == 12.1, f"the channel's incident without the IRD: {list(ni['detail'].get('then', {}).keys())}")
+        # rain: the C/N falls
+        tuner["cn"] = 6.0
+        low = wait_for(lambda: incidents("ird_cn_low"), 15, "low C/N")[0]
+        need("C/N 6.0 dB, normally 12.1 dB" in low["summary"], f"low: {low['summary']}")
+        need(((low["detail"].get("then") or {}).get("irds") or [{}])[0].get("cn_db") == 6.0, f"evidence: {low['detail']}")
+        tuner["cn"] = 12.1
+        wait_for(lambda: all(x["closed"] for x in incidents("ird_cn_low")), 15, "low C/N over")
+        tuner["lock"] = 0
+        wait_for(lambda: incidents("ird_unlocked"), 15, "lock lost")
+        tuner["lock"] = 1
+        tuner["up"] = False
+        down = wait_for(lambda: incidents("ird_down"), 15, "not answering")[0]
+        need("HTTP 404" in down["summary"], f"down: {down['summary']}")
+        tuner["up"] = True
+        # the list through the API, kept
+        api("/api/irds", "PUT", {"irds": [{"name": "ird10", "address": f"127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]}]})
+        need(json.load(open(cfg))["irds"][0]["raw"] == "", "not saved")
+    finally:
+        stop.set()
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+        srv.shutdown()
+    return f"normal C/N {ird['cn_normal_db']} dB; remux: {mm['summary'][:90]}; C/N low, lock lost and not answering opened"
+
+
+@test
 def supervisor_technician():
     """The technician: an incident opens, the model server is started for it, and the answer (JSON to the schema) is kept on the incident and said in the conversation. Needs CC3_LLAMA_SERVER and CC3_TEST_MODEL (any small GGUF)."""
     import base64

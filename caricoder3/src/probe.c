@@ -77,6 +77,7 @@ struct probe {
     bool pat_seen;
     uint64_t packets, bytes, sync_errors;
     int only_program;
+    bool brief;
     FILE *save;
     uint64_t saved;
 };
@@ -602,6 +603,40 @@ static void jstr(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* --brief: the programs and their streams only, small (for comparing two
+ * sources: the IRD check). {"ok", "bitrate", "programs": [{"n", "name",
+ * "scr", "br", "st": [[pid, stream type, codec, b/s, scrambled packets]]}]} */
+static void report_brief(struct probe *p, FILE *f, double span)
+{
+    fprintf(f, "{\"ok\": true, \"bitrate\": %.0f, \"programs\": [", (double)p->bytes * 8.0 / span);
+    for (int i = 0, np = 0; i < p->n_progs; i++) {
+        const struct program *pr = &p->progs[i];
+        char name[SERVICE_TEXT_MAX + 1];
+        uint64_t pbytes = 0;
+
+        if (p->only_program && pr->number != p->only_program)
+            continue;
+        program_service_name(pr, name, sizeof(name));
+        for (int k = 0; k < pr->n_es; k++)
+            if (p->pid[pr->es[k].pid])
+                pbytes += p->pid[pr->es[k].pid]->bytes;
+        fprintf(f, "%s\n{\"n\": %u, \"pmt\": %s, \"name\": ", np++ ? "," : "", pr->number,
+                p->pmt_seen[i] ? "true" : "false");
+        jstr(f, name);
+        fprintf(f, ", \"scr\": %s, \"br\": %.0f, \"st\": [", pr->free_ca ? "true" : "false",
+                (double)pbytes * 8.0 / span);
+        for (int k = 0; k < pr->n_es; k++) {
+            const struct pid_stat *st = p->pid[pr->es[k].pid];
+
+            fprintf(f, "%s[%u, %u, \"%s\", %.0f, %llu]", k ? ", " : "", pr->es[k].pid, pr->es[k].stream_type,
+                    es_codec(pr, k), st ? (double)st->bytes * 8.0 / span : 0.0,
+                    (unsigned long long)(st ? st->scrambled : 0));
+        }
+        fprintf(f, "]}");
+    }
+    fprintf(f, "]}\n");
+}
+
 static void report(struct probe *p, FILE *f, const char *url, double seconds, bool live)
 {
     double span = seconds;              /* over which the bytes were counted */
@@ -619,6 +654,10 @@ static void report(struct probe *p, FILE *f, const char *url, double seconds, bo
     }
     if (span <= 0)
         span = 1;
+    if (p->brief) {
+        report_brief(p, f, span);
+        return;
+    }
 
     fprintf(f, "{\n  \"ok\": true,\n  \"url\": ");
     jstr(f, url);
@@ -714,6 +753,7 @@ static void usage(FILE *f)
                "  --seconds how long to listen (default 3)\n"
                "  --program report this service only\n"
                "  --save    also write what was received to FILE (TS; with --program, that service)\n"
+               "  --brief   only the programs and their streams, small (for comparing sources)\n"
                "Prints JSON: programs, streams, rates, picture and sound formats.\n");
 }
 
@@ -738,6 +778,7 @@ int probe_main(int argc, char **argv)
     char err[256];
     bool live;
     const char *save = NULL;
+    bool brief = false;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
@@ -750,6 +791,8 @@ int probe_main(int argc, char **argv)
             only = atoi(argv[i] + 10);
         else if (!strcmp(argv[i], "--save") && i + 1 < argc)
             save = argv[++i];
+        else if (!strcmp(argv[i], "--brief"))
+            brief = true;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(stdout);
             return 0;
@@ -772,6 +815,7 @@ int probe_main(int argc, char **argv)
     if (!p)
         return fail("out of memory", NULL);
     p->only_program = only;
+    p->brief = brief;
     live = input_is_live(url);
     if (save && !(p->save = fopen(save, "wb")))
         return fail("--save: %s", strerror(errno));

@@ -40,6 +40,10 @@ static const struct {
     [WD_CARD_OWN]    = { "card_own", "video not in the card process", "warn", false },
     [WD_CARD_ENDED]  = { "card_ended", "card process ended", "error", false },
     [WD_MEM_GROWING] = { "memory_growing", "memory growing (a leak?)", "warn", false },
+    [WD_IRD_DOWN]    = { "ird_down", "IRD not answering", "error", false },
+    [WD_IRD_UNLOCKED] = { "ird_unlocked", "IRD tuner not locked", "error", false },
+    [WD_IRD_CN]      = { "ird_cn_low", "IRD signal (C/N) low", "warn", false },
+    [WD_REMUX]       = { "remux_mismatch", "IRD output differs from the satellite", "warn", false },
 };
 
 #define ENTRIES_MAX 2048
@@ -105,6 +109,7 @@ void wd_defaults(struct wd_limits *l)
     l->mem_growth_mb = 100;
     l->mem_growth_pct = 30;
     l->warmup_s = 60;
+    l->ird_cn_drop_db = 3;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -127,7 +132,7 @@ int wd_rule_by_id(const char *id)
 
 #define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
-    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s)
+    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {

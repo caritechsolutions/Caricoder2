@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -68,6 +69,38 @@ static int wait_fd(int fd, short ev, int64_t deadline_ms)
 int peer_http(const char *url, const char *method, const char *path, const char *key, const char *body,
               int timeout_ms, char **out)
 {
+    return http_call(url, method, path, "application/json", key, body, timeout_ms, out);
+}
+
+/* A chunked body, joined in place. */
+static void dechunk(char *b)
+{
+    char *r = b, *w = b;
+
+    for (;;) {
+        char *end;
+        long n = strtol(r, &end, 16);
+
+        if (end == r || n <= 0)
+            break;
+        r = strstr(end, "\r\n");
+        if (!r)
+            break;
+        r += 2;
+        if ((long)strlen(r) < n)
+            n = (long)strlen(r);
+        memmove(w, r, (size_t)n);
+        w += n;
+        r += n;
+        if (!strncmp(r, "\r\n", 2))
+            r += 2;
+    }
+    *w = 0;
+}
+
+int http_call(const char *url, const char *method, const char *path, const char *ctype, const char *key,
+              const char *body, int timeout_ms, char **out)
+{
     char host[256], port[16] = "8550", *req = NULL, *resp = NULL;
     const char *h = url, *colon, *slash;
     struct addrinfo hints, *ai = NULL;
@@ -117,16 +150,16 @@ int peer_http(const char *url, const char *method, const char *path, const char 
     {
         size_t blen = body ? strlen(body) : 0, n = 0, len;
 
-        len = strlen(method) + strlen(path) + strlen(host) + (key ? strlen(key) : 0) + blen + 300;
+        len = strlen(method) + strlen(path) + strlen(host) + (key ? strlen(key) : 0) + strlen(ctype) + blen + 300;
         req = malloc(len);
         if (!req) {
             *out = strdup("out of memory");
             goto done;
         }
-        snprintf(req, len, "%s %s HTTP/1.1\r\nHost: %s:%s\r\n%s%s%sContent-Type: application/json\r\n"
+        snprintf(req, len, "%s %s HTTP/1.1\r\nHost: %s:%s\r\n%s%s%sContent-Type: %s\r\n"
                  "Content-Length: %zu\r\nConnection: close\r\n\r\n%s", method, path, host, port,
                  key && *key ? "Authorization: CC3-Peer " : "", key && *key ? key : "", key && *key ? "\r\n" : "",
-                 blen, body ? body : "");
+                 ctype, blen, body ? body : "");
         len = strlen(req);
         while (n < len) {
             ssize_t w = send(fd, req + n, len - n, MSG_NOSIGNAL);
@@ -181,8 +214,17 @@ int peer_http(const char *url, const char *method, const char *path, const char 
     status = atoi(resp + 9);
     {
         char *b = strstr(resp, "\r\n\r\n");
+        bool chunked = false;
 
+        if (b) {
+            *b = 0;
+            for (char *hp = resp; *hp; hp++)
+                if (!strncasecmp(hp, "\r\ntransfer-encoding:", 20) && strcasestr(hp + 20, "chunked"))
+                    chunked = true;
+        }
         *out = strdup(b ? b + 4 : "");
+        if (*out && chunked)
+            dechunk(*out);
     }
 done:
     if (fd >= 0)

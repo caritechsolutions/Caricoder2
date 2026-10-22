@@ -71,6 +71,7 @@
 #include "memwatch.h"
 #include "disk.h"
 #include "peer.h"
+#include "ird.h"
 #include "tech.h"
 
 #include <stdarg.h>
@@ -236,6 +237,9 @@ struct super {
     struct share sh[SHARES_MAX];
     char card_mode[8];                      /* "auto", "off", "test" (CPU, for tests) */
     char timezone[64];                      /* the site's, e.g. "America/Barbados" ("": the server's) */
+    struct ird_conf irds[IRDS_MAX];         /* the satellite receivers (ird.h) */
+    int n_irds;
+    struct ird_opts ird_o;                  /* how often (tests set them short) */
     struct cardp cards[CARDS_MAX];
     int n_cards;
     bool stopping_all;                      /* the supervisor is ending: card processes go last */
@@ -382,6 +386,47 @@ static void make_password(char *out, size_t len)
     out[n] = 0;
 }
 
+/* One IRD from the config or the API: {"name", "address", "kind", "raw",
+ * "outputs": [...]}. False (with a reason) when it is not usable. */
+static bool ird_conf_read(const struct json_doc *d, int j, struct ird_conf *c, char *err, size_t errlen)
+{
+    int o = json_get(d, j, "outputs");
+    const char *raw;
+
+    memset(c, 0, sizeof(*c));
+    snprintf(c->name, sizeof(c->name), "%s", json_get_str(d, j, "name", ""));
+    snprintf(c->address, sizeof(c->address), "%s", json_get_str(d, j, "address", ""));
+    snprintf(c->kind, sizeof(c->kind), "%s", json_get_str(d, j, "kind", "upcom"));
+    raw = json_get_str(d, j, "raw", "");
+    snprintf(c->raw, sizeof(c->raw), "%s", raw);
+    for (int k = o >= 0 ? d->node[o].first_child : -1; k >= 0 && c->n_out < IRD_OUTS; k = d->node[k].next)
+        if (d->node[k].type == JSON_STRING && d->node[k].str[0])
+            snprintf(c->outputs[c->n_out++], sizeof(c->outputs[0]), "%s", d->node[k].str);
+    for (const char *p = c->name; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '-' || *p == '_' || *p == '.')) {
+            if (err)
+                snprintf(err, errlen, "IRD name %s: letters, digits, - _ . only", c->name);
+            return false;
+        }
+    if (!c->name[0] || !c->address[0]) {
+        if (err)
+            snprintf(err, errlen, "an IRD needs a name and an address");
+        return false;
+    }
+    if (strcmp(c->kind, "upcom")) {
+        if (err)
+            snprintf(err, errlen, "IRD %s: kind %s is not known (upcom)", c->name, c->kind);
+        return false;
+    }
+    return true;
+}
+
+static void irds_apply(struct super *s)
+{
+    s->ird_o.binary = s->binary;
+    ird_set(s->irds, s->n_irds, &s->ird_o);
+}
+
 /* The site's time zone, for the times the technician is told and writes
  * in tickets (this server's clock may be on UTC). A name in the system's
  * zone files, or "" for the server's own. Returns false for an unknown one. */
@@ -440,6 +485,30 @@ static void save_system_config(struct super *s)
                 at += (size_t)snprintf(text + at, sizeof(text) - at, "%s{\"name\": %s, \"url\": %s}", i ? ", " : "",
                                        json_quote(s->peers[i].name, pq[0], sizeof(pq[0])),
                                        json_quote(s->peers[i].url, pq[1], sizeof(pq[1])));
+            snprintf(text + at, sizeof(text) - at, "]\n}\n");
+        }
+    }
+    {
+        /* the IRDs, before the closing brace */
+        size_t n = strlen(text);
+        char iq[4][600];
+
+        if (n > 3) {
+            size_t at = n - 3;
+
+            at += (size_t)snprintf(text + at, sizeof(text) - at, ",\n  \"irds\": [");
+            for (int i = 0; i < s->n_irds && at < sizeof(text) - 3000; i++) {
+                const struct ird_conf *c = &s->irds[i];
+
+                at += (size_t)snprintf(text + at, sizeof(text) - at, "%s\n    {\"name\": %s, \"address\": %s, \"kind\": %s, "
+                                       "\"raw\": %s, \"outputs\": [", i ? "," : "",
+                                       json_quote(c->name, iq[0], sizeof(iq[0])), json_quote(c->address, iq[1], sizeof(iq[1])),
+                                       json_quote(c->kind, iq[2], sizeof(iq[2])), json_quote(c->raw, iq[3], sizeof(iq[3])));
+                for (int k = 0; k < c->n_out; k++)
+                    at += (size_t)snprintf(text + at, sizeof(text) - at, "%s%s", k ? ", " : "",
+                                           json_quote(c->outputs[k], iq[0], sizeof(iq[0])));
+                at += (size_t)snprintf(text + at, sizeof(text) - at, "]}");
+            }
             snprintf(text + at, sizeof(text) - at, "]\n}\n");
         }
     }
@@ -549,6 +618,18 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
             snprintf(s->tech.knowledge[1], sizeof(s->tech.knowledge[1]), "%s",
                      json_get_str(&doc, t, "knowledge", s->tech.knowledge[1]));
         }
+    }
+    {
+        int a = json_get(&doc, root, "irds");
+
+        s->n_irds = 0;
+        for (int j = a >= 0 ? doc.node[a].first_child : -1; j >= 0 && s->n_irds < IRDS_MAX; j = doc.node[j].next)
+            if (ird_conf_read(&doc, j, &s->irds[s->n_irds], NULL, 0))
+                s->n_irds++;
+        s->ird_o.poll_s = (int)json_get_num(&doc, root, "ird_poll_s", 60);          /* the tests make these short */
+        s->ird_o.remux_s = (int)json_get_num(&doc, root, "ird_remux_s", 600);
+        s->ird_o.baseline_n = (int)json_get_num(&doc, root, "ird_baseline_n", 30);
+        s->ird_o.probe_s = (int)json_get_num(&doc, root, "ird_probe_s", 5);
     }
     {
         int a = json_get(&doc, root, "peers");
@@ -1128,10 +1209,30 @@ static void wd_snapshot(FILE *f, const char *chan, void *op)
 
         while (n && (st[n - 1] == '\n' || st[n - 1] == ' '))
             n--;
-        if (n && st[0] == '{' && st[n - 1] == '}')
-            fwrite(st, 1, n, f);
-        else
+        if (n && st[0] == '{' && st[n - 1] == '}') {
+            /* and the readings of the IRD it reads from, if it is one we know */
+            char *ib = NULL;
+            size_t il = 0;
+            FILE *m = open_memstream(&ib, &il);
+            bool have = m && ird_for_url(m, c->wd_group);
+
+            if (m)
+                fclose(m);
+            if (have && n > 2) {
+                fwrite(st, 1, n - 1, f);
+                fprintf(f, ", \"ird\": %s}", ib);
+            } else {
+                fwrite(st, 1, n, f);
+            }
+            free(ib);
+        } else {
             fprintf(f, "{}");
+        }
+    } else if (!chan && s->n_irds) {
+        /* the server's: how the IRDs are */
+        fprintf(f, "{\"irds\": ");
+        ird_json(f);
+        fprintf(f, "}");
     } else {
         fprintf(f, "{}");
     }
@@ -3118,6 +3219,12 @@ static void tick(struct super *s)
             wd_last = t;
             for (int i = 0; i < s->n; i++)
                 wd_channel_state(&s->ch[i], t);
+            {
+                struct wd_limits L;
+
+                wd_get_limits(&L);
+                ird_watch(t, L.ird_cn_drop_db);
+            }
             wd_tick(t);
         }
     }
@@ -4295,6 +4402,77 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->body_len = len;
         return;
     }
+    if (!strcmp(p, "/api/irds") || !strcmp(p, "/api/irds/check")) {
+        /* GET: the IRDs and their last readings; PUT {"irds": [{"name", "address", "kind",
+         * "raw", "outputs"}]}: the list; POST .../check: ask them all now */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+
+        if (!strcmp(p, "/api/irds/check")) {
+            if (strcmp(req->method, "POST")) {
+                api_error(resp, 405, "POST");
+                return;
+            }
+            ird_check_now();
+        } else if (!strcmp(req->method, "PUT")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1, a;
+            static struct ird_conf list[IRDS_MAX];
+            int n = 0;
+
+            a = root >= 0 ? json_get(doc, root, "irds") : -1;
+            if (root < 0 || a < 0) {
+                free(doc);
+                api_error(resp, 400, root < 0 ? (doc ? err : "out of memory") : "PUT {\"irds\": [...]}");
+                return;
+            }
+            for (int j = doc->node[a].first_child; j >= 0; j = doc->node[j].next) {
+                if (n == IRDS_MAX) {
+                    free(doc);
+                    api_error(resp, 400, "too many IRDs");
+                    return;
+                }
+                if (!ird_conf_read(doc, j, &list[n], err, sizeof(err))) {
+                    free(doc);
+                    api_error(resp, 400, err);
+                    return;
+                }
+                for (int k = 0; k < n; k++)
+                    if (!strcmp(list[k].name, list[n].name)) {
+                        free(doc);
+                        api_error(resp, 400, "two IRDs with one name");
+                        return;
+                    }
+                n++;
+            }
+            free(doc);
+            pthread_mutex_lock(&s->lock);
+            memcpy(s->irds, list, sizeof(list[0]) * (size_t)n);
+            s->n_irds = n;
+            save_system_config(s);
+            irds_apply(s);
+            pthread_mutex_unlock(&s->lock);
+            ev(NULL, "info", "user", "IRDs changed: %d", n);
+            ird_check_now();
+        } else if (strcmp(req->method, "GET")) {
+            api_error(resp, 405, "GET, PUT or POST .../check");
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        fprintf(f, "{\"ok\": true, \"irds\": ");
+        ird_json(f);
+        fprintf(f, "}\n");
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
     if (!strcmp(p, "/api/watchdog")) {
         /* GET: the limits, the rules, what is being watched now; PUT: new limits */
         struct wd_limits L;
@@ -4388,7 +4566,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                 free(st);
             }
         }
-        fprintf(f, "], \"card_mode\": \"%s\", \"card_processes\": [", s->card_mode[0] ? s->card_mode : "auto");
+        fprintf(f, "], \"irds\": ");
+        ird_json(f);
+        fprintf(f, ", \"card_mode\": \"%s\", \"card_processes\": [", s->card_mode[0] ? s->card_mode : "auto");
         for (int k = 0; k < s->n_cards; k++) {
             /* the card processes: running, restarts, and their own list of sessions */
             char sock[600], path[600], *st;
@@ -5229,6 +5409,7 @@ int super_main(int argc, char **argv)
     wd_set_snapshot(wd_snapshot, &s);
     wd_set_on_open(on_incident, &s);
     peers_apply(&s);
+    irds_apply(&s);
     snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
     tech_set_context(tech_context, &s);
     tech_set(&s.tech);
@@ -5284,6 +5465,7 @@ int super_main(int argc, char **argv)
     ev(NULL, "info", "server", "supervisor stopped");
     tech_stop();
     peer_stop();
+    ird_stop();
     history_close();
     sysstat_stop();
     for (int i = 0; i < s.n; i++)

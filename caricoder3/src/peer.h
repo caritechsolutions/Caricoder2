@@ -53,5 +53,9 @@ int peer_ask_check(const char *url, int program, int seconds, int64_t incident, 
  * -1 with *out a malloc'd reason. */
 int peer_http(const char *url, const char *method, const char *path, const char *key, const char *body,
               int timeout_ms, char **out);
+/* The same with a given Content-Type, to any HTTP server (an IRD's pages);
+ * `key` NULL for none. A chunked answer is joined. */
+int http_call(const char *url, const char *method, const char *path, const char *ctype, const char *key,
+              const char *body, int timeout_ms, char **out);
 
 #endif

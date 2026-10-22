@@ -243,6 +243,29 @@ Write for a busy engineer: short sentences, the facts first, no padding.
 Do not invent measurements. Do not blame the provider when the evidence
 points at this side, and do not blame this side when it points upstream.
 
+## The IRDs' own readings
+
+- An incident on a channel may carry "ird": the readings of the IRD whose
+  output the channel reads, at the moment it opened: whether it answered,
+  "locked", "cn_db" (C/N now), "cn_normal_db" (its normal, the median of
+  the last day), "ebn0_db", "ber", and "remux" (the last comparison of what
+  it sends with what comes down from the satellite).
+- C/N well below its normal (3 dB or more), on one IRD: that IRD's dish,
+  LNB, cable or that transponder. On several IRDs at once: rain, here or at
+  the uplink, or the satellite. C/N at its normal while the content
+  stopped: not the signal; look at the IRD (its CI card, its remux) or the
+  uplink's feed.
+- "IRD not answering": its web interface did not answer this server; the
+  IRD may be down, or only its management network. Look at whether its
+  channels still have input before calling it a source fault.
+- "IRD tuner not locked": no signal at that IRD: its dish, LNB, cable, or
+  the transponder is off. All its channels lose their input.
+- "IRD output differs from the satellite": the IRD's output carries a
+  service with other streams (PIDs, codecs) than the satellite sends, still
+  scrambled, or without data the satellite has. The IRD's remux or CI card,
+  not the provider: the fix is on the IRD (rebuild that service's remux
+  entry; for scrambled, the CI card). No provider ticket.
+
 ## Memory growing (a leak)
 
 - "memory growing" means one of this server's own processes (a channel,
