@@ -40,7 +40,7 @@
 #include <stdio.h>
 
 #define IRDS_MAX 16
-#define IRD_OUTS 4
+#define IRD_OUTS 16
 #define IRD_TUNERS 4
 
 struct ird_conf {

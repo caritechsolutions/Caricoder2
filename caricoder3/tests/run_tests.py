@@ -3532,7 +3532,8 @@ def supervisor_irds_mcr():
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
                "ird_poll_s": 1, "ird_remux_s": 5, "ird_baseline_n": 4, "ird_probe_s": 2,
                "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]},
-                        {"name": "ird16", "address": f"mcr://admin:admin@127.0.0.1:{web}/?tuners=1", "outputs": []}],
+                        {"name": "ird16", "address": f"mcr://admin:admin@127.0.0.1:{web}/?tuners=1",
+                         "outputs": [f"udp://127.0.0.1:{pout + 100 + 2 * i}" for i in range(15)]}],
                "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
 
@@ -3569,6 +3570,7 @@ def supervisor_irds_mcr():
         time.sleep(6)
         y = [i for i in api("/api/irds")["irds"] if i["name"] == "ird16"][0]
         need(y["answering"] and [t["used"] for t in y["tuners"]] == [True, False], f"ird16: {y}")
+        need(len(y["outputs"]) == 15, f"ird16 outputs: {y['outputs']}")   # 110.16: 15 single-program outputs
         unl = incidents("ird_unlocked")
         need(len(unl) == 1 and "ird15 tuner 2" in unl[0]["summary"], f"unlocked: {[i['summary'] for i in unl]}")
         tuners["tuner"][1]["status"].update({"lock": 1, "c_n_100": "12.25 dB", "power": "-29.21 dBm"})
