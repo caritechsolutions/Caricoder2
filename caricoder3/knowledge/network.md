@@ -58,7 +58,9 @@ them as more is known; keep each fact on its own line.
 - RIST: the RIST receiver's outputs are 224.10.10.10 (port 10000 dischd,
   10001 discovhome, 10004 discovkids). The names end in "_srt" but they
   come in by RIST. A fault on these alone: the RIST path, not the dish.
-- WPBT-PBS comes in by RIST (not from 110.16, which decrypts it but does not output it); its RIST address is not recorded yet.
+- WPBT-PBS comes in by RIST: 224.10.10.10:10006 (PIDs 49, 52), not from
+  110.16, which decrypts it but does not output it. tlc_belize is on
+  224.10.10.10:10005.
 
 ## Known behaviour
 
