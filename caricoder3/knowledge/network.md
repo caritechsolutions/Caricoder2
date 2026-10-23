@@ -58,7 +58,7 @@ them as more is known; keep each fact on its own line.
 - RIST: the RIST receiver's outputs are 224.10.10.10 (port 10000 dischd,
   10001 discovhome, 10004 discovkids). The names end in "_srt" but they
   come in by RIST. A fault on these alone: the RIST path, not the dish.
-- WPBT-PBS is carried elsewhere, not from an IRD's output.
+- WPBT-PBS is carried elsewhere (where: not recorded yet).
 
 ## Known behaviour
 
