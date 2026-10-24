@@ -486,6 +486,18 @@ The same problem again on the same channel (or source) within an hour
 (`merge_s`) of the last one ending takes that incident up again, its
 summary saying so ("black picture (again: 3 times since 00:26)"),
 rather than opening a new one.
+
+A multicast input joins its group on the interface the group's route uses
+(or the one `iface=` names). When nothing has come for 5 s it leaves the
+group and joins it again, looking the interface up afresh, then after
+10 s, 20 s and every minute while it stays quiet: a join lost while the
+network came up (the switch still starting, the multicast interface
+without its address, so the join went out of another one) is sent again,
+as another program joining the group would. An interface named with
+`iface=` that has no address yet is waited for. Outputs of a channel's
+config file that could not start (the same cause) are tried again every
+10 s. The channel's statistics say `rejoins`, `joined_on` and
+`join_note`; the Server page shows them for the shared readers.
 A problem that lasts 10 s (a black, frozen or silent picture or sound:
 30 s, as programmes have short ones) is an **incident**, kept in the
 history with the channel's statistics as the watchdog saw them; it is

@@ -32,6 +32,7 @@ struct source {
     enum src_state state;
     uint64_t failures;
     uint64_t rx_overflow, rx_truncated;
+    struct udp_join join;               /* UDP: its multicast membership, kept up */
 };
 
 struct sources {
@@ -151,7 +152,7 @@ static bool open_one(struct source *src, const struct input_ops **ops, void **ct
 
         if (udp_parse(src->url, &a, err, errlen) < 0)
             return false;
-        *fd = udp_open_rx(&a, err, errlen);
+        *fd = udp_open_rx_join(&a, &src->join, err, errlen);
         return *fd >= 0;
     }
 }
@@ -424,6 +425,9 @@ int sources_recv(struct sources *s, uint8_t *buf, int size, int64_t now_ns)
         s->last_rx_ns = now_ns;
         return n;
     }
+    /* nothing: a multicast group joined again now and then (a lost join) */
+    if (!src->ops)
+        udp_join_tick(&src->join, src->fd, s->last_rx_ns, now_ns);
     /* nothing: is it time to give up on this one? */
     if (s->n > 1) {
         int64_t idle_since = s->last_rx_ns ? s->last_rx_ns : s->since_ns;
@@ -465,6 +469,12 @@ void sources_stats(struct sources *s, struct source_stats *st)
     src = &s->list[s->active];
     st->rx_overflow = src->rx_overflow;
     st->rx_truncated = src->rx_truncated;
+    if (!src->ops && src->join.multicast) {
+        st->multicast = true;
+        st->rejoins = src->join.rejoins;
+        snprintf(st->joined_on, sizeof(st->joined_on), "%s", src->join.ifname);
+        snprintf(st->join_note, sizeof(st->join_note), "%s", src->join.note);
+    }
     if (src->ops && src->ctx && src->state == SRC_IN_USE) {
         struct input_stats is;
 

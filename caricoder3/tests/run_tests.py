@@ -2972,6 +2972,148 @@ def watchdog_records():
 
 
 @test
+def multicast_join_after_network():
+    """After a power cut the multicast interface came up after caricoder3: the joins went out of another interface and nothing came. Now a quiet input joins its group again (the interface looked up afresh), and an output that could not start (its interface had no address) is tried again: both recover without a restart. Needs root (a network namespace)."""
+    import base64
+    import urllib.request
+    if os.geteuid() != 0 or not shutil.which("ip"):
+        return "SKIPPED: needs root and ip(8)"
+    ns, va, vb = "cc3jns", "cc3ja", "cc3jb"
+
+    def sh(*a, check=True):
+        r = subprocess.run(list(a), capture_output=True, text=True)
+        if check and r.returncode:
+            raise Fail(f"{' '.join(a)}: {r.stderr.strip()}")
+        return r
+    sh("ip", "netns", "del", ns, check=False)
+    sh("ip", "link", "del", va, check=False)
+    if sh("ip", "netns", "add", ns, check=False).returncode:
+        return "SKIPPED: no network namespaces here"
+    root = w("mcast_join")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, p1, p2 = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    procs = []
+    try:
+        sh("ip", "link", "add", va, "type", "veth", "peer", "name", vb)
+        sh("ip", "link", "set", vb, "netns", ns)
+        sh("ip", "netns", "exec", ns, "ip", "addr", "add", "10.77.0.2/24", "dev", vb)
+        sh("ip", "netns", "exec", ns, "ip", "link", "set", vb, "up")
+        sh("ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up")
+        sh("ip", "netns", "exec", ns, "ip", "route", "add", "239.77.0.0/16", "dev", vb)
+        sh("ip", "link", "set", va, "up")           # up, but no address and no route yet (as after the power cut)
+        src = synth("mcast_join_src", duration=4.0)
+        sender = os.path.join(root, "send.py")
+        # The sender is a switch with IGMP snooping: it sends the group to the
+        # receiver only after a join (an IGMP report) has reached it on its port.
+        open(sender, "w").write(f"""import socket, struct, sys, threading
+sys.path.insert(0, {HERE!r})
+from udptools import Player
+joined = {{"239.77.0.1": threading.Event(), "239.77.0.2": threading.Event()}}
+def snoop():
+    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    s.bind(({vb!r}, 0))
+    while True:
+        f = s.recv(2048)[14:]
+        if len(f) < 20 or f[9] != 2:
+            continue
+        g = f[(f[0] & 15) * 4:]
+        groups = []
+        if g[0] == 0x16:
+            groups.append(socket.inet_ntoa(g[4:8]))
+        elif g[0] == 0x22:
+            n, o = struct.unpack("!H", g[6:8])[0], 8
+            for _ in range(n):
+                aux, ns = g[o + 1], struct.unpack("!H", g[o + 2:o + 4])[0]
+                if g[o] in (2, 4):          # MODE_IS_EXCLUDE / CHANGE_TO_EXCLUDE: a join
+                    groups.append(socket.inet_ntoa(g[o + 4:o + 8]))
+                o += 8 + 4 * ns + 4 * aux
+        for grp in groups:
+            if grp in joined and not joined[grp].is_set():
+                print("switch: join heard for", grp, flush=True)
+                joined[grp].set()
+def run(grp, port):
+    joined[grp].wait()
+    p = Player(grp, port, mcast_if="10.77.0.2")
+    while True:
+        p.play({src!r})
+threading.Thread(target=snoop, daemon=True).start()
+for grp, port in (("239.77.0.1", {p1}), ("239.77.0.2", {p2})):
+    threading.Thread(target=run, args=(grp, port), daemon=True).start()
+threading.Event().wait()
+""")
+        procs.append(subprocess.Popen(["ip", "netns", "exec", ns, sys.executable, sender]))
+        # a channel of its own (its input in the channel) ...
+        ccfg = os.path.join(root, "c2.json")
+        json.dump({"outputs": [{"id": "o1", "url": f"udp://239.78.0.1:{p2 + 100}?iface={va}"}]}, open(ccfg, "w"))
+        stats = os.path.join(root, "c2.stats")
+        clog = open(os.path.join(root, "c2.log"), "w")
+        procs.append(subprocess.Popen([BIN, "-i", f"udp://239.77.0.2:{p2}", "--config", ccfg, "--stats-file", stats,
+                                       "--stats-interval", "0"], stderr=clog))
+        # ... and the supervisor's (a shared reader)
+        cfg = os.path.join(root, "caricoder3.json")
+        json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+                   "run_dir": os.path.join(root, "run"), "password": "testpass1"}, open(cfg, "w"))
+        procs.append(subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w")))
+        auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+        def api(path, method="GET", body=None):
+            r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth, method=method,
+                                       data=json.dumps(body).encode() if body is not None else None)
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return json.load(resp)
+        wait_up(port)
+        api("/api/channels/m1", "PUT", {"input": f"udp://239.77.0.1:{p1}", "enabled": True})
+        time.sleep(8)
+
+        def c2():
+            try:
+                return json.load(open(stats))
+            except (OSError, ValueError):
+                return {}
+
+        def m1():
+            return api("/api/channels/m1")["channel"].get("stats", {}).get("input", {})
+        need(c2().get("input", {}).get("bitrate", 0) == 0 and m1().get("bitrate", 0) == 0,
+             f"input before the interface had an address: {c2().get('input', {}).get('bitrate')} / {m1().get('bitrate')}")
+        # the interface gets its address and the route: no restart
+        sh("ip", "addr", "add", "10.77.0.1/24", "dev", va)
+        sh("ip", "route", "add", "239.77.0.0/16", "dev", va)
+        t0 = time.time()
+        got = None
+        while time.time() - t0 < 45:
+            a, b = c2().get("input", {}), m1()
+            if a.get("bitrate", 0) > 100000 and b.get("bitrate", 0) > 100000:
+                got = time.time() - t0
+                break
+            time.sleep(1)
+        need(got is not None, f"no input {time.time() - t0:.0f} s after the address came: channel {c2().get('input')}, "
+                              f"supervisor's {m1()}")
+        a = c2()["input"]
+        need(a.get("rejoins", 0) >= 1 and a.get("joined_on") == va, f"channel's membership: {a.get('rejoins')} {a.get('joined_on')} {a.get('join_note')}")
+        clog.flush()
+        end = time.time() + 15
+        while time.time() < end and "output o1 started" not in open(os.path.join(root, "c2.log")).read():
+            time.sleep(1)
+        lg = open(os.path.join(root, "c2.log")).read()
+        need("output o1 started (it could not before" in lg, f"the output was not started again: {lg[-600:]}")
+        need(lg.count("config: output o1:") == 1, f"the failing output said more than once: {lg.count('config: output o1:')}")
+    finally:
+        for p in procs:
+            p.send_signal(signal.SIGTERM)
+        for p in procs:
+            try:
+                p.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        sh("ip", "link", "del", va, check=False)
+        sh("ip", "netns", "del", ns, check=False)
+    return f"both inputs back {got:.0f} s after the interface got its address (joined again on {va}), the output started; no restart"
+
+
+@test
 def supervisor_incidents():
     """The watchdog: an input lost on two channels of one source is one source incident with both in it; it closes when the input is back; limits read and set through the API."""
     import base64

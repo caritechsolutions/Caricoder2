@@ -73,6 +73,22 @@ them as more is known; keep each fact on its own line.
   110.16, which decrypts it but does not output it. tlc_belize is on
   224.10.10.10:10005.
 
+## After a power cut (24 Oct 2026)
+
+- The server came up before the network was ready: it waited 2 minutes
+  for enp6s0 (the multicast interface) and gave up; caricoder3 started at
+  once. enp6s0 had no address and no multicast route yet, so the inputs
+  joined their groups on enp5s0 (management) and nothing came for hours;
+  the outputs with iface=enp6s0 could not start. Channels whose groups
+  Flussonic also joined (on enp6s0) still worked: Linux shares a group
+  joined by one program with every socket on the machine.
+- Since 24 Oct a quiet multicast input joins its group again (5 s, 10 s,
+  20 s, then every minute), the interface looked up afresh, and outputs
+  that could not start are tried every 10 s: "joined ... again on enp6s0
+  (was enp5s0)" in the log is this, after a power cut or a switch restart.
+- There is an IGMP querier on the multicast VLAN (192.168.110.99, a query
+  every minute).
+
 ## Known behaviour
 
 - Audio/video sync faults almost always come from the source (the

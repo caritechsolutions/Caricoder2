@@ -53,6 +53,10 @@ struct source_stats {
     double rtt_ms;
     int64_t lost, recovered;
     uint64_t reconnects, link_errors;
+    bool multicast;                 /* the source in use is a UDP multicast group */
+    unsigned rejoins;               /* ... joined again after quiet spells (udp_join_tick) */
+    char joined_on[32];             /* ... the interface of its membership */
+    char join_note[200];
 };
 /* Called now and then from the input thread while data flows: starts the
  * primary's retry when a backup is in use. */

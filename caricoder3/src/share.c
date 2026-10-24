@@ -315,7 +315,7 @@ static bool load(struct sh *s, const char *path, char *err, size_t errlen)
     return true;
 }
 
-static void write_stats(const struct sh *s, const char *path, double in_bps)
+static void write_stats(const struct sh *s, const char *path, double in_bps, const struct udp_join *j)
 {
     char tmp[600];
     FILE *f;
@@ -324,8 +324,9 @@ static void write_stats(const struct sh *s, const char *path, double in_bps)
     if (!(f = fopen(tmp, "w")))
         return;
     fprintf(f, "{\"input\": \"%s\", \"bitrate\": %.0f, \"datagrams\": %llu, \"socket_overflow\": %llu, "
-               "\"pat\": %s, \"outputs\": [", s->input, in_bps, (unsigned long long)s->in_datagrams,
-            (unsigned long long)s->overflow, s->have_pat ? "true" : "false");
+               "\"pat\": %s, \"rejoins\": %u, \"joined_on\": \"%s\", \"join_note\": \"%s\", \"outputs\": [", s->input, in_bps,
+            (unsigned long long)s->in_datagrams, (unsigned long long)s->overflow, s->have_pat ? "true" : "false",
+            j->rejoins, j->ifname, j->note);
     for (int k = 0; k < s->n_out; k++)
         fprintf(f, "%s{\"program\": %d, \"port\": %d, \"pmt_pid\": %u, \"pmt_seen\": %s, \"packets\": %llu, \"send_errors\": %llu}",
                 k ? ", " : "", s->out[k].program, s->out[k].port, s->out[k].pmt_pid,
@@ -353,6 +354,8 @@ int share_main(int argc, char **argv)
     const char *cfg = NULL, *stats = NULL;
     char err[300];
     struct udp_addr a;
+    static struct udp_join join;
+    int64_t last_rx = 0;
     int fd, opt;
     int64_t last_stats = 0;
     uint64_t last_bytes = 0;
@@ -374,7 +377,7 @@ int share_main(int argc, char **argv)
         log_err("share: %s", err);
         return 1;
     }
-    if (udp_parse(s.input, &a, err, sizeof(err)) < 0 || (fd = udp_open_rx(&a, err, sizeof(err))) < 0) {
+    if (udp_parse(s.input, &a, err, sizeof(err)) < 0 || (fd = udp_open_rx_join(&a, &join, err, sizeof(err))) < 0) {
         log_err("share: %s: %s", s.input, err);
         return 1;
     }
@@ -416,6 +419,8 @@ int share_main(int argc, char **argv)
             }
             int n = recvmmsg(fd, mm, SH_BATCH, MSG_DONTWAIT, NULL);
 
+            if (n > 0)
+                last_rx = now;
             for (int i = 0; i < n; i++) {
                 for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mm[i].msg_hdr); cm; cm = CMSG_NXTHDR(&mm[i].msg_hdr, cm))
                     if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SO_RXQ_OVFL) {
@@ -427,6 +432,9 @@ int share_main(int argc, char **argv)
                 datagram(&s, bufs[i], mm[i].msg_len, now);
             }
         }
+        /* nothing for a while: the group joined again (a join lost at start-up, on another interface) */
+        if (r <= 0)
+            udp_join_tick(&join, fd, last_rx, now);
         /* nothing waits long: a low-rate program still gets its packets */
         for (int k = 0; k < s.n_out; k++)
             if (s.out[k].n && now - s.out[k].first_ns >= SH_HOLD_NS)
@@ -434,7 +442,7 @@ int share_main(int argc, char **argv)
         if (stats && now - last_stats >= 1000000000LL) {
             double dt = last_stats ? (double)(now - last_stats) / 1e9 : 1;
 
-            write_stats(&s, stats, (double)(s.in_bytes - last_bytes) * 8 / dt);
+            write_stats(&s, stats, (double)(s.in_bytes - last_bytes) * 8 / dt, &join);
             last_stats = now;
             last_bytes = s.in_bytes;
         }

@@ -104,6 +104,13 @@ struct ctx {
     _Atomic int64_t beat_in, beat_out;      /* thread heartbeats, ns */
     _Atomic int64_t last_rx;                /* last datagram received, ns */
     _Atomic int fatal;
+    /* outputs of the config file that would not start (an interface without
+     * its address yet, after a power cut): tried again every 10 s */
+    bool outputs_failed;
+    int64_t outputs_tried_ns;
+    char out_fail_id[OUTPUTS_MAX][SINK_ID_MAX];
+    char out_fail_msg[OUTPUTS_MAX][200];
+    int n_out_fail;
 };
 
 static void *input_thread(void *arg)
@@ -376,6 +383,12 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
         fprintf(f, ",\n    \"active\": %d,\n    \"switches\": %llu,\n    \"sources\": ",
                 ss.active, (unsigned long long)ss.switches);
         sources_json(c->src, f, json_str);
+        if (ss.multicast) {
+            fprintf(f, ",\n    \"rejoins\": %u,\n    \"joined_on\": ", ss.rejoins);
+            json_str(f, ss.joined_on);
+            fprintf(f, ",\n    \"join_note\": ");
+            json_str(f, ss.join_note);
+        }
     }
     fprintf(f, ",\n    \"bitrate\": %.0f,\n    \"last_packet_age_ms\": %lld,\n",
             r->in_bps, (long long)r->input_age_ms);
@@ -619,8 +632,15 @@ static bool config_load_locked(struct ctx *c, char *err, size_t errlen)
     int root, outs, i;
     bool ok = true;
     const char *keep[OUTPUTS_MAX];
-    int n_keep = 0;
+    int n_keep = 0, nf = 0, n_fail = c->n_out_fail;
     char id[SINK_ID_MAX], e[200];
+    static char fail_id[OUTPUTS_MAX][SINK_ID_MAX], fail_msg[OUTPUTS_MAX][200];
+
+    /* the last attempt's failures (to say what changed) */
+    for (int k = 0; k < n_fail; k++) {
+        snprintf(fail_id[k], sizeof(fail_id[k]), "%s", c->out_fail_id[k]);
+        snprintf(fail_msg[k], sizeof(fail_msg[k]), "%s", c->out_fail_msg[k]);
+    }
 
     if (!doc || !text) {
         free(doc);
@@ -670,10 +690,27 @@ static bool config_load_locked(struct ctx *c, char *err, size_t errlen)
         if (sinks_has(&c->sinks, oid))
             continue;                       /* already running */
         if (!sinks_add(&c->sinks, oid, url, true, e, sizeof(e))) {
-            log_err("config: output %s: %s", oid, e);
+            int k;
+
+            /* said once (and again if the reason changes), not every retry */
+            for (k = 0; k < n_fail && strcmp(fail_id[k], oid); k++)
+                ;
+            if (k == n_fail || strcmp(fail_msg[k], e))
+                log_err("config: output %s: %s (tried again every 10 s)", oid, e);
+            if (nf < OUTPUTS_MAX) {
+                snprintf(c->out_fail_id[nf], sizeof(c->out_fail_id[nf]), "%s", oid);
+                snprintf(c->out_fail_msg[nf], sizeof(c->out_fail_msg[nf]), "%s", e);
+                nf++;
+            }
             ok = false;
+        } else {
+            for (int k = 0; k < n_fail; k++)
+                if (!strcmp(fail_id[k], oid))
+                    log_info("config: output %s started (it could not before: %s)", oid, fail_msg[k]);
         }
     }
+    c->n_out_fail = nf;
+    c->outputs_failed = nf > 0;
     /* Saved outputs that the file no longer lists go away. */
     while (sinks_saved_not_in(&c->sinks, keep, n_keep, id, sizeof(id)))
         sinks_remove(&c->sinks, id, e, sizeof(e));
@@ -1004,6 +1041,12 @@ static int run_live(struct options *o, struct ctx *c)
             log_info("config: re-reading %s", o->config);
             if (!config_load(c, e, sizeof(e)))
                 log_err("config: %s", e);
+            c->outputs_tried_ns = now;
+        } else if (c->outputs_failed && o->config && now - c->outputs_tried_ns >= 10000000000LL) {
+            char e[300];
+
+            c->outputs_tried_ns = now;
+            config_load(c, e, sizeof(e));   /* those that run are left alone; the others tried again */
         }
 
         if (o->stats_interval > 0 && ++since_log >= o->stats_interval) {

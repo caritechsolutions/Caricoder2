@@ -3893,6 +3893,7 @@ static void jpick(FILE *f, const struct json_doc *d, int obj, const char *const 
 static void stats_brief(FILE *f, struct json_doc *d, const char *st)
 {
     static const char *const in_k[] = { "url", "shared", "bitrate", "last_packet_age_ms", "cc_errors", "socket_overflow",
+                                        "rejoins", "joined_on", "join_note",
                                         "active", "switches", NULL };
     static const char *const link_k[] = { "transport", "state", "connected", "lost", NULL };
     static const char *const out_k[] = { "bitrate", "mode", "muxrate", "dropped_units", "late_units", NULL };
