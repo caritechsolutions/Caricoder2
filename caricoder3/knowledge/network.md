@@ -9,6 +9,17 @@ them as more is known; keep each fact on its own line.
 - Transcoder 1: does most of the live work while transcoder 2 is used for
   development. IP 192.168.110.41.
 - Transcoder 2: 192.168.110.42, hostname transcoder2.
+- Transcoder 2 is not only for development: its Flussonic transcodes the
+  SRT and RIST feeds to 224.5.5.5 because 110.41 did not have enough
+  resources to transcode them, and 110.41's Flussonic reads them from
+  there (confirmed by Richard 23 Oct). 224.5.5.5 is the only input of
+  usa (:8016), hbo (:8006), hbo2 (:8007), hbop (:8009), dischd (:8002),
+  discovhome (:8003) and discovkids (:8004); the second input of hbomun
+  (:8012), hboext (:8013) and hbof (:8008), whose first is 224.2.2.2:2000;
+  and of hbos (:8010), whose first, 224.2.2.2:2001, is 110.16's MPTS
+  output, which is off.
+- So a fault on 110.42 (or its Flussonic stopped) takes those channels
+  off air on 110.41: check 110.42 first when they fail together.
 - Each has two NVIDIA Tesla P40 cards and the same twin CPUs (72 cores
   reported on transcoder 2).
 - Flussonic is being retired: once caricoder3 is proven there will be no
