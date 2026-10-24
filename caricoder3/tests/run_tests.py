@@ -3682,7 +3682,7 @@ def supervisor_language():
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
                "evidence": os.path.join(root, "evidence"),
-               "language_check": {"every_s": 4, "clip_s": 5, "expect": "eng"},
+               "language_check": {"every_s": 4, "clip_s": 5, "expect": "eng", "confirm_s": 20},
                "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
 
@@ -3718,11 +3718,20 @@ def supervisor_language():
         lang = lambda: api("/api/channels/c1")["channel"]["language"]
         ok = wait_for(lambda: (lambda L: L if "English, as it should be" in L["note"] else None)(lang()), 60, "heard English")
         need(ok["heard"] == "eng" and not ok["wrong"], f"first: {ok}")
-        # the audio turns Spanish: twice running is an incident, with a clip of it kept
+        # Spanish for a short while (an advertising break), heard twice: not an incident
+        open(said, "w").write("es 0.93")
+        wait_for(lambda: "advertising break" in lang()["note"], 30, "heard twice, waiting")
+        need(not lang()["wrong"], "wrong after a short break")
+        open(said, "w").write("en 0.95")
+        wait_for(lambda: "English, as it should be" in lang()["note"], 40, "English again after the break")
+        need(not [x for x in api("/api/incidents")["incidents"] if x["rule"] == "wrong_language"], "an incident for a break")
+        # the audio turns Spanish and stays: an incident once it lasts, with a clip of it kept
+        t_es = time.time()
         open(said, "w").write("es 0.93")
         inc = wait_for(lambda: [x for x in api("/api/incidents")["incidents"] if x["rule"] == "wrong_language"], 60,
                        "the wrong language incident")[0]
         need(inc["channel"] == "c1" and "heard Spanish (93% sure), should be English" in inc["summary"], f"incident: {inc}")
+        need(time.time() - t_es >= 18, f"an incident {time.time() - t_es:.0f} s after it turned, before confirm_s")
         ev = wait_for(lambda: [e for e in api(f"/api/incidents/{inc['id']}")["evidence"] if e["tool"] == "listen" and e.get("file")],
                       40, "the clip kept with it")[0]
         clip = os.path.join(root, "evidence", ev["file"])
@@ -3742,7 +3751,7 @@ def supervisor_language():
             sup.wait(timeout=15)
         except subprocess.TimeoutExpired:
             sup.kill()
-    return f"heard English, then Spanish twice: incident with a {os.path.getsize(clip) // 1000} kB clip; not sure left it; English closed it"
+    return f"heard English; Spanish for a break: nothing; Spanish that lasted: incident with a {os.path.getsize(clip) // 1000} kB clip; not sure left it; English closed it"
 
 
 @test

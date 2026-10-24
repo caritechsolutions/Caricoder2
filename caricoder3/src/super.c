@@ -165,6 +165,7 @@ struct chan {
     char lang_heard[8];                     /* the last confident answer ("eng") */
     double lang_p, lang_vol;
     int lang_wrong_n;                       /* confident answers in a row that were not what it should be */
+    int64_t lang_wrong_since;               /* ... the first of them */
     bool lang_wrong;                        /* two of them: an incident */
     bool lang_busy;
     char lang_note[160];                    /* the last answer in words */
@@ -253,6 +254,8 @@ struct super {
     char lang_expect[8];                    /* what the channels speak unless theirs says ("eng") */
     double lang_min_p;                      /* Whisper this sure, or the answer is "not sure" (0.5) */
     int lang_clip_s;                        /* each clip (20 s) */
+    int lang_confirm_s;                     /* wrong only if heard so over this long (600 s: longer than an
+                                             * advertising break, which can be in another language) */
     int64_t lang_have_t;                    /* when Whisper's presence was last looked at */
     bool lang_have;
     struct cardp cards[CARDS_MAX];
@@ -732,6 +735,7 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         snprintf(s->lang_expect, sizeof(s->lang_expect), "eng");
         s->lang_min_p = 0.5;
         s->lang_clip_s = 20;
+        s->lang_confirm_s = 600;
         if (l >= 0) {
             s->lang_every_s = (int)(json_get_num(&doc, l, "every_h", 6) * 3600);
             snprintf(s->lang_expect, sizeof(s->lang_expect), "%s", json_get_str(&doc, l, "expect", "eng"));
@@ -739,6 +743,8 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
             s->lang_clip_s = (int)json_get_num(&doc, l, "clip_s", 20);
             if (json_get(&doc, l, "every_s") >= 0)          /* the tests */
                 s->lang_every_s = (int)json_get_num(&doc, l, "every_s", 0);
+            if (json_get(&doc, l, "confirm_s") >= 0)
+                s->lang_confirm_s = (int)json_get_num(&doc, l, "confirm_s", 600);
         }
     }
     {
@@ -1570,7 +1576,8 @@ static void wd_channel_state(struct chan *c, int64_t t)
     snprintf(what, sizeof(what), "channel failed: %s", c->why);
     wd_observe(t, c->name, c->name, c->wd_group, WD_FAILED, c->state == CH_FAILED, what, 0);
     snprintf(what, sizeof(what), "audio in the wrong language: %.150s", c->lang_note);
-    wd_observe(t, c->name, c->name, c->wd_group, WD_LANGUAGE, c->state == CH_RUNNING && c->lang_wrong, what, 0);
+    wd_observe(t, c->name, c->name, c->wd_group, WD_LANGUAGE, c->state == CH_RUNNING && c->lang_wrong, what,
+               c->lang_wrong ? c->lang_wrong_since : 0);
     if (c->state != CH_RUNNING)
         for (size_t i = 0; i < sizeof(running_rules) / sizeof(running_rules[0]); i++)
             wd_observe(t, c->name, c->name, c->wd_group, running_rules[i], false, NULL, 0);
@@ -2598,18 +2605,33 @@ static void lang_result(struct super *s, struct chan *c, const char *result)
     snprintf(c->lang_heard, sizeof(c->lang_heard), "%s", heard);
     if (!strcmp(heard, want)) {
         c->lang_wrong_n = 0;
+        c->lang_wrong_since = 0;
         c->lang_wrong = false;
         snprintf(c->lang_note, sizeof(c->lang_note), "%s, as it should be (%.0f%% sure)", lang_name(heard), p * 100);
         c->lang_due = t + every;
         return;
     }
-    c->lang_wrong_n++;
-    snprintf(c->lang_note, sizeof(c->lang_note), "heard %s (%.0f%% sure), should be %s%s", lang_name(heard), p * 100,
-             lang_name(want), c->lang_wrong_n < 2 ? ": listening again in a minute" : "");
-    if (c->lang_wrong_n >= 2)
+    if (!c->lang_wrong_n++)
+        c->lang_wrong_since = t;
+    /* Once is not enough, nor twice in a few minutes: an advertising break
+     * can be in another language (seen on 23 Oct: Spanish for about 10
+     * minutes on English channels). Wrong when it still is lang_confirm_s
+     * after it was first heard; until then heard again in a minute, then
+     * at that time. */
+    if (c->lang_wrong_n >= 2 && t - c->lang_wrong_since >= s->lang_confirm_s)
         c->lang_wrong = true;
-    /* once is not enough: again soon, and while it is wrong, every 10 minutes */
-    c->lang_due = t + (c->lang_wrong ? (every < 600 ? every : 600) : (every < 60 ? every : 60));
+    snprintf(c->lang_note, sizeof(c->lang_note), "heard %s (%.0f%% sure), should be %s%s", lang_name(heard), p * 100,
+             lang_name(want), c->lang_wrong ? "" : c->lang_wrong_n < 2 ? ": listening again in a minute"
+             : ": listening again later (an advertising break can be in another language)");
+    if (c->lang_wrong) {
+        c->lang_due = t + (every < 600 ? every : 600);      /* while it is wrong, every 10 minutes */
+    } else if (c->lang_wrong_n < 2) {
+        c->lang_due = t + (every < 60 ? every : 60);
+    } else {
+        int64_t at = c->lang_wrong_since + s->lang_confirm_s, soon = t + (every < 60 ? every : 60);
+
+        c->lang_due = at > soon ? at : soon;
+    }
     log_info("%s: language check: %s", c->name, c->lang_note);
 }
 

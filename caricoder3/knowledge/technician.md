@@ -308,8 +308,12 @@ points at this side, and do not blame this side when it points upstream.
 
 - "audio in the wrong language": Whisper, on this server, listened to clips
   of the channel's output and heard another language than the channel
-  should carry, twice running, each time sure of it. A clip is kept with
-  the incident for a person to listen to.
+  should carry, each time sure of it, and still heard so 10 minutes after
+  it was first heard (since 23 Oct 2026; before, twice a minute apart). A
+  clip is kept with the incident for a person to listen to.
+- Advertising breaks can be in another language (Spanish on English
+  channels): incidents before 23 Oct that lasted about 10 minutes and
+  closed by themselves were most likely a break, not a fault.
 - The usual cause here: the uplink swapped or moved a service's audio
   tracks (look for "a service changed on the satellite" on its IRD just
   before), and the channel still takes the old PID. Next: listen to the
