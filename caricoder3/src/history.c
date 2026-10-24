@@ -45,6 +45,23 @@ bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, i
     return false;
 }
 void history_info(FILE *f) { fprintf(f, "null"); }
+void history_record(int64_t t, int64_t closed, const char *chan, const char *rule, const char *grp,
+                    const char *summary, const char *cause)
+{
+    (void)t; (void)closed; (void)chan; (void)rule; (void)grp; (void)summary; (void)cause;
+}
+bool history_query_records(FILE *f, const char *chan, int64_t from, int64_t to, int limit)
+{
+    (void)chan; (void)from; (void)to; (void)limit;
+    fprintf(f, "{\"records\": []}");
+    return false;
+}
+bool history_summary(FILE *f, int64_t from, int64_t to)
+{
+    (void)from; (void)to;
+    fprintf(f, "null");
+    return false;
+}
 int64_t history_incident_open(int64_t t, const char *chan, const char *rule, const char *level,
                               const char *grp, const char *summary, const char *detail, int64_t parent)
 {
@@ -136,7 +153,8 @@ int64_t history_bytes(void) { return 0; }
 #define TIDY_S        600             /* retention and the cap, this often */
 #define NAMES_MAX     1024
 
-enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE, R_MESSAGE, R_INC_DIAG, R_INC_VERDICT };
+enum rec_type { R_CHAN, R_METRIC, R_EVENT, R_INC_OPEN, R_INC_UPDATE, R_EVIDENCE, R_MESSAGE, R_INC_DIAG, R_INC_VERDICT,
+                R_RECORD };
 
 struct rec {
     enum rec_type type;
@@ -221,7 +239,14 @@ static const char *const SCHEMA =
     /* what this server and its peers said to each other ("out": said here, "in": heard) */
     "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, t INTEGER, peer TEXT, dir TEXT, text TEXT,"
     " data TEXT, incident INTEGER);"
-    "CREATE INDEX IF NOT EXISTS messages_t ON messages (t);";
+    "CREATE INDEX IF NOT EXISTS messages_t ON messages (t);"
+    /* what came and went without an effect worth a person's time (CC errors,
+     * short damage caused at the source): for the weekly summary and the
+     * technician, not for a verdict */
+    "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY, t INTEGER, closed INTEGER, chan TEXT, rule TEXT,"
+    " grp TEXT, summary TEXT, cause TEXT);"
+    "CREATE INDEX IF NOT EXISTS records_t ON records (t);"
+    "CREATE INDEX IF NOT EXISTS records_c ON records (chan, t);";
 
 static bool exec(sqlite3 *db, const char *sql)
 {
@@ -304,9 +329,11 @@ static int metric_id(const char *name)
 static void write_batch(struct rec *q, int n)
 {
     sqlite3_stmt *sc = NULL, *sm = NULL, *se = NULL, *si = NULL, *su = NULL, *sv = NULL, *sg = NULL, *sd = NULL;
-    sqlite3_stmt *sx = NULL;
+    sqlite3_stmt *sx = NULL, *sr = NULL;
 
     exec(H.db, "BEGIN");
+    sqlite3_prepare_v2(H.db, "INSERT INTO records (t, closed, chan, rule, grp, summary, cause) VALUES (?,?,?,?,?,?,?)",
+                       -1, &sr, NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO s10 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &sc, NULL);
     sqlite3_prepare_v2(H.db, "INSERT OR REPLACE INTO m10 VALUES (?,?,?)", -1, &sm, NULL);
     sqlite3_prepare_v2(H.db, "INSERT INTO events (t, cid, level, kind, text) VALUES (?,?,?,?,?)", -1, &se, NULL);
@@ -425,6 +452,19 @@ static void write_batch(struct rec *q, int n)
             sqlite3_bind_text(sv, 8, r->text ? r->text : "", -1, SQLITE_STATIC);
             sqlite3_step(sv);
             sqlite3_reset(sv);
+        } else if (r->type == R_RECORD && sr) {
+            sqlite3_bind_int64(sr, 1, r->t);
+            sqlite3_bind_int64(sr, 2, r->closed);
+            if (r->name[0])
+                sqlite3_bind_text(sr, 3, r->name, -1, SQLITE_STATIC);
+            else
+                sqlite3_bind_null(sr, 3);
+            sqlite3_bind_text(sr, 4, r->kind, -1, SQLITE_STATIC);
+            sqlite3_bind_text(sr, 5, r->grp ? r->grp : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(sr, 6, r->text ? r->text : "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(sr, 7, r->detail ? r->detail : "", -1, SQLITE_STATIC);
+            sqlite3_step(sr);
+            sqlite3_reset(sr);
         } else if (r->type == R_INC_UPDATE && su) {
             if (r->closed)
                 sqlite3_bind_int64(su, 1, r->closed);
@@ -456,6 +496,7 @@ static void write_batch(struct rec *q, int n)
     sqlite3_finalize(sg);
     sqlite3_finalize(sd);
     sqlite3_finalize(sx);
+    sqlite3_finalize(sr);
     exec(H.db, "COMMIT");
 }
 
@@ -549,8 +590,8 @@ static int64_t oldest(const char *table)
  * tenth of what is left at a time. */
 static void tidy(int64_t now)
 {
-    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "events", "messages", "incidents",
-                                         "evidence" };
+    static const char *const order[] = { "s10", "m10", "s60", "m60", "s3600", "m3600", "records", "events", "messages",
+                                         "incidents", "evidence" };
     int64_t before;
 
     exec(H.db, "PRAGMA wal_checkpoint(TRUNCATE)");  /* the log folded in: the size is the file's */
@@ -564,6 +605,7 @@ static void tidy(int64_t now)
     delete_before("m3600", now - KEEP_S3600);
     delete_before("events", now - KEEP_EVENTS);
     delete_before("incidents", now - KEEP_EVENTS);
+    delete_before("records", now - KEEP_EVENTS);
     delete_before("evidence", now - KEEP_EVENTS);
     delete_before("messages", now - KEEP_EVENTS);
     for (int round = 0; round < 40 && db_bytes() > H.cap * 9 / 10; round++) {
@@ -853,6 +895,25 @@ int64_t history_incident_open(int64_t t, const char *chan, const char *rule, con
     return r.id;
 }
 
+void history_record(int64_t t, int64_t closed, const char *chan, const char *rule, const char *grp,
+                    const char *summary, const char *cause)
+{
+    struct rec r;
+
+    if (!H.on)
+        return;
+    memset(&r, 0, sizeof(r));
+    r.type = R_RECORD;
+    r.t = t;
+    r.closed = closed > t ? closed : t;
+    snprintf(r.name, sizeof(r.name), "%s", chan ? chan : "");
+    snprintf(r.kind, sizeof(r.kind), "%s", rule);
+    r.grp = strdup(grp ? grp : "");
+    r.text = strdup(summary ? summary : "");
+    r.detail = strdup(cause ? cause : "");
+    push(&r);
+}
+
 int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, const char *tool, const char *args,
                              const char *result, const char *file)
 {
@@ -1081,6 +1142,187 @@ bool history_query_metrics(FILE *f, const char *metric, int64_t from, int64_t to
     fprintf(f, "}}");
     sqlite3_finalize(st);
     sqlite3_close(db);
+    return true;
+}
+
+bool history_query_records(FILE *f, const char *chan, int64_t from, int64_t to, int limit)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    char sql[300];
+
+    if (!db)
+        return false;
+    snprintf(sql, sizeof(sql), "SELECT t, closed, chan, rule, grp, summary, cause FROM records"
+             " WHERE t < ? AND closed >= ? %s ORDER BY t DESC, id DESC LIMIT ?", chan ? "AND chan = ?" : "");
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_bind_int64(st, 1, to);
+    sqlite3_bind_int64(st, 2, from);
+    if (chan) {
+        sqlite3_bind_text(st, 3, chan, -1, SQLITE_STATIC);
+        sqlite3_bind_int(st, 4, limit);
+    } else {
+        sqlite3_bind_int(st, 3, limit);
+    }
+    fprintf(f, "{\"records\": [");
+    for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+        fprintf(f, "%s\n{\"t\": %lld, \"closed\": %lld, \"channel\": ", n ? "," : "",
+                (long long)sqlite3_column_int64(st, 0), (long long)sqlite3_column_int64(st, 1));
+        if (sqlite3_column_type(st, 2) == SQLITE_NULL)
+            fprintf(f, "null");
+        else
+            jstr(f, (const char *)sqlite3_column_text(st, 2));
+        fprintf(f, ", \"rule\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 3));
+        fprintf(f, ", \"source\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 4));
+        fprintf(f, ", \"summary\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 5));
+        fprintf(f, ", \"cause\": ");
+        jstr(f, (const char *)sqlite3_column_text(st, 6));
+        fputc('}', f);
+    }
+    fprintf(f, "]}");
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return true;
+}
+
+/* The summary: per source (its address, without the program or other
+ * options), the CC bursts and short drops kept as records, the channel
+ * incidents, and when in the day (the site's hours) the records came. */
+#define SUM_SOURCES 256
+struct sum_src {
+    char key[200];
+    int cc, cc_s, drops, drops_s, incidents;
+    int hours[24];
+    char chans[300];
+    int n_chans;
+};
+
+static struct sum_src *sum_find(struct sum_src *v, int *n, const char *grp)
+{
+    char key[200];
+    size_t k;
+
+    snprintf(key, sizeof(key), "%s", grp && *grp ? grp : "(no source)");
+    k = strcspn(key, "?");
+    key[k] = 0;
+    for (int i = 0; i < *n; i++)
+        if (!strcmp(v[i].key, key))
+            return &v[i];
+    if (*n >= SUM_SOURCES)
+        return NULL;
+    memset(&v[*n], 0, sizeof(v[*n]));
+    snprintf(v[*n].key, sizeof(v[*n].key), "%s", key);
+    return &v[(*n)++];
+}
+
+static void sum_chan(struct sum_src *x, const char *chan)
+{
+    size_t n = strlen(x->chans), l;
+    const char *p = x->chans;
+
+    if (!chan || !*chan)
+        return;
+    l = strlen(chan);
+    while ((p = strstr(p, chan))) {             /* already listed? */
+        if ((p == x->chans || (p - x->chans >= 2 && p[-2] == ',')) && (p[l] == 0 || p[l] == ','))
+            return;
+        p += l;
+    }
+    if (n + l + 3 < sizeof(x->chans))
+        snprintf(x->chans + n, sizeof(x->chans) - n, "%s%s", n ? ", " : "", chan);
+    x->n_chans++;
+}
+
+static int sum_cmp(const void *a, const void *b)
+{
+    const struct sum_src *x = a, *y = b;
+
+    return (y->cc + y->drops + y->incidents) - (x->cc + x->drops + x->incidents);
+}
+
+bool history_summary(FILE *f, int64_t from, int64_t to)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    struct sum_src *v;
+    int n = 0, hours[24] = { 0 }, cc = 0, drops = 0, incidents = 0;
+
+    if (!db)
+        return false;
+    if (!(v = calloc(SUM_SOURCES, sizeof(*v)))) {
+        sqlite3_close(db);
+        return false;
+    }
+    if (sqlite3_prepare_v2(db, "SELECT t, closed, chan, rule, grp FROM records WHERE t >= ? AND t < ?", -1, &st,
+                           NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, from);
+        sqlite3_bind_int64(st, 2, to);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            time_t t = (time_t)sqlite3_column_int64(st, 0);
+            int lasted = (int)(sqlite3_column_int64(st, 1) - t);
+            const char *rule = (const char *)sqlite3_column_text(st, 3);
+            struct sum_src *x = sum_find(v, &n, (const char *)sqlite3_column_text(st, 4));
+            struct tm tm;
+
+            if (!x || !rule)
+                continue;
+            localtime_r(&t, &tm);
+            if (!strcmp(rule, "cc_errors")) {
+                x->cc++;
+                x->cc_s += lasted;
+                cc++;
+            } else {
+                x->drops++;
+                x->drops_s += lasted;
+                drops++;
+            }
+            x->hours[tm.tm_hour]++;
+            hours[tm.tm_hour]++;
+            sum_chan(x, (const char *)sqlite3_column_text(st, 2));
+        }
+        sqlite3_finalize(st);
+    }
+    if (sqlite3_prepare_v2(db, "SELECT chan, grp FROM incidents WHERE t >= ? AND t < ? AND chan IS NOT NULL"
+                           " AND (verdict IS NULL OR verdict != 'exclude')", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, from);
+        sqlite3_bind_int64(st, 2, to);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            struct sum_src *x = sum_find(v, &n, (const char *)sqlite3_column_text(st, 1));
+
+            if (!x)
+                continue;
+            x->incidents++;
+            incidents++;
+            sum_chan(x, (const char *)sqlite3_column_text(st, 0));
+        }
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    qsort(v, (size_t)n, sizeof(*v), sum_cmp);
+    fprintf(f, "{\"from\": %lld, \"to\": %lld, \"cc_bursts\": %d, \"short_drops\": %d, \"incidents\": %d, \"hours\": [",
+            (long long)from, (long long)to, cc, drops, incidents);
+    for (int h = 0; h < 24; h++)
+        fprintf(f, "%s%d", h ? ", " : "", hours[h]);
+    fprintf(f, "], \"sources\": [");
+    for (int i = 0; i < n; i++) {
+        fprintf(f, "%s\n{\"source\": ", i ? "," : "");
+        jstr(f, v[i].key);
+        fprintf(f, ", \"cc_bursts\": %d, \"cc_s\": %d, \"short_drops\": %d, \"short_drops_s\": %d, \"incidents\": %d,"
+                " \"channels\": ", v[i].cc, v[i].cc_s, v[i].drops, v[i].drops_s, v[i].incidents);
+        jstr(f, v[i].chans);
+        fprintf(f, ", \"n_channels\": %d, \"hours\": [", v[i].n_chans);
+        for (int h = 0; h < 24; h++)
+            fprintf(f, "%s%d", h ? ", " : "", v[i].hours[h]);
+        fprintf(f, "]}");
+    }
+    fprintf(f, "]}");
+    free(v);
     return true;
 }
 
@@ -1689,6 +1931,30 @@ bool history_query_incident(FILE *f, int64_t id, int64_t now)
             fprintf(f, ", \"kind\": ");
             jstr(f, (const char *)sqlite3_column_text(st, 3));
             fprintf(f, ", \"text\": ");
+            jstr(f, (const char *)sqlite3_column_text(st, 4));
+            fputc('}', f);
+        }
+        sqlite3_finalize(st);
+    }
+    /* what came and went on its channels (records: CC errors, short drops) from
+     * 15 minutes before it to its end: context, never incidents of their own */
+    fprintf(f, "], \"records\": [");
+    if (sqlite3_prepare_v2(db,
+            "SELECT t, closed, chan, rule, summary FROM records WHERE t <= ? AND closed >= ? AND chan IN"
+            " (SELECT chan FROM incidents WHERE (id = ? OR parent = ?) AND chan IS NOT NULL)"
+            " ORDER BY t, id LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, t1 + 60);
+        sqlite3_bind_int64(st, 2, t0 - 900);
+        sqlite3_bind_int64(st, 3, id);
+        sqlite3_bind_int64(st, 4, id);
+        sqlite3_bind_int(st, 5, report_mode ? 40 : 200);
+        for (int n = 0; sqlite3_step(st) == SQLITE_ROW; n++) {
+            fprintf(f, "%s\n{\"t\": %lld, \"closed\": %lld, \"channel\": ", n ? "," : "",
+                    (long long)sqlite3_column_int64(st, 0), (long long)sqlite3_column_int64(st, 1));
+            jstr(f, (const char *)sqlite3_column_text(st, 2));
+            fprintf(f, ", \"rule\": ");
+            jstr(f, (const char *)sqlite3_column_text(st, 3));
+            fprintf(f, ", \"summary\": ");
             jstr(f, (const char *)sqlite3_column_text(st, 4));
             fputc('}', f);
         }

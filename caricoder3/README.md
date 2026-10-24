@@ -470,9 +470,18 @@ clock not locked, a black, frozen or silent picture or sound, a stream
 the PMT lists without data, the source's PIDs changing; and the server:
 CPU or a video engine above 90% for 2 minutes, packets lost on this
 server (a network card with no room for them: its missed and FIFO
-counters; or UDP socket buffers full: `RcvbufErrors`. Not the cards'
-`rx_dropped`, which counts frames the kernel sets aside, steady and
-harmless, nor Intel's `dropped_smbus`, the management controller's own).
+counters. Not the cards' `rx_dropped`, which counts frames the kernel
+sets aside, steady and harmless, nor Intel's `dropped_smbus`, the
+management controller's own. The server's UDP `RcvbufErrors` is kept as a
+figure only: it counts every program's sockets; a channel's own socket
+overflowing is its "packets lost on the way in").
+CC errors are kept as **records**, not incidents: what they damage is the
+incident, and its summary names them as the cause ("..., with CC errors
+on its source"). Dropped pictures the source caused (CC errors, no data
+or no input within a minute) that are over within 2 minutes
+(`short_s`) are records too. The Incidents page shows the week by
+source (`/api/summary?days=7`): the CC bursts and short drops of each,
+its incidents, and the hours they came in; `/api/records` lists them.
 A problem that lasts 10 s (a black, frozen or silent picture or sound:
 30 s, as programmes have short ones) is an **incident**, kept in the
 history with the channel's statistics as the watchdog saw them; it is

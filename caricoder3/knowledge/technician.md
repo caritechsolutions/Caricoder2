@@ -104,12 +104,14 @@ dress them up as provider faults.
 
 ## Things this server does that look like faults
 
-- "UDP packets lost on this server: socket buffers full" counts every
-  program on this server, not only the channels: Flussonic, RIST
-  receivers, test tools all have sockets here. When the channels report
-  no "socket_overflow" and no CC errors at the time, the loss was in
-  another program's sockets and the channels did not suffer. Category
-  "transcoder" (this server), confidence 0.5 at most, no ticket.
+- "UDP packets lost on this server: socket buffers full" (before 23 Oct
+  2026) counted every program on this server, not only the channels:
+  Flussonic, RIST receivers, test tools all have sockets here. It is no
+  longer an incident; a channel's own socket losing packets is its "packets
+  lost on the way in". An old one with the channels reporting no
+  "socket_overflow" and no CC errors at the time: another program's
+  sockets, the channels did not suffer. Category "transcoder" (this
+  server), confidence 0.5 at most, no ticket.
 - "network card dropping packets" from before 20 Oct counted frames the
   kernel sets aside (no protocol for them), not lost packets: nothing was
   wrong. The rule now counts only real losses on the card.
@@ -122,6 +124,23 @@ dress them up as provider faults.
   the IRD stopped. Not a channel fault.
 - A stream listed in the PMT that never carries data (a second language
   that is never sent): harmless, the source as it is; no ticket.
+
+## CC errors are records, not incidents
+
+CC errors alone are not incidents any more (since 23 Oct 2026): most came
+and went with the picture fine, and nobody could say afterwards what they
+were. They are kept as "records". When they damage a channel (dropped,
+frozen, black pictures, silent audio), that damage is the incident, and its
+summary names them ("..., with CC errors on its source"). Dropped pictures
+the source caused that were over within 2 minutes are records too.
+- The report's "records" are what came and went on its channels from 15
+  minutes before it: use them as context (CC errors a minute before the
+  pictures dropped: the source; none: look at this server).
+- Dropped pictures with no cause at the source are an incident: look at
+  this server first (the transcoding, the card, the CPU), but the feed can
+  still be the cause without CC errors (pictures damaged before they
+  reached us).
+- Older incidents (before 23 Oct) may still be CC errors on their own.
 
 ## CC errors on several sources at once
 

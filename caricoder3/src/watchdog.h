@@ -12,6 +12,12 @@
  * same upstream problem at once, one incident for the source is opened
  * as well, and theirs belong to it: the clue that the cause is before
  * the transcoder.
+ *
+ * Some are kept as records instead (history_record), for the weekly
+ * summary and as context, and never asked about: CC errors (they come and
+ * go; what they damage is an incident of its own, which names them as its
+ * cause), and dropped pictures the source caused that are over within
+ * `short_s`.
  */
 #ifndef CC3_WATCHDOG_H
 #define CC3_WATCHDOG_H
@@ -54,6 +60,8 @@ struct wd_limits {
     int ird_cn_drop_db;     /* an IRD's C/N this far below its normal: low */
     int ird_temp_max_c;     /* an IRD hotter than this: too hot (0: judged by its normal instead) */
     int ird_temp_rise_c;    /* ... this much above its normal: too hot */
+    int short_s;            /* dropped pictures the source caused (CC errors, no data, no input within a
+                             * minute), over within this long: a record, not an incident */
     bool off[WD_RULES];     /* rules turned off */
 };
 

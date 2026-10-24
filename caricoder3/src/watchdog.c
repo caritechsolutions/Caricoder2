@@ -65,6 +65,17 @@ struct entry {
     int64_t id;             /* > 0: the incident is open */
     int64_t parent;
     char what[160];
+    bool record;            /* kept as a record when it is over, not an incident */
+    bool deferred;          /* caused at the source: an incident only if it lasts short_s */
+    char cause[64];         /* "with CC errors on its source", ... ("" none known) */
+};
+
+/* When each channel last had a problem at its source, for the cause of damage */
+#define SEEN_MAX 1024
+enum { C_CC, C_NO_DATA, C_NO_INPUT, C_LOSS, C_KINDS };
+struct seen {
+    char chan[64];
+    int64_t last[C_KINDS];
 };
 
 struct group {
@@ -83,6 +94,7 @@ static struct {
     bool have_lim;
     struct entry e[ENTRIES_MAX];
     struct group g[GROUPS_MAX];
+    struct seen seen[SEEN_MAX];
     void (*snap)(FILE *f, const char *chan, void *op);
     void *snap_op;
     void (*on_open)(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op);
@@ -116,6 +128,7 @@ void wd_defaults(struct wd_limits *l)
     l->ird_cn_drop_db = 3;
     l->ird_temp_max_c = 0;
     l->ird_temp_rise_c = 10;
+    l->short_s = 120;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -138,7 +151,7 @@ int wd_rule_by_id(const char *id)
 
 #define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
-    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_temp_max_c) X(ird_temp_rise_c)
+    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_temp_max_c) X(ird_temp_rise_c) X(short_s)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {
@@ -230,6 +243,79 @@ static int min_for(enum wd_rule r)
     return W.lim.min_s;
 }
 
+static int cause_kind(enum wd_rule r)
+{
+    return r == WD_CC ? C_CC : r == WD_NO_DATA ? C_NO_DATA : r == WD_NO_INPUT ? C_NO_INPUT : r == WD_LOSS ? C_LOSS : -1;
+}
+
+static void note_cause(const char *chan, int k, int64_t t)
+{
+    struct seen *free_s = NULL, *old = NULL;
+
+    for (int i = 0; i < SEEN_MAX; i++) {
+        struct seen *x = &W.seen[i];
+
+        if (!x->chan[0]) {
+            if (!free_s)
+                free_s = x;
+            continue;
+        }
+        if (!strcmp(x->chan, chan)) {
+            x->last[k] = t;
+            return;
+        }
+        {
+            int64_t m = 0;
+
+            for (int j = 0; j < C_KINDS; j++)
+                if (x->last[j] > m)
+                    m = x->last[j];
+            if (t - m > 3600 && !old)
+                old = x;                /* nothing for an hour: its place can go */
+        }
+    }
+    if (!free_s)
+        free_s = old;
+    if (free_s) {
+        memset(free_s, 0, sizeof(*free_s));
+        snprintf(free_s->chan, sizeof(free_s->chan), "%s", chan);
+        free_s->last[k] = t;
+    }
+}
+
+/* What at the source came with damage from `since` (within a minute of it): "" nothing */
+static void cause_of(const char *chan, int64_t since, char *out, size_t len)
+{
+    static const char *const say[C_KINDS] = { "with CC errors on its source", "with gaps in its source (no data)",
+                                              "with its input cutting out", "with packets lost on the way in" };
+    int best = -1;
+    int64_t bt = 0;
+
+    out[0] = 0;
+    for (int i = 0; i < SEEN_MAX; i++)
+        if (W.seen[i].chan[0] && !strcmp(W.seen[i].chan, chan)) {
+            for (int k = 0; k < C_KINDS; k++)
+                if (W.seen[i].last[k] >= since - 60 && W.seen[i].last[k] > bt) {
+                    bt = W.seen[i].last[k];
+                    best = k;
+                }
+            break;
+        }
+    if (best >= 0)
+        snprintf(out, len, "%s", say[best]);
+}
+
+static bool is_damage(enum wd_rule r)
+{
+    return r == WD_DROPPING || r == WD_FROZEN || r == WD_BLACK || r == WD_SILENT;
+}
+
+/* followed: open as an incident, or waiting to be kept as a record */
+static bool followed(const struct entry *e)
+{
+    return e->id || e->record || e->deferred;
+}
+
 static struct entry *find(const char *subject, enum wd_rule r)
 {
     for (int i = 0; i < ENTRIES_MAX; i++)
@@ -266,12 +352,14 @@ void wd_observe(int64_t t, const char *subject, const char *chan, const char *gr
     ensure_lim();
     if (W.lim.off[r])
         on = false;
+    if (on && chan && *chan && cause_kind(r) >= 0)
+        note_cause(chan, cause_kind(r), t);
     e = find(subject, r);
     if (on) {
         if (!e)
             e = add(subject, chan, group, r);
         if (e) {
-            if (!e->on && !e->id)
+            if (!e->on && !followed(e))
                 e->since = began > 0 && began < t ? began : t;
             e->on = true;
             e->last_on = t;
@@ -282,7 +370,7 @@ void wd_observe(int64_t t, const char *subject, const char *chan, const char *gr
         }
     } else if (e) {
         e->on = false;
-        if (!e->id)
+        if (!followed(e))
             e->used = false;            /* too short to be an incident */
     }
     pthread_mutex_unlock(&W.lock);
@@ -350,10 +438,18 @@ static char *snapshot(const struct entry *e)
 
 static void summary_of(const struct entry *e, char *out, size_t len)
 {
-    if (e->what[0])
-        snprintf(out, len, "%s", e->what);
-    else
-        snprintf(out, len, "%s", RULES[e->rule].name);
+    snprintf(out, len, "%s%s%s", e->what[0] ? e->what : RULES[e->rule].name, e->cause[0] ? ", " : "", e->cause);
+}
+
+/* Over, and kept as a record */
+static void record_entry(struct entry *e)
+{
+    char sum[240];
+
+    summary_of(e, sum, sizeof(sum));
+    history_record(e->since, e->last_on > e->since ? e->last_on : e->since, e->chan[0] ? e->chan : NULL,
+                   RULES[e->rule].id, e->group, sum, e->cause);
+    e->used = false;
 }
 
 static void open_entry(struct entry *e, int64_t t)
@@ -507,22 +603,40 @@ void wd_tick(int64_t t)
             continue;
         if (e->on && t - e->last_on > 30) {
             e->on = false;                  /* nobody says any more (the channel went) */
-            if (!e->id) {
+            if (!followed(e)) {
                 e->used = false;
                 continue;
             }
         }
         /* long enough by what was seen (not by the clock alone: the last
          * sample may be a couple of seconds old) */
-        if (!e->id && (e->instant || (e->on && e->last_on - e->since >= min_for(e->rule))))
+        if (!followed(e) && (e->instant || (e->on && e->last_on - e->since >= min_for(e->rule)))) {
+            if (e->rule == WD_CC) {
+                e->record = true;           /* CC errors: a record; what they damage is an incident */
+                continue;
+            }
+            if (is_damage(e->rule) && e->chan[0])
+                cause_of(e->chan, e->since, e->cause, sizeof(e->cause));
+            if (e->rule == WD_DROPPING && e->cause[0] && !e->instant) {
+                e->deferred = true;         /* the source's doing: an incident only if it lasts */
+                continue;
+            }
             open_entry(e, t);
+        } else if (e->deferred && e->on && e->last_on - e->since >= W.lim.short_s) {
+            e->deferred = false;
+            open_entry(e, t);
+        }
     }
     groups(t);
     for (int i = 0; i < ENTRIES_MAX; i++) {
         struct entry *e = &W.e[i];
 
-        if (e->used && e->id && !e->on && t - e->last_on >= W.lim.clear_s)
-            close_entry(e, t);
+        if (e->used && followed(e) && !e->on && t - e->last_on >= W.lim.clear_s) {
+            if (e->id)
+                close_entry(e, t);
+            else
+                record_entry(e);
+        }
     }
     groups(t);
     pthread_mutex_unlock(&W.lock);
@@ -536,11 +650,14 @@ void wd_forget(int64_t t, const char *subject)
 
         if (!e->used || strcmp(e->subject, subject))
             continue;
-        if (e->id) {
+        if (followed(e)) {
             if (e->on)
                 e->last_on = t;
             e->on = false;
-            close_entry(e, t);
+            if (e->id)
+                close_entry(e, t);
+            else
+                record_entry(e);
         } else {
             e->used = false;
         }
@@ -592,9 +709,10 @@ void wd_state_json(FILE *f, int64_t t)
             pending++;
         fprintf(f, "%s{\"subject\": ", n++ ? ", " : "");
         jesc(f, e->subject);
-        fprintf(f, ", \"rule\": \"%s\", \"since\": %lld, \"for_s\": %lld, \"incident\": %lld, \"on\": %s, \"what\": ",
+        fprintf(f, ", \"rule\": \"%s\", \"since\": %lld, \"for_s\": %lld, \"incident\": %lld, \"on\": %s,"
+                " \"record\": %s, \"what\": ",
                 RULES[e->rule].id, (long long)e->since, (long long)(t - e->since), (long long)(e->id > 0 ? e->id : 0),
-                e->on ? "true" : "false");
+                e->on ? "true" : "false", e->record || e->deferred ? "true" : "false");
         jesc(f, e->what);
         fputc('}', f);
     }

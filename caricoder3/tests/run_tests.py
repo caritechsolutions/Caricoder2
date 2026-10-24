@@ -2923,6 +2923,48 @@ def history_keeps_to_its_cap():
 
 
 @test
+def watchdog_records():
+    """CC errors, and dropped pictures the source caused that were over quickly, are records, not incidents; damage that lasts, or has no cause at the source, is an incident naming its cause; the summary by source."""
+    if subprocess.run(["pkg-config", "--exists", "sqlite3"]).returncode != 0:
+        return "SKIPPED: no libsqlite3-dev"
+    exe = w("watchdog_records")
+    srcd = os.path.join(HERE, "..", "src")
+    r = subprocess.run(["gcc", "-O1", "-g", "-fsanitize=address,undefined", "-DHAVE_SQLITE", "-o", exe,
+                        os.path.join(HERE, "watchdog_records.c")] +
+                       [os.path.join(srcd, f) for f in ("watchdog.c", "history.c", "json.c", "log.c")] +
+                       ["-lsqlite3", "-lpthread", "-lm"], capture_output=True, text=True)
+    need(r.returncode == 0, f"build: {r.stderr[-800:]}")
+    db = w("watchdog_records.db")
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(db + suffix):
+            os.unlink(db + suffix)
+    r = subprocess.run([exe, db], capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    need(r.returncode == 0, f"run: {r.stderr[-800:]}")
+    inc, rec, summ = [json.loads(x) for x in r.stdout.strip().split("\n=====\n")]
+    inc, rec = inc["incidents"], rec["records"]
+    got = sorted((x["channel"], x["rule"]) for x in inc)
+    need(got == [("a", "dropping"), ("b", "dropping"), ("c", "frozen"), ("c", "no_data")], f"incidents: {got}")
+    need(not [x for x in inc if x["rule"] == "cc_errors"], "a CC errors incident")
+    a = [x for x in inc if x["channel"] == "a"][0]
+    need("with CC errors on its source" in a["summary"], f"its cause not said: {a['summary']}")
+    b = [x for x in inc if x["channel"] == "b"][0]
+    need("with" not in b["summary"], f"a cause for one without: {b['summary']}")
+    c = [x for x in inc if x["rule"] == "frozen"][0]
+    need("with gaps in its source" in c["summary"], f"frozen: {c['summary']}")
+    rr = sorted((x["channel"], x["rule"]) for x in rec)
+    need(rr == [("a", "cc_errors")] * 3 + [("a", "dropping")], f"records: {rr}")
+    d = [x for x in rec if x["rule"] == "dropping"][0]
+    need(d["cause"] == "with CC errors on its source" and 28 <= d["closed"] - d["t"] <= 34, f"the short drop: {d}")
+    s0 = summ["sources"][0]
+    need(s0["source"] == "udp://239.1.2.3:5000" and s0["cc_bursts"] == 3 and s0["short_drops"] == 1 and
+         s0["incidents"] == 1 and s0["channels"] == "a", f"summary: {s0}")
+    need(summ["cc_bursts"] == 3 and summ["short_drops"] == 1 and sum(summ["hours"]) == 4, f"totals: {summ}")
+    return f"{len(inc)} incidents (a long drop and one with no cause, a freeze and its gap), {len(rec)} records " \
+           f"(3 CC bursts, 1 short drop); summary by source"
+
+
+@test
 def supervisor_incidents():
     """The watchdog: an input lost on two channels of one source is one source incident with both in it; it closes when the input is back; limits read and set through the API."""
     import base64
@@ -2988,6 +3030,12 @@ def supervisor_incidents():
         src_inc = [x for x in j["incidents"] if x["rule"] == "no_input" and x["channel"] is None][0]
         lasted = src_inc["closed"] - src_inc["opened"]
         p.close()
+        # the summary by source, and the records
+        code, j = api("/api/summary?days=7")
+        need(code == 200 and isinstance(j.get("sources"), list) and len(j["hours"]) == 24 and
+             any(x["source"] == f"udp://127.0.0.1:{pin}" and x["incidents"] >= 2 for x in j["sources"]), f"summary: {code} {j}")
+        code, j = api("/api/records?channel=i1")
+        need(code == 200 and isinstance(j.get("records"), list), f"records: {code} {j}")
         # limits through the API, kept in the config file
         code, j = api("/api/watchdog", "PUT", {"cc_per_min": 25, "off": []})
         need(code == 200 and j["limits"]["cc_per_min"] == 25 and j["limits"]["min_s"] == 5, f"put: {code} {j}")

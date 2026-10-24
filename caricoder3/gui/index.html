@@ -741,6 +741,25 @@ async function loadIncidents(force) {
   try { incAll = (await api(`/api/incidents?from=${to - 86400}&to=${to + 1}&limit=300&brief=1`)).incidents; } catch(e) { incAll = null; }
   if (view.page === "overview") renderOverviewPage(); else if (view.page === "incidents") renderIncidentsPage();
 }
+/* the week by source: what came and went (records) and the incidents */
+let sumInfo = null, sumAt = 0;
+async function loadSummary(force) {
+  if (!sys || !sys.history) return;
+  if (!force && Date.now() - sumAt < 60000) return;
+  sumAt = Date.now();
+  try { sumInfo = await api("/api/summary?days=7"); } catch(e) { sumInfo = { error: e.message }; }
+  if (view.page === "incidents") renderIncidentsPage();
+}
+function summaryCard() {
+  if (!sys || !sys.history) return "";
+  if (!sumInfo) { loadSummary(); return ""; }
+  if (sumInfo.error) return `<section class="card"><header><h2>The week by source</h2></header><div class="body"><div class="msg err">${esc(sumInfo.error)}</div></div></section>`;
+  const hrs = h => h.map((n, i) => [i, n]).filter(x => x[1]).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i, n]) => `${String(i).padStart(2, "0")}:00 (${n})`).join(", ") || "—";
+  const rows = sumInfo.sources.slice(0, 30).map(x => `<tr><td class="mono">${esc(x.source)}</td><td title="${esc(x.channels)}">${x.n_channels} ${x.n_channels === 1 ? esc(x.channels) : "channels"}</td>
+    <td>${x.cc_bursts ? `${x.cc_bursts} <span class="dim">(${fmtDur(x.cc_s)})</span>` : "—"}</td><td>${x.short_drops || "—"}</td><td>${x.incidents || "—"}</td><td>${hrs(x.hours)}</td></tr>`).join("");
+  return `<section class="card"><header><h2>The week by source</h2><span class="hint">CC errors and short drops the source caused are kept as records, not incidents: here is where they come from. ${sumInfo.cc_bursts} CC bursts, ${sumInfo.short_drops} short drops, ${sumInfo.incidents} incidents in 7 days; most in ${hrs(sumInfo.hours)}</span></header>
+    ${rows ? `<div class="evwrap" style="border:0;border-radius:0"><table class="evt"><thead><tr><th>Source</th><th>Channels</th><th>CC bursts</th><th>Short drops</th><th>Incidents</th><th>Most at</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="body"><div class="empty" style="padding:8px">Nothing in the last 7 days.</div></div>`}</section>`;
+}
 /* rows: the source's incidents with their channels' under them; the rest on their own */
 function incTable(list, withChan) {
   const now = Date.now() / 1000, ids = new Set(list.map(x => x.id));
@@ -783,6 +802,7 @@ async function openIncident(id) {
     ${j.members.length ? `<h4 class="sub4">Channels in it</h4>${incTable(j.members, true)}` : ""}
     ${proof.length ? `<h4 class="sub4">What the channel reported when it began</h4>${kv(proof)}` : ""}
     <h4 class="sub4">Evidence</h4>${evidenceList(j.evidence)}<div style="margin-top:8px">${toolButtons(x.channel, x.id)}</div>
+    ${(j.records || []).length ? `<h4 class="sub4">What came and went on its channels (records, from 15 minutes before)</h4><table class="evt"><tbody>${j.records.map(r => `<tr><td class="mono">${fmtWhen(r.t)}</td><td>${fmtDur(Math.max(0, r.closed - r.t))}</td><td>${esc(r.channel || "")}</td><td>${esc(r.summary)}</td></tr>`).join("")}</tbody></table>` : ""}
     <h4 class="sub4">Events from a minute before to a minute after</h4><div class="evwrap" style="max-height:260px">${eventRows(j.events.slice().reverse(), true)}</div>
     <div class="actions"><button onclick="document.getElementById('dlg').close();document.getElementById('dlg').style.width=''">Close</button></div>`;
   d.showModal();
@@ -802,7 +822,8 @@ const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], 
   ["ird_cn_drop_db", "An IRD's C/N this far below its own normal is low (dB)"],
   ["ird_temp_rise_c", "An IRD this much hotter than its own normal is too hot (°C)"],
   ["ird_temp_max_c", "... or hotter than this, if set (°C; 0: by its normal)"],
-  ["cc_per_min", "CC errors per minute"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
+  ["short_s", "Dropped pictures the source caused, over within this: a record, not an incident (s)"],
+  ["cc_per_min", "CC errors per minute (kept as records, never incidents)"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
 const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
 function disksCard() {
@@ -825,7 +846,7 @@ function watchdogCard(where) {
   const L = wdInfo.limits, w = wdInfo.watching || {}, items = (w.items || []).filter(i => i.on || i.incident);
   const off = wdInfo.rules.filter(r => !r.on && r.id !== "av_shift").map(r => r.name);
   return `<section class="card"><header><h2>Watchdog</h2><span class="hint">${where === "settings" ? "When a problem is an incident, and which rules are in use" : "What is wrong now, before it is an incident and while it is one"}</span><div class="sp"></div>${where === "settings" ? `<button onclick="editWatchdog()">Change</button>` : `<a onclick="go('settings')">rules</a>`}</header>
-    <div class="body">${where === "settings" ? `<div style="margin-bottom:10px">Incident after ${L.min_s} s (${L.content_s} s for picture and sound), over after ${L.clear_s} s quiet · no input after ${L.no_input_s} s · ${L.cc_per_min} CC errors a minute · CPU ${L.cpu_pct}% or a video engine ${L.gpu_pct}% for ${L.load_s} s</div><div style="display:flex;flex-wrap:wrap;gap:6px">${wdInfo.rules.filter(r => r.id !== "av_shift").map(r => `<span class="tag" ${r.on ? "" : 'style="text-decoration:line-through"'} title="${r.on ? "in use" : "turned off"}">${esc(r.name)}</span>`).join("")}</div>` : items.length ? `<table class="evt"><tbody>${items.map(i => `<tr><td>${esc(i.subject)}</td><td>${esc(i.what || i.rule)}</td><td>${fmtDur(i.for_s)}</td><td>${i.incident ? `<a onclick="openIncident(${i.incident})">incident</a>` : `<span style="color:var(--dim)">not yet ${L.min_s} s</span>`}</td></tr>`).join("")}</tbody></table>` : `<div class="empty" style="padding:6px">Nothing wrong being watched right now.</div>`}</div></section>`;
+    <div class="body">${where === "settings" ? `<div style="margin-bottom:10px">Incident after ${L.min_s} s (${L.content_s} s for picture and sound), over after ${L.clear_s} s quiet · no input after ${L.no_input_s} s · ${L.cc_per_min} CC errors a minute · CPU ${L.cpu_pct}% or a video engine ${L.gpu_pct}% for ${L.load_s} s</div><div style="display:flex;flex-wrap:wrap;gap:6px">${wdInfo.rules.filter(r => r.id !== "av_shift").map(r => `<span class="tag" ${r.on ? "" : 'style="text-decoration:line-through"'} title="${r.on ? "in use" : "turned off"}">${esc(r.name)}</span>`).join("")}</div>` : items.length ? `<table class="evt"><tbody>${items.map(i => `<tr><td>${esc(i.subject)}</td><td>${esc(i.what || i.rule)}</td><td>${fmtDur(i.for_s)}</td><td>${i.incident ? `<a onclick="openIncident(${i.incident})">incident</a>` : i.record ? `<span style="color:var(--dim)">kept as a record</span>` : `<span style="color:var(--dim)">not yet ${L.min_s} s</span>`}</td></tr>`).join("")}</tbody></table>` : `<div class="empty" style="padding:6px">Nothing wrong being watched right now.</div>`}</div></section>`;
 }
 function editWatchdog() {
   const d = $("#dlg"), L = wdInfo.limits;
@@ -1763,8 +1784,8 @@ function renderChannelsPage() {
 function renderIncidentsPage() {
   const main = $("#main");
   if (main.dataset.page !== "incidents") { main.dataset.page = "incidents"; main.innerHTML = `<div class="head"><h1>Incidents</h1><span class="state">the last 24 hours, with what the technician made of each; open one for its evidence and your verdict</span></div><div id="inc_body"></div>`; }
-  loadIncidents(); loadWatchdog(); loadTech();
-  $("#inc_body").innerHTML = (incAll ? incidentsCard(true) : `<div class="empty">Loading…</div>`) + watchdogCard("incidents") + techCard("incidents");
+  loadIncidents(); loadWatchdog(); loadTech(); loadSummary();
+  $("#inc_body").innerHTML = (incAll ? incidentsCard(true) : `<div class="empty">Loading…</div>`) + summaryCard() + watchdogCard("incidents") + techCard("incidents");
 }
 function renderSettingsPage() {
   const main = $("#main");

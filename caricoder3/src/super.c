@@ -2083,10 +2083,10 @@ static void metric_cb(const char *name, double v, void *op)
         snprintf(what, sizeof(what), "network card %.*s losing packets: no room on the card (%.0f in 10 s)", (int)(n - 12),
                  name + 4, v);
         wd_observe(t, subj, NULL, "", WD_NIC_DROP, v > 0, what, 0);
-    } else if (!strcmp(name, "udp.rcvbuf_errors")) {
-        snprintf(what, sizeof(what), "UDP packets lost on this server: socket buffers full (%.0f in 10 s)", v);
-        wd_observe(t, "server/udp", NULL, "", WD_NIC_DROP, v > 0, what, 0);
     }
+    /* (udp.rcvbuf_errors is kept as a figure, not judged: it counts every
+     * program's sockets, Flussonic's among them. A channel's own socket
+     * losing packets is its "loss" rule, from the socket itself.) */
 }
 
 /* Every 10 s of wall clock: a row per channel, and the server's figures. */
@@ -4131,7 +4131,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: max-age=86400\r\n");
         return;
     }
-    if (!strcmp(p, "/api/events") || !strcmp(p, "/api/history/server") ||
+    if (!strcmp(p, "/api/events") || !strcmp(p, "/api/history/server") || !strcmp(p, "/api/records") ||
+        !strcmp(p, "/api/summary") ||
         (!strncmp(p, "/api/channels/", 14) && strlen(p) > 22 && !strcmp(p + strlen(p) - 8, "/history"))) {
         /* ?from=&to= (unix seconds; default the last 24 h), &channel= / &metric= / &limit= */
         char v[128], chan[64] = "";
@@ -4161,6 +4162,18 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             bool has = query_param(req->query, "channel", chan, sizeof(chan));
 
             ok = history_query_events(f, has ? chan : NULL, from, to, limit);
+        } else if (!strcmp(p, "/api/records")) {
+            /* what came and went (CC errors, short drops the source caused): ?channel= */
+            bool has = query_param(req->query, "channel", chan, sizeof(chan));
+
+            ok = history_query_records(f, has ? chan : NULL, from, to, limit);
+        } else if (!strcmp(p, "/api/summary")) {
+            /* by source: ?days=N (default 7) up to now, or ?from=&to= */
+            if (query_param(req->query, "days", v, sizeof(v)) && atoi(v) > 0 && atoi(v) <= 366)
+                from = now - (int64_t)atoi(v) * 86400;
+            else if (!query_param(req->query, "from", v, sizeof(v)))
+                from = now - 7 * 86400;
+            ok = history_summary(f, from, to);
         } else if (!strcmp(p, "/api/history/server")) {
             ok = history_query_metrics(f, query_param(req->query, "metric", v, sizeof(v)) ? v : "*", from, to);
         } else {

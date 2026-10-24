@@ -64,6 +64,17 @@ void history_incident_update(int64_t id, int64_t closed, const char *summary, co
 /* {"incidents": [...]}: overlapping the span, open ones first; for a
  * channel, its own and the source's it belongs to */
 bool history_query_incidents(FILE *f, const char *chan, int64_t from, int64_t to, bool open_only, int limit);
+/* Something that came and went without an effect worth a person's time (CC
+ * errors; damage the source caused that was over quickly): kept for the
+ * weekly summary and as context, never asked about. `cause` a few words
+ * ("" none). */
+void history_record(int64_t t, int64_t closed, const char *chan, const char *rule, const char *grp,
+                    const char *summary, const char *cause);
+/* {"records": [...]} overlapping the span, newest first; chan NULL: any */
+bool history_query_records(FILE *f, const char *chan, int64_t from, int64_t to, int limit);
+/* By source over the span: CC bursts and short drops (the records) and the
+ * channel incidents, with the hours of the day they came in. */
+bool history_summary(FILE *f, int64_t from, int64_t to);
 /* Evidence a tool gathered: `args` and `result` JSON objects, `file` a
  * file it kept ("" none); `incident` 0 when it belongs to none. */
 int64_t history_evidence_add(int64_t t, int64_t incident, const char *chan, const char *tool, const char *args,
