@@ -5,6 +5,7 @@
 #include "watchdog.h"
 
 #include <pthread.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,6 +79,16 @@ struct seen {
     int64_t last[C_KINDS];
 };
 
+/* Incidents that ended lately: the same again soon is that one again */
+#define RECENT_MAX 512
+struct recent {
+    char key[600];          /* the subject (a channel's), or "source:" and the source */
+    enum wd_rule rule;
+    int64_t id, first, ended;
+    int times;
+    char what[200];         /* its summary the first time */
+};
+
 struct group {
     bool used;
     char group[512];
@@ -86,6 +97,7 @@ struct group {
     int members;            /* open ones */
     char names[400];        /* every channel that has been in it */
     int n_names;
+    char again[64];         /* " (again: 3 times since 00:26)", "" the first time */
 };
 
 static struct {
@@ -95,6 +107,7 @@ static struct {
     struct entry e[ENTRIES_MAX];
     struct group g[GROUPS_MAX];
     struct seen seen[SEEN_MAX];
+    struct recent recent[RECENT_MAX];
     void (*snap)(FILE *f, const char *chan, void *op);
     void *snap_op;
     void (*on_open)(int64_t id, const char *chan, const char *group, enum wd_rule r, void *op);
@@ -129,6 +142,7 @@ void wd_defaults(struct wd_limits *l)
     l->ird_temp_max_c = 0;
     l->ird_temp_rise_c = 10;
     l->short_s = 120;
+    l->merge_s = 3600;
 }
 
 const char *wd_rule_id(enum wd_rule r)
@@ -151,7 +165,7 @@ int wd_rule_by_id(const char *id)
 
 #define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
-    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_temp_max_c) X(ird_temp_rise_c) X(short_s)
+    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_temp_max_c) X(ird_temp_rise_c) X(short_s) X(merge_s)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {
@@ -441,6 +455,65 @@ static void summary_of(const struct entry *e, char *out, size_t len)
     snprintf(out, len, "%s%s%s", e->what[0] ? e->what : RULES[e->rule].name, e->cause[0] ? ", " : "", e->cause);
 }
 
+static struct recent *recent_find(const char *key, enum wd_rule r, int64_t since)
+{
+    for (int i = 0; i < RECENT_MAX; i++) {
+        struct recent *x = &W.recent[i];
+
+        if (x->id > 0 && x->rule == r && !strcmp(x->key, key) && W.lim.merge_s > 0 && since >= x->ended &&
+            since - x->ended <= W.lim.merge_s)
+            return x;
+    }
+    return NULL;
+}
+
+/* An incident ended: kept a while, to be taken up again */
+static void recent_note(const char *key, enum wd_rule r, int64_t id, int64_t first, int64_t ended, const char *what)
+{
+    struct recent *x = NULL, *old = NULL;
+
+    if (id <= 0)
+        return;
+    for (int i = 0; i < RECENT_MAX && !x; i++)
+        if (W.recent[i].id == id)
+            x = &W.recent[i];               /* again: already known */
+    if (!x)
+        for (int i = 0; i < RECENT_MAX; i++) {
+            if (!W.recent[i].id || (W.recent[i].rule == r && !strcmp(W.recent[i].key, key))) {
+                x = &W.recent[i];
+                break;
+            }
+            if (!old || W.recent[i].ended < old->ended)
+                old = &W.recent[i];
+        }
+    if (!x)
+        x = old;
+    if (!x)
+        return;
+    if (x->id != id) {
+        memset(x, 0, sizeof(*x));
+        snprintf(x->key, sizeof(x->key), "%s", key);
+        x->rule = r;
+        x->id = id;
+        x->first = first;
+        x->times = 1;
+        snprintf(x->what, sizeof(x->what), "%s", what);
+    }
+    x->ended = ended;
+}
+
+/* "<first summary> (again: 3 times since 00:26)" */
+static void again_summary(const struct recent *x, char *out, size_t len)
+{
+    struct tm tm;
+    time_t f = (time_t)x->first;
+    char hm[16];
+
+    localtime_r(&f, &tm);
+    strftime(hm, sizeof(hm), "%H:%M", &tm);
+    snprintf(out, len, "%.150s (again: %d times since %s)", x->what, x->times, hm);
+}
+
 /* Over, and kept as a record */
 static void record_entry(struct entry *e)
 {
@@ -459,6 +532,21 @@ static void open_entry(struct entry *e, int64_t t)
 
     (void)t;
     summary_of(e, sum, sizeof(sum));
+    if (!e->instant) {
+        struct recent *x = recent_find(e->subject, e->rule, e->since);
+
+        if (x) {
+            char s2[240];
+
+            x->times++;
+            again_summary(x, s2, sizeof(s2));
+            e->id = x->id;
+            history_incident_update(e->id, 0, s2, NULL, 0);
+            history_event(e->since, e->chan[0] ? e->chan : NULL, RULES[e->rule].level, "incident", s2);
+            log_info("incident again: %s%s%s", e->chan[0] ? e->chan : "server", ": ", s2);
+            return;
+        }
+    }
     det = snapshot(e);
     e->id = history_incident_open(e->since, e->chan[0] ? e->chan : NULL, RULES[e->rule].id, RULES[e->rule].level,
                                   e->group, sum, det, 0);
@@ -477,8 +565,11 @@ static void close_entry(struct entry *e, int64_t t)
 
     (void)t;
     summary_of(e, sum, sizeof(sum));
-    if (e->id > 0)
+    if (e->id > 0) {
         history_incident_update(e->id, e->last_on > e->since ? e->last_on : e->since, NULL, NULL, e->parent);
+        if (!e->instant)
+            recent_note(e->subject, e->rule, e->id, e->since, e->last_on, sum);
+    }
     snprintf(text, sizeof(text), "over: %s (%lld s)", sum, (long long)(e->last_on - e->since));
     history_event(e->last_on, e->chan[0] ? e->chan : NULL, "info", "incident", text);
     for (int k = 0; k < GROUPS_MAX; k++)
@@ -498,9 +589,17 @@ static struct group *group_for(const char *grp, enum wd_rule r)
     return NULL;
 }
 
-static void group_summary(const struct group *g, char *out, size_t len)
+static void group_base(const struct group *g, char *out, size_t len)
 {
     snprintf(out, len, "%s on %d channels of %.150s: %.300s", RULES[g->rule].name, g->n_names, g->group, g->names);
+}
+
+static void group_summary(const struct group *g, char *out, size_t len)
+{
+    char b[600];
+
+    group_base(g, b, sizeof(b));
+    snprintf(out, len, "%.520s%s", b, g->again);
 }
 
 static void group_add_name(struct group *g, const char *name)
@@ -550,15 +649,38 @@ static void groups(int64_t t)
                     since = W.e[with[k]].since;
             }
             g->since = since;
-            group_summary(g, sum, sizeof(sum));
-            g->id = history_incident_open(g->since, NULL, RULES[g->rule].id, RULES[g->rule].level, g->group,
-                                          sum, "{}", 0);
-            if (g->id <= 0)
-                g->id = -2;
-            history_event(g->since, NULL, RULES[g->rule].level, "incident", sum);
-            log_info("incident: %s", sum);
-            if (W.on_open && g->id > 0)
-                W.on_open(g->id, NULL, g->group, g->rule, W.open_op);
+            {
+                char key[600];
+                struct recent *x;
+
+                snprintf(key, sizeof(key), "source:%.500s", g->group);
+                x = recent_find(key, g->rule, g->since);
+                if (x) {
+                    struct tm tm;
+                    time_t f = (time_t)x->first;
+                    char hm[16];
+
+                    x->times++;
+                    localtime_r(&f, &tm);
+                    strftime(hm, sizeof(hm), "%H:%M", &tm);
+                    snprintf(g->again, sizeof(g->again), " (again: %d times since %s)", x->times, hm);
+                    g->id = x->id;
+                    group_summary(g, sum, sizeof(sum));
+                    history_incident_update(g->id, 0, sum, NULL, 0);
+                    history_event(g->since, NULL, RULES[g->rule].level, "incident", sum);
+                    log_info("incident again: %s", sum);
+                } else {
+                    group_summary(g, sum, sizeof(sum));
+                    g->id = history_incident_open(g->since, NULL, RULES[g->rule].id, RULES[g->rule].level, g->group,
+                                                  sum, "{}", 0);
+                    if (g->id <= 0)
+                        g->id = -2;
+                    history_event(g->since, NULL, RULES[g->rule].level, "incident", sum);
+                    log_info("incident: %s", sum);
+                    if (W.on_open && g->id > 0)
+                        W.on_open(g->id, NULL, g->group, g->rule, W.open_op);
+                }
+            }
             for (int k = -1; k < n; k++) {
                 struct entry *m = k < 0 ? e : &W.e[with[k]];
 
@@ -586,8 +708,14 @@ static void groups(int64_t t)
 
         if (!g->used || g->members > 0)
             continue;
-        if (g->id > 0)
+        if (g->id > 0) {
+            char key[600], b[600];
+
             history_incident_update(g->id, g->last_close ? g->last_close : t, NULL, NULL, 0);
+            snprintf(key, sizeof(key), "source:%.500s", g->group);
+            group_base(g, b, sizeof(b));
+            recent_note(key, g->rule, g->id, g->since, g->last_close ? g->last_close : t, b);
+        }
         g->used = false;
     }
 }

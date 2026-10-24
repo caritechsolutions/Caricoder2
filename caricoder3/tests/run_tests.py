@@ -2943,8 +2943,15 @@ def watchdog_records():
     need(r.returncode == 0, f"run: {r.stderr[-800:]}")
     inc, rec, summ = [json.loads(x) for x in r.stdout.strip().split("\n=====\n")]
     inc, rec = inc["incidents"], rec["records"]
-    got = sorted((x["channel"], x["rule"]) for x in inc)
-    need(got == [("a", "dropping"), ("b", "dropping"), ("c", "frozen"), ("c", "no_data")], f"incidents: {got}")
+    got = sorted((x["channel"] or "", x["rule"]) for x in inc)
+    need(got == [("", "no_input"), ("a", "dropping"), ("b", "dropping"), ("c", "frozen"), ("c", "no_data"), ("d", "black"),
+                 ("e1", "no_input"), ("e2", "no_input")], f"incidents: {got}")
+    d = [x for x in inc if x["channel"] == "d"][0]
+    need("black picture (again: 3 times since" in d["summary"] and d["closed"], f"repeats: {d}")
+    g = [x for x in inc if x["channel"] is None][0]
+    need("(again: 2 times since" in g["summary"] and "2 channels" in g["summary"] and
+         all(x["parent"] == g["id"] for x in inc if x["channel"] in ("e1", "e2")), f"source repeats: {g}")
+    inc = [x for x in inc if x["channel"] in ("a", "b", "c")]
     need(not [x for x in inc if x["rule"] == "cc_errors"], "a CC errors incident")
     a = [x for x in inc if x["channel"] == "a"][0]
     need("with CC errors on its source" in a["summary"], f"its cause not said: {a['summary']}")
@@ -2961,7 +2968,7 @@ def watchdog_records():
          s0["incidents"] == 1 and s0["channels"] == "a", f"summary: {s0}")
     need(summ["cc_bursts"] == 3 and summ["short_drops"] == 1 and sum(summ["hours"]) == 4, f"totals: {summ}")
     return f"{len(inc)} incidents (a long drop and one with no cause, a freeze and its gap), {len(rec)} records " \
-           f"(3 CC bursts, 1 short drop); summary by source"
+           f"(3 CC bursts, 1 short drop); a channel's and a source's repeats one incident each; summary by source"
 
 
 @test

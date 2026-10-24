@@ -142,6 +142,15 @@ the source caused that were over within 2 minutes are records too.
   reached us).
 - Older incidents (before 23 Oct) may still be CC errors on their own.
 
+## Repeats
+
+Since 24 Oct 2026 the same problem again on the same channel (or source)
+within an hour of the last one ending is the same incident, taken up
+again: its summary ends "(again: N times since HH:MM)". Many times in a
+few hours is a pattern: say so, and look for what repeats (one service
+only: its feed upstream; every channel of one source: that IRD or its
+way here).
+
 ## CC errors on several sources at once
 
 CC errors on channels of different multiplexes in the same few seconds,

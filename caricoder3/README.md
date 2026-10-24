@@ -482,6 +482,10 @@ or no input within a minute) that are over within 2 minutes
 (`short_s`) are records too. The Incidents page shows the week by
 source (`/api/summary?days=7`): the CC bursts and short drops of each,
 its incidents, and the hours they came in; `/api/records` lists them.
+The same problem again on the same channel (or source) within an hour
+(`merge_s`) of the last one ending takes that incident up again, its
+summary saying so ("black picture (again: 3 times since 00:26)"),
+rather than opening a new one.
 A problem that lasts 10 s (a black, frozen or silent picture or sound:
 30 s, as programmes have short ones) is an **incident**, kept in the
 history with the channel's statistics as the watchdog saw them; it is

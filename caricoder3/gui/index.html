@@ -823,6 +823,7 @@ const WD_FIELDS = [["min_s", "A problem lasting this long is an incident (s)"], 
   ["ird_temp_rise_c", "An IRD this much hotter than its own normal is too hot (°C)"],
   ["ird_temp_max_c", "... or hotter than this, if set (°C; 0: by its normal)"],
   ["short_s", "Dropped pictures the source caused, over within this: a record, not an incident (s)"],
+  ["merge_s", "The same problem again on a channel within this of the last one ending: that incident again (s; 0: never)"],
   ["cc_per_min", "CC errors per minute (kept as records, never incidents)"], ["dropped_per_min", "Dropped or late pictures per minute"], ["restarts", "Restarts on its own …"],
   ["restart_window_s", "… within (s)"], ["cpu_pct", "CPU above (%)"], ["gpu_pct", "Video engine above (%)"], ["load_s", "… for (s)"]];
 const fmtBytes = b => b == null || b < 0 ? "—" : b >= 1e12 ? (b / 1e12).toFixed(2) + " TB" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(0) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";

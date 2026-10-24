@@ -60,6 +60,8 @@ struct wd_limits {
     int ird_cn_drop_db;     /* an IRD's C/N this far below its normal: low */
     int ird_temp_max_c;     /* an IRD hotter than this: too hot (0: judged by its normal instead) */
     int ird_temp_rise_c;    /* ... this much above its normal: too hot */
+    int merge_s;            /* the same problem again on the same channel (or source) within this long of
+                             * the last one ending: that incident again, not a new one (0: never) */
     int short_s;            /* dropped pictures the source caused (CC errors, no data, no input within a
                              * minute), over within this long: a record, not an incident */
     bool off[WD_RULES];     /* rules turned off */

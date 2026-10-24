@@ -79,6 +79,23 @@ int main(int argc, char **argv)
     /* 5. a frozen picture after no data: an incident with the cause said */
     both("c", "udp://239.1.2.5:5000", WD_NO_DATA, WD_FROZEN, 40);
     quiet(20);
+    /* 6. the same again on one channel, twice within the hour: one incident, said again */
+    for (int k = 0; k < 3; k++) {
+        hold("d", "udp://239.1.2.6:5000", WD_BLACK, 40, "black picture");
+        quiet(120);
+    }
+    /* 7. two channels of one source without input, twice: one source incident */
+    for (int k = 0; k < 2; k++) {
+        for (int i = 0; i <= 20; i += 2) {
+            wd_observe(T, "e1", "e1", "udp://239.1.2.7:5000", WD_NO_INPUT, true, "no input", 0);
+            wd_observe(T, "e2", "e2", "udp://239.1.2.7:5000", WD_NO_INPUT, true, "no input", 0);
+            wd_tick(T);
+            T += 2;
+        }
+        wd_observe(T, "e1", "e1", "udp://239.1.2.7:5000", WD_NO_INPUT, false, NULL, 0);
+        wd_observe(T, "e2", "e2", "udp://239.1.2.7:5000", WD_NO_INPUT, false, NULL, 0);
+        quiet(120);
+    }
     history_close();
     if (!history_open_readonly(argv[1], err, sizeof(err))) {
         fprintf(stderr, "reopen: %s\n", err);
