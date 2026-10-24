@@ -313,7 +313,7 @@ points at this side, and do not blame this side when it points upstream.
   clip is kept with the incident for a person to listen to.
 - Advertising breaks can be in another language (Spanish on English
   channels): incidents before 23 Oct that lasted about 10 minutes and
-  closed by themselves were most likely a break, not a fault.
+  closed by themselves may have been a break, not a fault (not confirmed).
 - The usual cause here: the uplink swapped or moved a service's audio
   tracks (look for "a service changed on the satellite" on its IRD just
   before), and the channel still takes the old PID. Next: listen to the
