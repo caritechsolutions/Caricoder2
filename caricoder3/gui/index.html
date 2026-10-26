@@ -1113,6 +1113,19 @@ async function chatSend() {
 const fmtKB = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + " GB" : Math.round(kb / 1024) + " MB";
 const barCls = p => p >= 90 ? "bad" : p >= 75 ? "warn" : "";
 /* The IRDs: their tuners, and whether their outputs match what comes down */
+/* the weather at both ends of the satellite link (airport reports) */
+function weatherCard() {
+  const W = sys && sys.weather;
+  if (!W) return "";
+  const now = Date.now() / 1000, cls = r => r >= 3 ? "bad" : r >= 2 ? "warn" : "";
+  const rows = (W.places || []).map(p => !p.station
+    ? `<tr><td>${esc(p.name)}</td><td colspan="4" class="dim">${esc(p.note || "no report")}</td></tr>`
+    : `<tr><td>${esc(p.name)}</td><td><b class="${cls(p.rain)}">${esc(p.now)}</b>${p.precip_1h_mm != null ? ` · ${p.precip_1h_mm} mm in the hour` : ""}</td>
+       <td>${p.wind_kt != null ? `${p.wind_kt} kt${p.gust_kt != null ? `, gusts ${p.gust_kt}` : ""}` : "—"}${p.visibility_km != null ? ` · ${p.visibility_km >= 10 ? "10+" : p.visibility_km} km` : ""}${p.clouds ? ` · <span class="mono">${esc(p.clouds)}</span>` : ""}</td>
+       <td>${esc(p.last_3h || "")}</td><td class="mono" title="${esc(p.raw || "")}">${esc(p.station)} · ${p.age_min} min ago</td></tr>`).join("");
+  return `<section class="card"><header><h2>Weather</h2><span class="hint">At our dish and at the uplink, from airport reports (METAR, aviationweather.gov): rain at either end can fade the signal. Every ${W.places && W.places.length ? "10 minutes" : "—"}${W.error ? ` · <span class="bad">${esc(W.error)}</span>` : ""}</span></header>
+    <div class="tw"><table><thead><tr><th>Where</th><th>Now</th><th>Wind, visibility, cloud</th><th>Rain in the last 3 hours</th><th>Report</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
 function irdsCard() {
   const L = (sys && sys.irds) || [], now = Date.now() / 1000;
   const f1 = v => v == null ? "—" : v.toFixed(1);
@@ -1183,6 +1196,7 @@ function renderServer() {
         return `<tr><td>${x.card}${sys.card_mode === "test" ? ' <span style="color:var(--dim)">(test, CPU)</span>' : ""}</td><td>${x.running ? `running · up ${fmtUp(x.up_s)}` : "<span class='bad'>not running</span>"}${x.restarts ? ` · <span class="warn">${x.restarts} restart${x.restarts > 1 ? "s" : ""}</span>` : ""}</td><td>${ss.length}</td><td>${chs.map(esc).join(", ") || '<span style="color:var(--dim)">none</span>'}</td></tr>`; }).join("")}
       </tbody></table></section>` : ""}
     ${irdsCard()}
+    ${weatherCard()}
     ${sys.history ? `<section class="card"><header><h2>History</h2><span class="hint">CPU and video engines${sys.history.bytes != null ? ` · record ${fmtKB(sys.history.bytes / 1024)} of ${fmtKB(sys.history.cap_bytes / 1024)} allowed` : ""}</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="srvhist"></div></section>` : ""}
     ${disksCard()}
     <section class="card"><header><h2>Network interfaces</h2><span class="hint">Rates since the previous sample; errors and drops since boot</span></header>

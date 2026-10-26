@@ -3113,6 +3113,124 @@ threading.Event().wait()
     return f"both inputs back {got:.0f} s after the interface got its address (joined again on {va}), the output started; no restart"
 
 
+def _metar_time(ago_min=0):
+    t = time.gmtime(time.time() - ago_min * 60)
+    return time.strftime("%d%H%MZ", t)
+
+
+@test
+def weather_reports():
+    """Airport weather reports (METAR) read into rain (none, light, moderate, heavy or thunder), wind, visibility and cloud; the supervisor fetches them for each end of the satellite link, says when the rain changes, and puts them in every incident for the technician."""
+    import base64
+    import http.server
+    import urllib.request
+    exe = w("weather_parse")
+    srcd = os.path.join(HERE, "..", "src")
+    r = subprocess.run(["gcc", "-O1", "-g", "-fsanitize=address,undefined", "-o", exe, os.path.join(HERE, "weather_parse.c"),
+                        os.path.join(srcd, "weather.c"), os.path.join(srcd, "history.c"), os.path.join(srcd, "log.c"),
+                        "-lpthread", "-lm"], capture_output=True, text=True)
+    need(r.returncode == 0, f"build: {r.stderr[-800:]}")
+    T = _metar_time(5)
+    lines = [f"TBPB {T} 09012G22KT 9999 -SHRA FEW014 SCT020 BKN080 26/23 Q1014 TEMPO 4000 SHRA",
+             f"METAR KHWO {T} 12008KT 3SM +TSRA BR SCT015CB BKN030 OVC070 24/22 A2995 RMK AO2 P0045 T02440222",
+             f"KOPF {T} 00000KT 10SM CLR 25/21 A3001 RMK AO2",
+             f"KFLL {T} 09010KT 1 1/2SM RA BR OVC008 24/23 A2998",
+             f"SPECI KHWO {T} AUTO 13005KT 10SM VCTS SCT040 27/22 A3000",
+             f"TBPB {T} 09012KT 9999 FEW020 27/22 Q1015 RERA",
+             "nonsense here"]
+    r = subprocess.run([exe], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    need(r.returncode == 0, f"run: {r.stderr[-500:]}")
+    o = [json.loads(x) for x in r.stdout.splitlines()]
+    need(o[0]["rain"] == 1 and o[0]["now"] == "light rain showers" and o[0]["wind"] == 12 and o[0]["gust"] == 22 and
+         o[0]["vis"] == 10 and 280 <= o[0]["age_s"] <= 370, f"TBPB showers: {o[0]}")
+    need(o[1]["rain"] == 3 and o[1]["thunder"] and "heavy rain" in o[1]["now"] and "thunderstorm" in o[1]["now"] and
+         abs(o[1]["precip"] - 11.4) < 0.1 and abs(o[1]["vis"] - 4.8) < 0.1 and "CB" in o[1]["clouds"], f"KHWO storm: {o[1]}")
+    need(o[2]["rain"] == 0 and o[2]["now"] == "" and o[2]["precip"] == -1, f"KOPF dry: {o[2]}")
+    need(o[3]["rain"] == 2 and o[3]["now"].startswith("rain") and abs(o[3]["vis"] - 2.4) < 0.1, f"KFLL rain: {o[3]}")
+    need(o[4]["rain"] == 1 and o[4]["now"] == "thunderstorm nearby" and not o[4]["thunder"], f"KHWO nearby: {o[4]}")
+    need(o[5]["rain"] == 0, f"recent rain is not rain now: {o[5]}")
+    need(not o[6]["ok"], "nonsense read as a report")
+
+    # the supervisor: a stand-in for aviationweather.gov
+    root = w("super_wx")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, web, pin = _port[0] + 1, _port[0] + 2, _port[0] + 3
+    _port[0] += 4
+    said = {"ids": None, "body": "\n".join([f"TBPB {_metar_time(20)} 09012KT 9999 FEW020 27/22 Q1015",
+                                           f"KHWO {_metar_time(10)} 12008KT 3SM +TSRA BR SCT015CB 24/22 A2995 RMK AO2 P0045",
+                                           f"KOPF {_metar_time(12)} 10006KT 10SM -RA SCT030 25/21 A3001"]) + "\n"}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            said["ids"] = self.path
+            body = said["body"].encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", web), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        rq = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth, method=method,
+                                    data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(rq, timeout=10) as resp:
+            return json.load(resp)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"),
+                           env=dict(os.environ, CC3_WEATHER_URL=f"http://127.0.0.1:{web}/api/data/metar"))
+    try:
+        wait_up(port)
+        end = time.time() + 20
+        wx = None
+        while time.time() < end:
+            wx = api("/api/weather")
+            if wx and wx.get("fetched"):
+                break
+            time.sleep(0.5)
+        need(wx and wx.get("fetched"), f"no weather: {wx}")
+        need("ids=TBPB,KHWO,KOPF,KFLL&format=raw&hours=3" in (said["ids"] or ""), f"asked for: {said['ids']}")
+        bt, mi = wx["places"]
+        need(bt["role"] == "downlink" and bt["station"] == "TBPB" and bt["rain"] == 0 and bt["now"] == "no rain",
+             f"Bridgetown: {bt}")
+        need(mi["role"] == "uplink" and mi["station"] == "KHWO" and mi["rain"] == 3 and mi["thunder"] and
+             mi["precip_1h_mm"] == 11.4 and "heavy rain" in mi["last_3h"], f"Miami: {mi}")
+        need("weather" in json.load(urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/system", headers=auth), timeout=10)), "not in /api/system")
+        # an incident carries it
+        api("/api/channels/w1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "enabled": True})
+        end = time.time() + 30
+        inc = []
+        while time.time() < end and not inc:
+            inc = [x for x in api("/api/incidents")["incidents"] if x["channel"] == "w1"]
+            time.sleep(0.5)
+        need(inc, "no incident for an input that never came")
+        det = api(f"/api/incidents/{inc[0]['id']}")["incident"]["detail"]["then"]
+        need(det.get("weather", {}).get("places", [{}])[1].get("station") == "KHWO", f"incident without the weather: {list(det)}")
+        ev = api("/api/events?limit=50")["events"]
+        need(any(e["kind"] == "weather" and "United Teleports" in e["text"] and "thunderstorm" in e["text"] for e in ev),
+             f"no weather event: {[e['text'] for e in ev if e['kind'] == 'weather']}")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+        srv.shutdown()
+    return f"7 reports read (showers, a storm with 11.4 mm, dry, rain, thunder nearby, recent rain, nonsense); " \
+           f"Bridgetown {bt['now']}, Miami {mi['now']} ({mi['station']}); in the incident and the events"
+
+
 @test
 def supervisor_incidents():
     """The watchdog: an input lost on two channels of one source is one source incident with both in it; it closes when the input is back; limits read and set through the API."""

@@ -72,6 +72,7 @@
 #include "disk.h"
 #include "peer.h"
 #include "ird.h"
+#include "weather.h"
 #include "tech.h"
 
 #include <stdarg.h>
@@ -249,6 +250,9 @@ struct super {
     char timezone[64];                      /* the site's, e.g. "America/Barbados" ("": the server's) */
     struct ird_conf irds[IRDS_MAX];         /* the satellite receivers (ird.h) */
     int n_irds;
+    struct wx_place wx[WX_PLACES];          /* the weather at each end of the satellite link (weather.h) */
+    int n_wx, wx_every_s;
+    bool wx_set;                            /* "weather" was in the config (else the defaults) */
     struct ird_opts ird_o;                  /* how often (tests set them short) */
     int lang_every_s;                       /* the language check, every (6 h; 0: off) */
     char lang_expect[8];                    /* what the channels speak unless theirs says ("eng") */
@@ -514,6 +518,11 @@ static void irds_apply(struct super *s)
     ird_set(s->irds, s->n_irds, &s->ird_o);
 }
 
+static void weather_apply(struct super *s)
+{
+    weather_set(s->wx, s->n_wx, s->wx_every_s);
+}
+
 /* The site's time zone, for the times the technician is told and writes
  * in tickets (this server's clock may be on UTC). A name in the system's
  * zone files, or "" for the server's own. Returns false for an unknown one. */
@@ -608,6 +617,27 @@ static void save_system_config(struct super *s)
             snprintf(text + n - 3, sizeof(text) - (n - 3),
                      ",\n  \"language_check\": {\"every_h\": %g, \"expect\": %s, \"min_probability\": %.2f, \"clip_s\": %d}\n}\n",
                      s->lang_every_s / 3600.0, json_quote(s->lang_expect, lq, sizeof(lq)), s->lang_min_p, s->lang_clip_s);
+    }
+    if (s->wx_set) {
+        /* the weather places, when they were set (otherwise the defaults stay defaults) */
+        size_t n = strlen(text);
+
+        if (n > 3) {
+            size_t at = n - 3;
+            char wq[2][200];
+
+            at += (size_t)snprintf(text + at, sizeof(text) - at, ",\n  \"weather\": {\"every_min\": %d, \"places\": [",
+                                   s->wx_every_s / 60);
+            for (int i = 0; i < s->n_wx; i++) {
+                at += (size_t)snprintf(text + at, sizeof(text) - at, "%s{\"name\": %s, \"role\": %s, \"stations\": [",
+                                       i ? ", " : "", json_quote(s->wx[i].name, wq[0], sizeof(wq[0])),
+                                       json_quote(s->wx[i].role, wq[1], sizeof(wq[1])));
+                for (int k = 0; k < s->wx[i].n_stations; k++)
+                    at += (size_t)snprintf(text + at, sizeof(text) - at, "%s\"%s\"", k ? ", " : "", s->wx[i].stations[k]);
+                at += (size_t)snprintf(text + at, sizeof(text) - at, "]}");
+            }
+            snprintf(text + at, sizeof(text) - at, "]}\n}\n");
+        }
     }
     {
         /* the watchdog's limits, before the closing brace */
@@ -745,6 +775,48 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
                 s->lang_every_s = (int)json_get_num(&doc, l, "every_s", 0);
             if (json_get(&doc, l, "confirm_s") >= 0)
                 s->lang_confirm_s = (int)json_get_num(&doc, l, "confirm_s", 600);
+        }
+    }
+    {
+        /* the weather where the signal goes: by default our dish (Bridgetown:
+         * Grantley Adams, TBPB) and United Teleports' uplink (North Miami Beach:
+         * North Perry KHWO, Opa-locka KOPF, Fort Lauderdale KFLL, nearest first) */
+        int w = json_get(&doc, root, "weather");
+
+        s->n_wx = 0;
+        s->wx_every_s = 600;
+        s->wx_set = w >= 0;
+        if (w < 0) {
+            static const struct wx_place def[] = {
+                { "Bridgetown, Barbados (our dish, the downlink)", "downlink", { "TBPB" }, 1 },
+                { "North Miami Beach, FL (United Teleports, the uplink)", "uplink", { "KHWO", "KOPF", "KFLL" }, 3 },
+            };
+
+            memcpy(s->wx, def, sizeof(def));
+            s->n_wx = 2;
+        } else if (doc.node[w].type == JSON_OBJECT) {
+            int pl = json_get(&doc, w, "places");
+
+            s->wx_every_s = (int)(json_get_num(&doc, w, "every_min", 10) * 60);
+            for (int k = pl >= 0 ? doc.node[pl].first_child : -1; k >= 0 && s->n_wx < WX_PLACES; k = doc.node[k].next) {
+                struct wx_place *x = &s->wx[s->n_wx];
+                int st = json_get(&doc, k, "stations");
+
+                memset(x, 0, sizeof(*x));
+                snprintf(x->name, sizeof(x->name), "%s", json_get_str(&doc, k, "name", ""));
+                snprintf(x->role, sizeof(x->role), "%s", json_get_str(&doc, k, "role", ""));
+                for (int j = st >= 0 ? doc.node[st].first_child : -1; j >= 0 && x->n_stations < WX_STATIONS; j = doc.node[j].next) {
+                    const char *id = doc.node[j].type == JSON_STRING ? doc.node[j].str : "";
+                    bool ok = strlen(id) == 4;
+
+                    for (int c = 0; ok && c < 4; c++)
+                        ok = isalnum((unsigned char)id[c]);
+                    if (ok)
+                        snprintf(x->stations[x->n_stations++], sizeof(x->stations[0]), "%s", id);
+                }
+                if (x->name[0] && x->n_stations)
+                    s->n_wx++;
+            }
         }
     }
     {
@@ -1314,9 +1386,8 @@ static char *chan_stats(struct super *s, struct chan *c);
 static struct chan *find_chan(struct super *s, const char *name);
 static void chan_source(const struct chan *c, char *url, size_t len, int *program);
 
-static void wd_snapshot(FILE *f, const char *chan, void *op)
+static void wd_snapshot_base(FILE *f, const char *chan, struct super *s)
 {
-    struct super *s = op;
     struct chan *c = chan ? find_chan(s, chan) : NULL;
     /* what the watchdog saw when it decided, not the file as it is now (it
      * may have changed since: a short silence already over) */
@@ -1360,6 +1431,33 @@ static void wd_snapshot(FILE *f, const char *chan, void *op)
         fprintf(f, "{}");
     }
     free(st);
+}
+
+/* ... and the weather at both ends of the satellite link, when it is kept */
+static void wd_snapshot(FILE *f, const char *chan, void *op)
+{
+    struct super *s = op;
+    char *b = NULL;
+    size_t bl = 0;
+    FILE *m = open_memstream(&b, &bl);
+
+    if (!m) {
+        fputs("{}", f);
+        return;
+    }
+    wd_snapshot_base(m, chan, s);
+    fclose(m);
+    while (bl && (b[bl - 1] == '\n' || b[bl - 1] == ' '))
+        bl--;
+    if (weather_on() && bl >= 2 && b[0] == '{' && b[bl - 1] == '}') {
+        fwrite(b, 1, bl - 1, f);
+        fprintf(f, "%s\"weather\": ", bl > 2 ? ", " : "");
+        weather_json(f);
+        fputc('}', f);
+    } else {
+        fwrite(b, 1, bl, f);
+    }
+    free(b);
 }
 
 static bool source_readable(const char *url);
@@ -4744,6 +4842,22 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->body_len = len;
         return;
     }
+    if (!strcmp(p, "/api/weather") && !strcmp(req->method, "GET")) {
+        /* the weather at both ends of the satellite link (weather.h) */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f = open_memstream(&out, &len);
+
+        if (!f)
+            return;
+        weather_json(f);
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
     if (!strcmp(p, "/api/irds") || !strcmp(p, "/api/irds/check")) {
         /* GET: the IRDs and their last readings; PUT {"irds": [{"name", "address", "kind",
          * "raw", "outputs"}]}: the list; POST .../check: ask them all now */
@@ -4910,6 +5024,8 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         }
         fprintf(f, "], \"irds\": ");
         ird_json(f);
+        fprintf(f, ", \"weather\": ");
+        weather_json(f);
         fprintf(f, ", \"card_mode\": \"%s\", \"card_processes\": [", s->card_mode[0] ? s->card_mode : "auto");
         for (int k = 0; k < s->n_cards; k++) {
             /* the card processes: running, restarts, and their own list of sessions */
@@ -5766,6 +5882,7 @@ int super_main(int argc, char **argv)
     peers_apply(&s);
     ird_set_uses(chan_uses, &s);
     irds_apply(&s);
+    weather_apply(&s);
     snprintf(s.tech.my_name, sizeof(s.tech.my_name), "%s", s.name);
     tech_set_context(tech_context, &s);
     tech_set(&s.tech);
@@ -5822,6 +5939,7 @@ int super_main(int argc, char **argv)
     tech_stop();
     peer_stop();
     ird_stop();
+    weather_stop();
     history_close();
     sysstat_stop();
     for (int i = 0; i < s.n; i++)

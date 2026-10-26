@@ -89,6 +89,14 @@ them as more is known; keep each fact on its own line.
 - There is an IGMP querier on the multicast VLAN (192.168.110.99, a query
   every minute).
 
+## The two ends of the satellite link (26 Oct 2026)
+
+- Downlink (our dish, the headend): Bridgetown, Barbados.
+- Uplink: United Teleports, 19000 NE 5th Ave, North Miami Beach, FL 33179.
+- The weather at both is taken from airport reports: Bridgetown from
+  Grantley Adams (TBPB); North Miami Beach from North Perry (KHWO), else
+  Opa-locka (KOPF), else Fort Lauderdale (KFLL).
+
 ## Known behaviour
 
 - Audio/video sync faults almost always come from the source (the

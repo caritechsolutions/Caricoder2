@@ -313,6 +313,31 @@ points at this side, and do not blame this side when it points upstream.
   not the provider: the fix is on the IRD (rebuild that service's remux
   entry; for scrambled, the CI card). No provider ticket.
 
+## The weather at both ends of the satellite link
+
+Each incident's readings carry "weather": the latest airport weather
+report (METAR) for our dish in Bridgetown (Grantley Adams, TBPB, about
+15 km away) and for United Teleports' uplink in North Miami Beach (North
+Perry KHWO about 7 km away, else Opa-locka KOPF, else Fort Lauderdale
+KFLL), with "rain" 0 none, 1 light or showers nearby, 2 rain, 3 heavy rain
+or thunder, and "last_3h". They are observations at the airport, not at
+the dish: a shower over one and not the other is not seen, and an old
+report (age_min over 60) says less.
+- Rain at the dish (Bridgetown heavy rain or thunder) with the IRDs' C/N
+  down on every tuner together: rain fade at our end. Category
+  "satellite_signal"; it passes with the rain; no ticket.
+- Rain at the uplink (Miami heavy rain or thunder) while Bridgetown is
+  dry: rain fade at United Teleports' end. Our C/N may drop on the
+  transponders they uplink, and services can stall or break up on all of
+  them at once. Category "satellite_signal" (the uplink); a ticket only if
+  it outlasts the rain.
+- Rain at neither end, and the C/N normal: not the weather. Look at the
+  uplink's encoders (one service only) or our side.
+- Dry at both ends and the C/N down on every IRD: the dish, the LNB or
+  their cable, or something in the way.
+- Say which you saw: "heavy rain with thunder at North Perry (Miami) at
+  21:53, Bridgetown dry".
+
 ## Audio in the wrong language
 
 - "audio in the wrong language": Whisper, on this server, listened to clips

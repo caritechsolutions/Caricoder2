@@ -498,6 +498,20 @@ as another program joining the group would. An interface named with
 config file that could not start (the same cause) are tried again every
 10 s. The channel's statistics say `rejoins`, `joined_on` and
 `join_note`; the Server page shows them for the shared readers.
+
+**The weather at both ends of the satellite link.** Every 10 minutes the
+supervisor fetches airport weather reports (METAR, from aviationweather.gov,
+public, no key; with curl) for each place in `"weather"`, by default our
+dish in Bridgetown (Grantley Adams, TBPB) and United Teleports' uplink in
+North Miami Beach (North Perry KHWO, else Opa-locka KOPF, else Fort
+Lauderdale KFLL). Each is read into rain (0 none, 1 light or showers
+nearby, 2 rain, 3 heavy rain or thunder), wind, visibility, cloud and the
+rain of the last 3 hours; it is on the Server page, at `/api/weather`, in
+the history (`weather.<station>.rain`, an event when the rain changes) and
+in every incident's readings, for the technician to tell rain fade at our
+dish from rain fade at the uplink. Set other places with
+`"weather": {"every_min": 10, "places": [{"name", "role", "stations": [...]}]}`;
+`"places": []` turns it off.
 A problem that lasts 10 s (a black, frozen or silent picture or sound:
 30 s, as programmes have short ones) is an **incident**, kept in the
 history with the channel's statistics as the watchdog saw them; it is
