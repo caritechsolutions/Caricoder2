@@ -320,7 +320,9 @@ report (METAR) for our dish in Bridgetown (Grantley Adams, TBPB, about
 15 km away) and for United Teleports' uplink in North Miami Beach (North
 Perry KHWO about 7 km away, else Opa-locka KOPF, else Fort Lauderdale
 KFLL), with "rain" 0 none, 1 light or showers nearby, 2 rain, 3 heavy rain
-or thunder, and "last_3h". They are observations at the airport, not at
+or thunder, and "last_3h"; "rain_in_hour" true when rain began or ended
+since the previous hourly report though none fell at the moment it was
+taken (showers passing). They are observations at the airport, not at
 the dish: a shower over one and not the other is not seen, and an old
 report (age_min over 60) says less.
 - Rain at the dish (Bridgetown heavy rain or thunder) with the IRDs' C/N
