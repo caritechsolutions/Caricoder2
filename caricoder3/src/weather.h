@@ -44,6 +44,8 @@ struct wx_obs {
     int rain;                       /* 0 none, 1 light (or showers nearby), 2 moderate, 3 heavy or thunder */
     bool thunder;
     char now[96];                   /* "heavy rain, thunderstorm", "" nothing to say */
+    bool rain_in_hour;              /* the remarks say rain (or thunder) began or ended since the last hourly report */
+    bool thunder_in_hour;
     double precip_1h_mm;            /* -1: not reported */
     int wind_kt, gust_kt;           /* -1: not reported */
     double visibility_km;           /* -1: not reported */

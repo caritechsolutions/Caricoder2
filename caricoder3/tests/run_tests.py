@@ -3137,7 +3137,12 @@ def weather_reports():
              f"KFLL {T} 09010KT 1 1/2SM RA BR OVC008 24/23 A2998",
              f"SPECI KHWO {T} AUTO 13005KT 10SM VCTS SCT040 27/22 A3000",
              f"TBPB {T} 09012KT 9999 FEW020 27/22 Q1015 RERA",
-             "nonsense here"]
+             "nonsense here",
+             # as aviationweather.gov sent them to transcoder2 on 26 Oct (times made recent)
+             f"METAR TBPB {T} 10018KT 9999 FEW020 28/25 Q1013 NOSIG",
+             f"METAR KHWO {T} AUTO 35009KT 10SM FEW029 SCT038 23/22 A2996 RMK AO2 RAB05E15B34E44 SLP144 P0000 T02280217 $",
+             f"METAR KOPF {T} AUTO 35008KT 10SM FEW028 23/22 A2996 RMK AO2 SLP145 T02330222 TSNO",
+             f"METAR KFLL {T} 34005G14KT 10SM SCT026 SCT046 24/21 A2994 RMK AO2 RAB22E32 SLP138 P0000 60002 T02440211 50003 $"]
     r = subprocess.run([exe], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=30,
                        env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
     need(r.returncode == 0, f"run: {r.stderr[-500:]}")
@@ -3151,6 +3156,10 @@ def weather_reports():
     need(o[4]["rain"] == 1 and o[4]["now"] == "thunderstorm nearby" and not o[4]["thunder"], f"KHWO nearby: {o[4]}")
     need(o[5]["rain"] == 0, f"recent rain is not rain now: {o[5]}")
     need(not o[6]["ok"], "nonsense read as a report")
+    need(o[7]["rain"] == 0 and o[7]["wind"] == 18 and o[7]["vis"] == 10 and not o[7]["in_hour"], f"real TBPB: {o[7]}")
+    need(o[8]["rain"] == 0 and o[8]["in_hour"] and o[8]["precip"] == 0 and o[8]["wind"] == 9, f"real KHWO: {o[8]}")
+    need(o[9]["rain"] == 0 and not o[9]["thunder"] and not o[9]["in_hour"], f"real KOPF (TSNO is not thunder): {o[9]}")
+    need(o[10]["gust"] == 14 and o[10]["in_hour"], f"real KFLL: {o[10]}")
 
     # the supervisor: a stand-in for aviationweather.gov
     root = w("super_wx")
@@ -3227,7 +3236,7 @@ def weather_reports():
         except subprocess.TimeoutExpired:
             sup.kill()
         srv.shutdown()
-    return f"7 reports read (showers, a storm with 11.4 mm, dry, rain, thunder nearby, recent rain, nonsense); " \
+    return f"11 reports read (showers, a storm with 11.4 mm, dry, rain, thunder nearby, recent rain, nonsense, 4 real ones); " \
            f"Bridgetown {bt['now']}, Miami {mi['now']} ({mi['station']}); in the incident and the events"
 
 

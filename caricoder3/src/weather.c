@@ -193,6 +193,25 @@ bool wx_parse(const char *line, int64_t now, struct wx_obs *o)
             /* hourly precipitation: P0012 = 0.12 inch in the last hour */
             if (n == 5 && tok[0] == 'P' && all_digits(tok + 1, 4))
                 o->precip_1h_mm = atoi(tok + 1) * 0.254;
+            /* when weather began and ended this hour: RAB05E15B34E44, TSB12E40, SHRAE09 */
+            {
+                const char *q = tok;
+                bool seen = false, ts = false;
+
+                while (*q && strchr("TSRADZNUPLGSH", *q) && q[1] && strchr("TSRADZNUPLGSH", q[1])) {
+                    if (!strncmp(q, "TS", 2))
+                        ts = true;
+                    if (!strncmp(q, "RA", 2) || !strncmp(q, "DZ", 2) || !strncmp(q, "SH", 2) || !strncmp(q, "UP", 2) ||
+                        !strncmp(q, "TS", 2))
+                        seen = true;
+                    q += 2;
+                }
+                if (seen && q > tok && (*q == 'B' || *q == 'E') && isdigit((unsigned char)q[1])) {
+                    o->rain_in_hour = true;
+                    if (ts)
+                        o->thunder_in_hour = true;
+                }
+            }
             continue;
         }
         if (!strcmp(tok, "TEMPO") || !strcmp(tok, "BECMG") || !strcmp(tok, "NOSIG"))
@@ -308,6 +327,17 @@ static const char *rain_word(int r)
     return r >= 3 ? "heavy rain or thunder" : r == 2 ? "rain" : r == 1 ? "light rain" : "no rain";
 }
 
+/* What a report says, in a few words */
+static void obs_words(const struct wx_obs *o, char *out, size_t len)
+{
+    if (o->now[0])
+        snprintf(out, len, "%s", o->now);
+    else if (o->rain_in_hour)
+        snprintf(out, len, "no rain now; %s earlier in the hour", o->thunder_in_hour ? "rain and thunder" : "rain");
+    else
+        snprintf(out, len, "%s", rain_word(o->rain));
+}
+
 static void fetch(void)
 {
     char ids[200] = "", cmd[600], line[400];
@@ -397,8 +427,13 @@ static void fetch(void)
 
             localtime_r(&ot, &tm);
             strftime(hm, sizeof(hm), "%H:%M", &tm);
-            snprintf(text, sizeof(text), "weather at %s: %s (%s %s)%s", X.p[i].name, o->now[0] ? o->now : rain_word(r),
-                     o->station, hm, X.last_rain[i] >= 0 ? "" : ", first report");
+            {
+                char wd[120];
+
+                obs_words(o, wd, sizeof(wd));
+                snprintf(text, sizeof(text), "weather at %s: %s (%s %s)%s", X.p[i].name, wd, o->station, hm,
+                         X.last_rain[i] >= 0 ? "" : ", first report");
+            }
             if (X.last_rain[i] >= 0 || r > 0)
                 history_event(now, NULL, r >= 2 ? "warn" : "info", "weather", text);
             if (r >= 2 || X.last_rain[i] >= 2)
@@ -531,21 +566,28 @@ void weather_json(FILE *f)
                     if (!nx)
                         break;
                     prev = nx->t;
-                    if (nx->rain > 0) {
+                    if (nx->rain > 0 || nx->rain_in_hour) {
+                        char wd[120];
                         struct tm tm;
                         time_t ot = (time_t)nx->t;
                         size_t l = strlen(last);
 
                         localtime_r(&ot, &tm);
                         strftime(hm, sizeof(hm), "%H:%M", &tm);
-                        snprintf(last + l, sizeof(last) - l, "%s%s %s", any++ ? ", " : "", hm,
-                                 nx->now[0] ? nx->now : rain_word(nx->rain));
+                        obs_words(nx, wd, sizeof(wd));
+                        snprintf(last + l, sizeof(last) - l, "%s%s %s", any++ ? ", " : "", hm, wd);
                     }
                 }
             }
             fprintf(f, ", \"station\": \"%s\", \"observed\": %lld, \"age_min\": %lld, \"rain\": %d, \"thunder\": %s, \"now\": ",
                     o->station, (long long)o->t, (long long)((now - o->t) / 60), o->rain, o->thunder ? "true" : "false");
-            jesc(f, o->now[0] ? o->now : rain_word(o->rain));
+            {
+                char wd[120];
+
+                obs_words(o, wd, sizeof(wd));
+                jesc(f, wd);
+            }
+            fprintf(f, ", \"rain_in_hour\": %s", o->rain_in_hour ? "true" : "false");
             if (o->precip_1h_mm >= 0)
                 fprintf(f, ", \"precip_1h_mm\": %.1f", o->precip_1h_mm);
             if (o->wind_kt >= 0)

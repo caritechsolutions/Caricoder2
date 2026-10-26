@@ -21,9 +21,9 @@ int main(void)
             continue;
         }
         printf("{\"ok\": true, \"station\": \"%s\", \"age_s\": %lld, \"rain\": %d, \"thunder\": %s, \"now\": \"%s\", "
-               "\"precip\": %.1f, \"wind\": %d, \"gust\": %d, \"vis\": %.1f, \"clouds\": \"%s\"}\n",
+               "\"precip\": %.1f, \"wind\": %d, \"gust\": %d, \"vis\": %.1f, \"clouds\": \"%s\", \"in_hour\": %s}\n",
                o.station, (long long)(now - o.t), o.rain, o.thunder ? "true" : "false", o.now, o.precip_1h_mm, o.wind_kt,
-               o.gust_kt, o.visibility_km, o.clouds);
+               o.gust_kt, o.visibility_km, o.clouds, o.rain_in_hour ? "true" : "false");
     }
     return 0;
 }
