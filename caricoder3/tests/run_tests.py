@@ -3241,6 +3241,91 @@ def weather_reports():
 
 
 @test
+def supervisor_technician_fits():
+    """The technician's request is fitted to the model's context (the notes, the incident and the earlier cases cut to size), and asked again with less when the model still says it is too long: on 27 Oct 53 incidents went unanswered at 16447 tokens of a 16384 context."""
+    import base64
+    import urllib.request
+    root = w("super_fit")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, pin = _port[0] + 1, _port[0] + 2
+    _port[0] += 10
+    ctx = 8192
+    seen = os.path.join(root, "seen.jsonl")
+    fake = os.path.join(root, "fake-llama-server")
+    # a model server that counts what it is sent: the first request, and any over 85% of the
+    # supervisor's own budget, it says exceed the context (as llama.cpp does: its tokens are not ours)
+    open(fake, "w").write(f"""#!{sys.executable}
+import json, sys, http.server
+a = sys.argv; port = int(a[a.index("--port") + 1]); ctx = int(a[a.index("-c") + 1])
+limit = int((ctx - 1900) * 3.2 * 0.85)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{{}}")
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        n = sum(len(m["content"]) for m in body["messages"])
+        H.calls = getattr(H, "calls", 0) + 1
+        ok = n <= limit and H.calls > 1
+        open({seen!r}, "a").write(json.dumps({{"chars": n, "limit": limit, "ok": ok}}) + "\\n")
+        if ok:
+            ans = {{"cause": "the input stopped", "category": "network", "confidence": 0.5, "explanation": "test",
+                   "next_checks": [], "ticket": ""}}
+            out = json.dumps({{"choices": [{{"message": {{"content": json.dumps(ans)}}}}]}}).encode()
+            self.send_response(200)
+        else:
+            out = json.dumps({{"error": {{"code": 400, "message": f"request ({{n // 3}} tokens) exceeds the available context size ({{ctx}} tokens)", "type": "exceed_context_size_error"}}}}).encode()
+            self.send_response(400)
+        self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *x): pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+""")
+    os.chmod(fake, 0o755)
+    model = os.path.join(root, "model.gguf")
+    open(model, "w").write("x")
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
+               "technician": {"enabled": True, "server": fake, "model": model, "gpu": "cpu", "threads": 2,
+                              "context": ctx, "delay_s": 1, "port": port + 7, "knowledge": os.path.join(ROOT, "knowledge")},
+               "watchdog": {"min_s": 3, "clear_s": 4, "off": ["cpu", "disk_low", "disk_critical", "disk_filling"]}},
+              open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"))
+    try:
+        wait_up(port)
+        api("/api/channels/t1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "enabled": True})
+        diag = None
+        for _ in range(90):
+            time.sleep(1)
+            got = [x for x in api("/api/incidents")["incidents"] if x.get("diagnosis")]
+            if got:
+                diag = got[0]
+                break
+        reqs = [json.loads(x) for x in open(seen)] if os.path.exists(seen) else []
+        need(diag and diag["diagnosis"]["cause"] == "the input stopped", f"no answer: {api('/api/technician')}; requests {reqs}")
+        budget = int((ctx - 1900) * 3.2)
+        need(all(r["chars"] <= budget for r in reqs), f"over the budget of {budget}: {reqs}")
+        need(any(not r["ok"] for r in reqs) and reqs[-1]["ok"], f"not asked again with less: {reqs}")
+        knowledge = sum(os.path.getsize(os.path.join(ROOT, "knowledge", f)) for f in os.listdir(os.path.join(ROOT, "knowledge")))
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"notes {knowledge // 1000} kB, context {ctx} tokens: sent {[r['chars'] for r in reqs]} characters " \
+           f"(budget {budget}); refused once, answered when asked with less"
+
+
+@test
 def supervisor_incidents():
     """The watchdog: an input lost on two channels of one source is one source incident with both in it; it closes when the input is back; limits read and set through the API."""
     import base64

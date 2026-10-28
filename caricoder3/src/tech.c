@@ -423,11 +423,16 @@ static void key_facts(FILE *f, const char *rep, int64_t now)
  * (or belongs to a source's: that one is looked at instead, *parent set).
  * With `answer` (training data): the messages only, and that answer as the
  * assistant's. */
-static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *parent, const char *answer)
+static char *build_request_fit(const struct tech_conf *c, int64_t id, int64_t *parent, const char *answer, double fit)
 {
     char *sys = NULL, *rep = NULL, *sim = NULL, *req = NULL;
     size_t sl = 0, rl = 0, ml = 0, ql = 0;
     FILE *f;
+    /* what fits the model's context: about 3.2 characters a token (JSON, numbers, English),
+     * less the answer's 1500 tokens and the wording around; the notes first, then the
+     * incident (three quarters of what is left) and the earlier cases. `fit` below 1
+     * when the model said it was still too much. */
+    int rep_max = 40000, sim_max = 12000, sys_max = 120000;
 
     *parent = 0;
     if (!(f = open_memstream(&rep, &rl)))
@@ -460,11 +465,28 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
         knowledge(f, c);
         fclose(f);
     }
+    if (c->ctx > 0) {
+        long avail = (long)((c->ctx - 1500 - 400) * 3.2 * (fit > 0 ? fit : 1)), rest;
+        long sysl = sys ? (long)strlen(sys) : 0;
+
+        if (sysl > avail - 8000)
+            sysl = avail - 8000 > 4000 ? avail - 8000 : 4000;
+        sys_max = (int)sysl;
+        rest = avail - sysl - 1500;
+        if (rest < 3000)
+            rest = 3000;
+        rep_max = (int)(rest * 3 / 4);
+        sim_max = (int)(rest - rep_max);
+        if (rep_max > 40000)
+            rep_max = 40000;
+        if (sim_max > 12000)
+            sim_max = 12000;
+    }
     if ((f = open_memstream(&req, &ql))) {
         char user[256];
 
         fprintf(f, "{\"messages\": [{\"role\": \"system\", \"content\": ");
-        jesc(f, sys ? sys : "", 120000);
+        jesc(f, sys ? sys : "", (size_t)sys_max);
         fprintf(f, "}, {\"role\": \"user\", \"content\": ");
         {
             char *u = NULL;
@@ -484,9 +506,9 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
                 fprintf(uf, "\n\n");
                 key_facts(uf, rep, time(NULL));
                 fprintf(uf, "\nThe incident, with its evidence and the events around it (JSON; times are Unix "
-                            "seconds):\n%.40000s\n\nEarlier incidents like it, with what you said then and what a "
-                            "person said (JSON; null where nobody said):\n%.12000s\n\nWhat caused this incident? "
-                            "Answer with the JSON object only.", rep, sim ? sim : "[]");
+                            "seconds):\n%.*s\n\nEarlier incidents like it, with what you said then and what a "
+                            "person said (JSON; null where nobody said):\n%.*s\n\nWhat caused this incident? "
+                            "Answer with the JSON object only.", rep_max, rep, sim_max, sim ? sim : "[]");
                 fclose(uf);
                 jesc(f, u ? u : "", ul);
             }
@@ -511,6 +533,11 @@ static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *pa
     free(rep);
     free(sim);
     return req;
+}
+
+static char *build_request_as(const struct tech_conf *c, int64_t id, int64_t *parent, const char *answer)
+{
+    return build_request_fit(c, id, parent, answer, 1);
 }
 
 static char *build_request(const struct tech_conf *c, int64_t id, int64_t *parent)
@@ -696,6 +723,19 @@ static void diagnose(int64_t id, int tries)
     snprintf(url, sizeof(url), "http://127.0.0.1:%d", c.port);
     st = peer_http(url, "POST", "/v1/chat/completions", NULL, req, 600000, &out);
     free(req);
+    /* still more than the model's context (the estimate is rough): smaller, twice at most */
+    for (double fit = 0.75; st == 400 && out && strstr(out, "exceed_context") && fit > 0.4; fit -= 0.25) {
+        char *r2 = build_request_fit(&c, id, &parent, NULL, fit);
+
+        if (!r2)
+            break;
+        log_info("technician: incident %lld: too long for the model's context; asking again with less (%.0f%%)",
+                 (long long)id, fit * 100);
+        free(out);
+        out = NULL;
+        st = peer_http(url, "POST", "/v1/chat/completions", NULL, r2, 600000, &out);
+        free(r2);
+    }
     {
         static struct json_doc doc;         /* this thread only */
         char e2[200];
