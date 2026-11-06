@@ -313,6 +313,16 @@ points at this side, and do not blame this side when it points upstream.
   not the provider: the fix is on the IRD (rebuild that service's remux
   entry; for scrambled, the CI card). No provider ticket.
 
+## IRD comparisons during a signal drop
+
+Since 6 Nov 2026 the IRDs' tables and outputs are compared only once the
+signal has been steady for 5 minutes (no tuner unlocked or low). Before
+that, a comparison taken during a signal drop said "the remux differs from
+the satellite" or "was scrambled and is clear now" for many services at
+once: the satellite side was simply missing (no data, so nothing to be
+scrambled). Such incidents at the time of a signal drop are the drop, not
+a stale remux or a change at the uplink.
+
 ## The weather at both ends of the satellite link
 
 Each incident's readings carry "weather": the latest airport weather

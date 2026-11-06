@@ -757,6 +757,7 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         s->ird_o.remux_s = (int)json_get_num(&doc, root, "ird_remux_s", 3 * 3600);   /* the tables are read every minute */
         s->ird_o.baseline_n = (int)json_get_num(&doc, root, "ird_baseline_n", 30);
         s->ird_o.probe_s = (int)json_get_num(&doc, root, "ird_probe_s", 5);
+        s->ird_o.settle_s = (int)json_get_num(&doc, root, "ird_settle_s", 300);
     }
     {
         int l = json_get(&doc, root, "language_check");

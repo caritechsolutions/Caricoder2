@@ -3780,7 +3780,7 @@ def supervisor_irds():
     cfg = os.path.join(root, "caricoder3.json")
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
-               "ird_poll_s": 1, "ird_remux_s": 6, "ird_baseline_n": 4, "ird_probe_s": 2,
+               "ird_poll_s": 1, "ird_remux_s": 6, "ird_baseline_n": 4, "ird_probe_s": 2, "ird_settle_s": 4,
                "irds": [{"name": "ird10", "address": f"127.0.0.1:{web}", "kind": "upcom",
                          "raw": f"udp://127.0.0.1:{praw}", "outputs": [f"udp://127.0.0.1:{pout}", f"udp://127.0.0.1:{pch}"]}],
                "watchdog": {"min_s": 2, "clear_s": 4}}, open(cfg, "w"))
@@ -3939,7 +3939,7 @@ def supervisor_irds_mcr():
     cfg = os.path.join(root, "caricoder3.json")
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": os.path.join(root, "h.db"),
-               "ird_poll_s": 1, "ird_remux_s": 5, "ird_baseline_n": 4, "ird_probe_s": 2,
+               "ird_poll_s": 1, "ird_remux_s": 5, "ird_baseline_n": 4, "ird_probe_s": 2, "ird_settle_s": 4,
                "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}", "outputs": [f"udp://127.0.0.1:{pout}"]},
                         {"name": "ird16", "address": f"mcr://admin:admin@127.0.0.1:{web}/?tuners=1",
                          "outputs": [f"udp://127.0.0.1:{pout + 100 + 2 * i}" for i in range(15)]}],
@@ -3976,7 +3976,8 @@ def supervisor_irds_mcr():
         x = wait_for(lambda: [i for i in api("/api/irds")["irds"] if i.get("cn_normal_db") is not None], 20, "a normal C/N")[0]
         # one with only tuner 1 in use: its second tuner, not locked, is no problem
         tuners["tuner"][1]["status"].update({"lock": 0, "c_n_100": "0.00 dB", "power": "-94.86 dBm"})
-        time.sleep(6)
+        wait_for(lambda: incidents("ird_unlocked"), 20, "tuner 2 unlocked")
+        time.sleep(2)
         y = [i for i in api("/api/irds")["irds"] if i["name"] == "ird16"][0]
         need(y["answering"] and [t["used"] for t in y["tuners"]] == [True, False], f"ird16: {y}")
         need(len(y["outputs"]) == 15, f"ird16 outputs: {y['outputs']}")   # 110.16: 15 single-program outputs
@@ -3997,8 +3998,16 @@ def supervisor_irds_mcr():
         status["uptime"] = "00:02:05"
         rs = wait_for(lambda: [i for i in incidents("ird_restarted") if "ird15 " in i["summary"]], 15, "the restart")[0]
         need("IRD ird15 restarted: up 2 min (it had been up 25 h 31 min)" in rs["summary"], f"restart: {rs['summary']}")
-        # its output changes: said, against the probe before
+        # its output changes while the signal is lost: not compared (the satellite side is missing),
+        # then said once the signal has been back a while
+        tuners["tuner"][0]["status"].update({"lock": 0, "c_n_100": "0.00 dB"})
+        time.sleep(2)
         playing["file"] = b
+        time.sleep(10)
+        bad = [i for i in incidents("satellite_changed") if "changed in the output" in i["summary"]]
+        put_off = [i for i in api("/api/irds")["irds"] if i["name"] == "ird15"][0].get("remux", {}).get("notes", "")
+        need(not bad, f"compared while the signal was lost: {[i['summary'] for i in bad]}")
+        tuners["tuner"][0]["status"].update({"lock": 1, "c_n_100": "12.25 dB"})
         ch = wait_for(lambda: [i for i in incidents("satellite_changed") if "changed in the output" in i["summary"]], 40,
                       "the output's change")[0]
         need("Other (2000): changed in the output: was 2001 h264, 2002 aac, 2003 ac3; now 2101 h264, 2102 aac, 2103 ac3"

@@ -54,7 +54,28 @@ static struct {
     char binary[512];
     bool (*uses)(const char *url, int program, int pid, void *op);
     void *uses_op;
+    int64_t signal_bad_t;           /* last seen: a tuner in use unlocked, or its C/N low (all IRDs share the dish) */
 } I = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER };
+
+/* The tables and the outputs are compared only with the signal steady: while a
+ * tuner has lost it (rain fade, at either end), the satellite side is missing
+ * and every service looks gone or changed. With the lock held. */
+#define SIGNAL_SETTLE_S (I.o.settle_s > 0 ? I.o.settle_s : 300)
+static bool signal_settled(int64_t t)
+{
+    return !I.signal_bad_t || t - I.signal_bad_t >= SIGNAL_SETTLE_S;
+}
+
+/* The output comparison put off: again once the signal has been steady a while */
+static void later(int k, int64_t t)
+{
+    int64_t again = I.signal_bad_t + SIGNAL_SETTLE_S + 30;
+
+    if (I.o.remux_s > 0)
+        I.ird[k].st.remux_t = again - I.o.remux_s > t - I.o.remux_s ? again - I.o.remux_s : t - I.o.remux_s + 60;
+    snprintf(I.ird[k].st.remux_notes, sizeof(I.ird[k].st.remux_notes),
+             "put off: the signal dropped (a tuner unlocked or low) less than %d s ago", SIGNAL_SETTLE_S);
+}
 
 /* ---- reading an Upcom's tuner ---------------------------------------------------- */
 
@@ -306,6 +327,10 @@ static void poll_one(int k)
                     tu->low = 0;
                 }
             }
+            for (int i = 0; i < st->n_tuners; i++)
+                if ((!st->c.tuners || (st->c.tuners >> i & 1)) && st->t[i].have &&
+                    (!st->t[i].locked || st->t[i].low > 0))
+                    I.signal_bad_t = t;
             if (got.have_health) {
                 /* a restart: up less than it was, more than the time between two looks can explain */
                 if (st->have_health && st->uptime_s >= 0 && uptime + 120 < st->uptime_s + (t - st->last_ok)) {
@@ -437,11 +462,14 @@ static void tables_one(int k)
     struct { char text[300]; } changes[8];
     int n_changes = 0;
 
+    bool settled;
+
     pthread_mutex_lock(&I.lock);
     c = I.ird[k].st.c;
+    settled = signal_settled(t);
     pthread_mutex_unlock(&I.lock);
-    if (strcmp(c.kind, "upcom"))
-        return;
+    if (strcmp(c.kind, "upcom") || !settled)
+        return;                         /* (the signal not steady: nothing to compare with) */
     ird_base_url(c.address, url, sizeof(url));
     body = upcom_ask(url, 8, 0, err, sizeof(err));
     if (body && !upcom_parse(body, &remux))
@@ -925,6 +953,11 @@ static void reference_one(int k)
 
     pthread_mutex_lock(&I.lock);
     c = I.ird[k].st.c;
+    if (!signal_settled(t)) {
+        later(k, t);
+        pthread_mutex_unlock(&I.lock);
+        return;
+    }
     pthread_mutex_unlock(&I.lock);
     if (!c.n_out)
         return;
@@ -994,6 +1027,11 @@ static void compare_one(int k)
 
     pthread_mutex_lock(&I.lock);
     c = I.ird[k].st.c;
+    if (!signal_settled(t)) {
+        later(k, t);
+        pthread_mutex_unlock(&I.lock);
+        return;
+    }
     pthread_mutex_unlock(&I.lock);
     if (!c.raw[0] || !c.n_out)
         return;

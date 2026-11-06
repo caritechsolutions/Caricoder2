@@ -59,6 +59,7 @@ struct ird_opts {
     int remux_s;                /* the probe comparison, every (3 h; 0: never) */
     int baseline_n;             /* readings before there is a normal C/N (30) */
     int probe_s;                /* each probe this long (5) */
+    int settle_s;               /* the signal steady this long before tables and outputs are compared (300) */
 };
 
 struct ird_state {
