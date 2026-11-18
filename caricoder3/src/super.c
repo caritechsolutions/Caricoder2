@@ -33,7 +33,8 @@
  * {"input": "udp://...", "backup_inputs": ["srt://..."], "program": 0, "muxrate": "5M", "vbr": false,
  *  "delay": 500, "video": ["h264:3M", "640x360:h264:1M"], "audio": ["aac:128k"], "drop": [258],
  *  "decoder": "auto", "encoder": "auto", "gpu": 0, "preset": "", "gop": 2000,
- *  "vbv": 1000, "service_name": "", "service_provider": "", "enabled": true}
+ *  "vbv": 1000, "aq": "on", "temporal_aq": "off", "lookahead": 20, "weighted_pred": "on",
+ *  "multipass": "quarter", "service_name": "", "service_provider": "", "enabled": true}
  * Its outputs live in channels/NAME.outputs.json, which the channel
  * itself reads and writes (--config), so outputs added while it runs
  * survive a restart.
@@ -1099,6 +1100,9 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "bframes", -1);
         if (v >= 0)
             ARG("--bframes=%d", (int)v);
+        v = json_get_num(&doc, root, "lookahead", 0);
+        if (v > 0)
+            ARG("--lookahead=%d", (int)v);
         v = json_get_num(&doc, root, "pcr_interval", 0);
         if (v > 0)
             ARG("--pcr-interval=%d", (int)v);
@@ -1175,6 +1179,8 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         static const char *const strs[][2] = {
             { "decoder", "--decoder=%s" }, { "encoder", "--encoder=%s" }, { "preset", "--preset=%s" },
             { "profile", "--profile=%s" },
+            { "aq", "--aq=%s" }, { "temporal_aq", "--temporal-aq=%s" },
+            { "weighted_pred", "--weighted-pred=%s" }, { "multipass", "--multipass=%s" },
             { "service_name", "--service-name=%s" }, { "service_provider", "--service-provider=%s" },
         };
 

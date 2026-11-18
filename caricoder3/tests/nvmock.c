@@ -292,6 +292,12 @@ struct m_enc {
     struct m_res *res[MAX_RES];
     struct m_bs *bs[MAX_RES];
     int n_res, n_bs, pending;
+    /* look-ahead: pictures given and not yet let through to the coding
+     * above, oldest first */
+    int la;
+    struct m_pic la_pic[33];
+    struct m_bs *la_bs[33];
+    int n_la, released;
 };
 
 static int is_guid(const GUID *a, const GUID *b) { return memcmp(a, b, sizeof(*a)) == 0; }
@@ -320,6 +326,10 @@ static NVENCSTATUS NVENCAPI m_caps(void *enc, GUID codec, NV_ENC_CAPS_PARAM *p, 
     case NV_ENC_CAPS_SUPPORT_FIELD_ENCODING: *val = is_guid(&codec, &NV_ENC_CODEC_H264_GUID); break;
     /* Like a Pascal card: B-frames for H.264 only. */
     case NV_ENC_CAPS_NUM_MAX_BFRAMES: *val = is_guid(&codec, &NV_ENC_CODEC_H264_GUID) ? 4 : 0; break;
+    /* Like a Pascal card, as far as HandBrake's notes go: temporal AQ in H.264 only. */
+    case NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ: *val = is_guid(&codec, &NV_ENC_CODEC_H264_GUID); break;
+    case NV_ENC_CAPS_SUPPORT_LOOKAHEAD: *val = 1; break;
+    case NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION: *val = 1; break;
     default: *val = 0; break;
     }
     return NV_ENC_SUCCESS;
@@ -361,7 +371,21 @@ static NVENCSTATUS NVENCAPI m_init(void *enc, NV_ENC_INITIALIZE_PARAMS *p)
     CHECK(p->encodeConfig->frameIntervalP == 1 || is_guid(&p->encodeGUID, &NV_ENC_CODEC_H264_GUID),
           "B-frames asked for where this card has none");
     e->bframes = (int)p->encodeConfig->frameIntervalP - 1;
-    CHECK(p->encodeConfig->rcParams.enableLookahead == 0, "this stand-in has no look-ahead");
+    {
+        const NV_ENC_RC_PARAMS *rc = &p->encodeConfig->rcParams;
+
+        CHECK(!rc->enableLookahead || (rc->lookaheadDepth >= 1 && rc->lookaheadDepth <= 32),
+              "look-ahead depth %u", (unsigned)rc->lookaheadDepth);
+        e->la = rc->enableLookahead ? rc->lookaheadDepth : 0;
+        CHECK(!rc->enableTemporalAQ || is_guid(&p->encodeGUID, &NV_ENC_CODEC_H264_GUID),
+              "temporal AQ where the card said it has none");
+        CHECK(rc->aqStrength <= 15 && (!rc->aqStrength || rc->enableAQ), "AQ strength %u without AQ",
+              (unsigned)rc->aqStrength);
+        CHECK(rc->multiPass <= NV_ENC_TWO_PASS_FULL_RESOLUTION, "multiPass %d", (int)rc->multiPass);
+        /* NVIDIA: not supported if the session is configured with B-frames */
+        CHECK(!p->enableWeightedPrediction || p->encodeConfig->frameIntervalP == 1,
+              "weighted prediction with B-frames");
+    }
     CHECK(p->encodeConfig->rcParams.averageBitRate > 0 &&
           p->encodeConfig->rcParams.vbvBufferSize > 0, "rate control not set");
     CHECK(p->encodeConfig->gopLength > 0, "gop length 0");
@@ -484,8 +508,8 @@ static NVENCSTATUS NVENCAPI m_destroy_bs(void *enc, NV_ENC_OUTPUT_PTR bs)
     NEED_CTX("nvEncDestroyBitstreamBuffer");
     /* The real driver crashed (Tesla P40, 535) when torn down with
      * pictures still held back: insist that they were brought out. */
-    CHECK(e->n_held == 0, "destroying a bitstream buffer while the encoder still holds "
-          "%d picture(s): send EOS and collect them first", e->n_held);
+    CHECK(e->n_held == 0 && e->n_la == 0, "destroying a bitstream buffer while the encoder still "
+          "holds %d picture(s): send EOS and collect them first", e->n_held + e->n_la);
     CHECK(x && !x->full, "destroying a bitstream buffer whose output was not collected");
     for (int i = 0; i < e->n_bs; i++)
         if (e->bs[i] == bs) {
@@ -520,6 +544,8 @@ static void emit_held(struct m_enc *e)
     e->n_held = 0;
 }
 
+static NVENCSTATUS code_pic(struct m_enc *e, const struct m_pic *pp, struct m_bs *b);
+
 static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
 {
     struct m_enc *e = enc;
@@ -532,6 +558,9 @@ static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
     NEED_CTX("nvEncEncodePicture");
     CHECK(p->version == NV_ENC_PIC_PARAMS_VER, "pic params version");
     if (p->encodePicFlags & NV_ENC_PIC_FLAG_EOS) {
+        for (int i = 0; i < e->n_la; i++)
+            code_pic(e, &e->la_pic[i], e->la_bs[i]);
+        e->n_la = 0;
         emit_held(e);
         return NV_ENC_SUCCESS;
     }
@@ -568,6 +597,35 @@ static NVENCSTATUS NVENCAPI m_encode(void *enc, NV_ENC_PIC_PARAMS *p)
     memcpy(pic.data + 16, &sum, 4);
     pic.len = 20 + (pic.idr ? 30 : 4);
     e->n++;
+
+    if (e->la > 0) {
+        /* The picture waits in the look-ahead window; the oldest leaves
+         * it once the window is full and is coded as without. "Done" is
+         * said from then on, for every picture, though the window (and
+         * any B-frame group) still holds pictures that are not coded:
+         * the caller must not collect those yet. */
+        NVENCSTATUS st = NV_ENC_ERR_NEED_MORE_INPUT;
+
+        e->la_pic[e->n_la] = pic;
+        e->la_bs[e->n_la++] = b;
+        if (e->n_la > e->la) {
+            code_pic(e, &e->la_pic[0], e->la_bs[0]);
+            memmove(e->la_pic, e->la_pic + 1, sizeof(e->la_pic[0]) * (size_t)(e->n_la - 1));
+            memmove(e->la_bs, e->la_bs + 1, sizeof(e->la_bs[0]) * (size_t)(e->n_la - 1));
+            e->n_la--;
+            e->released = 1;
+        }
+        if (e->released)
+            st = NV_ENC_SUCCESS;
+        return st;
+    }
+    return code_pic(e, &pic, b);
+}
+
+/* Codes one picture as an encoder without look-ahead would. */
+static NVENCSTATUS code_pic(struct m_enc *e, const struct m_pic *pp, struct m_bs *b)
+{
+    struct m_pic pic = *pp;
 
     if (e->bframes == 0) {
         put_pic(b, &pic);
@@ -620,7 +678,8 @@ static NVENCSTATUS NVENCAPI m_destroy(void *enc)
     struct m_enc *e = enc;
 
     NEED_CTX("nvEncDestroyEncoder");
-    CHECK(e->n_held == 0, "encoder destroyed while it still holds %d picture(s)", e->n_held);
+    CHECK(e->n_held == 0 && e->n_la == 0, "encoder destroyed while it still holds %d picture(s)",
+          e->n_held + e->n_la);
     CHECK(e->n_res == 0, "encoder destroyed with %d resources still registered", e->n_res);
     CHECK(e->n_bs == 0, "encoder destroyed with %d bitstream buffers left", e->n_bs);
     free(e);

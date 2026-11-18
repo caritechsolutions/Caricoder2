@@ -277,6 +277,8 @@ static int connect_card(struct rvxc *r, char *err, size_t errlen)
     hi.gop_ms = r->cfg.gop_ms;
     hi.bframes = r->cfg.bframes;
     hi.first_rendition = r->cfg.first_rendition;
+    _Static_assert(sizeof(r->cfg.tune) <= sizeof(hi.tune), "card_hello.tune too small");
+    memcpy(hi.tune, &r->cfg.tune, sizeof(r->cfg.tune));
     snprintf(hi.preset, sizeof(hi.preset), "%s", r->cfg.preset ? r->cfg.preset : "");
     snprintf(hi.profile, sizeof(hi.profile), "%s", r->cfg.profile ? r->cfg.profile : "");
     snprintf(hi.channel, sizeof(hi.channel), "%s", g_name);

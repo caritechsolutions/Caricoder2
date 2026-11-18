@@ -164,6 +164,21 @@ struct vdec_ops {
     void (*close)(void *ctx);
 };
 
+/*
+ * Picture-quality options of the NVIDIA encoder (the CPU encoders ignore
+ * them). Every field at 0 is what the encoder did before these existed:
+ * NVIDIA's preset decides AQ and the passes, no look-ahead, no weighted
+ * prediction. See the GUI's help for when each is worth turning on.
+ */
+struct venc_tune {
+    int8_t aq;                  /* spatial AQ: 0 the preset's, 1 off, 2 on */
+    int8_t aq_strength;         /* 0 the driver picks, 1 (gentle) .. 15 (strong) */
+    int8_t taq;                 /* temporal AQ: 0 the preset's, 1 off, 2 on */
+    int8_t lookahead;           /* pictures, 0 (off) .. 32 */
+    int8_t wp;                  /* weighted prediction: 0 off, 1 on (only without B-frames) */
+    int8_t multipass;           /* 0 the preset's, 1 one pass, 2 first pass at quarter size, 3 full */
+};
+
 struct venc_cfg {
     enum codec_id codec;
     int  width, height, depth;
@@ -177,6 +192,7 @@ struct venc_cfg {
     const char *preset;         /* backend's own name for speed, or NULL */
     int  bframes;               /* B-frames between references; -1: the backend's own */
     const char *profile;        /* "baseline", "main", "high", "main10"; NULL: the backend's own */
+    struct venc_tune tune;
     int  gpu;
     void *cuda_ctx;             /* frames will arrive in this CUDA context */
 };

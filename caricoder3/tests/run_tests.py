@@ -6572,6 +6572,88 @@ def xc_nvidia_standin():
     return "; ".join(res)
 
 
+@test
+def xc_nvidia_quality_options():
+    """The NVIDIA picture-quality options reach the card, in a whole channel run.
+
+    The stand-in holds the code to the rules NVIDIA states for each: no
+    temporal AQ where the card says it has none, no weighted prediction with
+    B-frames, look-ahead of 1 to 32. Its look-ahead says "done" while pictures
+    are still in the window, as the real card may: collecting one of those
+    breaks a rule, so this shows the encoder waits for them. And Main 10 from
+    an 8-bit source, made 10-bit on the card and on the CPU."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    if not nvmock_dir():
+        return "SKIPPED: could not build the stand-in libraries"
+    src = v_source("xc_v_h264", "h264")
+    in_pts = {r["pts"] for r in Analysis(src).pes[0x100]}
+    res = []
+
+    def run(name, *args, n=195):
+        out = w(name)
+        st, log = run_mock(src, out, *args)
+        must_pass(out)
+        x = xstats(st, 0x100)
+        need(x["encoder"] == "nvenc" and x["frames_out"] >= n, f"{name}: {x}")
+        v = Analysis(out).pes[0x100]
+        need({r["pts"] for r in v} <= in_pts, f"{name}: time stamps the input did not have")
+        d = [r["dts"] for r in v]
+        need(all(b > a for a, b in zip(d, d[1:])) and all(r["dts"] <= r["pts"] for r in v),
+             f"{name}: decode times out of order")
+        need(st["output"]["late_units"] == 0 and st["output"]["dropped_units"] == 0,
+             f"{name}: late or dropped units")
+        return log, x
+
+    # H.265, everything the card has for it; temporal AQ asked for and not there
+    log, x = run("xc_nvq_hevc.ts", "--video", "hevc:500k", "--aq", "8", "--temporal-aq", "on",
+                 "--lookahead", "20", "--weighted-pred", "on", "--multipass", "quarter")
+    need("spatial AQ on, strength 8" in log and "look-ahead 20" in log and
+         "weighted prediction on" in log and "first at a quarter size" in log, log[-800:])
+    need("no temporal AQ in HEVC; left off" in log, "temporal AQ not refused for HEVC")
+    need("holds back up to 24 pictures" in log, "the look-ahead's hold not counted: " + log[-600:])
+    res.append("H.265: AQ 8, look-ahead 20, weighted prediction, two passes; temporal AQ left off")
+
+    # H.264 with B-frames: look-ahead on top of them; weighted prediction refused
+    log, x = run("xc_nvq_h264.ts", "--video", "h264:500k", "--aq", "on", "--temporal-aq", "on",
+                 "--lookahead", "8", "--weighted-pred", "on")
+    need("temporal AQ on" in log and "look-ahead 8" in log, log[-800:])
+    need("weighted prediction needs a stream without B-frames" in log, "WP with B-frames not refused")
+    res.append("H.264 with B-frames: temporal AQ, look-ahead 8; weighted prediction refused")
+
+    # ... and without B-frames it is taken
+    log, x = run("xc_nvq_h264_wp.ts", "--video", "h264:500k", "--bframes", "0", "--weighted-pred", "on")
+    need("weighted prediction on" in log, log[-600:])
+
+    # Main 10 from an 8-bit source: on the card (decoded there) and from the CPU decoder
+    for name, extra in (("xc_nvq_m10_card.ts", []), ("xc_nvq_m10_cpu.ts", ["--decoder", "cpu"])):
+        log, x = run(name, "--video", "hevc:500k", "--profile", "main10", *extra)
+        need(", 10-bit," in log, f"{name}: not encoded at 10 bits: " + log[-600:])
+        need(x["decoder"] == ("libavcodec" if extra else "nvdec"), str(x))
+    res.append("Main 10 from 8 bits, made 10-bit on the card and on the CPU")
+
+    # three renditions in Main 10, scaled and made 10-bit on the card
+    out = w("xc_nvq_m10_rend.ts")
+    st, log = run_mock(src, out, "--video", "hevc:500k", "--video", "160x120:hevc:150k",
+                       "--profile", "main10", "--lookahead", "4")
+    must_pass(out)
+    for s_ in st["service"]["streams"]:
+        if s_["mode"] == "transcode":
+            need(s_["encoder"] == "nvenc" and s_["frames_out"] >= 195, str(s_))
+    need(log.count(", 10-bit,") == 2, "not every rendition at 10 bits: " + log[-600:])
+    res.append("two renditions, Main 10 and look-ahead")
+
+    # a bad value stops the channel with a reason, it is not ignored
+    p = subprocess.run([BIN, "-i", src, "-o", w("x.ts"), "--lookahead", "40"], capture_output=True,
+                       text=True)
+    need(p.returncode == 2 and "0 to 32" in p.stderr, p.stderr)
+    return "; ".join(res)
+
+
 def main():
     args = sys.argv[1:]
     if "--list" in args:

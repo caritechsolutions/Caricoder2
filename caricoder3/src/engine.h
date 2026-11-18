@@ -29,6 +29,7 @@ struct engine_cfg {
     const char *preset;
     int bframes;                        /* -1: the encoder's own */
     const char *profile;                /* baseline, main, high, main10; NULL: the encoder's own */
+    struct venc_tune tune;              /* NVIDIA picture-quality options (codec.h) */
 
     /* Streams of the service left out of the output (by input PID). */
     uint16_t drop[MAX_ES];

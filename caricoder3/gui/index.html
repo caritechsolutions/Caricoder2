@@ -1414,8 +1414,24 @@ function settingsHtml() {
       <label>Card</label>${sel("gpu", [["","Card 0"],["1","Card 1"],["2","Card 2"],["3","Card 3"]])}
       <label>Speed / quality</label>${sel("preset", [["","Default (veryfast on CPU, p2 on NVIDIA)"],["ultrafast","Fastest"],["superfast","Faster"],["veryfast","Fast"],["faster","Balanced"],["medium","Better quality (CPU)"],["p1","NVIDIA p1 (fastest)"],["p2","NVIDIA p2 (the default)"],["p3","NVIDIA p3"],["p4","NVIDIA p4 (more of the card's encoder)"],["p5","NVIDIA p5"],["p6","NVIDIA p6"],["p7","NVIDIA p7 (best, most of the encoder)"]])}
       <label>B-frames</label><div class="row">${sel("bframes", [["","Encoder's choice"],["0","None (for receivers that cannot take them)"],["1","1"],["2","2"],["3","3"],["4","4"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">The NVIDIA card does as many as it can (Pascal: none in H.265).</span></div>
-      <label>Profile</label><div class="row">${sel("profile", [["","Encoder's choice (H.264 high, H.265 as the source)"],["high","H.264 High"],["main","Main (H.264 Main; H.265 Main, 8 bits)"],["baseline","H.264 Baseline (no B-frames)"],["main10","H.265 Main 10"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">Older set-top boxes may need Main, or Baseline.</span></div>
+      <label>Profile</label><div class="row">${sel("profile", [["","Encoder's choice (H.264 high, H.265 as the source)"],["high","H.264 High"],["main","Main (H.264 Main; H.265 Main, 8 bits)"],["baseline","H.264 Baseline (no B-frames)"],["main10","H.265 Main 10 (10 bits, also from an 8-bit source)"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">Older set-top boxes may need Main, or Baseline.</span></div>
+      <div class="help"><b>Main 10</b>: 10 bits per colour, made from 8 when the source has 8. Much less banding in skies, gradients and dark scenes at low bit rates. Every receiver of the channel must decode H.265 Main 10 (set-top boxes, hotel TVs, apps): check that first, on one channel. A little more card memory.</div>
     </div>
+    <details style="margin-top:22px" id="q_box"><summary style="cursor:pointer;color:var(--fg2)">Picture quality on the NVIDIA card <span id="q_sum" style="color:var(--dim)"></span></summary>
+    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. None is on unless set here. Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
+    <div class="f" style="margin-top:12px">
+      <label>Spatial AQ</label>${sel("aq", [["","As the preset has it"],["off","Off"],["on","On, strength chosen by the driver"],...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(n => [String(n), `On, strength ${n}${n===1?" (gentlest)":n===8?" (middle)":n===15?" (strongest)":""}`])])}
+      <div class="help">More bits to flat and dark parts of each picture (sky, faces, studio walls), where blocks and banding show first; fewer to busy texture. <b>When:</b> channels at low bit rates (HD under about 2.5 Mb/s) that show banding or blocks in dark or flat scenes. <b>Cost:</b> fine texture (grass, crowds) a little softer; very little card time.</div>
+      <label>Temporal AQ</label>${sel("temporal_aq", [["","As the preset has it"],["off","Off"],["on","On"]])}
+      <div class="help">More bits to detail that stays still (logos, news sets, slow pans), which later pictures then reuse. <b>When:</b> talk, news and studio channels. <b>Cost:</b> picture sizes swing more within each key-frame interval; some card time. On the Tesla P40 it is expected for H.264 only (<code>--gpu-test</code> says); where the card lacks it, it is left off and the channel log says so.</div>
+      <label>Look-ahead</label>${sel("lookahead", [["","Off"],["8","8 pictures (about 0.3 s more delay)"],["16","16 pictures (about 0.6 s)"],["20","20 pictures (about 0.8 s)"],["32","32 pictures (about 1.3 s)"]])}
+      <div class="help">The card studies the coming pictures before coding them: bits go where scenes are hard, and key pictures land on scene cuts. <b>When:</b> sport, action, frequent scene changes. <b>Cost:</b> that much more delay (the channel's buffer grows by itself), more card memory, and fewer pictures a second from the card.</div>
+      <label>Weighted prediction</label>${sel("weighted_pred", [["","Off"],["on","On"]])}
+      <div class="help">Fades to and from black, flashes and lighting changes are coded as a change of brightness instead of as new detail. <b>When:</b> films, adverts, anything with many fades. <b>Cost:</b> only works without B-frames. H.265 on this card has none anyway; for H.264, set B-frames to None, which costs about a tenth more bit rate, so it rarely pays there. A little card time.</div>
+      <label>Passes</label>${sel("multipass", [["","As the preset has it"],["off","One pass"],["quarter","Two passes, the first at a quarter size"],["full","Two passes, both full size"]])}
+      <div class="help">A quick first look at each picture before the real encode: bits spread better within the picture and the rate stays closer to its target. <b>When:</b> the card has room to spare. <b>Cost:</b> fewer channels per card; quarter size gives most of the gain for less. Check <code>--gpu-test</code> before turning it on for many channels.</div>
+    </div>
+    </details>
     <details style="margin-top:22px"><summary style="cursor:pointer;color:var(--fg2)">Timing and service details</summary>
     <div class="f" style="margin-top:12px">
       <label>Delay</label><div class="row"><input id="delay" class="n" placeholder="auto"><span style="color:var(--dim)">ms of buffer between input and output. Empty: 500, or 800 / 3000 when audio / video is transcoded.</span></div>
@@ -1525,6 +1541,10 @@ function fillForm(cfg) {
   $("#a_codec").value = ap[0] && ["aac","mp2","mp3"].includes(ap[0]) ? ap[0] : ""; $("#a_rate").value = ap[1] && ABR.includes(ap[1]) ? ap[1] : "128k"; $("#a_rate").disabled = !$("#a_codec").value;
   $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
   $("#bframes").value = cfg.bframes != null ? String(cfg.bframes) : ""; $("#profile").value = cfg.profile || "";
+  for (const k of ["aq","temporal_aq","weighted_pred","multipass"]) $("#"+k).value = cfg[k] || "";
+  $("#lookahead").value = cfg.lookahead ? String(cfg.lookahead) : "";
+  { const on = ["aq","temporal_aq","lookahead","weighted_pred","multipass"].filter(k => cfg[k]).length;
+    $("#q_sum").textContent = on ? `(${on} set)` : "(none set)"; $("#q_box").open = !!on; }
   for (const k of ["delay","gop","vbv","service_name","service_provider","service_id","ts_id","onid","pmt_pid"]) $("#"+k).value = cfg[k] ?? "";
   $("#pcr_mode").value = cfg.pcr_pid === "video" ? "video" : cfg.pcr_pid ? "pid" : "";
   $("#pcr_pid").value = typeof cfg.pcr_pid === "number" ? cfg.pcr_pid : ""; $("#pcr_pid").style.display = $("#pcr_mode").value === "pid" ? "" : "none";
@@ -1649,7 +1669,9 @@ function readForm() {
     if (!cfg.video.length) delete cfg.video;
   }
   if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
-  for (const k of ["decoder","encoder","preset","profile","service_name","service_provider"]) if (v(k)) cfg[k] = v(k);
+  for (const k of ["decoder","encoder","preset","profile","service_name","service_provider",
+                   "aq","temporal_aq","weighted_pred","multipass"]) if (v(k)) cfg[k] = v(k);
+  if (v("lookahead")) cfg.lookahead = Number(v("lookahead"));
   if (v("bframes") !== "") cfg.bframes = Number(v("bframes"));
   if (v("gpu")) cfg.gpu = Number(v("gpu"));
   for (const k of ["delay","gop","vbv"]) if (num(k)) cfg[k] = num(k);

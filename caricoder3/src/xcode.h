@@ -46,6 +46,7 @@ struct xcode_cfg {
     const char *preset;
     int bframes;                /* -1: the encoder's own choice */
     const char *profile;        /* NULL: the encoder's own choice */
+    struct venc_tune tune;      /* NVIDIA picture-quality options; all 0: as before */
 };
 
 struct xcode_stats {

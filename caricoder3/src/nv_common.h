@@ -53,5 +53,13 @@ const char *nv_cu_err(CUresult r);
 bool nv_probe(char *why, size_t len);
 bool nv_device_name(int gpu, char *name, size_t len, size_t *mem_bytes);
 
+/* What card `gpu`'s encoder offers for H.264 or H.265 (v_nvenc.c). */
+struct nvenc_caps {
+    int bframes;                /* most B-frames between references */
+    int temporal_aq, lookahead, weighted_pred, ten_bit, emphasis_map, fields;
+    int width_max, height_max;
+};
+bool nvenc_query_caps(int gpu, int codec, struct nvenc_caps *c, char *why, size_t len);
+
 #endif
 #endif

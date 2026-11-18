@@ -17,7 +17,16 @@
  * picture, not the one of its own picture. The decode time of each is
  * worked out here (the presentation time of the picture given two
  * earlier: the usual rule for a delay of two). H.265 has no B-frames on
- * the Tesla P40 (Pascal) and is coded without. No look-ahead.
+ * the Tesla P40 (Pascal) and is coded without.
+ *
+ * Look-ahead (an option, struct venc_tune): the card keeps the last N
+ * pictures given to study them before it codes the oldest, and says
+ * "need more input" until it has them. Once it says "done", not every
+ * picture given so far is coded: only those that have left the look-ahead
+ * window are. So a picture is collected only when at least N + B + 4 more
+ * have been given since (the margin ffmpeg uses), or at the end; the
+ * pool of surfaces is that much larger. With look-ahead off this is the
+ * same as before: everything given is ready at "done".
  *
  * First run on real hardware (Tesla P40, driver 535) on 2026-10-14 for
  * the part without B-frames; `caricoder3 --gpu-test` exercises it.
@@ -33,7 +42,8 @@
 #include "log.h"
 #include "nv_common.h"
 
-#define POOL 8
+#define POOL 8                          /* surfaces without look-ahead */
+#define POOL_MAX 48                     /* with: N + B + 1 + 4, N up to 32 */
 #define BFRAMES_H264 2                  /* between references; 0 turns them off */
 #define PTS_RING 64                     /* input time stamps kept for decode times */
 
@@ -59,8 +69,10 @@ struct nve {
     NV_ENC_BUFFER_FORMAT fmt;
     NV_ENC_PIC_STRUCT pic_struct;
 
-    struct slot slot[POOL];
-    int pend[POOL];                     /* slots submitted, oldest first */
+    struct slot slot[POOL_MAX];
+    int pool;                           /* slots in use: POOL, or more for look-ahead */
+    int inside;                         /* with look-ahead: pictures that may still be on the card */
+    int pend[POOL_MAX];                 /* slots submitted, oldest first */
     int pend_head, pend_n;
     int ready;                          /* how many of them can be collected */
     bool flushing, eos_sent;
@@ -164,7 +176,7 @@ static void drain_all(struct nve *e)
         struct slot *s = &e->slot[e->pend[e->pend_head]];
         NV_ENC_LOCK_BITSTREAM lb;
 
-        e->pend_head = (e->pend_head + 1) % POOL;
+        e->pend_head = (e->pend_head + 1) % e->pool;
         e->pend_n--;
         memset(&lb, 0, sizeof(lb));
         lb.version = NV_ENC_LOCK_BITSTREAM_VER;
@@ -186,7 +198,7 @@ static void destroy(struct nve *e)
         push_ctx(e);
         if (e->init_done)
             drain_all(e);
-        for (int i = 0; i < POOL; i++) {
+        for (int i = 0; i < e->pool; i++) {
             struct slot *s = &e->slot[i];
 
             if (s->mapped)
@@ -237,6 +249,80 @@ static int gcd(int64_t a, int64_t b)
         b = t;
     }
     return a ? (int)a : 1;
+}
+
+static bool tune_used(const struct venc_tune *t)
+{
+    return t->aq || t->taq || t->lookahead > 0 || t->wp || t->multipass;
+}
+
+/*
+ * The picture-quality options (struct venc_tune) on top of the preset.
+ * Whatever the card does not offer is left as it was and said once, so
+ * that a channel never fails for an option. Logs what the encoder will
+ * really do. Called with the context current.
+ */
+static void apply_tune(struct nve *e, GUID codec, const struct venc_cfg *cfg, NV_ENC_CONFIG *conf,
+                       NV_ENC_INITIALIZE_PARAMS *ip)
+{
+    const struct venc_tune *t = &cfg->tune;
+    const char *cn = cfg->codec == CODEC_H264 ? "H.264" : "HEVC";
+    NV_ENC_RC_PARAMS *rc = &conf->rcParams;
+    char la[40] = "no look-ahead", aq[40];
+
+    if (t->aq == 1) {
+        rc->enableAQ = 0;
+        rc->aqStrength = 0;
+    } else if (t->aq == 2) {
+        rc->enableAQ = 1;
+        rc->aqStrength = (uint32_t)(t->aq_strength >= 1 && t->aq_strength <= 15 ? t->aq_strength : 0);
+    }
+    if (t->taq == 1) {
+        rc->enableTemporalAQ = 0;
+    } else if (t->taq == 2) {
+        if (cap(e, codec, NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ) >= 1)
+            rc->enableTemporalAQ = 1;
+        else
+            log_warn("nvenc: this card has no temporal AQ in %s; left off", cn);
+    }
+    if (t->multipass >= 1 && t->multipass <= 3)
+        rc->multiPass = t->multipass == 1 ? NV_ENC_MULTI_PASS_DISABLED
+                      : t->multipass == 2 ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION
+                      : NV_ENC_TWO_PASS_FULL_RESOLUTION;
+    if (t->lookahead > 0) {
+        int n = t->lookahead > 32 ? 32 : t->lookahead;
+
+        if (cap(e, codec, NV_ENC_CAPS_SUPPORT_LOOKAHEAD) >= 1) {
+            rc->enableLookahead = 1;
+            rc->lookaheadDepth = (uint16_t)n;
+            e->inside = n + e->bframes + 4;
+            e->pool = e->inside + e->bframes + 2;
+            snprintf(la, sizeof(la), "look-ahead %d", n);
+        } else {
+            log_warn("nvenc: this card has no look-ahead in %s; left off", cn);
+        }
+    }
+    if (t->wp) {
+        if (e->bframes > 0)
+            log_warn("nvenc: weighted prediction needs a stream without B-frames (set B-frames "
+                     "to None); left off");
+        else if (cap(e, codec, NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION) < 1)
+            log_warn("nvenc: this card has no weighted prediction in %s; left off", cn);
+        else
+            ip->enableWeightedPrediction = 1;
+    }
+    if (!tune_used(t))
+        return;
+    if (rc->enableAQ && rc->aqStrength)
+        snprintf(aq, sizeof(aq), "on, strength %u", (unsigned)rc->aqStrength);
+    else
+        snprintf(aq, sizeof(aq), "%s", rc->enableAQ ? "on, strength by the driver" : "off");
+    log_info("nvenc: picture-quality options: spatial AQ %s, temporal AQ %s, %s, "
+             "weighted prediction %s, %s", aq,
+             rc->enableTemporalAQ ? "on" : "off", la, ip->enableWeightedPrediction ? "on" : "off",
+             rc->multiPass == NV_ENC_TWO_PASS_FULL_RESOLUTION ? "two passes, full size"
+             : rc->multiPass == NV_ENC_TWO_PASS_QUARTER_RESOLUTION ? "two passes, the first at a quarter size"
+             : "one pass");
 }
 
 static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
@@ -293,6 +379,7 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     if (!e)
         return NULL;
     e->cu = nv_cu();
+    e->pool = POOL;
     e->codec = cfg->codec;
     e->width = cfg->width;
     e->height = cfg->height;
@@ -396,6 +483,8 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     conf.rcParams.enableLookahead = 0;
     conf.rcParams.lookaheadDepth = 0;
     conf.frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
+    memset(&ip, 0, sizeof(ip));
+    apply_tune(e, codec, cfg, &conf, &ip);
 
     if (cfg->codec == CODEC_H264) {
         NV_ENC_CONFIG_H264 *h = &conf.encodeCodecConfig.h264Config;
@@ -442,7 +531,6 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     dar_w /= g;
     dar_h /= g;
 
-    memset(&ip, 0, sizeof(ip));
     ip.version = NV_ENC_INITIALIZE_PARAMS_VER;
     ip.encodeGUID = codec;
     ip.presetGUID = *presets[preset - 1];
@@ -487,6 +575,26 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
             st = e->fn.nvEncInitializeEncoder(e->enc, &ip);
         }
     }
+    if (st != NV_ENC_SUCCESS && tune_used(&cfg->tune)) {
+        /* An option the card said it has and then would not take: the
+         * channel goes on without the options rather than not at all. */
+        log_warn("nvenc: the encoder would not start with the picture-quality options (%s); "
+                 "starting it without them", nv_status(e, st));
+        e->fn.nvEncDestroyEncoder(e->enc);
+        st = session_open(e);
+        if (st == NV_ENC_SUCCESS) {
+            conf.rcParams.enableAQ = pc.presetCfg.rcParams.enableAQ;
+            conf.rcParams.aqStrength = pc.presetCfg.rcParams.aqStrength;
+            conf.rcParams.enableTemporalAQ = pc.presetCfg.rcParams.enableTemporalAQ;
+            conf.rcParams.multiPass = pc.presetCfg.rcParams.multiPass;
+            conf.rcParams.enableLookahead = 0;
+            conf.rcParams.lookaheadDepth = 0;
+            ip.enableWeightedPrediction = 0;
+            e->inside = 0;
+            e->pool = POOL;
+            st = e->fn.nvEncInitializeEncoder(e->enc, &ip);
+        }
+    }
     if (st != NV_ENC_SUCCESS) {
         snprintf(err, errlen, "nvEncInitializeEncoder (%dx%d, %d-bit, %d kb/s, p%d): %s",
                  cfg->width, cfg->height, cfg->depth, cfg->bitrate / 1000, preset,
@@ -495,7 +603,7 @@ static void *nve_open(const struct venc_cfg *cfg, char *err, size_t errlen)
     }
 
     e->init_done = true;
-    for (int i = 0; i < POOL; i++) {
+    for (int i = 0; i < e->pool; i++) {
         struct slot *s = &e->slot[i];
         NV_ENC_CREATE_BITSTREAM_BUFFER bb;
         NV_ENC_REGISTER_RESOURCE rr;
@@ -647,12 +755,12 @@ static int nve_push(void *ctx, const struct vframe *f)
     }
     if (f->width != e->width || f->height != e->height || f->depth != e->depth)
         return -1;
-    for (int i = 0; i < POOL; i++)
+    for (int i = 0; i < e->pool; i++)
         if (!e->slot[i].busy) {
             idx = i;
             break;
         }
-    if (idx < 0 || e->pend_n == POOL)
+    if (idx < 0 || e->pend_n == e->pool)
         return -1;                          /* output was not collected */
     s = &e->slot[idx];
 
@@ -696,14 +804,18 @@ static int nve_push(void *ctx, const struct vframe *f)
     pop_ctx(e);
 
     s->busy = true;
-    e->pend[(e->pend_head + e->pend_n) % POOL] = idx;
+    e->pend[(e->pend_head + e->pend_n) % e->pool] = idx;
     e->pend_n++;
     /* (counted only once the card has taken it: a refused picture must
      * not put the decode times of all that follow one picture off) */
     e->in_pts[e->n_in % PTS_RING] = f->pts / STC_PER_90K;
     e->n_in++;
-    if (st == NV_ENC_SUCCESS)
-        e->ready = e->pend_n;               /* everything submitted so far is done */
+    if (st == NV_ENC_SUCCESS) {
+        if (e->inside == 0)
+            e->ready = e->pend_n;           /* everything submitted so far is done */
+        else if (e->pend_n > e->inside)
+            e->ready = e->pend_n - e->inside; /* what has left the look-ahead window */
+    }
     return 0;
 }
 
@@ -730,7 +842,7 @@ static int nve_pull(void *ctx, struct vpacket *p)
         return 0;
 
     s = &e->slot[e->pend[e->pend_head]];
-    e->pend_head = (e->pend_head + 1) % POOL;
+    e->pend_head = (e->pend_head + 1) % e->pool;
     e->pend_n--;
     e->ready--;
 
@@ -795,11 +907,54 @@ static int nve_pull(void *ctx, struct vpacket *p)
     return st == NV_ENC_SUCCESS && p->len > 0 ? 1 : nve_pull(ctx, p);
 }
 
+bool nvenc_query_caps(int gpu, int codec_id, struct nvenc_caps *c, char *why, size_t len)
+{
+    struct nve e;
+    GUID codec = codec_id == CODEC_HEVC ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+    NVENCSTATUS st;
+    bool ok = false;
+
+    memset(c, 0, sizeof(*c));
+    memset(&e, 0, sizeof(e));
+    if (!nv_load(why, len))
+        return false;
+    e.cu = nv_cu();
+    e.ctx = nv_ctx_get(gpu, why, len);
+    if (!e.ctx)
+        return false;
+    e.fn.version = NV_ENCODE_API_FUNCTION_LIST_VER;
+    if (nv_ne()->NvEncodeAPICreateInstance(&e.fn) != NV_ENC_SUCCESS) {
+        snprintf(why, len, "NvEncodeAPICreateInstance failed");
+        nv_ctx_put(e.ctx);
+        return false;
+    }
+    push_ctx(&e);
+    st = session_open(&e);
+    if (st == NV_ENC_SUCCESS) {
+        c->bframes = cap(&e, codec, NV_ENC_CAPS_NUM_MAX_BFRAMES);
+        c->temporal_aq = cap(&e, codec, NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ);
+        c->lookahead = cap(&e, codec, NV_ENC_CAPS_SUPPORT_LOOKAHEAD);
+        c->weighted_pred = cap(&e, codec, NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION);
+        c->ten_bit = cap(&e, codec, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE);
+        c->emphasis_map = cap(&e, codec, NV_ENC_CAPS_SUPPORT_EMPHASIS_LEVEL_MAP);
+        c->fields = cap(&e, codec, NV_ENC_CAPS_SUPPORT_FIELD_ENCODING);
+        c->width_max = cap(&e, codec, NV_ENC_CAPS_WIDTH_MAX);
+        c->height_max = cap(&e, codec, NV_ENC_CAPS_HEIGHT_MAX);
+        e.fn.nvEncDestroyEncoder(e.enc);
+        ok = true;
+    } else {
+        snprintf(why, len, "no encode session: %s", nv_status(&e, st));
+    }
+    pop_ctx(&e);
+    nv_ctx_put(e.ctx);
+    return ok;
+}
+
 static int nve_delay(void *ctx)
 {
     struct nve *e = ctx;
 
-    return e->bframes;
+    return e->inside ? e->inside : e->bframes;
 }
 
 static void nve_close(void *ctx)

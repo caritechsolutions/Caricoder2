@@ -60,9 +60,16 @@ static bool launch(struct nv_scaler *s, CUdeviceptr src, int spitch, int sw, int
 bool nv_scale(struct nv_scaler **sp, const struct vframe *in, int dw, int dh, struct vframe *out,
               char *why, size_t len)
 {
+    return nv_scale_to(sp, in, dw, dh, in->depth, out, why, len);
+}
+
+bool nv_scale_to(struct nv_scaler **sp, const struct vframe *in, int dw, int dh, int depth,
+                 struct vframe *out, char *why, size_t len)
+{
     CudaFunctions *cu = nv_cu();
     struct nv_scaler *s = *sp;
-    int bps = in->depth > 8 ? 2 : 1;
+    int bps = depth > 8 ? 2 : 1;
+    int wide = in->depth > 8 ? 1 : depth > 8 ? 2 : 0;
     int blend = in->interlaced ? 1 : 0;
     int spitch = in->stride[0], dpitch;
     CUdeviceptr src = (CUdeviceptr)(uintptr_t)in->plane[0];
@@ -72,6 +79,10 @@ bool nv_scale(struct nv_scaler **sp, const struct vframe *in, int dw, int dh, st
 
     if (in->mem != VMEM_CUDA || !in->cuda_ctx || !cu || dw < 16 || dh < 16 || (dw & 1) || (dh & 1)) {
         snprintf(why, len, "nothing the card can scale");
+        return false;
+    }
+    if (depth != in->depth && !(in->depth == 8 && depth == 10)) {
+        snprintf(why, len, "the card only makes 8-bit pictures 10-bit (asked: %d to %d bits)", in->depth, depth);
         return false;
     }
     if (s && s->ctx != in->cuda_ctx) {
@@ -106,9 +117,9 @@ bool nv_scale(struct nv_scaler **sp, const struct vframe *in, int dw, int dh, st
         s->bps = bps;
     }
     dpitch = (int)s->pitch;
-    ok = launch(s, src, spitch, in->width, in->height, s->buf, dpitch, dw, dh, 1, bps == 2, blend) &&
+    ok = launch(s, src, spitch, in->width, in->height, s->buf, dpitch, dw, dh, 1, wide, blend) &&
          launch(s, src + (CUdeviceptr)spitch * in->height, spitch, in->width / 2, in->height / 2,
-                s->buf + (CUdeviceptr)dpitch * dh, dpitch, dw / 2, dh / 2, 2, bps == 2, blend);
+                s->buf + (CUdeviceptr)dpitch * dh, dpitch, dw / 2, dh / 2, 2, wide, blend);
     if (ok)
         r = cu->cuStreamSynchronize(s->st);
     cu->cuCtxPopCurrent(&dummy);
@@ -118,6 +129,7 @@ bool nv_scale(struct nv_scaler **sp, const struct vframe *in, int dw, int dh, st
     *out = *in;
     out->width = dw;
     out->height = dh;
+    out->depth = depth;
     out->plane[0] = (uint8_t *)(uintptr_t)s->buf;
     out->stride[0] = dpitch;
     out->interlaced = false;
@@ -167,6 +179,14 @@ bool nv_scale(struct nv_scaler **s, const struct vframe *in, int dw, int dh, str
               char *why, size_t len)
 {
     (void)s; (void)in; (void)dw; (void)dh; (void)out;
+    snprintf(why, len, "built without NVIDIA support");
+    return false;
+}
+
+bool nv_scale_to(struct nv_scaler **s, const struct vframe *in, int dw, int dh, int depth,
+                 struct vframe *out, char *why, size_t len)
+{
+    (void)s; (void)in; (void)dw; (void)dh; (void)depth; (void)out;
     snprintf(why, len, "built without NVIDIA support");
     return false;
 }

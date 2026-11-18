@@ -226,6 +226,7 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
     c.preset = v->cfg.preset;
     c.bframes = v->cfg.bframes;
     c.profile = v->cfg.profile;
+    c.tune = v->cfg.tune;
     c.gpu = v->cfg.gpu;
     c.cuda_ctx = f->cuda_ctx;
 
@@ -282,6 +283,45 @@ static bool encoder_open(struct vxc *v, const struct vframe *f)
              f->interlaced ? " interlaced" : "", (double)c.fps_num / c.fps_den, c.depth,
              c.bitrate / 1e6, c.gop_ms, v->st->decoder, v->eb->name,
              v->eb->venc->delay_frames(v->ectx));
+    return true;
+}
+
+/* 8-bit samples to 10-bit (two bytes each, as a 10-bit decoder leaves
+ * them): for a Main 10 encoder fed an 8-bit source. */
+static bool to_10bit(struct vxc *v, const struct vframe *in, struct vframe *out)
+{
+    int cw = (in->width + 1) / 2, ch = (in->height + 1) / 2;
+    size_t need = ((size_t)in->width * in->height + 2 * (size_t)cw * ch) * 2;
+    uint8_t *dst;
+
+    if (need > v->conv_size) {
+        uint8_t *n = realloc(v->conv, need);
+
+        if (!n)
+            return false;
+        v->conv = n;
+        v->conv_size = need;
+    }
+    *out = *in;
+    out->depth = 10;
+    dst = v->conv;
+    for (int pl = 0; pl < 3; pl++) {
+        int w = pl ? cw : in->width, h = pl ? ch : in->height;
+
+        out->plane[pl] = dst;
+        out->stride[pl] = w * 2;
+        for (int y = 0; y < h; y++) {
+            const uint8_t *s = in->plane[pl] + (size_t)y * in->stride[pl];
+
+            for (int x = 0; x < w; x++) {
+                unsigned val = (unsigned)s[x] << 2;
+
+                dst[2 * x] = (uint8_t)val;
+                dst[2 * x + 1] = (uint8_t)(val >> 8);
+            }
+            dst += (size_t)w * 2;
+        }
+    }
     return true;
 }
 
@@ -521,6 +561,9 @@ static bool scale_picture(struct vxc *v, const struct vframe *in, struct vframe 
 static void picture_in(struct vxc *v, const struct vframe *in)
 {
     struct vframe f = *in, tmp;
+    /* Main 10 asked for: an 8-bit source is made 10-bit before the encoder */
+    bool up10 = v->cfg.out == CODEC_HEVC && v->cfg.profile && !strcmp(v->cfg.profile, "main10") &&
+                in->depth == 8;
 
     v->st->frames_in++;
     if (v->fanout)
@@ -543,16 +586,18 @@ static void picture_in(struct vxc *v, const struct vframe *in)
                 return;
             f = tmp;
         }
-    } else if (f.mem == VMEM_CUDA && (v->cfg.width || v->cfg.height)) {
-        /* a picture another rendition's decoder made, at its size: scaled on the card */
-        int tw, th;
+    } else if (f.mem == VMEM_CUDA && (v->cfg.width || v->cfg.height || up10)) {
+        /* a picture another rendition's decoder made, at its size: scaled
+         * on the card; and made 10-bit there for Main 10 */
+        int tw = f.width, th = f.height;
         char why[160];
 
-        video_size(v->cfg.width, v->cfg.height, v->cfg.fit, f.width, f.height,
-                   f.sar_num > 0 && f.sar_den > 0 ? f.width * f.sar_num : 0,
-                   f.sar_num > 0 && f.sar_den > 0 ? f.height * f.sar_den : 0, &tw, &th);
-        if (f.width != tw || f.height != th) {
-            if (!nv_scale(&v->nvs, &f, tw, th, &tmp, why, sizeof(why))) {
+        if (v->cfg.width || v->cfg.height)
+            video_size(v->cfg.width, v->cfg.height, v->cfg.fit, f.width, f.height,
+                       f.sar_num > 0 && f.sar_den > 0 ? f.width * f.sar_num : 0,
+                       f.sar_num > 0 && f.sar_den > 0 ? f.height * f.sar_den : 0, &tw, &th);
+        if (f.width != tw || f.height != th || up10) {
+            if (!nv_scale_to(&v->nvs, &f, tw, th, up10 ? 10 : f.depth, &tmp, why, sizeof(why))) {
                 if (!v->nvs_failed)
                     log_err("PID 0x%04X: %s", v->cfg.pid, why);
                 v->nvs_failed = true;
@@ -562,6 +607,11 @@ static void picture_in(struct vxc *v, const struct vframe *in)
             v->nvs_failed = false;
             f = tmp;
         }
+    }
+    if (up10 && f.mem == VMEM_CPU) {
+        if (!to_10bit(v, &f, &tmp))
+            return;
+        f = tmp;
     }
     if (v->ectx && format_changed(v, &f)) {
         log_info("PID 0x%04X: the picture format changed", v->cfg.pid);

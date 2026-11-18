@@ -1183,8 +1183,18 @@ static void usage(FILE *f)
 "                           encoder's; 0 for receivers that cannot take them)\n"
 "      --profile NAME       H.264: baseline, main or high (default high);\n"
 "                           H.265: main (8 bits, a 10-bit source converted) or\n"
-"                           main10 (default: as the source)\n"
+"                           main10 (10 bits, an 8-bit source converted; less\n"
+"                           banding, but every receiver must decode Main 10)\n"
+"                           (default: as the source)\n"
 "                           (x264/x265: ultrafast ... medium; nvenc: p1 ... p7)\n"
+"      NVIDIA encoder picture quality (each left out: as NVIDIA's preset has it):\n"
+"      --aq off|on|1..15    spatial adaptive quantisation; on: the driver picks\n"
+"                           the strength, 1 gentle .. 15 strong\n"
+"      --temporal-aq off|on bits for detail that stays still (H.264 on Pascal)\n"
+"      --lookahead N        pictures studied before coding, 0..32 (default 0);\n"
+"                           adds N pictures of delay\n"
+"      --weighted-pred off|on  for fades and flashes; only without B-frames\n"
+"      --multipass off|quarter|full  a first pass over each picture\n"
 "      --gop MS             longest gap between key frames (default 2000)\n"
 "      --vbv MS             video decoder buffer as time (default 1000)\n"
 "      --pcr-interval MS    default 30\n"
@@ -1255,6 +1265,7 @@ enum {
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
     OPT_CARD_PROCESS, OPT_CARD_ALL, OPT_KEEP_INPUT,
+    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1333,6 +1344,11 @@ int main(int argc, char **argv)
         { "preset", required_argument, 0, OPT_PRESET },
         { "bframes", required_argument, 0, OPT_BFRAMES },
         { "profile", required_argument, 0, OPT_PROFILE },
+        { "aq", required_argument, 0, OPT_AQ },
+        { "temporal-aq", required_argument, 0, OPT_TAQ },
+        { "lookahead", required_argument, 0, OPT_LOOKAHEAD },
+        { "weighted-pred", required_argument, 0, OPT_WP },
+        { "multipass", required_argument, 0, OPT_MULTIPASS },
         { "gop", required_argument, 0, OPT_GOP },
         { "vbv", required_argument, 0, OPT_VBV },
         { "gpu-test", no_argument, 0, OPT_GPU_TEST },
@@ -1578,6 +1594,52 @@ int main(int argc, char **argv)
             }
             o.eng.profile = optarg;
             break;
+        case OPT_AQ:
+        case OPT_TAQ:
+        case OPT_WP: {
+            int8_t *t = opt == OPT_AQ ? &o.eng.tune.aq : opt == OPT_TAQ ? &o.eng.tune.taq : &o.eng.tune.wp;
+            char *end;
+            long n;
+
+            if (!strcmp(optarg, "off")) {
+                *t = opt == OPT_WP ? 0 : 1;
+            } else if (!strcmp(optarg, "on")) {
+                *t = opt == OPT_WP ? 1 : 2;
+            } else if (opt == OPT_AQ && (n = strtol(optarg, &end, 10)) >= 1 && n <= 15 &&
+                       end != optarg && !*end) {
+                o.eng.tune.aq = 2;
+                o.eng.tune.aq_strength = (int8_t)n;
+            } else {
+                fprintf(stderr, "--%s: off or on%s\n",
+                        opt == OPT_AQ ? "aq" : opt == OPT_TAQ ? "temporal-aq" : "weighted-pred",
+                        opt == OPT_AQ ? ", or a strength 1 to 15" : "");
+                return 2;
+            }
+            break;
+        }
+        case OPT_LOOKAHEAD: {
+            char *end;
+            long n = strtol(optarg, &end, 10);
+
+            if (end == optarg || *end || n < 0 || n > 32) {
+                fprintf(stderr, "--lookahead: 0 to 32 pictures\n");
+                return 2;
+            }
+            o.eng.tune.lookahead = (int8_t)n;
+            break;
+        }
+        case OPT_MULTIPASS:
+            if (!strcmp(optarg, "off"))
+                o.eng.tune.multipass = 1;
+            else if (!strcmp(optarg, "quarter"))
+                o.eng.tune.multipass = 2;
+            else if (!strcmp(optarg, "full"))
+                o.eng.tune.multipass = 3;
+            else {
+                fprintf(stderr, "--multipass: off, quarter or full\n");
+                return 2;
+            }
+            break;
         case OPT_GOP: o.eng.gop_ms = atoi(optarg); break;
         case OPT_VBV: o.eng.vbv_ms = atoi(optarg); break;
         case OPT_GPU_TEST: gpu_test = true; break;
@@ -1640,6 +1702,10 @@ int main(int argc, char **argv)
             o.eng.delay_ms = xv ? DELAY_VIDEO_MS : xa ? DELAY_AUDIO_MS : 500;
             if (xv && o.eng.vbv_ms > 1000)
                 o.eng.delay_ms += o.eng.vbv_ms - 1000;
+            /* look-ahead holds pictures on the card: N, and the few the
+             * encoder keeps besides (v_nvenc.c), at up to 25 a second */
+            if (xv && o.eng.tune.lookahead > 0)
+                o.eng.delay_ms += (o.eng.tune.lookahead + 4) * 40;
         } else if (xv && o.eng.delay_ms < (o.eng.vbv_ms ? o.eng.vbv_ms : 1000) + 500) {
             fprintf(stderr, "--delay %lld is too short for a video buffer (--vbv) of %d ms: "
                     "new video is sent that long before it is due. Use --delay %d or more, "

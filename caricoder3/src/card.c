@@ -488,6 +488,7 @@ static void *session(void *arg)
     cfg.bframes = s->hi.bframes;
     cfg.preset = s->hi.preset[0] ? s->hi.preset : NULL;
     cfg.profile = s->hi.profile[0] ? s->hi.profile : NULL;
+    memcpy(&cfg.tune, s->hi.tune, sizeof(cfg.tune));
     if (!codec_is_video(cfg.in) || !codec_is_video(cfg.out)) {
         snprintf(rd.err, sizeof(rd.err), "the card process does video only");
         card_send(s->fd, CM_READY, &rd, sizeof(rd), NULL, 0);

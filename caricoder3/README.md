@@ -388,6 +388,8 @@ A channel file holds what the command line would, for example
 Keys: `input`, `backup_inputs` (list), `switch_after`, `retry_primary`, `program`, `drop` (list of PIDs), `muxrate`, `vbr`, `delay`, `video` (list),
 `audio` (list), `decoder`, `encoder`, `gpu`, `preset`, `bframes` (0–4),
 `profile` (`baseline`, `main`, `high`; `main10`), `gop`, `vbv`,
+`aq` (`off`, `on`, or a strength `1`–`15`), `temporal_aq` (`off`, `on`), `lookahead`
+(pictures, 1–32), `weighted_pred` (`off`, `on`), `multipass` (`off`, `quarter`, `full`),
 `pcr_interval`, `psi_interval`, `service_name`, `service_provider`,
 `service_id`, `ts_id`, `onid`, `pmt_pid`, `pcr_pid` (a PID, or `"video"`),
 `remap` (`{"256": 481, ...}`: input PID to output PID), `order` (input
@@ -916,7 +918,7 @@ How it is built: pictures decoded on the card stay on it and are copied,
 card to card, into the encoder's input. H.264 is coded with two B-frames
 between references (about a tenth off the bit rate for the same quality;
 the card holds back two pictures for it); H.265 without, as the Tesla P40
-has no H.265 B-frames. No look-ahead. When the card lets a stream down
+has no H.265 B-frames. When the card lets a stream down
 and nobody insisted on the card (`--decoder nvidia`, `--encoder nvidia`),
 the CPU takes over and the log says so: if the card will not decode the
 stream (a format it does not take, no decoder free), the CPU decodes and
@@ -927,6 +929,32 @@ as `failed` in the statistics. If the card refuses to encode interlaced
 video as fields, it encodes the fields together as frames, with a
 warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
 `--decoder nvidia --encoder cpu` is not built yet.
+
+**Picture-quality options** (per channel; the GUI's "Picture quality on
+the NVIDIA card", with help on when each is worth it). None is on unless
+set; left out, NVIDIA's preset decides, as before.
+
+| Option | Command line | What it does | What it costs |
+|---|---|---|---|
+| Spatial AQ | `--aq on` or `--aq 1..15` | bits moved to flat and dark areas, where banding shows | fine texture a little softer; PSNR falls even when it looks better |
+| Temporal AQ | `--temporal-aq on` | bits for detail that stays still (logos, sets) | picture sizes swing within a GOP; on the P40 expected for H.264 only |
+| Look-ahead | `--lookahead N` (1–32) | the card studies N pictures ahead; key pictures on scene cuts | N pictures more delay (the buffer grows by itself), card memory, speed |
+| Weighted prediction | `--weighted-pred on` | fades and flashes coded as brightness changes | only without B-frames (H.264: `--bframes 0`) |
+| Two passes | `--multipass quarter` / `full` | a first look at each picture before coding | fewer channels per card |
+| Main 10 | `--profile main10` | 10-bit H.265, also from an 8-bit source (made 10-bit on the card or CPU) | every receiver must decode Main 10 |
+
+An option the card does not have is left off and the channel log says so;
+if the card refuses the options altogether, the encoder starts without
+them (logged) rather than not at all. `--gpu-test` lists what the card's
+encoder offers and runs each option at 1080p, with its speed next to
+plain, so their cost can be compared before turning one on.
+
+Look-ahead needs care in how the output is collected: once the window is
+full the card says "done" for each picture, but the pictures still in the
+window are not coded yet. Each is collected only when N + B + 4 pictures
+have been given after it (ffmpeg's margin), or at the end. The stand-in
+driver behaves the same way and treats collecting too early as a broken
+rule, so the tests catch it.
 
 ### Card processes
 

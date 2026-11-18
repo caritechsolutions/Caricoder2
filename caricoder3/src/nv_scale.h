@@ -22,6 +22,11 @@ struct nv_scaler;
  * False with a reason. */
 bool nv_scale(struct nv_scaler **s, const struct vframe *in, int dw, int dh, struct vframe *out,
               char *why, size_t len);
+
+/* The same, and the picture made `depth` bits (8 to 10 only: an 8-bit
+ * source for a Main 10 encoder). dw x dh may be the picture's own size. */
+bool nv_scale_to(struct nv_scaler **s, const struct vframe *in, int dw, int dh, int depth,
+                 struct vframe *out, char *why, size_t len);
 void nv_scaler_free(struct nv_scaler *s);
 
 #endif

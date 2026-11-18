@@ -377,6 +377,7 @@ static int plan_stream(struct engine *e, const struct program *p, int idx,
             c->preset = e->cfg.preset;
             c->bframes = e->cfg.bframes;
             c->profile = e->cfg.profile;
+            c->tune = e->cfg.tune;
         }
         out++;
     }
