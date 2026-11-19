@@ -1160,6 +1160,8 @@ static void usage(FILE *f)
 "                           is transcoded, 3000 when video is\n"
 "      --drop PID[,PID..]   leave these streams of the service out of the output\n"
 "                           (an audio track not wanted, say; caricoder3 probe lists them)\n"
+"      --pids PID[,PID..]   only these streams of the service in the output (the\n"
+"                           opposite of --drop; Flussonic's pids=)\n"
 "      --audio SPEC         transcode audio: aac, mp2 or mp3, with an optional\n"
 "                           bit rate (aac:128k). PID=SPEC for one stream only\n"
 "                           (1653=aac:96k); may be repeated. Default: copy\n"
@@ -1265,7 +1267,7 @@ enum {
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
     OPT_CARD_PROCESS, OPT_CARD_ALL, OPT_KEEP_INPUT,
-    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS,
+    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS, OPT_PIDS,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1344,6 +1346,7 @@ int main(int argc, char **argv)
         { "preset", required_argument, 0, OPT_PRESET },
         { "bframes", required_argument, 0, OPT_BFRAMES },
         { "profile", required_argument, 0, OPT_PROFILE },
+        { "pids", required_argument, 0, OPT_PIDS },
         { "aq", required_argument, 0, OPT_AQ },
         { "temporal-aq", required_argument, 0, OPT_TAQ },
         { "lookahead", required_argument, 0, OPT_LOOKAHEAD },
@@ -1479,21 +1482,26 @@ int main(int argc, char **argv)
                 return 2;
             }
             break;
-        case OPT_DROP: {
+        case OPT_DROP:
+        case OPT_PIDS: {
             /* PID[,PID...], decimal or 0x hex; may be repeated */
+            const char *what = opt == OPT_DROP ? "--drop" : "--pids";
+            uint16_t *list = opt == OPT_DROP ? o.eng.drop : o.eng.keep;
+            int *n = opt == OPT_DROP ? &o.eng.n_drop : &o.eng.n_keep;
+
             for (const char *p = optarg; *p; ) {
                 char *end;
                 long pid = strtol(p, &end, 0);
 
                 if (end == p || pid < 0x10 || pid > 0x1FFE || (*end && *end != ',')) {
-                    fprintf(stderr, "--drop: PIDs between 0x10 and 0x1FFE, separated by commas\n");
+                    fprintf(stderr, "%s: PIDs between 0x10 and 0x1FFE, separated by commas\n", what);
                     return 2;
                 }
-                if (o.eng.n_drop >= MAX_ES) {
-                    fprintf(stderr, "--drop: too many PIDs\n");
+                if (*n >= MAX_ES) {
+                    fprintf(stderr, "%s: too many PIDs\n", what);
                     return 2;
                 }
-                o.eng.drop[o.eng.n_drop++] = (uint16_t)pid;
+                list[(*n)++] = (uint16_t)pid;
                 p = *end == ',' ? end + 1 : end;
             }
             break;

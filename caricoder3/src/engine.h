@@ -34,6 +34,9 @@ struct engine_cfg {
     /* Streams of the service left out of the output (by input PID). */
     uint16_t drop[MAX_ES];
     int  n_drop;
+    /* Only these streams of the service (by input PID); none listed: all. */
+    uint16_t keep[MAX_ES];
+    int  n_keep;
 
     /* The output's identifiers. All by input PID; unset ones keep the
      * source's (or, for renditions, the automatic) values. */

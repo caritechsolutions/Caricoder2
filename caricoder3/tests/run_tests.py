@@ -166,6 +166,24 @@ def file_drop_streams():
 
 
 @test
+def file_keep_streams():
+    """--pids keeps only the named streams (Flussonic's pids=): the others gone from the PMT and the packets."""
+    src = synth("syn")
+    out = w("keep.ts")
+    st = run_file(src, out, "-r", "4M", "--pids", "1651,1652")
+    must_pass(out, cbr=True)
+    a = Analysis(out)
+    pids = {e["pid"] for e in a.pmt["streams"]}
+    need(pids == {1651, 1652}, f"PMT lists {sorted(pids)}")
+    need(1653 not in a.pid_packets and 0x1FF0 not in a.pid_packets, "streams not listed still have packets")
+    must_match(src, out, only={1651, 1652})
+    need(len(st["service"]["streams"]) == 2, f"stats: {st['service']}")
+    p = subprocess.run([BIN, "-i", src, "-o", w("x.ts"), "--pids", "7"], capture_output=True, text=True)
+    need(p.returncode == 2 and "--pids" in p.stderr, "a bad PID was taken")
+    return "video and AAC kept exact, AC-3 and the section PID left out"
+
+
+@test
 def file_follows_pid_change():
     """The source moves its streams and PMT to other PIDs mid-run: settings still apply, the output keeps its PIDs; remembered for the next run."""
     a = synth("follow_a", duration=4.0)

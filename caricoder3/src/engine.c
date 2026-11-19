@@ -586,6 +586,12 @@ static bool dropped(const struct engine *e, uint16_t pid)
     for (int i = 0; i < e->cfg.n_drop; i++)
         if (e->cfg.drop[i] == pid)
             return true;
+    if (e->cfg.n_keep) {
+        for (int i = 0; i < e->cfg.n_keep; i++)
+            if (e->cfg.keep[i] == pid)
+                return false;
+        return true;
+    }
     return false;
 }
 
@@ -733,13 +739,15 @@ static void on_program(void *opaque, const struct program *p)
     struct program named = *p;
     static struct program np[MAX_PROGRAMS];     /* input thread only; large */
     static uint16_t src_tmp[8192];
-    uint16_t pinned[4 * MAX_ES + 12];
+    uint16_t pinned[5 * MAX_ES + 12];
     int n_pinned = 0;
     int n_prog = 1;
 
     /* The source's PIDs as they were first seen: settings name those. */
     for (int i = 0; i < e->cfg.n_drop; i++)
         pinned[n_pinned++] = e->cfg.drop[i];
+    for (int i = 0; i < e->cfg.n_keep; i++)
+        pinned[n_pinned++] = e->cfg.keep[i];
     for (int i = 0; i < e->cfg.n_remap; i++)
         pinned[n_pinned++] = e->cfg.remap[i].in;
     for (int i = 0; i < e->cfg.n_order; i++)
@@ -962,7 +970,7 @@ static void on_unit(void *opaque, struct es_unit *u)
             e->lead_win_max[pid] = lead;
         }
     }
-    if (e->cfg.n_drop && dropped(e, u->pid)) {
+    if ((e->cfg.n_drop || e->cfg.n_keep) && dropped(e, u->pid)) {
         free(u);
         return;
     }

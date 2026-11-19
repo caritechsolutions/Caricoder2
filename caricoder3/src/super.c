@@ -1275,9 +1275,10 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "retry_primary", 0);
         if (v > 0)
             ARG("--retry-primary=%d", (int)v);
-        {
-            /* "drop": [257, 258] -> --drop=257,258 */
-            int a = json_get(&doc, root, "drop");
+        for (int dk = 0; dk < 2; dk++) {
+            /* "drop": [257, 258] -> --drop=257,258; "pids" (only these) -> --pids= */
+            const char *key = dk ? "pids" : "drop";
+            int a = json_get(&doc, root, key);
             char list[256] = "";
             size_t o = 0;
 
@@ -1287,14 +1288,14 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
                         int need = snprintf(NULL, 0, "%s%d", o ? "," : "", (int)doc.node[j].num);
 
                         if (o + (size_t)need >= sizeof(list)) {
-                            snprintf(err, errlen, "too many PIDs in \"drop\"");
+                            snprintf(err, errlen, "too many PIDs in \"%s\"", key);
                             return -1;
                         }
                         o += (size_t)snprintf(list + o, sizeof(list) - o, "%s%d", o ? "," : "",
                                               (int)doc.node[j].num);
                     }
             if (list[0])
-                ARG("--drop=%s", list);
+                ARG("--%s=%s", key, list);
         }
         {
             /* the output's identifiers:
