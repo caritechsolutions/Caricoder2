@@ -270,7 +270,7 @@ struct super {
     struct qset {
         char aq[8], taq[8], wp[8], mp[12];
         int la;
-    } qdef;
+    } qdef, qdef264;                        /* for H.265 channels; for H.264-only ones */
     int64_t q_next_ns;                      /* the next queued restart */
     int q_gap_s;                            /* between restarts (20 s; tests shorter) */
     struct cardp cards[CARDS_MAX];
@@ -629,15 +629,16 @@ static void save_system_config(struct super *s)
                      ",\n  \"language_check\": {\"every_h\": %g, \"expect\": %s, \"min_probability\": %.2f, \"clip_s\": %d}\n}\n",
                      s->lang_every_s / 3600.0, json_quote(s->lang_expect, lq, sizeof(lq)), s->lang_min_p, s->lang_clip_s);
     }
-    {
-        /* the quality defaults, before the closing brace */
+    for (int k = 0; k < 2; k++) {
+        /* the quality defaults (H.265, then H.264), before the closing brace */
+        const struct qset *qs = k ? &s->qdef264 : &s->qdef;
         size_t n = strlen(text);
 
         if (n > 3)
             snprintf(text + n - 3, sizeof(text) - (n - 3),
-                     ",\n  \"quality\": {\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, "
+                     ",\n  \"%s\": {\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, "
                      "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}\n}\n",
-                     s->qdef.aq, s->qdef.taq, s->qdef.la, s->qdef.wp, s->qdef.mp);
+                     k ? "quality_h264" : "quality", qs->aq, qs->taq, qs->la, qs->wp, qs->mp);
     }
     if (s->wx_set) {
         /* the weather places, when they were set (otherwise the defaults stay defaults) */
@@ -783,14 +784,20 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
     {
         int q = json_get(&doc, root, "quality");
 
-        memset(&s->qdef, 0, sizeof(s->qdef));
         s->q_gap_s = (int)json_get_num(&doc, root, "quality_restart_gap_s", 20);
-        if (q >= 0) {
-            snprintf(s->qdef.aq, sizeof(s->qdef.aq), "%s", json_get_str(&doc, q, "aq", ""));
-            snprintf(s->qdef.taq, sizeof(s->qdef.taq), "%s", json_get_str(&doc, q, "temporal_aq", ""));
-            snprintf(s->qdef.wp, sizeof(s->qdef.wp), "%s", json_get_str(&doc, q, "weighted_pred", ""));
-            snprintf(s->qdef.mp, sizeof(s->qdef.mp), "%s", json_get_str(&doc, q, "multipass", ""));
-            s->qdef.la = (int)json_get_num(&doc, q, "lookahead", 0);
+        for (int k = 0; k < 2; k++) {
+            struct qset *d = k ? &s->qdef264 : &s->qdef;
+
+            memset(d, 0, sizeof(*d));
+            if (k)
+                q = json_get(&doc, root, "quality_h264");
+            if (q >= 0) {
+                snprintf(d->aq, sizeof(d->aq), "%s", json_get_str(&doc, q, "aq", ""));
+                snprintf(d->taq, sizeof(d->taq), "%s", json_get_str(&doc, q, "temporal_aq", ""));
+                snprintf(d->wp, sizeof(d->wp), "%s", json_get_str(&doc, q, "weighted_pred", ""));
+                snprintf(d->mp, sizeof(d->mp), "%s", json_get_str(&doc, q, "multipass", ""));
+                d->la = (int)json_get_num(&doc, q, "lookahead", 0);
+            }
         }
     }
     {
@@ -1051,8 +1058,33 @@ static bool q_valid(const char *key, const char *v)
     return !strcmp(v, "off") || !strcmp(v, "on");
 }
 
-/* Does the channel make H.265 (any of its renditions)? */
-static bool chan_makes_hevc(const struct json_doc *doc, int root)
+/* One set of defaults from a JSON object; false with a reason. */
+static bool q_parse(const struct json_doc *doc, int node, struct qset *q, char *err, size_t errlen)
+{
+    static const char *const keys[4] = { "aq", "temporal_aq", "weighted_pred", "multipass" };
+
+    memset(q, 0, sizeof(*q));
+    for (int k = 0; k < 4; k++) {
+        const char *v = json_get_str(doc, node, keys[k], "");
+        char *dst = k == 0 ? q->aq : k == 1 ? q->taq : k == 2 ? q->wp : q->mp;
+        size_t cap = k == 3 ? sizeof(q->mp) : sizeof(q->aq);
+
+        if (!q_valid(keys[k], v) || strlen(v) >= cap) {
+            snprintf(err, errlen, "%s: not a value it takes", keys[k]);
+            return false;
+        }
+        snprintf(dst, cap, "%s", v);
+    }
+    q->la = (int)json_get_num(doc, node, "lookahead", 0);
+    if (q->la < 0 || q->la > 32) {
+        snprintf(err, errlen, "lookahead: 0 to 32 pictures");
+        return false;
+    }
+    return true;
+}
+
+/* Does the channel make H.265 (any of its renditions)? With `h264`: H.264. */
+static bool chan_makes(const struct json_doc *doc, int root, bool h264)
 {
     int a = json_get(doc, root, "video");
 
@@ -1062,7 +1094,7 @@ static bool chan_makes_hevc(const struct json_doc *doc, int root)
 
         snprintf(buf, sizeof(buf), "%s", v);
         for (char *t = strtok_r(buf, ":", &save); t; t = strtok_r(NULL, ":", &save))
-            if (!strcmp(t, "hevc") || !strcmp(t, "h265"))
+            if (h264 ? !strcmp(t, "h264") : (!strcmp(t, "hevc") || !strcmp(t, "h265")))
                 return true;
     }
     return false;
@@ -1070,8 +1102,9 @@ static bool chan_makes_hevc(const struct json_doc *doc, int root)
 
 /*
  * The picture-quality options of a channel: its own where it has them,
- * otherwise the server's default (s->qdef) when it makes H.265. Into
- * out[] as command-line arguments; returns how many.
+ * otherwise the server's default: s->qdef when it makes H.265 (any
+ * rendition), s->qdef264 when it makes H.264 only. Into out[] as
+ * command-line arguments; returns how many.
  */
 static int quality_args(const struct super *s, const struct json_doc *doc, int root, char out[5][40])
 {
@@ -1081,19 +1114,20 @@ static int quality_args(const struct super *s, const struct json_doc *doc, int r
         { "weighted_pred", "--weighted-pred", offsetof(struct qset, wp) },
         { "multipass", "--multipass", offsetof(struct qset, mp) },
     };
-    bool hevc = chan_makes_hevc(doc, root);
+    const struct qset *d = chan_makes(doc, root, false) ? &s->qdef
+                         : chan_makes(doc, root, true) ? &s->qdef264 : NULL;
     int n = 0, la;
 
     for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
         const char *v = json_get_str(doc, root, strs[i].key, "");
 
-        if (!*v && hevc)
-            v = (const char *)&s->qdef + strs[i].off;
+        if (!*v && d)
+            v = (const char *)d + strs[i].off;
         if (*v && strcmp(v, "preset") && q_valid(strs[i].key, v))
             snprintf(out[n++], 40, "%s=%s", strs[i].opt, v);
     }
     la = json_get(doc, root, "lookahead") >= 0 ? (int)json_get_num(doc, root, "lookahead", 0)
-       : hevc ? s->qdef.la : 0;
+       : d ? d->la : 0;
     if (la > 0 && la <= 32)
         snprintf(out[n++], 40, "--lookahead=%d", la);
     return n;
@@ -5024,41 +5058,40 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             struct json_doc *doc = malloc(sizeof(*doc));
             char err[200];
             int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
-            struct qset nqs;
-            static const char *const keys[4] = { "aq", "temporal_aq", "weighted_pred", "multipass" };
+            struct qset sets[2];
+            bool have[2];
+            int h = root >= 0 ? json_get(doc, root, "h264") : -1;
 
             if (root < 0) {
                 free(doc);
                 api_error(resp, 400, doc ? err : "out of memory");
                 return;
             }
-            memset(&nqs, 0, sizeof(nqs));
-            for (int k = 0; k < 4; k++) {
-                const char *v = json_get_str(doc, root, keys[k], "");
-                char *dst = k == 0 ? nqs.aq : k == 1 ? nqs.taq : k == 2 ? nqs.wp : nqs.mp;
-                size_t cap = k == 3 ? sizeof(nqs.mp) : sizeof(nqs.aq);
-
-                if (!q_valid(keys[k], v) || strlen(v) >= cap) {
+            /* the H.265 set at the top (as before), the H.264 one under "h264"; a set left out stays */
+            have[0] = json_get(doc, root, "aq") >= 0 || json_get(doc, root, "lookahead") >= 0 ||
+                      json_get(doc, root, "weighted_pred") >= 0 || json_get(doc, root, "temporal_aq") >= 0 ||
+                      json_get(doc, root, "multipass") >= 0;
+            have[1] = h >= 0 && doc->node[h].type == JSON_OBJECT;
+            for (int k = 0; k < 2; k++)
+                if (have[k] && !q_parse(doc, k ? h : root, &sets[k], err, sizeof(err))) {
                     free(doc);
-                    snprintf(err, sizeof(err), "%s: not a value it takes", keys[k]);
                     api_error(resp, 400, err);
                     return;
                 }
-                snprintf(dst, cap, "%s", v);
-            }
-            nqs.la = (int)json_get_num(doc, root, "lookahead", 0);
             free(doc);
-            if (nqs.la < 0 || nqs.la > 32) {
-                api_error(resp, 400, "lookahead: 0 to 32 pictures");
-                return;
-            }
             pthread_mutex_lock(&s->lock);
-            s->qdef = nqs;
+            if (have[0])
+                s->qdef = sets[0];
+            if (have[1])
+                s->qdef264 = sets[1];
             save_system_config(s);
             pthread_mutex_unlock(&s->lock);
-            ev(NULL, "info", "user", "picture-quality defaults changed: aq %s, temporal AQ %s, look-ahead %d, "
-               "weighted prediction %s, passes %s", nqs.aq[0] ? nqs.aq : "-", nqs.taq[0] ? nqs.taq : "-", nqs.la,
-               nqs.wp[0] ? nqs.wp : "-", nqs.mp[0] ? nqs.mp : "-");
+            for (int k = 0; k < 2; k++)
+                if (have[k])
+                    ev(NULL, "info", "user", "picture-quality defaults for %s changed: aq %s, temporal AQ %s, "
+                       "look-ahead %d, weighted prediction %s, passes %s", k ? "H.264" : "H.265",
+                       sets[k].aq[0] ? sets[k].aq : "-", sets[k].taq[0] ? sets[k].taq : "-", sets[k].la,
+                       sets[k].wp[0] ? sets[k].wp : "-", sets[k].mp[0] ? sets[k].mp : "-");
         } else if (strcmp(req->method, "GET")) {
             api_error(resp, 405, "GET or PUT");
             return;
@@ -5070,8 +5103,12 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         {
             int np = 0, nq = 0;
 
+            const struct qset *a = &s->qdef, *b = &s->qdef264;
+
             fprintf(f, "{\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, \"weighted_pred\": \"%s\", "
-                    "\"multipass\": \"%s\", \"pending\": [", s->qdef.aq, s->qdef.taq, s->qdef.la, s->qdef.wp, s->qdef.mp);
+                    "\"multipass\": \"%s\", \"h264\": {\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, "
+                    "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}, \"pending\": [",
+                    a->aq, a->taq, a->la, a->wp, a->mp, b->aq, b->taq, b->la, b->wp, b->mp);
             for (int i = 0; i < s->n; i++) {
                 struct chan *c = &s->ch[i];
                 char nq_[160];

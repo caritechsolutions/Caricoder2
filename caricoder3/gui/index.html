@@ -935,22 +935,28 @@ function qualityCard() {
   if (!qualInfo) { loadQuality(); return ""; }
   if (qualInfo.error) return `<section class="card"><header><h2>Picture quality</h2></header><div class="body"><div class="msg err">${esc(qualInfo.error)}</div></div></section>`;
   const Q = qualInfo, pend = Q.pending || [], queued = Q.queued || [];
-  const rows = Object.keys(Q_NAMES).map(k => `<tr><td>${Q_NAMES[k]}</td><td>${esc(qLabel(k, k === "lookahead" ? Q[k] : (Q[k] || "preset")))}</td></tr>`).join("");
-  return `<section class="card"><header><h2>Picture quality on the NVIDIA card</h2><span class="hint">the defaults for every channel that makes H.265; a channel's own setting wins</span><div class="sp"></div><button onclick="editQuality()">Change</button></header>
-    <table><tbody>${rows}</tbody></table>
+  const H = Q.h264 || {}, val = (S, k) => esc(qLabel(k, k === "lookahead" ? S[k] : (S[k] || Q_OPTS[k][0][0])));
+  const rows = Object.keys(Q_NAMES).map(k => `<tr><td>${Q_NAMES[k]}</td><td>${val(Q, k)}</td><td>${val(H, k)}</td></tr>`).join("");
+  return `<section class="card"><header><h2>Picture quality on the NVIDIA card</h2><span class="hint">the defaults for every channel by what it makes; a channel's own setting wins</span><div class="sp"></div><button onclick="editQuality()">Change</button></header>
+    <table><thead><tr><th></th><th>H.265 channels</th><th>H.264 channels</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="body">${queued.length ? `<div class="msg">Restarting one at a time, ${Q.gap_s} s apart: ${queued.length} to go (${esc(queued.join(", "))}).</div>`
       : pend.length ? `<div class="row" style="align-items:center"><span>${pend.length} running channel${pend.length > 1 ? "s" : ""} would start with different options: ${esc(pend.join(", "))}.</span><div class="sp"></div><button class="primary" onclick="restartQuality(${pend.length})" style="flex:0 0 auto">Restart them one at a time</button></div><div class="help" style="margin-top:6px">A changed default reaches a channel when it next starts. Restarted ${Q.gap_s} s apart, each is away for a few seconds and never two at once.</div>`
       : `<div class="dim">Every running channel has these.</div>`}</div></section>`;
 }
 function editQuality() {
   const d = $("#dlg"), Q = qualInfo || {};
-  d.innerHTML = `<h3>Picture quality: the defaults</h3><div class="help" style="margin:0 0 12px">For every channel that makes H.265. A channel can still set its own on its settings page. The help for each is there too.</div>
-    <div class="f">${Object.keys(Q_NAMES).map(k => `<label>${Q_NAMES[k]}</label>${sel("qd_" + k, Q_OPTS[k])}`).join("")}</div>
+  d.innerHTML = `<h3>Picture quality: the defaults</h3><div class="help" style="margin:0 0 12px">A channel that makes H.265 (in any rendition) takes the first column; one that makes only H.264, the second. A channel can still set its own on its settings page, where the help for each is. On the Tesla P40, temporal AQ is H.264 only, and weighted prediction is left off on H.264 with B-frames (the usual).</div>
+    <div class="f" style="grid-template-columns:150px minmax(0,1fr) minmax(0,1fr)"><span></span><b>H.265 channels</b><b>H.264 channels</b>${Object.keys(Q_NAMES).map(k => `<label>${Q_NAMES[k]}</label>${sel("qd_" + k, Q_OPTS[k])}${sel("qe_" + k, Q_OPTS[k])}`).join("")}</div>
     <div id="qd_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="qd_go">Save</button></div>`;
-  for (const k of Object.keys(Q_NAMES)) $("#qd_" + k).value = k === "lookahead" ? String(Q[k] || 0) : (Q[k] || "preset");
+  const H = Q.h264 || {};
+  d.style.width = "880px"; d.addEventListener("close", () => { d.style.width = ""; }, { once: true });
+  for (const k of Object.keys(Q_NAMES)) {
+    $("#qd_" + k).value = k === "lookahead" ? String(Q[k] || 0) : (Q[k] || Q_OPTS[k][0][0]);
+    $("#qe_" + k).value = k === "lookahead" ? String(H[k] || 0) : (H[k] || Q_OPTS[k][0][0]);
+  }
   $("#qd_go").onclick = async () => {
-    const body = {};
-    for (const k of Object.keys(Q_NAMES)) { const v = $("#qd_" + k).value; body[k] = k === "lookahead" ? Number(v) : (v === "preset" ? "" : v); }
+    const body = { h264: {} }, get = (id, k) => { const v = $(id).value; return k === "lookahead" ? Number(v) : (v === "preset" ? "" : v); };
+    for (const k of Object.keys(Q_NAMES)) { body[k] = get("#qd_" + k, k); body.h264[k] = get("#qe_" + k, k); }
     try { qualInfo = await api("/api/quality", { method: "PUT", body: JSON.stringify(body) }); d.close(); rerender(); }
     catch(e) { $("#qd_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };
@@ -1465,7 +1471,7 @@ function settingsHtml() {
       <div class="help"><b>Main 10</b>: 10 bits per colour, made from 8 when the source has 8. Much less banding in skies, gradients and dark scenes at low bit rates. Every receiver of the channel must decode H.265 Main 10 (set-top boxes, hotel TVs, apps): check that first, on one channel. A little more card memory.</div>
     </div>
     <details style="margin-top:22px" id="q_box"><summary style="cursor:pointer;color:var(--fg2)">Picture quality on the NVIDIA card <span id="q_sum" style="color:var(--dim)"></span></summary>
-    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. "Server default" takes what Settings → Picture quality says (for H.265 channels; H.264 channels get nothing from there). Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
+    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. "Server default" takes what Settings → Picture quality says for this channel's kind (H.265, or H.264 only). Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
     <div class="f" style="margin-top:12px">
       <label>Spatial AQ</label>${sel("aq", [["","Server default (Settings)"], ...Q_OPTS.aq])}
       <div class="help">More bits to flat and dark parts of each picture (sky, faces, studio walls), where blocks and banding show first; fewer to busy texture. <b>When:</b> channels at low bit rates (HD under about 2.5 Mb/s) that show banding or blocks in dark or flat scenes. <b>Cost:</b> fine texture (grass, crowds) a little softer; very little card time.</div>

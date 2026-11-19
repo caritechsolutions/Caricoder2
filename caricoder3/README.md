@@ -934,13 +934,15 @@ warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
 the NVIDIA card", with help on when each is worth it). None is on unless
 set; left out, NVIDIA's preset decides, as before.
 
-Server-wide defaults for every channel that makes H.265 are in Settings →
-Picture quality (system config `"quality": {"aq", "temporal_aq",
-"lookahead", "weighted_pred", "multipass"}`, `GET/PUT /api/quality`). A
+Server-wide defaults are in Settings → Picture quality, one set for
+channels that make H.265 (in any rendition) and one for channels that make
+only H.264 (system config `"quality"` and `"quality_h264"`, each `{"aq",
+"temporal_aq", "lookahead", "weighted_pred", "multipass"}`; `GET/PUT
+/api/quality`, the H.264 set under `"h264"`). A
 channel's own value wins: in a channel file `"aq": "preset"` (or
 `"temporal_aq"`/`"multipass"`) means NVIDIA's preset, `"lookahead": 0`
 and `"weighted_pred": "off"` mean off, and a key left out takes the
-default. H.264 channels take nothing from the defaults. A change reaches a
+default; a channel that copies its video takes nothing. A change reaches a
 channel when it next starts; Settings lists the running channels it would
 change and restarts them one at a time, 20 s apart
 (`POST /api/quality/restart`), so only one is ever away.

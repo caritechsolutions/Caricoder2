@@ -3257,7 +3257,8 @@ def supervisor_quality_defaults():
     json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
                "run_dir": os.path.join(root, "run"), "password": "testpass1", "card_process": "off",
                "quality_restart_gap_s": 2,
-               "quality": {"aq": "on", "lookahead": 20, "weighted_pred": "on"}}, open(cfg, "w"))
+               "quality": {"aq": "on", "lookahead": 20, "weighted_pred": "on"},
+               "quality_h264": {"aq": "on", "temporal_aq": "on", "lookahead": 16}}, open(cfg, "w"))
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
 
     def api(path, method="GET", body=None):
@@ -3305,7 +3306,8 @@ def supervisor_quality_defaults():
         a = wait_for(lambda: (lambda x: x if len(x) == 4 else None)(args()), 15, "the four channels did not start")
         need(sorted(a["hevc_plain"][1]) == ["--aq=on", "--lookahead=20", "--weighted-pred=on"], str(a["hevc_plain"]))
         need(sorted(a["hevc_own"][1]) == ["--aq=off", "--multipass=quarter", "--weighted-pred=on"], str(a["hevc_own"]))
-        need(a["h264_only"][1] == [] and a["copy"][1] == [], f"H.264 / copy got options: {a}")
+        need(sorted(a["h264_only"][1]) == ["--aq=on", "--lookahead=16", "--temporal-aq=on"], str(a["h264_only"]))
+        need(a["copy"][1] == [], f"a channel that copies got options: {a['copy']}")
         q = api("/api/quality")
         need(q["aq"] == "on" and q["lookahead"] == 20 and q["pending"] == [], str(q))
 
@@ -3347,8 +3349,18 @@ def supervisor_quality_defaults():
         c = args()
         need(c["hevc_plain"][1] == ["--weighted-pred=off"], str(c["hevc_plain"]))
         need(sorted(c["hevc_own"][1]) == ["--aq=off", "--multipass=quarter", "--weighted-pred=off"], str(c["hevc_own"]))
-        need(c["h264_only"][0] == a["h264_only"][0], "the H.264 channel was restarted")
-        return f"defaults to H.265 only, own settings win, restarts {gap:.1f} s apart"
+        need(c["h264_only"][0] == a["h264_only"][0], "the H.264 channel was restarted for an H.265 change")
+
+        # the H.264 set alone: only the H.264 channel is concerned
+        q = api("/api/quality", "PUT", {"h264": {"aq": "6", "lookahead": 0}})
+        need(q["pending"] == ["h264_only"] and q["h264"]["aq"] == "6" and q["weighted_pred"] == "off", str(q))
+        need(json.load(open(cfg))["quality_h264"]["aq"] == "6", "the H.264 defaults were not saved")
+        api("/api/quality/restart", "POST")
+        d = wait_for(lambda: (lambda x: x if "h264_only" in x and x["h264_only"][0] != a["h264_only"][0] else None)(args()),
+                     15, "h264_only was not restarted")
+        need(d["h264_only"][1] == ["--aq=6"], str(d["h264_only"]))
+        need(d["hevc_plain"][0] == c["hevc_plain"][0], "an H.265 channel was restarted for an H.264 change")
+        return f"H.265 and H.264 defaults each to their own channels, own settings win, restarts {gap:.1f} s apart"
     finally:
         sup.terminate()
         try:
