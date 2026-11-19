@@ -914,6 +914,53 @@ function toolButtons(chan, incident) {
   return `<span class="tools">${chan ? b("record", "Record 20 s", { seconds: 20 }) + b("snapshot", "Keep the picture") + b("probe", "Probe the source", { seconds: 3 }) + b("ask_peers", "Ask the other transcoders", { seconds: 3 }) : ""}${b("ping", "Ping…")}<span class="toolnote dim"></span></span>`;
 }
 
+/* ---------- picture quality on the NVIDIA card: the options, and the server's defaults ---------- */
+const Q_OPTS = {
+  aq: [["preset","As the preset has it"],["off","Off"],["on","On, strength chosen by the driver"],...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(n => [String(n), `On, strength ${n}${n===1?" (gentlest)":n===8?" (middle)":n===15?" (strongest)":""}`])],
+  temporal_aq: [["preset","As the preset has it"],["off","Off"],["on","On (H.264 only on the P40)"]],
+  lookahead: [["0","Off"],["8","8 pictures (about 0.3 s more delay)"],["16","16 pictures (about 0.6 s)"],["20","20 pictures (about 0.8 s)"],["32","32 pictures (about 1.3 s)"]],
+  weighted_pred: [["off","Off"],["on","On"]],
+  multipass: [["preset","As the preset has it"],["off","One pass"],["quarter","Two passes, the first at a quarter size"],["full","Two passes, both full size"]],
+};
+const Q_NAMES = { aq: "Spatial AQ", temporal_aq: "Temporal AQ", lookahead: "Look-ahead", weighted_pred: "Weighted prediction", multipass: "Passes" };
+const qLabel = (k, v) => { const o = Q_OPTS[k].find(x => x[0] === String(v)); return o ? o[1] : (Q_OPTS[k][0][1]); };
+let qualInfo = null, qualAt = 0;
+async function loadQuality(force) {
+  if (!force && Date.now() - qualAt < 5000) return;
+  qualAt = Date.now();
+  try { qualInfo = await api("/api/quality"); } catch(e) { qualInfo = { error: e.message }; }
+  rerender();
+}
+function qualityCard() {
+  if (!qualInfo) { loadQuality(); return ""; }
+  if (qualInfo.error) return `<section class="card"><header><h2>Picture quality</h2></header><div class="body"><div class="msg err">${esc(qualInfo.error)}</div></div></section>`;
+  const Q = qualInfo, pend = Q.pending || [], queued = Q.queued || [];
+  const rows = Object.keys(Q_NAMES).map(k => `<tr><td>${Q_NAMES[k]}</td><td>${esc(qLabel(k, k === "lookahead" ? Q[k] : (Q[k] || "preset")))}</td></tr>`).join("");
+  return `<section class="card"><header><h2>Picture quality on the NVIDIA card</h2><span class="hint">the defaults for every channel that makes H.265; a channel's own setting wins</span><div class="sp"></div><button onclick="editQuality()">Change</button></header>
+    <table><tbody>${rows}</tbody></table>
+    <div class="body">${queued.length ? `<div class="msg">Restarting one at a time, ${Q.gap_s} s apart: ${queued.length} to go (${esc(queued.join(", "))}).</div>`
+      : pend.length ? `<div class="row" style="align-items:center"><span>${pend.length} running channel${pend.length > 1 ? "s" : ""} would start with different options: ${esc(pend.join(", "))}.</span><div class="sp"></div><button class="primary" onclick="restartQuality(${pend.length})" style="flex:0 0 auto">Restart them one at a time</button></div><div class="help" style="margin-top:6px">A changed default reaches a channel when it next starts. Restarted ${Q.gap_s} s apart, each is away for a few seconds and never two at once.</div>`
+      : `<div class="dim">Every running channel has these.</div>`}</div></section>`;
+}
+function editQuality() {
+  const d = $("#dlg"), Q = qualInfo || {};
+  d.innerHTML = `<h3>Picture quality: the defaults</h3><div class="help" style="margin:0 0 12px">For every channel that makes H.265. A channel can still set its own on its settings page. The help for each is there too.</div>
+    <div class="f">${Object.keys(Q_NAMES).map(k => `<label>${Q_NAMES[k]}</label>${sel("qd_" + k, Q_OPTS[k])}`).join("")}</div>
+    <div id="qd_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="qd_go">Save</button></div>`;
+  for (const k of Object.keys(Q_NAMES)) $("#qd_" + k).value = k === "lookahead" ? String(Q[k] || 0) : (Q[k] || "preset");
+  $("#qd_go").onclick = async () => {
+    const body = {};
+    for (const k of Object.keys(Q_NAMES)) { const v = $("#qd_" + k).value; body[k] = k === "lookahead" ? Number(v) : (v === "preset" ? "" : v); }
+    try { qualInfo = await api("/api/quality", { method: "PUT", body: JSON.stringify(body) }); d.close(); rerender(); }
+    catch(e) { $("#qd_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
+}
+async function restartQuality(n) {
+  if (!confirm(`Restart ${n} channel${n > 1 ? "s" : ""} one at a time, ${qualInfo.gap_s} s apart? Each is away for a few seconds.`)) return;
+  try { qualInfo = await api("/api/quality/restart", { method: "POST" }); rerender(); } catch(e) { alert(e.message); }
+}
+
 /* ---------- the other transcoders ---------- */
 let peersInfo = null, peersAt = 0;
 async function loadPeers(force) {
@@ -1418,17 +1465,17 @@ function settingsHtml() {
       <div class="help"><b>Main 10</b>: 10 bits per colour, made from 8 when the source has 8. Much less banding in skies, gradients and dark scenes at low bit rates. Every receiver of the channel must decode H.265 Main 10 (set-top boxes, hotel TVs, apps): check that first, on one channel. A little more card memory.</div>
     </div>
     <details style="margin-top:22px" id="q_box"><summary style="cursor:pointer;color:var(--fg2)">Picture quality on the NVIDIA card <span id="q_sum" style="color:var(--dim)"></span></summary>
-    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. None is on unless set here. Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
+    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. "Server default" takes what Settings → Picture quality says (for H.265 channels; H.264 channels get nothing from there). Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
     <div class="f" style="margin-top:12px">
-      <label>Spatial AQ</label>${sel("aq", [["","As the preset has it"],["off","Off"],["on","On, strength chosen by the driver"],...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(n => [String(n), `On, strength ${n}${n===1?" (gentlest)":n===8?" (middle)":n===15?" (strongest)":""}`])])}
+      <label>Spatial AQ</label>${sel("aq", [["","Server default (Settings)"], ...Q_OPTS.aq])}
       <div class="help">More bits to flat and dark parts of each picture (sky, faces, studio walls), where blocks and banding show first; fewer to busy texture. <b>When:</b> channels at low bit rates (HD under about 2.5 Mb/s) that show banding or blocks in dark or flat scenes. <b>Cost:</b> fine texture (grass, crowds) a little softer; very little card time.</div>
-      <label>Temporal AQ</label>${sel("temporal_aq", [["","As the preset has it"],["off","Off"],["on","On"]])}
+      <label>Temporal AQ</label>${sel("temporal_aq", [["","Server default (Settings)"], ...Q_OPTS.temporal_aq])}
       <div class="help">More bits to detail that stays still (logos, news sets, slow pans), which later pictures then reuse. <b>When:</b> talk, news and studio channels. <b>Cost:</b> picture sizes swing more within each key-frame interval; some card time. On the Tesla P40 it is expected for H.264 only (<code>--gpu-test</code> says); where the card lacks it, it is left off and the channel log says so.</div>
-      <label>Look-ahead</label>${sel("lookahead", [["","Off"],["8","8 pictures (about 0.3 s more delay)"],["16","16 pictures (about 0.6 s)"],["20","20 pictures (about 0.8 s)"],["32","32 pictures (about 1.3 s)"]])}
+      <label>Look-ahead</label>${sel("lookahead", [["","Server default (Settings)"], ...Q_OPTS.lookahead])}
       <div class="help">The card studies the coming pictures before coding them: bits go where scenes are hard, and key pictures land on scene cuts. <b>When:</b> sport, action, frequent scene changes. <b>Cost:</b> that much more delay (the channel's buffer grows by itself), more card memory, and fewer pictures a second from the card.</div>
-      <label>Weighted prediction</label>${sel("weighted_pred", [["","Off"],["on","On"]])}
+      <label>Weighted prediction</label>${sel("weighted_pred", [["","Server default (Settings)"], ...Q_OPTS.weighted_pred])}
       <div class="help">Fades to and from black, flashes and lighting changes are coded as a change of brightness instead of as new detail. <b>When:</b> films, adverts, anything with many fades. <b>Cost:</b> only works without B-frames. H.265 on this card has none anyway; for H.264, set B-frames to None, which costs about a tenth more bit rate, so it rarely pays there. A little card time.</div>
-      <label>Passes</label>${sel("multipass", [["","As the preset has it"],["off","One pass"],["quarter","Two passes, the first at a quarter size"],["full","Two passes, both full size"]])}
+      <label>Passes</label>${sel("multipass", [["","Server default (Settings)"], ...Q_OPTS.multipass])}
       <div class="help">A quick first look at each picture before the real encode: bits spread better within the picture and the rate stays closer to its target. <b>When:</b> the card has room to spare. <b>Cost:</b> fewer channels per card; quarter size gives most of the gain for less. Check <code>--gpu-test</code> before turning it on for many channels.</div>
     </div>
     </details>
@@ -1542,9 +1589,9 @@ function fillForm(cfg) {
   $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
   $("#bframes").value = cfg.bframes != null ? String(cfg.bframes) : ""; $("#profile").value = cfg.profile || "";
   for (const k of ["aq","temporal_aq","weighted_pred","multipass"]) $("#"+k).value = cfg[k] || "";
-  $("#lookahead").value = cfg.lookahead ? String(cfg.lookahead) : "";
-  { const on = ["aq","temporal_aq","lookahead","weighted_pred","multipass"].filter(k => cfg[k]).length;
-    $("#q_sum").textContent = on ? `(${on} set)` : "(none set)"; $("#q_box").open = !!on; }
+  $("#lookahead").value = cfg.lookahead != null ? String(cfg.lookahead) : "";
+  { const on = ["aq","temporal_aq","lookahead","weighted_pred","multipass"].filter(k => cfg[k] != null && cfg[k] !== "").length;
+    $("#q_sum").textContent = on ? `(${on} set here; the rest from Settings)` : "(all from Settings)"; $("#q_box").open = !!on; }
   for (const k of ["delay","gop","vbv","service_name","service_provider","service_id","ts_id","onid","pmt_pid"]) $("#"+k).value = cfg[k] ?? "";
   $("#pcr_mode").value = cfg.pcr_pid === "video" ? "video" : cfg.pcr_pid ? "pid" : "";
   $("#pcr_pid").value = typeof cfg.pcr_pid === "number" ? cfg.pcr_pid : ""; $("#pcr_pid").style.display = $("#pcr_mode").value === "pid" ? "" : "none";
@@ -1671,7 +1718,7 @@ function readForm() {
   if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
   for (const k of ["decoder","encoder","preset","profile","service_name","service_provider",
                    "aq","temporal_aq","weighted_pred","multipass"]) if (v(k)) cfg[k] = v(k);
-  if (v("lookahead")) cfg.lookahead = Number(v("lookahead"));
+  if (v("lookahead") !== "") cfg.lookahead = Number(v("lookahead"));
   if (v("bframes") !== "") cfg.bframes = Number(v("bframes"));
   if (v("gpu")) cfg.gpu = Number(v("gpu"));
   for (const k of ["delay","gop","vbv"]) if (num(k)) cfg[k] = num(k);
@@ -1827,8 +1874,8 @@ function renderIncidentsPage() {
 function renderSettingsPage() {
   const main = $("#main");
   if (main.dataset.page !== "settings") { main.dataset.page = "settings"; main.innerHTML = `<div class="head"><h1>Settings</h1><span class="state">for this server; each channel's own are on its page</span></div><div id="set_body"></div>`; }
-  loadWatchdog(); loadTech(); loadPeers();
-  $("#set_body").innerHTML = watchdogCard("settings") + techCard("settings") + peersCard()
+  loadWatchdog(); loadTech(); loadPeers(); loadQuality();
+  $("#set_body").innerHTML = watchdogCard("settings") + qualityCard() + techCard("settings") + peersCard()
     + (sys ? `<section class="card"><header><h2>This build</h2><span class="hint">caricoder3 ${esc(sys.version)}: the codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:8px;max-height:none">${esc(sys.backends || "")}</pre></div></section>` : "");
 }
 

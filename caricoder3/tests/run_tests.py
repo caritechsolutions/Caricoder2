@@ -3241,6 +3241,123 @@ def weather_reports():
 
 
 @test
+def supervisor_quality_defaults():
+    """The picture-quality defaults in Settings: they reach every H.265 channel that has
+    none of its own, a channel's own setting wins, H.264 channels get nothing from them,
+    and a change restarts the channels it concerns one at a time when asked."""
+    import base64
+    import urllib.request
+    root = w("super_q")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "card_process": "off",
+               "quality_restart_gap_s": 2,
+               "quality": {"aq": "on", "lookahead": 20, "weighted_pred": "on"}}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+
+    chans = {
+        "hevc_plain": {"video": ["hevc:2M"]},
+        "hevc_own": {"video": ["640x360:hevc:1M"], "aq": "off", "lookahead": 0, "multipass": "quarter"},
+        "h264_only": {"video": ["h264:2M"]},
+        "copy": {},
+    }
+    for i, (name, extra) in enumerate(chans.items()):
+        json.dump(dict({"input": f"udp://239.255.77.{i + 1}:5000", "share_input": False}, **extra),
+                  open(os.path.join(root, "channels", name + ".json"), "w"))
+
+    def args():
+        out = {}
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                a = open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="replace").split("\0")
+            except OSError:
+                continue
+            if "--name" in a and a[0] == BIN and "--run-dir" in a and root in " ".join(a):
+                out[a[a.index("--name") + 1]] = (int(pid), [x for x in a if x.startswith(
+                    ("--aq", "--temporal-aq", "--lookahead", "--weighted-pred", "--multipass"))])
+        return out
+
+    def wait_for(fn, secs, what):
+        end = time.time() + secs
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.2)
+        raise Fail(what)
+
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"))
+    try:
+        wait_up(port)
+        a = wait_for(lambda: (lambda x: x if len(x) == 4 else None)(args()), 15, "the four channels did not start")
+        need(sorted(a["hevc_plain"][1]) == ["--aq=on", "--lookahead=20", "--weighted-pred=on"], str(a["hevc_plain"]))
+        need(sorted(a["hevc_own"][1]) == ["--aq=off", "--multipass=quarter", "--weighted-pred=on"], str(a["hevc_own"]))
+        need(a["h264_only"][1] == [] and a["copy"][1] == [], f"H.264 / copy got options: {a}")
+        q = api("/api/quality")
+        need(q["aq"] == "on" and q["lookahead"] == 20 and q["pending"] == [], str(q))
+
+        # a new default: two H.265 channels would start differently, nobody restarted yet
+        q = api("/api/quality", "PUT", {"aq": "8", "lookahead": 16, "weighted_pred": "on", "temporal_aq": "", "multipass": ""})
+        # hevc_own keeps its own aq and lookahead; only the shared WP is unchanged: not pending
+        need(q["pending"] == ["hevc_plain"], f"pending: {q['pending']}")
+        need(json.load(open(cfg))["quality"]["aq"] == "8", "the defaults were not saved")
+        before = args()
+        need(before["hevc_plain"][0] == a["hevc_plain"][0], "restarted without being asked")
+
+        # restart: the one pending channel comes back with the new options; the others untouched
+        api("/api/quality/restart", "POST")
+        b = wait_for(lambda: (lambda x: x if "hevc_plain" in x and x["hevc_plain"][0] != a["hevc_plain"][0] else None)(args()),
+                     15, "hevc_plain was not restarted")
+        need(sorted(b["hevc_plain"][1]) == ["--aq=8", "--lookahead=16", "--weighted-pred=on"], str(b["hevc_plain"]))
+        for n in ("hevc_own", "h264_only", "copy"):
+            need(b[n][0] == a[n][0], f"{n} was restarted though nothing changed for it")
+        need(wait_for(lambda: api("/api/quality")["pending"] == [] and api("/api/quality")["queued"] == [], 10,
+                      "still pending after the restart"), "")
+
+        # two pending: restarted one at a time, the gap apart
+        api("/api/quality", "PUT", {"aq": "", "lookahead": 0, "weighted_pred": "off", "temporal_aq": "", "multipass": ""})
+        c0 = args()
+        api("/api/quality/restart", "POST")
+        q = api("/api/quality")
+        need(len(q["pending"]) + len(q["queued"]) >= 1, str(q))
+        t_first = {}
+        end = time.time() + 20
+        while time.time() < end and len(t_first) < 2:
+            now = args()
+            for n in ("hevc_plain", "hevc_own"):
+                if n not in t_first and n in now and now[n][0] != c0[n][0]:
+                    t_first[n] = time.time()
+            time.sleep(0.1)
+        need(len(t_first) == 2, f"not both restarted: {t_first}")
+        gap = abs(t_first["hevc_plain"] - t_first["hevc_own"])
+        need(gap >= 1.5, f"restarted {gap:.1f} s apart: not one at a time")
+        c = args()
+        need(c["hevc_plain"][1] == ["--weighted-pred=off"], str(c["hevc_plain"]))
+        need(sorted(c["hevc_own"][1]) == ["--aq=off", "--multipass=quarter", "--weighted-pred=off"], str(c["hevc_own"]))
+        need(c["h264_only"][0] == a["h264_only"][0], "the H.264 channel was restarted")
+        return f"defaults to H.265 only, own settings win, restarts {gap:.1f} s apart"
+    finally:
+        sup.terminate()
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+
+
+@test
 def supervisor_technician_fits():
     """The technician's request is fitted to the model's context (the notes, the incident and the earlier cases cut to size), and asked again with less when the model still says it is too long: on 27 Oct 53 incidents went unanswered at 16447 tokens of a 16384 context."""
     import base64

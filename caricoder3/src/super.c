@@ -131,6 +131,8 @@ struct chan {
 
     /* a shared input: the channel reads its program from the share's
      * reader on this loopback port (0 = reads its input itself) */
+    uint32_t q_hash;                        /* of the picture-quality options it was started with */
+    bool q_restart;                         /* queued to restart for new quality defaults */
     uint32_t sh_hash;                       /* of cfg, when the fields below were worked out */
     bool sh_able;                           /* its input is UDP/RTP and sharing is not turned off */
     char sh_url[512];
@@ -263,6 +265,14 @@ struct super {
                                              * advertising break, which can be in another language) */
     int64_t lang_have_t;                    /* when Whisper's presence was last looked at */
     bool lang_have;
+    /* NVIDIA picture-quality options for every H.265 channel; a channel's
+     * own setting wins ("" in a channel: this default) */
+    struct qset {
+        char aq[8], taq[8], wp[8], mp[12];
+        int la;
+    } qdef;
+    int64_t q_next_ns;                      /* the next queued restart */
+    int q_gap_s;                            /* between restarts (20 s; tests shorter) */
     struct cardp cards[CARDS_MAX];
     int n_cards;
     bool stopping_all;                      /* the supervisor is ending: card processes go last */
@@ -619,6 +629,16 @@ static void save_system_config(struct super *s)
                      ",\n  \"language_check\": {\"every_h\": %g, \"expect\": %s, \"min_probability\": %.2f, \"clip_s\": %d}\n}\n",
                      s->lang_every_s / 3600.0, json_quote(s->lang_expect, lq, sizeof(lq)), s->lang_min_p, s->lang_clip_s);
     }
+    {
+        /* the quality defaults, before the closing brace */
+        size_t n = strlen(text);
+
+        if (n > 3)
+            snprintf(text + n - 3, sizeof(text) - (n - 3),
+                     ",\n  \"quality\": {\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, "
+                     "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}\n}\n",
+                     s->qdef.aq, s->qdef.taq, s->qdef.la, s->qdef.wp, s->qdef.mp);
+    }
     if (s->wx_set) {
         /* the weather places, when they were set (otherwise the defaults stay defaults) */
         size_t n = strlen(text);
@@ -759,6 +779,19 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         s->ird_o.baseline_n = (int)json_get_num(&doc, root, "ird_baseline_n", 30);
         s->ird_o.probe_s = (int)json_get_num(&doc, root, "ird_probe_s", 5);
         s->ird_o.settle_s = (int)json_get_num(&doc, root, "ird_settle_s", 300);
+    }
+    {
+        int q = json_get(&doc, root, "quality");
+
+        memset(&s->qdef, 0, sizeof(s->qdef));
+        s->q_gap_s = (int)json_get_num(&doc, root, "quality_restart_gap_s", 20);
+        if (q >= 0) {
+            snprintf(s->qdef.aq, sizeof(s->qdef.aq), "%s", json_get_str(&doc, q, "aq", ""));
+            snprintf(s->qdef.taq, sizeof(s->qdef.taq), "%s", json_get_str(&doc, q, "temporal_aq", ""));
+            snprintf(s->qdef.wp, sizeof(s->qdef.wp), "%s", json_get_str(&doc, q, "weighted_pred", ""));
+            snprintf(s->qdef.mp, sizeof(s->qdef.mp), "%s", json_get_str(&doc, q, "multipass", ""));
+            s->qdef.la = (int)json_get_num(&doc, q, "lookahead", 0);
+        }
     }
     {
         int l = json_get(&doc, root, "language_check");
@@ -1001,6 +1034,94 @@ static void cards_update(struct super *s, int64_t now, bool stop)
 static void chan_share_prepare(struct super *s, struct chan *c);
 static bool evidence_on(const struct super *s);
 
+/* Values the options take, as the command line has them; "preset" means
+ * no option (NVIDIA's preset decides). */
+static bool q_valid(const char *key, const char *v)
+{
+    if (!*v || !strcmp(v, "preset"))
+        return true;
+    if (!strcmp(key, "aq")) {
+        char *end;
+        long n = strtol(v, &end, 10);
+
+        return !strcmp(v, "off") || !strcmp(v, "on") || (end != v && !*end && n >= 1 && n <= 15);
+    }
+    if (!strcmp(key, "multipass"))
+        return !strcmp(v, "off") || !strcmp(v, "quarter") || !strcmp(v, "full");
+    return !strcmp(v, "off") || !strcmp(v, "on");
+}
+
+/* Does the channel make H.265 (any of its renditions)? */
+static bool chan_makes_hevc(const struct json_doc *doc, int root)
+{
+    int a = json_get(doc, root, "video");
+
+    for (int j = a >= 0 ? doc->node[a].first_child : -1; j >= 0; j = doc->node[j].next) {
+        const char *v = doc->node[j].type == JSON_STRING ? doc->node[j].str : "";
+        char buf[128], *save = NULL;
+
+        snprintf(buf, sizeof(buf), "%s", v);
+        for (char *t = strtok_r(buf, ":", &save); t; t = strtok_r(NULL, ":", &save))
+            if (!strcmp(t, "hevc") || !strcmp(t, "h265"))
+                return true;
+    }
+    return false;
+}
+
+/*
+ * The picture-quality options of a channel: its own where it has them,
+ * otherwise the server's default (s->qdef) when it makes H.265. Into
+ * out[] as command-line arguments; returns how many.
+ */
+static int quality_args(const struct super *s, const struct json_doc *doc, int root, char out[5][40])
+{
+    static const struct { const char *key, *opt; size_t off; } strs[] = {
+        { "aq", "--aq", offsetof(struct qset, aq) },
+        { "temporal_aq", "--temporal-aq", offsetof(struct qset, taq) },
+        { "weighted_pred", "--weighted-pred", offsetof(struct qset, wp) },
+        { "multipass", "--multipass", offsetof(struct qset, mp) },
+    };
+    bool hevc = chan_makes_hevc(doc, root);
+    int n = 0, la;
+
+    for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
+        const char *v = json_get_str(doc, root, strs[i].key, "");
+
+        if (!*v && hevc)
+            v = (const char *)&s->qdef + strs[i].off;
+        if (*v && strcmp(v, "preset") && q_valid(strs[i].key, v))
+            snprintf(out[n++], 40, "%s=%s", strs[i].opt, v);
+    }
+    la = json_get(doc, root, "lookahead") >= 0 ? (int)json_get_num(doc, root, "lookahead", 0)
+       : hevc ? s->qdef.la : 0;
+    if (la > 0 && la <= 32)
+        snprintf(out[n++], 40, "--lookahead=%d", la);
+    return n;
+}
+
+static uint32_t text_hash(const char *t);
+
+static uint32_t quality_hash(char q[5][40], int n)
+{
+    uint32_t h = 1;
+
+    for (int i = 0; i < n; i++)
+        h = h * 31 + text_hash(q[i]);
+    return h;
+}
+
+/* What the channel would get if started now, as quality_hash says it. */
+static uint32_t chan_quality_now(const struct super *s, const struct chan *c)
+{
+    struct json_doc *doc = malloc(sizeof(*doc));
+    char e[200], qa[5][40];
+    int root = doc && c->cfg ? json_parse(doc, c->cfg, e, sizeof(e)) : -1;
+    uint32_t h = root >= 0 ? quality_hash(qa, quality_args(s, doc, root, qa)) : c->q_hash;
+
+    free(doc);
+    return h;
+}
+
 /* Builds the command line from the channel's JSON. Returns the number
  * of arguments, -1 with a reason. */
 static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char *err, size_t errlen)
@@ -1100,9 +1221,14 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         v = json_get_num(&doc, root, "bframes", -1);
         if (v >= 0)
             ARG("--bframes=%d", (int)v);
-        v = json_get_num(&doc, root, "lookahead", 0);
-        if (v > 0)
-            ARG("--lookahead=%d", (int)v);
+        {
+            char qa[5][40];
+            int nq = quality_args(s, &doc, root, qa);
+
+            for (int j = 0; j < nq; j++)
+                ARG("%s", qa[j]);
+            c->q_hash = quality_hash(qa, nq);
+        }
         v = json_get_num(&doc, root, "pcr_interval", 0);
         if (v > 0)
             ARG("--pcr-interval=%d", (int)v);
@@ -1179,8 +1305,6 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         static const char *const strs[][2] = {
             { "decoder", "--decoder=%s" }, { "encoder", "--encoder=%s" }, { "preset", "--preset=%s" },
             { "profile", "--profile=%s" },
-            { "aq", "--aq=%s" }, { "temporal_aq", "--temporal-aq=%s" },
-            { "weighted_pred", "--weighted-pred=%s" }, { "multipass", "--multipass=%s" },
             { "service_name", "--service-name=%s" }, { "service_provider", "--service-provider=%s" },
         };
 
@@ -3630,6 +3754,26 @@ static void tick(struct super *s)
     disk_tick(s);
     jobs_tick(s);
     lang_tick(s);
+    if (now >= s->q_next_ns) {
+        /* the queued restarts for new quality defaults: one, then a pause, so
+         * the cards open one encoder at a time and only one channel is
+         * away at any moment */
+        for (int i = 0; i < s->n; i++) {
+            struct chan *c = &s->ch[i];
+
+            if (!c->q_restart)
+                continue;
+            c->q_restart = false;
+            if (c->state != CH_RUNNING || !c->want)
+                continue;
+            ev(c->name, "info", "user", "restarted for the picture-quality defaults");
+            c->restarts = 0;
+            c->next_start_ns = 0;
+            chan_stop(s, c);
+            s->q_next_ns = now + (int64_t)s->q_gap_s * 1000000000LL;
+            break;
+        }
+    }
     {
         static int64_t wd_last;
         int64_t t = time(NULL);
@@ -4841,6 +4985,109 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             return;
         pthread_mutex_lock(&s->lock);
         peers_json(s, f);
+        pthread_mutex_unlock(&s->lock);
+        fclose(f);
+        resp->status = 200;
+        resp->type = "application/json";
+        resp->body = out;
+        resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/quality") || !strcmp(p, "/api/quality/restart")) {
+        /* GET: the defaults for H.265 channels, and which running channels would
+         * start differently now ("pending") or are queued to; PUT the defaults;
+         * POST .../restart: the pending ones restarted one at a time */
+        char *out = NULL;
+        size_t len = 0;
+        FILE *f;
+
+        if (!strcmp(p, "/api/quality/restart")) {
+            int nq = 0;
+
+            if (strcmp(req->method, "POST")) {
+                api_error(resp, 405, "POST");
+                return;
+            }
+            pthread_mutex_lock(&s->lock);
+            for (int i = 0; i < s->n; i++) {
+                struct chan *c = &s->ch[i];
+
+                if (c->state == CH_RUNNING && chan_quality_now(s, c) != c->q_hash) {
+                    c->q_restart = true;
+                    nq++;
+                }
+            }
+            s->q_next_ns = 0;
+            pthread_mutex_unlock(&s->lock);
+            ev(NULL, "info", "user", "%d channel(s) to restart one at a time for the picture-quality defaults", nq);
+        } else if (!strcmp(req->method, "PUT")) {
+            struct json_doc *doc = malloc(sizeof(*doc));
+            char err[200];
+            int root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
+            struct qset nqs;
+            static const char *const keys[4] = { "aq", "temporal_aq", "weighted_pred", "multipass" };
+
+            if (root < 0) {
+                free(doc);
+                api_error(resp, 400, doc ? err : "out of memory");
+                return;
+            }
+            memset(&nqs, 0, sizeof(nqs));
+            for (int k = 0; k < 4; k++) {
+                const char *v = json_get_str(doc, root, keys[k], "");
+                char *dst = k == 0 ? nqs.aq : k == 1 ? nqs.taq : k == 2 ? nqs.wp : nqs.mp;
+                size_t cap = k == 3 ? sizeof(nqs.mp) : sizeof(nqs.aq);
+
+                if (!q_valid(keys[k], v) || strlen(v) >= cap) {
+                    free(doc);
+                    snprintf(err, sizeof(err), "%s: not a value it takes", keys[k]);
+                    api_error(resp, 400, err);
+                    return;
+                }
+                snprintf(dst, cap, "%s", v);
+            }
+            nqs.la = (int)json_get_num(doc, root, "lookahead", 0);
+            free(doc);
+            if (nqs.la < 0 || nqs.la > 32) {
+                api_error(resp, 400, "lookahead: 0 to 32 pictures");
+                return;
+            }
+            pthread_mutex_lock(&s->lock);
+            s->qdef = nqs;
+            save_system_config(s);
+            pthread_mutex_unlock(&s->lock);
+            ev(NULL, "info", "user", "picture-quality defaults changed: aq %s, temporal AQ %s, look-ahead %d, "
+               "weighted prediction %s, passes %s", nqs.aq[0] ? nqs.aq : "-", nqs.taq[0] ? nqs.taq : "-", nqs.la,
+               nqs.wp[0] ? nqs.wp : "-", nqs.mp[0] ? nqs.mp : "-");
+        } else if (strcmp(req->method, "GET")) {
+            api_error(resp, 405, "GET or PUT");
+            return;
+        }
+        f = open_memstream(&out, &len);
+        if (!f)
+            return;
+        pthread_mutex_lock(&s->lock);
+        {
+            int np = 0, nq = 0;
+
+            fprintf(f, "{\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, \"weighted_pred\": \"%s\", "
+                    "\"multipass\": \"%s\", \"pending\": [", s->qdef.aq, s->qdef.taq, s->qdef.la, s->qdef.wp, s->qdef.mp);
+            for (int i = 0; i < s->n; i++) {
+                struct chan *c = &s->ch[i];
+                char nq_[160];
+
+                if (c->state == CH_RUNNING && chan_quality_now(s, c) != c->q_hash)
+                    fprintf(f, "%s%s", np++ ? ", " : "", json_quote(c->name, nq_, sizeof(nq_)));
+            }
+            fprintf(f, "], \"queued\": [");
+            for (int i = 0; i < s->n; i++) {
+                char nq_[160];
+
+                if (s->ch[i].q_restart)
+                    fprintf(f, "%s%s", nq++ ? ", " : "", json_quote(s->ch[i].name, nq_, sizeof(nq_)));
+            }
+            fprintf(f, "], \"gap_s\": %d}\n", s->q_gap_s);
+        }
         pthread_mutex_unlock(&s->lock);
         fclose(f);
         resp->status = 200;

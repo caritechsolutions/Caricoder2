@@ -393,7 +393,10 @@ areas), temporal AQ (bits to still detail; on the Tesla P40 expected for
 H.264 only), look-ahead (1-32 pictures studied ahead; adds that much delay
 and the channel's buffer grows to match), weighted prediction (fades;
 only without B-frames) and two passes. Profile Main 10 makes H.265 10-bit,
-even from an 8-bit source. None is on unless set. The channel log says at
+even from an 8-bit source. Settings holds defaults for every H.265
+channel; a channel's own setting wins. A restart for new defaults is
+logged as "restarted for the picture-quality defaults": a short planned
+gap, not a fault. The channel log says at
 encoder start which are in force ("picture-quality options: ..."), and a
 warning when the card lacks one ("left off"). When a viewer complains of
 banding or blocks in dark scenes, AQ or Main 10 is the usual remedy; when
