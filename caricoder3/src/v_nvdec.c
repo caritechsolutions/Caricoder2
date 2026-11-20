@@ -36,6 +36,7 @@ struct nvd {
     int want_w, want_h;             /* pictures asked for at this size (0: as coded; -1: see video_size) */
     bool want_fit;
     bool scaled;                    /* the card scales (and deinterlaces) */
+    bool said_interlaced;           /* "not resized by the decoder" said once */
 
     CUVIDEOFORMAT fmt;
     unsigned coded_w, coded_h;
@@ -100,10 +101,21 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
         snprintf(d->err, sizeof(d->err), "the stream announces a %dx%d picture", w, h);
         return 0;
     }
-    /* Another size wanted: the card's own scaler makes it, and an
-     * interlaced source is deinterlaced on the way (a scaled picture is a
-     * progressive one: a rendition for OTT). */
-    if (d->want_w || d->want_h) {
+    /* Another size wanted: the card's own scaler makes it (a scaled
+     * picture is a progressive one: a rendition for OTT). Not for an
+     * interlaced source: resized and deinterlaced at once, a Tesla P40
+     * (driver 535) gave pictures laid out other than NV12 says (dark,
+     * striped, the left half stretched over the whole width: an HBO 1080i
+     * H.264 feed made 720, 2026-11-20), while progressive ones came out
+     * right (gpu-test, measured). An interlaced source comes out whole,
+     * as coded, and is resized and deinterlaced after, on the card
+     * (nv_scale, field blend: xc_video.c). */
+    if ((d->want_w || d->want_h) && !f->progressive_sequence) {
+        if (!d->said_interlaced)
+            log_info("nvdec: interlaced source: decoded at its own size, resized after on the card");
+        d->said_interlaced = true;
+        d->scaled = false;
+    } else if (d->want_w || d->want_h) {
         int tw, th;
 
         video_size(d->want_w, d->want_h, d->want_fit, w, h, f->display_aspect_ratio.x,

@@ -577,6 +577,13 @@ static bool scale_route(FILE *out, int gpu, const struct blob *src, enum codec_i
             if (++n < 20 && i < src->n)
                 continue;
             done = true;
+            /* the decoder did not make the size (an interlaced source):
+             * resized after, as a channel does (xc_video.c) */
+            if (!scale_to_w && dw && (f.width != dw || f.height != dh)) {
+                scale_to_w = dw;
+                scale_to_h = dh;
+                depth_to = f.depth;
+            }
             if (scale_to_w) {
                 if (!nv_scale_to(&sc, &f, scale_to_w, scale_to_h, depth_to, &g, err, sizeof(err))) {
                     fprintf(out, "  FAIL  %-44s %s\n", label, err);
@@ -602,8 +609,9 @@ static bool scale_route(FILE *out, int gpu, const struct blob *src, enum codec_i
 
 static int scale_test(FILE *out, int gpu)
 {
-    static const struct { enum codec_id codec; int depth; } srcs[] = {
-        { CODEC_HEVC, 10 }, { CODEC_HEVC, 8 }, { CODEC_H264, 8 },
+    static const struct { enum codec_id codec; int depth; bool interlaced; } srcs[] = {
+        { CODEC_HEVC, 10, false }, { CODEC_HEVC, 8, false }, { CODEC_H264, 8, false },
+        { CODEC_H264, 8, true },            /* 1080i, as broadcast HD is */
     };
     char name[128] = "";
     int bad = 0;
@@ -624,9 +632,9 @@ static int scale_test(FILE *out, int gpu)
         char err[200] = "", lab[96];
         void *enc;
         int d = srcs[k].depth;
-        const char *cn = srcs[k].codec == CODEC_HEVC ? "H.265" : "H.264";
+        const char *cn = srcs[k].interlaced ? "H.264i" : srcs[k].codec == CODEC_HEVC ? "H.265" : "H.264";
 
-        fill_cfg(&ec, srcs[k].codec, 1920, 1080, d, gpu, NULL, false);
+        fill_cfg(&ec, srcs[k].codec, 1920, 1080, d, gpu, NULL, srcs[k].interlaced);
         ec.bitrate = 20000000;
         if (!eb || !mem || !(enc = eb->venc->open(&ec, err, sizeof(err)))) {
             fprintf(out, "  FAIL  %s %d-bit source: could not encode it: %s\n", cn, d, err);
@@ -636,6 +644,7 @@ static int scale_test(FILE *out, int gpu)
         }
         for (int i = 0; i < 40; i++) {
             make_smooth(&f, mem, 1920, 1080, d, i);
+            f.interlaced = f.tff = srcs[k].interlaced;
             eb->venc->push(enc, &f);
             while (eb->venc->pull(enc, &p) == 1)
                 blob_add(&src, &p);
@@ -647,7 +656,7 @@ static int scale_test(FILE *out, int gpu)
         free(mem);
         snprintf(lab, sizeof(lab), "%s %d-bit: decoded, as it is", cn, d);
         bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 0, 0, 0, lab);
-        snprintf(lab, sizeof(lab), "%s %d-bit: the decoder resizes", cn, d);
+        snprintf(lab, sizeof(lab), srcs[k].interlaced ? "%s %d-bit: as a channel resizes it" : "%s %d-bit: the decoder resizes", cn, d);
         bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, false, 0, 0, 0, lab);
         snprintf(lab, sizeof(lab), "%s %d-bit: resized after (renditions)", cn, d);
         bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, d, lab);

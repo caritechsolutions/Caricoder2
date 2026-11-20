@@ -6720,6 +6720,35 @@ def xc_nvidia_standin():
 
 
 @test
+def xc_nvidia_interlaced_resize():
+    """An interlaced source made another size on the card: the card's decoder does not resize it
+    (resized and deinterlaced at once, a real card gave garbled pictures); it comes out whole and
+    is resized after, on the card, field-blended. A progressive source still has the decoder resize."""
+    skip = xc_ready("libavcodec", "x264")
+    if skip:
+        return skip
+    if "nvenc" not in {l.split()[0] for l in subprocess.run(
+            [BIN, "--backends"], capture_output=True, text=True).stdout.splitlines()}:
+        return "SKIPPED: built without NVIDIA support"
+    if not nvmock_dir():
+        return "SKIPPED: could not build the stand-in libraries"
+    src = v_source("xc_v_h264", "h264")
+    res = []
+    for fmt, inter in (("320x240:8:i", True), ("320x240:8", False)):
+        out = w("xc_nv_ires.ts")
+        st, log = run_mock(src, out, "--video", "160x120:h264:150k", env_extra={"NVMOCK_FORMAT": fmt})
+        must_pass(out)
+        x = xstats(st, 0x100)
+        need(x["encoder"] == "nvenc" and x["decoder"] == "nvdec" and x["frames_out"] >= 195, str(x))
+        need(", 160x120," in log, "not made 160x120: " + log[-500:])
+        said = "decoded at its own size, resized after on the card" in log
+        need(said == inter, ("an interlaced source was resized by the decoder" if inter else
+                             "a progressive source was not resized by the decoder") + ": " + log[-400:])
+        res.append(("interlaced: decoded whole, resized after" if inter else "progressive: the decoder resizes"))
+    return "; ".join(res)
+
+
+@test
 def xc_nvidia_quality_options():
     """The NVIDIA picture-quality options reach the card, in a whole channel run.
 
