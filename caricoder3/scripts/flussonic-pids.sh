@@ -4,7 +4,15 @@
 # of the streams in the PMT, the TS id and the service name. So whatever
 # receives the multicast sees no change when caricoder3 takes over.
 #   curl -fsSL .../scripts/flussonic-pids.sh | sudo bash
-#   (DRY=1 ... | sudo DRY=1 bash: show, change nothing)
+#   (... | sudo DRY=1 bash: show, change nothing)
+#   ... | sudo bash -s -- NAME [NAME..] [--start]: only those channels;
+#   --start also switches each matched channel on (refused while Flussonic
+#   still sends that stream: switch it off there first)
+#
+# Flussonic's identifiers are kept in /var/lib/caricoder3/flussonic-outputs/
+# NAME.http.json whenever they are read, so a stream already switched off
+# in Flussonic (an SRT source takes one connection: the channel's source
+# can be read only then) is matched against the copy.
 #
 # For each caricoder3 channel that Flussonic has a stream of the same name:
 #   - Flussonic's output is read from its own HTTP port on this machine
@@ -25,10 +33,17 @@ FHTTP=${FLUSSONIC_HTTP:-http://127.0.0.1:8080}
 PROBE_S=${PROBE_S:-4}
 DRY=${DRY:-0}
 [ -r "$CFG" ] || { echo "no caricoder3 config at $CFG" >&2; exit 1; }
-exec python3 - "$CFG" "$BIN" "$FHTTP" "$PROBE_S" "$DRY" <<'PY'
+STATE=${CC3_STATE:-/var/lib/caricoder3}
+exec python3 - "$CFG" "$BIN" "$FHTTP" "$PROBE_S" "$DRY" "$STATE" "$@" <<'PY'
 import base64, json, subprocess, sys, urllib.error, urllib.request
 
-cfg_path, binary, fhttp, probe_s, dry = sys.argv[1:6]
+import os, time
+cfg_path, binary, fhttp, probe_s, dry, state = sys.argv[1:7]
+args = sys.argv[7:]
+start = "--start" in args
+only = [a for a in args if not a.startswith("--")]
+cache = os.path.join(state, "flussonic-outputs")
+os.makedirs(cache, exist_ok=True)
 dry = dry not in ("", "0")
 cfg = json.load(open(cfg_path))
 host = cfg.get("listen", "0.0.0.0")
@@ -84,22 +99,57 @@ def match(src, out):
         left += [y["pid"] for y in s]
     return pairs, left, None
 
+def http_answer(url):
+    """what a web server says to a GET, in words"""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=5) as f:
+            return f"HTTP {f.status}, {f.headers.get('Content-Type', '?')}"
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code} {e.reason}"
+    except Exception as e:
+        return f"no answer ({e})"
+
+def clean(name):
+    """a service name without the DVB character-table byte in front"""
+    return (name or "").lstrip("".join(chr(c) for c in range(0x20))).strip()
+
 chans = api("/api/channels")["channels"]
-say(f"{len(chans)} caricoder3 channel(s); Flussonic read at {fhttp}/NAME/mpegts" + ("  (DRY RUN: nothing changed)" if dry else ""))
+if only:
+    chans = [c for c in chans if c["name"] in only]
+    missing = set(only) - {c["name"] for c in chans}
+    if missing:
+        raise SystemExit(f"no such caricoder3 channel: {', '.join(sorted(missing))}")
+say(f"{len(chans)} channel(s); Flussonic read at {fhttp}/NAME/mpegts" + ("  (DRY RUN: nothing changed)" if dry else "") +
+    ("; matched ones are switched on" if start and not dry else ""))
 for ch in chans:
     name = ch["name"]
     full = api(f"/api/channels/{name}")
     conf = (full.get("channel") or full).get("config") or {}
     say(name)
     fr, err = probe(f"{fhttp}/{name}/mpegts")
-    if not fr:
-        note(f"Flussonic's output could not be read: {err}. Left as it was.")
+    cpath = os.path.join(cache, name + ".http.json")
+    flussonic_live = bool(fr)
+    if fr:
+        json.dump(fr[0], open(cpath, "w"), indent=1)
+    elif os.path.exists(cpath):
+        fr = (json.load(open(cpath)), None)
+        fr = (fr[0], [g for g in fr[0].get("programs", []) if g.get("streams")])
+        note("Flussonic no longer sends it: its identifiers from the copy taken " +
+             time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(cpath))))
+    else:
+        note(f"Flussonic's output could not be read ({err}) and there is no copy of it. Left as it was.")
         continue
     fj, fprogs = fr
     fp = fprogs[0]
-    sr, err = probe(conf.get("input", ""))
+    inp = conf.get("input", "")
+    sr, err = probe(inp)
     if not sr:
-        note(f"the source could not be read ({conf.get('input')}): {err}. Left as it was.")
+        why = err
+        if inp.startswith("http://"):
+            why += f"; the server answers: {http_answer(inp)}"
+        if inp.startswith("srt://") and flussonic_live:
+            why += f". Flussonic holds this SRT source: switch {name} off in Flussonic, then run this for {name} again"
+        note(f"the source could not be read ({inp}): {why}. Left as it was.")
         continue
     sj, sprogs = sr
     want = conf.get("program") or 0
@@ -133,13 +183,21 @@ for ch in chans:
         new["pcr_pid"] = fp["pcr_pid"]
     if fj.get("ts_id"):
         new["ts_id"] = fj["ts_id"]
-    if fp.get("name"):
-        new["service_name"] = fp["name"]
+    # the name only when Flussonic's differs from the source's own (which goes out as it is)
+    if clean(fp.get("name")) and clean(fp.get("name")) != clean(sp.get("name")):
+        new["service_name"] = clean(fp["name"])
     note("set: " + ", ".join(f"{a}->{b}" for a, b in pairs) + (f"; left out {left}" if left else "") +
          f"; program {new['service_id']}, PMT {new['pmt_pid']}, PCR {new.get('pcr_pid', 'as is')}, TS id {new.get('ts_id', 'as is')}" +
          (f", name {new['service_name']!r}" if new.get("service_name") else ""))
-    if not dry:
-        api(f"/api/channels/{name}", "PUT", new)
-        note("saved")
-say("done" + ("  (dry run)" if dry else ": switch each one over when you are ready; nothing went on air"))
+    if dry:
+        continue
+    start_it = start and not flussonic_live
+    if start_it:
+        new["enabled"] = True
+    api(f"/api/channels/{name}", "PUT", new)
+    if start and flussonic_live:
+        note(f"saved, NOT switched on: Flussonic still sends {name} (two senders on one address). Switch it off there first.")
+    else:
+        note("saved and switched on" if start_it else "saved")
+say("done" + ("  (dry run)" if dry else ""))
 PY
