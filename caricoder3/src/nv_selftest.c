@@ -23,6 +23,7 @@
  * The speed is of one stream alone on an idle card and of a made-up
  * picture: for comparing the options with each other, not a capacity.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -278,7 +279,7 @@ done:
     return ok;
 }
 
-static const char *yn(int v)
+static const char *yesno(int v)
 {
     return v > 0 ? "yes" : "no";
 }
@@ -296,12 +297,12 @@ static void show_caps(FILE *out, int gpu)
             return;
         }
     fprintf(out, "  B-frames (most)                         %-7d %d\n", c[0].bframes, c[1].bframes);
-    fprintf(out, "  temporal AQ                             %-7s %s\n", yn(c[0].temporal_aq), yn(c[1].temporal_aq));
-    fprintf(out, "  look-ahead                              %-7s %s\n", yn(c[0].lookahead), yn(c[1].lookahead));
-    fprintf(out, "  weighted prediction                     %-7s %s\n", yn(c[0].weighted_pred), yn(c[1].weighted_pred));
-    fprintf(out, "  10-bit                                  %-7s %s\n", yn(c[0].ten_bit), yn(c[1].ten_bit));
-    fprintf(out, "  interlaced (fields)                     %-7s %s\n", yn(c[0].fields), yn(c[1].fields));
-    fprintf(out, "  emphasis map (ROI)                      %-7s %s\n", yn(c[0].emphasis_map), yn(c[1].emphasis_map));
+    fprintf(out, "  temporal AQ                             %-7s %s\n", yesno(c[0].temporal_aq), yesno(c[1].temporal_aq));
+    fprintf(out, "  look-ahead                              %-7s %s\n", yesno(c[0].lookahead), yesno(c[1].lookahead));
+    fprintf(out, "  weighted prediction                     %-7s %s\n", yesno(c[0].weighted_pred), yesno(c[1].weighted_pred));
+    fprintf(out, "  10-bit                                  %-7s %s\n", yesno(c[0].ten_bit), yesno(c[1].ten_bit));
+    fprintf(out, "  interlaced (fields)                     %-7s %s\n", yesno(c[0].fields), yesno(c[1].fields));
+    fprintf(out, "  emphasis map (ROI)                      %-7s %s\n", yesno(c[0].emphasis_map), yesno(c[1].emphasis_map));
     fprintf(out, "  largest picture                         %dx%d  %dx%d\n", c[0].width_max, c[0].height_max,
             c[1].width_max, c[1].height_max);
     fprintf(out, "  (spatial AQ and two passes have no capability bit: every NVENC card has them)\n");
@@ -439,6 +440,229 @@ done:
     return fps;
 }
 
+/* ---- resizing on the card, measured ----------------------------------- *
+ * A smooth picture (ramps in Y, U and V) is encoded at 1920x1080, decoded
+ * on the card and made 1280x720 by each route a channel can take; every
+ * sample of the result is compared with what the ramps say it should be.
+ * A colour plane read from the wrong place, or turned over, is far off. */
+
+static double ramp(int plane, double x, double y)
+{
+    /* 0..1 over the picture; x, y in 0..1 */
+    return plane == 0 ? 0.15 + 0.7 * x : plane == 1 ? 0.2 + 0.6 * y : 0.8 - 0.6 * x;
+}
+
+static void make_smooth(struct vframe *f, uint8_t *mem, int w, int h, int depth, int i)
+{
+    int bps = depth > 8 ? 2 : 1, cw = w / 2, ch = h / 2;
+    uint8_t *pl[3] = { mem, mem + (size_t)w * h * bps, mem + (size_t)w * h * bps + (size_t)cw * ch * bps };
+    double full = depth > 8 ? 1023.0 : 255.0;
+
+    memset(f, 0, sizeof(*f));
+    f->mem = VMEM_CPU;
+    f->width = w;
+    f->height = h;
+    f->depth = depth;
+    f->fps_num = 25;
+    f->fps_den = 1;
+    f->pts = (stc_t)(i + 250) * (STC_HZ / 25);
+    for (int p = 0; p < 3; p++) {
+        int pw = p ? cw : w, ph = p ? ch : h;
+
+        f->plane[p] = pl[p];
+        f->stride[p] = pw * bps;
+        for (int y = 0; y < ph; y++)
+            for (int x = 0; x < pw; x++) {
+                unsigned v = (unsigned)(ramp(p, (x + 0.5) / pw, (y + 0.5) / ph) * full + 0.5);
+
+                if (bps == 1) {
+                    pl[p][(size_t)y * pw + x] = (uint8_t)v;
+                } else {
+                    pl[p][((size_t)y * pw + x) * 2] = (uint8_t)v;
+                    pl[p][((size_t)y * pw + x) * 2 + 1] = (uint8_t)(v >> 8);
+                }
+            }
+    }
+}
+
+/* Mean distance (0..1) of a picture on the card from the ramps, worst plane. */
+static double ramp_error(const struct vframe *f, char *which, size_t wl)
+{
+    CudaFunctions *cu = nv_cu();
+    int bps = f->depth > 8 ? 2 : 1;
+    size_t row = (size_t)f->width * bps;
+    uint8_t *buf = malloc(row * (size_t)f->height * 3 / 2);
+    CUDA_MEMCPY2D c;
+    CUcontext dummy;
+    double worst = -1, err[3] = { 0, 0, 0 };
+    const char *names[3] = { "Y", "U", "V" };
+    int wi = 0;
+
+    if (!buf)
+        return 1;
+    memset(&c, 0, sizeof(c));
+    c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    c.srcDevice = (CUdeviceptr)(uintptr_t)f->plane[0];
+    c.srcPitch = (size_t)f->stride[0];
+    c.dstMemoryType = CU_MEMORYTYPE_HOST;
+    c.dstHost = buf;
+    c.dstPitch = row;
+    c.WidthInBytes = row;
+    c.Height = (size_t)f->height * 3 / 2;
+    if (f->cuda_ctx)
+        cu->cuCtxPushCurrent(f->cuda_ctx);
+    if (cu->cuMemcpy2D(&c) != CUDA_SUCCESS) {
+        if (f->cuda_ctx)
+            cu->cuCtxPopCurrent(&dummy);
+        free(buf);
+        snprintf(which, wl, "could not copy the picture off the card");
+        return 1;
+    }
+    if (f->cuda_ctx)
+        cu->cuCtxPopCurrent(&dummy);
+    for (int p = 0; p < 3; p++) {
+        int pw = p ? f->width / 2 : f->width, ph = p ? f->height / 2 : f->height;
+        const uint8_t *base = p ? buf + row * (size_t)f->height : buf;
+        double sum = 0;
+        long n = 0;
+
+        /* away from the edges, where a scaler may treat borders its own way */
+        for (int y = ph / 10; y < ph - ph / 10; y += 3)
+            for (int x = pw / 10; x < pw - pw / 10; x += 3) {
+                size_t at = (size_t)y * row + ((size_t)x * (p ? 2 : 1) + (p == 2 ? 1 : 0)) * bps;
+                double v = bps == 1 ? base[at] / 255.0
+                                    : (double)(base[at] | (base[at + 1] << 8)) / 65535.0;
+
+                sum += fabs(v - ramp(p, (x + 0.5) / pw, (y + 0.5) / ph));
+                n++;
+            }
+        err[p] = n ? sum / n : 1;
+        if (err[p] > worst) {
+            worst = err[p];
+            wi = p;
+        }
+    }
+    snprintf(which, wl, "off by Y %.1f %%, U %.1f %%, V %.1f %% (worst %s)", err[0] * 100, err[1] * 100,
+             err[2] * 100, names[wi]);
+    free(buf);
+    return worst;
+}
+
+/* One route: `src` decoded on the card (asked for dw x dh, 8-bit only if
+ * `only8`), then, if `scale_to_w`, resized by nv_scale_to to that size and
+ * `depth_to` bits. Checks the 20th picture. */
+static bool scale_route(FILE *out, int gpu, const struct blob *src, enum codec_id codec, int dw, int dh,
+                        bool only8, int scale_to_w, int scale_to_h, int depth_to, const char *label)
+{
+    const struct codec_backend *db = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_NVIDIA, 0);
+    struct vdec_cfg dc = { .codec = codec, .gpu = gpu, .want_cuda = true, .width = dw, .height = dh,
+                           .only_8bit = only8 };
+    struct nv_scaler *sc = NULL;
+    struct vframe f, g;
+    char err[200] = "", which[160] = "";
+    void *dec;
+    int n = 0;
+    bool ok = false, done = false;
+
+    if (!db || !(dec = db->vdec->open(&dc, err, sizeof(err)))) {
+        fprintf(out, "  FAIL  %-44s decoder: %s\n", label, err);
+        return false;
+    }
+    for (int i = 0; i <= src->n && !done; i++) {
+        if (i < src->n)
+            db->vdec->push(dec, src->data + src->off[i], src->size[i], src->pts[i] / STC_PER_90K, NOPTS);
+        else
+            db->vdec->drain(dec);
+        while (!done && db->vdec->pull(dec, &f) == 1) {
+            if (++n < 20 && i < src->n)
+                continue;
+            done = true;
+            if (scale_to_w) {
+                if (!nv_scale_to(&sc, &f, scale_to_w, scale_to_h, depth_to, &g, err, sizeof(err))) {
+                    fprintf(out, "  FAIL  %-44s %s\n", label, err);
+                    break;
+                }
+                f = g;
+            }
+            {
+                double e = ramp_error(&f, which, sizeof(which));
+
+                ok = e < 0.03;
+                fprintf(out, "  %s  %-44s %dx%d %d-bit, %s\n", ok ? "ok  " : "FAIL", label, f.width, f.height,
+                        f.depth, which);
+            }
+        }
+    }
+    if (!done)
+        fprintf(out, "  FAIL  %-44s no picture came out\n", label);
+    nv_scaler_free(sc);
+    db->vdec->close(dec);
+    return ok;
+}
+
+static int scale_test(FILE *out, int gpu)
+{
+    static const struct { enum codec_id codec; int depth; } srcs[] = {
+        { CODEC_HEVC, 10 }, { CODEC_HEVC, 8 }, { CODEC_H264, 8 },
+    };
+    char name[128] = "";
+    int bad = 0;
+
+    fprintf(out, "\nResizing on the card, measured: a smooth 1920x1080 picture made 1280x720 by each\n"
+                 "route, every sample compared with what it should be (under 3 %% off is right)\n");
+    if (nv_device_name(gpu, name, sizeof(name), NULL) && strstr(name, "Stand-in")) {
+        fprintf(out, "  skipped: the stand-in card's pictures are not real pictures\n");
+        return 0;
+    }
+    for (size_t k = 0; k < sizeof(srcs) / sizeof(srcs[0]); k++) {
+        const struct codec_backend *eb = codec_find(CODEC_VIDEO, CODEC_ENCODER, srcs[k].codec, WHERE_NVIDIA, 0);
+        uint8_t *mem = malloc((size_t)1920 * 1080 * 3 * 2);
+        struct blob src = { 0 };
+        struct venc_cfg ec;
+        struct vframe f;
+        struct vpacket p;
+        char err[200] = "", lab[96];
+        void *enc;
+        int d = srcs[k].depth;
+        const char *cn = srcs[k].codec == CODEC_HEVC ? "H.265" : "H.264";
+
+        fill_cfg(&ec, srcs[k].codec, 1920, 1080, d, gpu, NULL, false);
+        ec.bitrate = 20000000;
+        if (!eb || !mem || !(enc = eb->venc->open(&ec, err, sizeof(err)))) {
+            fprintf(out, "  FAIL  %s %d-bit source: could not encode it: %s\n", cn, d, err);
+            free(mem);
+            bad++;
+            continue;
+        }
+        for (int i = 0; i < 40; i++) {
+            make_smooth(&f, mem, 1920, 1080, d, i);
+            eb->venc->push(enc, &f);
+            while (eb->venc->pull(enc, &p) == 1)
+                blob_add(&src, &p);
+        }
+        eb->venc->push(enc, NULL);
+        while (eb->venc->pull(enc, &p) == 1)
+            blob_add(&src, &p);
+        eb->venc->close(enc);
+        free(mem);
+        snprintf(lab, sizeof(lab), "%s %d-bit: decoded, as it is", cn, d);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 0, 0, 0, lab);
+        snprintf(lab, sizeof(lab), "%s %d-bit: the decoder resizes", cn, d);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, false, 0, 0, 0, lab);
+        snprintf(lab, sizeof(lab), "%s %d-bit: resized after (renditions)", cn, d);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, d, lab);
+        if (d > 8) {
+            snprintf(lab, sizeof(lab), "%s 10-bit: decoder resizes, makes 8-bit", cn);
+            bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, true, 0, 0, 0, lab);
+        } else {
+            snprintf(lab, sizeof(lab), "%s 8-bit: resized and made 10-bit", cn);
+            bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, 10, lab);
+        }
+        free(src.data);
+    }
+    return bad;
+}
+
 static int options_test(FILE *out, int gpu)
 {
     static const struct {
@@ -524,6 +748,7 @@ int nv_selftest(FILE *out, int gpu)
     /* Interlaced H.264, as most broadcast HD and SD is: coded as fields. */
     bad += !round_trip(out, gpu, CODEC_H264, 8, CODEC_H264, 1920, 1080, 50, false, true);
     show_caps(out, gpu);
+    bad += scale_test(out, gpu);
     bad += options_test(out, gpu);
 
     fprintf(out, "\n%s\n", bad ? "RESULT: FAILED (see above)" : "RESULT: all steps passed");
