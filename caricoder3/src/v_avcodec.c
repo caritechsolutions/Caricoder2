@@ -30,6 +30,7 @@ struct av_dec {
     uint8_t *in;                    /* input copied here, with padding after it */
     size_t in_cap;
     bool warned_format;
+    bool pulldown;                  /* repeated fields seen: film carried at 29.97 */
     uint64_t errors;
 };
 
@@ -213,6 +214,21 @@ static int avd_pull(void *ctx, struct vframe *f)
         f->sar_den = a->sample_aspect_ratio.den;
         f->fps_num = d->ctx->framerate.num;
         f->fps_den = d->ctx->framerate.den;
+        /* Repeated fields (3:2 pulldown): film at 23.976 carried as 29.97
+         * video; the pictures come, and are encoded, at the film's rate. */
+        if (a->repeat_pict > 0 && !d->pulldown) {
+            d->pulldown = true;
+            log_info("libavcodec: repeated fields (pulldown): film, encoded at its own rate (23.976, not 29.97)");
+        }
+        if (d->pulldown && f->fps_den > 0) {
+            if ((int64_t)f->fps_num * 1001 == (int64_t)f->fps_den * 30000) {
+                f->fps_num = 24000;
+                f->fps_den = 1001;
+            } else if (f->fps_num == f->fps_den * 30) {
+                f->fps_num = 24;
+                f->fps_den = 1;
+            }
+        }
         f->primaries = a->color_primaries;
         f->transfer = a->color_trc;
         f->matrix = a->colorspace;

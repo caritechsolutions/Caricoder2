@@ -88,6 +88,7 @@ struct vxc {
      * decoder) */
     struct nv_scaler *nvs;
     bool nvs_failed;
+    bool said_deint;                    /* how an interlaced source is treated: said once */
 };
 
 /* ---- output --------------------------------------------------------- */
@@ -566,6 +567,16 @@ static void picture_in(struct vxc *v, const struct vframe *in)
                 in->depth == 8;
 
     v->st->frames_in++;
+    /* "deinterlace": off: the two fields are one picture as they are (film
+     * carried as interlaced video): resized and encoded as whole frames */
+    if (in->interlaced && !v->said_deint) {
+        v->said_deint = true;
+        log_info("PID 0x%04X: interlaced source: %s", v->cfg.pid,
+                 v->cfg.deint == DEINT_OFF ? "the fields are kept together (deinterlace off)"
+                 : "the fields are blended where it is resized (deinterlace blend)");
+    }
+    if (v->cfg.deint == DEINT_OFF)
+        f.interlaced = false;
     if (v->fanout)
         v->fanout(v->fanout_opaque, in);
     if (v->cfg.first_rendition) {
@@ -837,6 +848,7 @@ struct vxc *vxc_new(const struct xcode_cfg *cfg, xcode_emit_fn emit, void *opaqu
         /* H.264 goes out at 8 bits (see encoder_open). */
         struct vdec_cfg dc = { .codec = cfg->in, .width = cfg->width, .height = cfg->height,
                                .gpu = cfg->gpu, .fit = cfg->fit, .want_cuda = v->want_cuda,
+                               .deint = cfg->deint,
                                .only_8bit = cfg->out == CODEC_H264 ||
                                             (cfg->profile && !strcmp(cfg->profile, "main")) };
         const struct codec_backend *b =

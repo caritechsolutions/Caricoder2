@@ -6745,6 +6745,28 @@ def xc_nvidia_interlaced_resize():
         need(said == inter, ("an interlaced source was resized by the decoder" if inter else
                              "a progressive source was not resized by the decoder") + ": " + log[-400:])
         res.append(("interlaced: decoded whole, resized after" if inter else "progressive: the decoder resizes"))
+
+    # deinterlace off (film): kept together; card: the decoder's adaptive deinterlacer at full size
+    out = w("xc_nv_ires_off.ts")
+    st, log = run_mock(src, out, "--video", "160x120:h264:150k", "--deinterlace", "off",
+                       env_extra={"NVMOCK_FORMAT": "320x240:8:i"})
+    must_pass(out)
+    need("the fields are kept together" in log and ", 160x120," in log, log[-500:])
+    out = w("xc_nv_ires_card.ts")
+    st, log = run_mock(src, out, "--video", "160x120:h264:150k", "--deinterlace", "card",
+                       env_extra={"NVMOCK_FORMAT": "320x240:8:i"})
+    must_pass(out)
+    need("deinterlaced by the card (motion-adaptive), at 320x240" in log and ", 160x120," in log, log[-500:])
+    need(xstats(st, 0x100)["frames_out"] >= 195, str(xstats(st, 0x100)))
+    res.append("deinterlace off: fields kept together; card: adaptive at full size, resized after")
+
+    # film carried as 29.97 with repeated fields: encoded at 23.976
+    out = w("xc_nv_pulldown.ts")
+    st, log = run_mock(src, out, "--video", "h264:500k",
+                       env_extra={"NVMOCK_FORMAT": "320x240:8:i", "NVMOCK_FPS": "30000/1001", "NVMOCK_PULLDOWN": "1"})
+    must_pass(out)
+    need("repeated fields (pulldown)" in log and "23.976 fps" in log, log[-600:])
+    res.append("pulldown: 23.976, not 29.97")
     return "; ".join(res)
 
 

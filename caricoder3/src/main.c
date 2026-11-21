@@ -1175,6 +1175,10 @@ static void usage(FILE *f)
 "      --decoder WHERE      video decoding on: auto, nvidia or cpu (default auto)\n"
 "      --encoder WHERE      video encoding on: auto, nvidia or cpu (default auto)\n"
 "      --gpu N              which NVIDIA card (default 0)\n"
+"      --deinterlace MODE   an interlaced source, when resized: blend (the two\n"
+"                           fields averaged; default), off (kept together: film\n"
+"                           carried as interlaced video), card (the NVIDIA\n"
+"                           decoder's motion-adaptive deinterlacer)\n"
 "      --card-process DIR   video for the card transcoded in the card process\n"
 "                           whose socket is DIR/card-N.sock (caricoder3 card)\n"
 "      --card-process-all   ... and video transcoded on the CPU too (for tests)\n"
@@ -1267,7 +1271,7 @@ enum {
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
     OPT_CARD_PROCESS, OPT_CARD_ALL, OPT_KEEP_INPUT,
-    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS, OPT_PIDS,
+    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS, OPT_PIDS, OPT_DEINT,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1347,6 +1351,7 @@ int main(int argc, char **argv)
         { "bframes", required_argument, 0, OPT_BFRAMES },
         { "profile", required_argument, 0, OPT_PROFILE },
         { "pids", required_argument, 0, OPT_PIDS },
+        { "deinterlace", required_argument, 0, OPT_DEINT },
         { "aq", required_argument, 0, OPT_AQ },
         { "temporal-aq", required_argument, 0, OPT_TAQ },
         { "lookahead", required_argument, 0, OPT_LOOKAHEAD },
@@ -1645,6 +1650,18 @@ int main(int argc, char **argv)
                 o.eng.tune.multipass = 3;
             else {
                 fprintf(stderr, "--multipass: off, quarter or full\n");
+                return 2;
+            }
+            break;
+        case OPT_DEINT:
+            if (!strcmp(optarg, "blend"))
+                o.eng.deint = DEINT_BLEND;
+            else if (!strcmp(optarg, "off"))
+                o.eng.deint = DEINT_OFF;
+            else if (!strcmp(optarg, "card"))
+                o.eng.deint = DEINT_CARD;
+            else {
+                fprintf(stderr, "--deinterlace: blend, off or card\n");
                 return 2;
             }
             break;

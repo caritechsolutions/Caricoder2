@@ -404,3 +404,15 @@ a channel set to Main 10 shows no picture on some receivers, those
 receivers do not decode Main 10. These options never cause CC errors or
 dropouts; more card load from them can, if the card is near its limit.
 
+## Interlaced sources and film
+
+A channel's "deinterlace" setting decides what happens to an interlaced
+source when it is resized: blend (default, fields averaged, softer), off
+(fields kept together; right for film channels such as HBO, which are film
+carried as 1080i), card (the NVIDIA decoder's motion-adaptive deinterlacer;
+for live and sports). Fine horizontal lines on moving edges ("combing") on a
+channel set to off mean that source really is interlaced: card or blend is
+then the setting. Slightly uneven motion on a film channel set to blend is
+the blending, not a fault. Film carried at 29.97 with repeated fields is
+encoded at 23.976 (the log says "repeated fields (pulldown)").
+

@@ -126,6 +126,14 @@ struct vframe {
 void video_size(int want_w, int want_h, bool fit, int src_w, int src_h, int dar_num, int dar_den,
                 int *w, int *h);
 
+/* What becomes of an interlaced source (a channel's "deinterlace"). */
+enum deint {
+    DEINT_BLEND = 0,            /* the two fields averaged when resized (the default) */
+    DEINT_OFF,                  /* fields kept together as they came: film carried as
+                                 * interlaced video (Flussonic's deinterlace=false) */
+    DEINT_CARD,                 /* the card's decoder, motion-adaptive, at full size */
+};
+
 struct vdec_cfg {
     enum codec_id codec;
     int  width, height;         /* pictures wanted at this size (0: as coded).
@@ -135,6 +143,7 @@ struct vdec_cfg {
     int  gpu;                   /* card index for a hardware decoder */
     bool fit;                   /* width x height is a box (see video_size) */
     bool want_cuda;             /* leave frames on the card if possible */
+    int  deint;                 /* enum deint: DEINT_CARD asks the card's decoder */
     bool only_8bit;             /* the encoder takes 8 bits only: a hardware
                                  * decoder converts 10-bit video itself (a CPU
                                  * decoder need not: the pipeline does it) */

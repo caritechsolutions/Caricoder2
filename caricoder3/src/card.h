@@ -32,7 +32,7 @@
 
 #include "cc3.h"
 
-#define CARD_PROTO          4
+#define CARD_PROTO          5
 #define CARD_FAILS          3
 #define CARD_FAIL_WINDOW_S  600
 #define CARD_MSG_MAX        (16u * 1024 * 1024)
@@ -65,6 +65,7 @@ struct card_hello {
     int32_t  vbv_ms, gop_ms, bframes, first_rendition;
     char     preset[32], profile[32];
     int8_t   tune[8];       /* struct venc_tune, byte for byte */
+    int32_t  deint;         /* enum deint */
     char     channel[64];   /* for the card process's log */
 };
 

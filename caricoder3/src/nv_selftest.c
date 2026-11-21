@@ -552,11 +552,11 @@ static double ramp_error(const struct vframe *f, char *which, size_t wl)
  * `only8`), then, if `scale_to_w`, resized by nv_scale_to to that size and
  * `depth_to` bits. Checks the 20th picture. */
 static bool scale_route(FILE *out, int gpu, const struct blob *src, enum codec_id codec, int dw, int dh,
-                        bool only8, int scale_to_w, int scale_to_h, int depth_to, const char *label)
+                        bool only8, int scale_to_w, int scale_to_h, int depth_to, const char *label, int deint)
 {
     const struct codec_backend *db = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_NVIDIA, 0);
     struct vdec_cfg dc = { .codec = codec, .gpu = gpu, .want_cuda = true, .width = dw, .height = dh,
-                           .only_8bit = only8 };
+                           .only_8bit = only8, .deint = deint };
     struct nv_scaler *sc = NULL;
     struct vframe f, g;
     char err[200] = "", which[160] = "";
@@ -655,17 +655,21 @@ static int scale_test(FILE *out, int gpu)
         eb->venc->close(enc);
         free(mem);
         snprintf(lab, sizeof(lab), "%s %d-bit: decoded, as it is", cn, d);
-        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 0, 0, 0, lab);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 0, 0, 0, lab, DEINT_BLEND);
         snprintf(lab, sizeof(lab), srcs[k].interlaced ? "%s %d-bit: as a channel resizes it" : "%s %d-bit: the decoder resizes", cn, d);
-        bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, false, 0, 0, 0, lab);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, false, 0, 0, 0, lab, DEINT_BLEND);
         snprintf(lab, sizeof(lab), "%s %d-bit: resized after (renditions)", cn, d);
-        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, d, lab);
+        bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, d, lab, DEINT_BLEND);
         if (d > 8) {
             snprintf(lab, sizeof(lab), "%s 10-bit: decoder resizes, makes 8-bit", cn);
-            bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, true, 0, 0, 0, lab);
+            bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, true, 0, 0, 0, lab, DEINT_BLEND);
         } else {
             snprintf(lab, sizeof(lab), "%s 8-bit: resized and made 10-bit", cn);
-            bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, 10, lab);
+            bad += !scale_route(out, gpu, &src, srcs[k].codec, 0, 0, false, 1280, 720, 10, lab, DEINT_BLEND);
+        }
+        if (srcs[k].interlaced) {
+            snprintf(lab, sizeof(lab), "%s %d-bit: card deinterlaces, resized after", cn, d);
+            bad += !scale_route(out, gpu, &src, srcs[k].codec, 1280, 720, false, 0, 0, 0, lab, DEINT_CARD);
         }
         free(src.data);
     }

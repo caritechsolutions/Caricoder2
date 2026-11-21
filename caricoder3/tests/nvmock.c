@@ -814,6 +814,8 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
         f.codec = p->pp.CodecType;
         f.frame_rate.numerator = 25;
         f.frame_rate.denominator = 1;
+        if (getenv("NVMOCK_FPS"))          /* NVMOCK_FPS=30000/1001 */
+            sscanf(getenv("NVMOCK_FPS"), "%u/%u", &f.frame_rate.numerator, &f.frame_rate.denominator);
         f.progressive_sequence = il != 'i';
         f.bit_depth_luma_minus8 = f.bit_depth_chroma_minus8 = (unsigned char)(depth - 8);
         f.min_num_decode_surfaces = 6;
@@ -846,6 +848,8 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
     di.picture_index = p->next_idx;
     di.progressive_frame = il != 'i';
     di.top_field_first = 1;
+    /* NVMOCK_PULLDOWN: 3:2 pulldown, a field repeated on every other picture */
+    di.repeat_first_field = getenv("NVMOCK_PULLDOWN") && (p->next_idx & 1) ? 1 : 0;
     di.timestamp = (pkt->flags & CUVID_PKT_TIMESTAMP) ? pkt->timestamp : 0;
     p->next_idx = (p->next_idx + 1) % p->surfaces;
     /* Pictures arrive in decoding order and are shown in order of time:
@@ -875,6 +879,15 @@ CUresult cuvidCreateDecoder(CUvideodecoder *dec, CUVIDDECODECREATEINFO *ci)
     CHECK(live_decoders < 32, "%d decoders at once: something is not closing them", live_decoders);
     CHECK(ci->ulWidth && ci->ulHeight && ci->ulTargetWidth && ci->ulTargetHeight &&
           !(ci->ulTargetWidth & 1) && !(ci->ulTargetHeight & 1), "decoder size");
+    /* A Tesla P40 garbled the pictures of an interlaced source resized and
+     * deinterlaced at once (HBO 1080i to 720, 2026-11-20): not asked for. */
+    CHECK(ci->DeinterlaceMode == cudaVideoDeinterlaceMode_Weave ||
+          ((long)ci->ulTargetWidth == ci->display_area.right - ci->display_area.left &&
+           (long)ci->ulTargetHeight == ci->display_area.bottom - ci->display_area.top),
+          "deinterlacing and resizing at once (%ux%u to %ux%u)",
+          (unsigned)(ci->display_area.right - ci->display_area.left),
+          (unsigned)(ci->display_area.bottom - ci->display_area.top),
+          (unsigned)ci->ulTargetWidth, (unsigned)ci->ulTargetHeight);
     CHECK(ci->ulNumDecodeSurfaces >= 6, "fewer decode surfaces than the stream needs");
     CHECK(ci->ulNumOutputSurfaces >= 1, "no output surfaces");
     CHECK(ci->ChromaFormat == cudaVideoChromaFormat_420, "chroma format");

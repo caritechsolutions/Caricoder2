@@ -37,6 +37,9 @@ struct nvd {
     bool want_fit;
     bool scaled;                    /* the card scales (and deinterlaces) */
     bool said_interlaced;           /* "not resized by the decoder" said once */
+    int deint;                      /* enum deint, as asked */
+    bool card_deint;                /* the decoder deinterlaces (DEINT_CARD, at full size) */
+    bool pulldown;                  /* repeated fields seen: film carried at 29.97 */
 
     CUVIDEOFORMAT fmt;
     unsigned coded_w, coded_h;
@@ -153,8 +156,13 @@ static int CUDAAPI on_sequence(void *user, CUVIDEOFORMAT *f)
     ci.bitDepthMinus8 = f->bit_depth_luma_minus8;
     /* Asked for 8-bit pictures from 10-bit video, the card converts. */
     ci.OutputFormat = depth > 8 ? cudaVideoSurfaceFormat_P016 : cudaVideoSurfaceFormat_NV12;
-    /* Fields stay woven together in the frame, as they came. */
-    ci.DeinterlaceMode = d->scaled && !f->progressive_sequence
+    /* Fields stay woven together in the frame, as they came, unless the
+     * card is asked to deinterlace (DEINT_CARD): then motion-adaptive, at
+     * the picture's own size (the resize comes after, see above). */
+    d->card_deint = d->deint == DEINT_CARD && !f->progressive_sequence && !d->scaled;
+    if (d->card_deint)
+        log_info("nvdec: interlaced source: deinterlaced by the card (motion-adaptive), at %dx%d", w, h);
+    ci.DeinterlaceMode = (d->scaled || d->card_deint) && !f->progressive_sequence
                              ? cudaVideoDeinterlaceMode_Adaptive
                              : cudaVideoDeinterlaceMode_Weave;
     ci.ulCreationFlags = cudaVideoCreate_PreferCUVID;
@@ -228,6 +236,20 @@ static void release_frame(struct nvd *d)
     d->mapped = false;
 }
 
+/* 29.97 (30) said by a stream that repeats fields: 23.976 (24). */
+static void film_rate(bool pulldown, int *num, int *den)
+{
+    if (!pulldown || *den <= 0)
+        return;
+    if ((int64_t)*num * 1001 == (int64_t)*den * 30000) {
+        *num = 24000;
+        *den = 1001;
+    } else if (*num == *den * 30) {
+        *num = 24;
+        *den = 1;
+    }
+}
+
 static void *nvd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
 {
     struct nvd *d;
@@ -246,6 +268,7 @@ static void *nvd_open(const struct vdec_cfg *cfg, char *err, size_t errlen)
     d->only_8bit = cfg->only_8bit;
     d->want_w = cfg->width;
     d->want_h = cfg->height;
+    d->deint = cfg->deint;
     d->want_fit = cfg->fit;
     d->ctx = nv_ctx_get(cfg->gpu, err, errlen);
     if (!d->ctx) {
@@ -351,10 +374,18 @@ static int nvd_pull(void *ctx, struct vframe *f)
     f->stride[0] = (int)pitch;
     /* A picture whose access unit came without a time stamp reports 0. */
     f->pts = (di.timestamp == 0 && d->seen_ts) ? NOPTS : (stc_t)di.timestamp * STC_PER_90K;
-    f->interlaced = !di.progressive_frame && !d->scaled;
+    f->interlaced = !di.progressive_frame && !d->scaled && !d->card_deint;
     f->tff = di.top_field_first != 0;
     f->fps_num = (int)d->fmt.frame_rate.numerator;
     f->fps_den = (int)d->fmt.frame_rate.denominator;
+    /* Repeated fields (3:2 pulldown, H.264 pic_struct / MPEG-2
+     * repeat_first_field): film at 23.976 carried as 29.97 video. The
+     * pictures come at the film's rate, and so they are encoded. */
+    if (di.repeat_first_field > 0 && !d->pulldown) {
+        d->pulldown = true;
+        log_info("nvdec: repeated fields (pulldown): film, encoded at its own rate (23.976, not 29.97)");
+    }
+    film_rate(d->pulldown, &f->fps_num, &f->fps_den);
     /* The card gives the shape of the picture; the encoder wants the
      * shape of a pixel. */
     dar_w = d->fmt.display_aspect_ratio.x;

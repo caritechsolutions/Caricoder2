@@ -1465,6 +1465,8 @@ function settingsHtml() {
       <label>Decode on</label>${sel("decoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Encode on</label>${sel("encoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Card</label>${sel("gpu", [["","Card 0"],["1","Card 1"],["2","Card 2"],["3","Card 3"]])}
+      <label>Deinterlace</label>${sel("deinterlace", [["","Blend the two fields (the default)"],["off","Off: fields kept together (film, e.g. HBO)"],["card","The card's motion-adaptive deinterlacer"]])}
+      <div class="help">Only for an interlaced source that is resized. <b>Off</b> for film carried as interlaced video (movie channels: sharp, smooth, as Flussonic's <code>deinterlace=false</code>); fine lines on moving edges mean the source really is interlaced. <b>Card</b> for live and sports channels that really are interlaced (Flussonic's <code>deinterlace=true</code> or <code>yadif</code>). <b>Blend</b> is safe for both but softer.</div>
       <label>Speed / quality</label>${sel("preset", [["","Default (veryfast on CPU, p2 on NVIDIA)"],["ultrafast","Fastest"],["superfast","Faster"],["veryfast","Fast"],["faster","Balanced"],["medium","Better quality (CPU)"],["p1","NVIDIA p1 (fastest)"],["p2","NVIDIA p2 (the default)"],["p3","NVIDIA p3"],["p4","NVIDIA p4 (more of the card's encoder)"],["p5","NVIDIA p5"],["p6","NVIDIA p6"],["p7","NVIDIA p7 (best, most of the encoder)"]])}
       <label>B-frames</label><div class="row">${sel("bframes", [["","Encoder's choice"],["0","None (for receivers that cannot take them)"],["1","1"],["2","2"],["3","3"],["4","4"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">The NVIDIA card does as many as it can (Pascal: none in H.265).</span></div>
       <label>Profile</label><div class="row">${sel("profile", [["","Encoder's choice (H.264 high, H.265 as the source)"],["high","H.264 High"],["main","Main (H.264 Main; H.265 Main, 8 bits)"],["baseline","H.264 Baseline (no B-frames)"],["main10","H.265 Main 10 (10 bits, also from an 8-bit source)"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">Older set-top boxes may need Main, or Baseline.</span></div>
@@ -1595,6 +1597,7 @@ function fillForm(cfg) {
   $("#decoder").value = cfg.decoder || ""; $("#encoder").value = cfg.encoder || ""; $("#gpu").value = cfg.gpu ? String(cfg.gpu) : ""; $("#preset").value = cfg.preset || "";
   $("#bframes").value = cfg.bframes != null ? String(cfg.bframes) : ""; $("#profile").value = cfg.profile || "";
   for (const k of ["aq","temporal_aq","weighted_pred","multipass"]) $("#"+k).value = cfg[k] || "";
+  $("#deinterlace").value = cfg.deinterlace || "";
   $("#lookahead").value = cfg.lookahead != null ? String(cfg.lookahead) : "";
   { const on = ["aq","temporal_aq","lookahead","weighted_pred","multipass"].filter(k => cfg[k] != null && cfg[k] !== "").length;
     $("#q_sum").textContent = on ? `(${on} set here; the rest from Settings)` : "(all from Settings)"; $("#q_box").open = !!on; }
@@ -1723,7 +1726,7 @@ function readForm() {
   }
   if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
   for (const k of ["decoder","encoder","preset","profile","service_name","service_provider",
-                   "aq","temporal_aq","weighted_pred","multipass"]) if (v(k)) cfg[k] = v(k);
+                   "aq","temporal_aq","weighted_pred","multipass","deinterlace"]) if (v(k)) cfg[k] = v(k);
   if (v("lookahead") !== "") cfg.lookahead = Number(v("lookahead"));
   if (v("bframes") !== "") cfg.bframes = Number(v("bframes"));
   if (v("gpu")) cfg.gpu = Number(v("gpu"));

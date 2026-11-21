@@ -930,6 +930,17 @@ video as fields, it encodes the fields together as frames, with a
 warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
 `--decoder nvidia --encoder cpu` is not built yet.
 
+**Interlaced sources** (channel key `"deinterlace"`, `--deinterlace`), when
+resized: `blend` (default; the two fields averaged), `off` (the fields kept
+together: film carried as interlaced video, as Flussonic's
+`deinterlace=false`; sharp and smooth, but a source that really is
+interlaced shows fine lines on moving edges), `card` (the NVIDIA decoder's
+motion-adaptive deinterlacer, at the picture's own size; for live and sports
+channels). The card's decoder never resizes an interlaced picture itself: a
+Tesla P40 garbled them (dark, striped) when asked to resize and deinterlace
+at once; they are resized after, on the card. Film carried at 29.97 with
+repeated fields (3:2 pulldown) is encoded at its own 23.976.
+
 **Picture-quality options** (per channel; the GUI's "Picture quality on
 the NVIDIA card", with help on when each is worth it). None is on unless
 set; left out, NVIDIA's preset decides, as before.

@@ -1339,7 +1339,7 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
     {
         static const char *const strs[][2] = {
             { "decoder", "--decoder=%s" }, { "encoder", "--encoder=%s" }, { "preset", "--preset=%s" },
-            { "profile", "--profile=%s" },
+            { "profile", "--profile=%s" }, { "deinterlace", "--deinterlace=%s" },
             { "service_name", "--service-name=%s" }, { "service_provider", "--service-provider=%s" },
         };
 
