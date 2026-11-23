@@ -6831,6 +6831,30 @@ def xc_nvidia_interlaced_resize():
     must_pass(out)
     need("repeated fields (pulldown)" in log and "23.976 fps" in log, log[-600:])
     res.append("pulldown: 23.976, not 29.97")
+
+    # film resized: every other picture is marked as two fields, but none is
+    # deinterlaced (blended one in two, the sharpness flickered: hbomundi_srt);
+    # real interlaced video still is (the control)
+    def mock_log(*extra, film):
+        env = {"NVMOCK_FORMAT": "320x240:8:i", "NVMOCK_LOG_CTX": "1"}
+        if film:
+            env.update({"NVMOCK_FPS": "30000/1001", "NVMOCK_PULLDOWN": "1"})
+        out = w("xc_nv_film.ts")
+        st, log = run_mock(src, out, "--video", "160x120:h264:150k", *extra, env_extra=env)
+        must_pass(out)
+        need(xstats(st, 0x100)["frames_out"] >= 150, str(xstats(st, 0x100)))
+        return log
+    log = mock_log(film=False)
+    need(log.count("(blend)") >= 100, "real interlaced video was not blended: " + log[-400:])
+    log = mock_log(film=True)
+    need("film: every picture is whole" in log, log[-500:])
+    # (the first picture or two come before the first repeated field: those may be)
+    need(log.count("(blend)") <= 8 and log.count("NVMOCK scaled") >= 100, "film was blended: " + log[-400:])
+    log = mock_log("--deinterlace", "card", film=False)
+    need(log.count("NVMOCK mapped deinterlaced") >= 100, "card deinterlace did not deinterlace: " + log[-400:])
+    log = mock_log("--deinterlace", "card", film=True)
+    need(log.count("NVMOCK mapped deinterlaced") <= 4, "the card deinterlaced film: " + log[-400:])
+    res.append("film: none deinterlaced (blend or card), real interlaced video still is")
     return "; ".join(res)
 
 

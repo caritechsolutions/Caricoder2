@@ -412,7 +412,13 @@ source when it is resized: blend (default, fields averaged, softer), off
 carried as 1080i), card (the NVIDIA decoder's motion-adaptive deinterlacer;
 for live and sports). Fine horizontal lines on moving edges ("combing") on a
 channel set to off mean that source really is interlaced: card or blend is
-then the setting. Slightly uneven motion on a film channel set to blend is
-the blending, not a fault. Film carried at 29.97 with repeated fields is
-encoded at 23.976 (the log says "repeated fields (pulldown)").
+then the setting. Film carried at 29.97 with repeated fields (HBO) is
+encoded at 23.976 (the log says "repeated fields (pulldown)") and is never
+deinterlaced, whatever the setting (the log says "film: every picture is
+whole"): its pictures are whole though every other one is marked as two
+fields. Before 2026-11-23 those were blended one in two, and resized film
+looked slightly jittery; separately, a picture resized on the card could be
+read before the decoder had finished it, and the one before was sent again
+(about once a second). Both are fixed. scripts/scale-repro.sh prints the
+picture timing of a channel's output made each way.
 

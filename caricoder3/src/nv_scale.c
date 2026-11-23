@@ -42,7 +42,12 @@ static bool make(struct nv_scaler *s, CUcontext ctx, char *why, size_t len)
     if (r == CUDA_SUCCESS)
         r = cu->cuModuleGetFunction(&s->fn, s->mod, "cc3_scale");
     if (r == CUDA_SUCCESS)
-        r = cu->cuStreamCreate(&s->st, 1 /* CU_STREAM_NON_BLOCKING */);
+        /* A stream that waits for the default one: the decoder makes each
+         * picture there (cuvidMapVideoFrame). Non-blocking, the scaling
+         * could read the surface before the picture was in it and send the
+         * one before again (hbomundi_srt at 720: 19 pictures repeated in
+         * 18 s, 2026-11-23). */
+        r = cu->cuStreamCreate(&s->st, 0 /* CU_STREAM_DEFAULT */);
     cu->cuCtxPopCurrent(&dummy);
     return r == CUDA_SUCCESS || fail(why, len, "the scaling program would not load", r);
 }

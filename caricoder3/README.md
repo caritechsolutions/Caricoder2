@@ -943,7 +943,10 @@ motion-adaptive deinterlacer, at the picture's own size; for live and sports
 channels). The card's decoder never resizes an interlaced picture itself: a
 Tesla P40 garbled them (dark, striped) when asked to resize and deinterlace
 at once; they are resized after, on the card. Film carried at 29.97 with
-repeated fields (3:2 pulldown) is encoded at its own 23.976.
+repeated fields (3:2 pulldown) is encoded at its own 23.976, and none of
+its pictures is deinterlaced while the repeats keep coming (every other one
+is marked as two fields but none is: deinterlacing one in two made the
+sharpness flicker); video that really is interlaced still is.
 
 **Picture-quality options** (per channel; the GUI's "Picture quality on
 the NVIDIA card", with help on when each is worth it). None is on unless

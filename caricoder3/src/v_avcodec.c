@@ -31,6 +31,8 @@ struct av_dec {
     size_t in_cap;
     bool warned_format;
     bool pulldown;                  /* repeated fields seen: film carried at 29.97 */
+    int since_rff;                  /* pictures since the last repeated field */
+    bool said_film;
     uint64_t errors;
 };
 
@@ -219,6 +221,20 @@ static int avd_pull(void *ctx, struct vframe *f)
         if (a->repeat_pict > 0 && !d->pulldown) {
             d->pulldown = true;
             log_info("libavcodec: repeated fields (pulldown): film, encoded at its own rate (23.976, not 29.97)");
+        }
+        /* Film is whole pictures though every other one is marked as two
+         * fields: none is deinterlaced while repeats keep coming (see
+         * v_nvdec.c) */
+        if (a->repeat_pict > 0)
+            d->since_rff = 0;
+        else if (d->since_rff < FILM_HOLD + 1)
+            d->since_rff++;
+        if (d->pulldown && d->since_rff <= FILM_HOLD && f->interlaced) {
+            f->interlaced = false;
+            if (!d->said_film) {
+                d->said_film = true;
+                log_info("libavcodec: film: every picture is whole, none is deinterlaced");
+            }
         }
         if (d->pulldown && f->fps_den > 0) {
             if ((int64_t)f->fps_num * 1001 == (int64_t)f->fps_den * 30000) {

@@ -150,6 +150,9 @@ struct vdec_cfg {
 };
 
 #define VDEC_CANNOT (-2)
+/* Film with repeated fields (3:2 pulldown) has a repeat every other
+ * picture: this many pictures without one and it counts as video again. */
+#define FILM_HOLD 8
 
 struct vdec_ops {
     void *(*open)(const struct vdec_cfg *cfg, char *err, size_t errlen);

@@ -40,6 +40,8 @@ struct nvd {
     int deint;                      /* enum deint, as asked */
     bool card_deint;                /* the decoder deinterlaces (DEINT_CARD, at full size) */
     bool pulldown;                  /* repeated fields seen: film carried at 29.97 */
+    int since_rff;                  /* pictures since the last repeated field */
+    bool said_film;
 
     CUVIDEOFORMAT fmt;
     unsigned coded_w, coded_h;
@@ -351,8 +353,28 @@ static int nvd_pull(void *ctx, struct vframe *f)
     d->head = (d->head + 1) % DISP_MAX;
     d->count--;
 
+    /* Film carried with repeated fields (3:2 pulldown) is whole pictures,
+     * but every other one is marked as two fields: deinterlaced (blended,
+     * or by the card) one in two, the sharpness flickers and the motion
+     * looks uneven (hbomundi_srt, 2026-11-23: none of its pictures is
+     * combed). While repeated fields keep coming, none is deinterlaced;
+     * video that is really interlaced (no repeats) is, as before. */
+    if (di.repeat_first_field > 0) {
+        d->since_rff = 0;
+        if (!d->pulldown) {
+            d->pulldown = true;
+            log_info("nvdec: repeated fields (pulldown): film, encoded at its own rate (23.976, not 29.97)");
+        }
+    } else if (d->since_rff < FILM_HOLD + 1) {
+        d->since_rff++;
+    }
+    bool film = d->pulldown && d->since_rff <= FILM_HOLD;
+    if (film && !d->said_film && !di.progressive_frame) {
+        d->said_film = true;
+        log_info("nvdec: film: every picture is whole, none is deinterlaced");
+    }
     memset(&vpp, 0, sizeof(vpp));
-    vpp.progressive_frame = di.progressive_frame;
+    vpp.progressive_frame = film ? 1 : di.progressive_frame;
     vpp.top_field_first = di.top_field_first;
     vpp.unpaired_field = di.repeat_first_field < 0;
     r = d->cv->cuvidMapVideoFrame(d->dec, di.picture_index, &d->map_ptr, &pitch, &vpp);
@@ -374,17 +396,13 @@ static int nvd_pull(void *ctx, struct vframe *f)
     f->stride[0] = (int)pitch;
     /* A picture whose access unit came without a time stamp reports 0. */
     f->pts = (di.timestamp == 0 && d->seen_ts) ? NOPTS : (stc_t)di.timestamp * STC_PER_90K;
-    f->interlaced = !di.progressive_frame && !d->scaled && !d->card_deint;
+    f->interlaced = !di.progressive_frame && !film && !d->scaled && !d->card_deint;
     f->tff = di.top_field_first != 0;
     f->fps_num = (int)d->fmt.frame_rate.numerator;
     f->fps_den = (int)d->fmt.frame_rate.denominator;
     /* Repeated fields (3:2 pulldown, H.264 pic_struct / MPEG-2
      * repeat_first_field): film at 23.976 carried as 29.97 video. The
      * pictures come at the film's rate, and so they are encoded. */
-    if (di.repeat_first_field > 0 && !d->pulldown) {
-        d->pulldown = true;
-        log_info("nvdec: repeated fields (pulldown): film, encoded at its own rate (23.976, not 29.97)");
-    }
     film_rate(d->pulldown, &f->fps_num, &f->fps_den);
     /* The card gives the shape of the picture; the encoder wants the
      * shape of a pixel. */

@@ -185,11 +185,35 @@ CUresult cuModuleUnload(CUmodule mod)
     return CUDA_SUCCESS;
 }
 
+/* A picture the decoder maps is made on the card's default stream (or the
+ * output_stream asked for). A kernel that reads it from a stream created
+ * CU_STREAM_NON_BLOCKING does not wait for that: it can read the surface
+ * before the picture is in it (on the card: the picture before, again).
+ * The mock remembers the mapped pictures not yet waited for. */
+#define PEND_MAX 64
+static struct { const unsigned char *lo, *hi; CUstream st; } pend[PEND_MAX];
+
+static void pend_add(const unsigned char *lo, size_t n, CUstream st)
+{
+    for (int i = 0; i < PEND_MAX; i++)
+        if (!pend[i].lo) {
+            pend[i].lo = lo; pend[i].hi = lo + n; pend[i].st = st;
+            return;
+        }
+}
+
+static void pend_drop(const unsigned char *lo)
+{
+    for (int i = 0; i < PEND_MAX; i++)
+        if (pend[i].lo == lo)
+            pend[i].lo = NULL;
+}
+
 CUresult cuStreamCreate(CUstream *st, unsigned int flags)
 {
-    (void)flags;
     NEED_CTX("cuStreamCreate");
     *st = (CUstream)malloc(8);
+    *(unsigned int *)*st = flags;
     __sync_fetch_and_add(&live_stream, 1);
     return CUDA_SUCCESS;
 }
@@ -198,6 +222,9 @@ CUresult cuStreamSynchronize(CUstream st)
 {
     NEED_CTX("cuStreamSynchronize");
     CHECK(st != NULL, "synchronising no stream");
+    for (int i = 0; i < PEND_MAX; i++)
+        if (pend[i].lo && pend[i].st == st)
+            pend[i].lo = NULL;
     return CUDA_SUCCESS;
 }
 
@@ -228,11 +255,16 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gx, unsigned int gy, unsigned
     CHECK(src && dst && sw > 0 && sh > 0 && dw > 0 && dh > 0 && (comps == 1 || comps == 2),
           "scale %dx%d -> %dx%d, %d components", sw, sh, dw, dh, comps);
     CHECK(gx * bx >= (unsigned)dw && gy * by >= (unsigned)dh, "the grid does not cover the picture");
+    for (int i = 0; i < PEND_MAX; i++)
+        if (pend[i].lo && src >= pend[i].lo && src < pend[i].hi && pend[i].st != st)
+            CHECK(!(pend[i].st == NULL && (*(unsigned int *)st & 1)),
+                  "a kernel on a non-blocking stream reads a decoded picture made on the default "
+                  "stream without waiting for it (on the card: the picture before)");
     for (int y = 0; y < dh; y++)
         for (int x = 0; x < dw; x++)
             cc3_scale_px(src, spitch, sw, sh, dst, dpitch, dw, dh, comps, wide, blend, x, y);
     if (getenv("NVMOCK_LOG_CTX"))
-        fprintf(stderr, "NVMOCK scaled %dx%d -> %dx%d\n", sw, sh, dw, dh);
+        fprintf(stderr, "NVMOCK scaled %dx%d -> %dx%d%s\n", sw, sh, dw, dh, blend ? " (blend)" : "");
     return CUDA_SUCCESS;
 }
 
@@ -850,6 +882,10 @@ CUresult cuvidParseVideoData(CUvideoparser obj, CUVIDSOURCEDATAPACKET *pkt)
     di.top_field_first = 1;
     /* NVMOCK_PULLDOWN: 3:2 pulldown, a field repeated on every other picture */
     di.repeat_first_field = getenv("NVMOCK_PULLDOWN") && (p->next_idx & 1) ? 1 : 0;
+    /* as broadcast film comes: the pictures with a repeated field are
+     * marked progressive, the others as two fields (none is combed) */
+    if (di.repeat_first_field)
+        di.progressive_frame = 1;
     di.timestamp = (pkt->flags & CUVID_PKT_TIMESTAMP) ? pkt->timestamp : 0;
     p->next_idx = (p->next_idx + 1) % p->surfaces;
     /* Pictures arrive in decoding order and are shown in order of time:
@@ -939,6 +975,9 @@ CUresult cuvidMapVideoFrame64(CUvideodecoder dec, int idx, unsigned long long *p
           d->mapped + 1, (unsigned long)d->ci.ulNumOutputSurfaces);
     mem = malloc(p * rows);                 /* exactly the surface, no more */
     memset(mem, 0x40 + idx, p * rows);
+    pend_add(mem, p * rows, vpp->output_stream);
+    if (getenv("NVMOCK_LOG_CTX") && d->ci.DeinterlaceMode != cudaVideoDeinterlaceMode_Weave && !vpp->progressive_frame)
+        fprintf(stderr, "NVMOCK mapped deinterlaced\n");
     d->mapped++;
     *ptr = (unsigned long long)(uintptr_t)mem;
     *pitch = (unsigned int)p;
@@ -951,6 +990,7 @@ CUresult cuvidUnmapVideoFrame64(CUvideodecoder dec, unsigned long long ptr)
 
     NEED_CTX("cuvidUnmapVideoFrame");
     CHECK(d->mapped > 0 && ptr, "unmap of a picture that is not mapped");
+    pend_drop((const unsigned char *)(uintptr_t)ptr);
     free((void *)(uintptr_t)ptr);
     d->mapped--;
     return CUDA_SUCCESS;
