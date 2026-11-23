@@ -3259,6 +3259,70 @@ def weather_reports():
 
 
 @test
+def supervisor_password_change():
+    """The GUI password changed from Settings: the current one is asked for, a short one refused;
+    the new one works at once and the old one no longer does; the channels are not restarted;
+    it is saved, so a restarted supervisor asks for the new one."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super_pw")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "oldpass1", "card_process": "off"}, open(cfg, "w"))
+    json.dump({"input": "udp://239.255.78.1:5000", "share_input": False},
+              open(os.path.join(root, "channels", "c1.json"), "w"))
+
+    def call(path, pw, method="GET", body=None):
+        h = {"Authorization": "Basic " + base64.b64encode(f"admin:{pw}".encode()).decode()}
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=h,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as f:
+                return f.status, json.load(f)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    def start():
+        p = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "sup.log"), "a"))
+        wait_up(port)
+        return p
+
+    sup = start()
+    try:
+        end = time.time() + 10
+        while time.time() < end and (call("/api/channels/c1", "oldpass1")[1] or {}).get("channel", {}).get("state") != "running":
+            time.sleep(0.2)
+        pid0 = call("/api/channels/c1", "oldpass1")[1]["channel"]["pid"]
+        need(call("/api/password", "oldpass1", "POST", {"current": "wrong", "new": "newpass22"})[0] == 403,
+             "a wrong current password was taken")
+        need(call("/api/password", "oldpass1", "POST", {"current": "oldpass1", "new": "short"})[0] == 400,
+             "a 5-character password was taken")
+        need(call("/api/password", "oldpass1", "POST", {"current": "oldpass1", "new": "newpass22"})[0] == 200,
+             "the change was refused")
+        need(call("/api/system", "oldpass1")[0] == 401, "the old password still works")
+        code, ch = call("/api/channels/c1", "newpass22")
+        need(code == 200 and ch["channel"]["pid"] == pid0, "the new password does not work, or the channel restarted")
+        need(json.load(open(cfg))["password"] == "newpass22", "the new password was not saved")
+    finally:
+        sup.terminate()
+        sup.wait(timeout=15)
+    sup = start()
+    try:
+        need(call("/api/system", "newpass22")[0] == 200 and call("/api/system", "oldpass1")[0] == 401,
+             "after a restart the new password is not the one asked for")
+    finally:
+        sup.terminate()
+        sup.wait(timeout=15)
+    return "wrong current and short new refused; new works at once, old does not; channel untouched; kept over a restart"
+
+
+@test
 def supervisor_quality_defaults():
     """The picture-quality defaults in Settings: they reach every H.265 channel that has
     none of its own, a channel's own setting wins, H.264 channels get nothing from them,

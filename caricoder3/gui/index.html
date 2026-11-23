@@ -967,6 +967,30 @@ async function restartQuality(n) {
   try { qualInfo = await api("/api/quality/restart", { method: "POST" }); rerender(); } catch(e) { alert(e.message); }
 }
 
+/* ---------- the GUI password ---------- */
+function passwordCard() {
+  return `<section class="card"><header><h2>Password</h2><span class="hint">the password to sign in here (user admin); a change takes effect at once, the channels are not touched</span><div class="sp"></div><button onclick="editPassword()">Change password</button></header></section>`;
+}
+function editPassword() {
+  const d = $("#dlg");
+  d.innerHTML = `<h3>Change the password</h3><div class="f"><label>Current password</label><input id="pw_cur" type="password" autocomplete="current-password">
+    <label>New password</label><input id="pw_new" type="password" autocomplete="new-password" placeholder="6 characters or more">
+    <label>New, again</label><input id="pw_new2" type="password" autocomplete="new-password"></div>
+    <div class="help">The user stays admin. Afterwards your browser asks you to sign in again, with the new password.</div>
+    <div id="pw_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="pw_go">Change it</button></div>`;
+  $("#pw_go").onclick = async () => {
+    const cur = $("#pw_cur").value, nw = $("#pw_new").value;
+    if (nw.length < 6) { $("#pw_msg").innerHTML = `<div class="msg err">The new password needs 6 characters or more.</div>`; return; }
+    if (nw !== $("#pw_new2").value) { $("#pw_msg").innerHTML = `<div class="msg err">The two new passwords are not the same.</div>`; return; }
+    try {
+      await api("/api/password", { method: "POST", body: JSON.stringify({ current: cur, new: nw }) });
+      $("#pw_msg").innerHTML = `<div class="msg">Changed. Sign in again with the new password.</div>`;
+      setTimeout(() => location.reload(), 1500);
+    } catch(e) { $("#pw_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
+}
+
 /* ---------- the other transcoders ---------- */
 let peersInfo = null, peersAt = 0;
 async function loadPeers(force) {
@@ -1884,7 +1908,7 @@ function renderSettingsPage() {
   const main = $("#main");
   if (main.dataset.page !== "settings") { main.dataset.page = "settings"; main.innerHTML = `<div class="head"><h1>Settings</h1><span class="state">for this server; each channel's own are on its page</span></div><div id="set_body"></div>`; }
   loadWatchdog(); loadTech(); loadPeers(); loadQuality();
-  $("#set_body").innerHTML = watchdogCard("settings") + qualityCard() + techCard("settings") + peersCard()
+  $("#set_body").innerHTML = watchdogCard("settings") + qualityCard() + techCard("settings") + peersCard() + passwordCard()
     + (sys ? `<section class="card"><header><h2>This build</h2><span class="hint">caricoder3 ${esc(sys.version)}: the codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:8px;max-height:none">${esc(sys.backends || "")}</pre></div></section>` : "");
 }
 

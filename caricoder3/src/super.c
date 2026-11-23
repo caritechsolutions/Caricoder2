@@ -3973,7 +3973,13 @@ static bool authorized(struct super *s, const struct http_req *req)
     int o = 0, bits = 0;
     unsigned acc = 0;
 
-    if (!s->password[0])
+    char pw[sizeof(s->password)];
+
+    /* a copy, under the lock: the password can be changed from the GUI */
+    pthread_mutex_lock(&s->lock);
+    snprintf(pw, sizeof(pw), "%s", s->password);
+    pthread_mutex_unlock(&s->lock);
+    if (!pw[0])
         return true;
     if (strncasecmp(req->auth, "Basic ", 6))
         return false;
@@ -3990,7 +3996,7 @@ static bool authorized(struct super *s, const struct http_req *req)
         }
     }
     got[o] = 0;
-    snprintf(want, sizeof(want), "admin:%s", s->password);
+    snprintf(want, sizeof(want), "admin:%s", pw);
     return strlen(got) == strlen(want) && memcmp(got, want, strlen(want)) == 0;
 }
 
@@ -5026,6 +5032,49 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         resp->type = "application/json";
         resp->body = out;
         resp->body_len = len;
+        return;
+    }
+    if (!strcmp(p, "/api/password")) {
+        /* POST {"current", "new"}: the GUI password, changed at once (no restart) */
+        struct json_doc *doc = malloc(sizeof(*doc));
+        char err[200];
+        int root;
+        const char *cur, *nw;
+        bool right;
+
+        if (strcmp(req->method, "POST")) {
+            free(doc);
+            api_error(resp, 405, "POST");
+            return;
+        }
+        root = doc ? json_parse(doc, req->body ? req->body : "", err, sizeof(err)) : -1;
+        if (root < 0) {
+            free(doc);
+            api_error(resp, 400, doc ? err : "out of memory");
+            return;
+        }
+        cur = json_get_str(doc, root, "current", "");
+        nw = json_get_str(doc, root, "new", "");
+        if (strlen(nw) < 6 || strlen(nw) >= sizeof(s->password)) {
+            free(doc);
+            snprintf(err, sizeof(err), "the new password: 6 to %zu characters", sizeof(s->password) - 1);
+            api_error(resp, 400, err);
+            return;
+        }
+        pthread_mutex_lock(&s->lock);
+        right = strlen(cur) == strlen(s->password) && !memcmp(cur, s->password, strlen(cur));
+        if (right) {
+            snprintf(s->password, sizeof(s->password), "%s", nw);
+            save_system_config(s);
+        }
+        pthread_mutex_unlock(&s->lock);
+        free(doc);
+        if (!right) {
+            api_error(resp, 403, "the current password is not right");
+            return;
+        }
+        ev(NULL, "info", "user", "the GUI password was changed");
+        http_resp_text(resp, 200, "application/json", "{\"ok\": true}\n");
         return;
     }
     if (!strcmp(p, "/api/quality") || !strcmp(p, "/api/quality/restart")) {

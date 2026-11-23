@@ -369,6 +369,10 @@ caricoder3 serve --show-password
 caricoder3 serve --password MyNewPassword      # change it (then restart the service)
 ```
 
+Or in the GUI: Settings → Password → Change password (the current password,
+then the new one twice; `POST /api/password {"current", "new"}`). That takes
+effect at once, with no restart: the channels are not touched.
+
 A channel file holds what the command line would, for example
 `/etc/caricoder3/channels/vacation.json`:
 
