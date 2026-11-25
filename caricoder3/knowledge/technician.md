@@ -276,8 +276,15 @@ points at this side, and do not blame this side when it points upstream.
 - An incident on a channel may carry "ird": the readings of the IRD whose
   output the channel reads, at the moment it opened: whether it answered,
   "locked", "cn_db" (C/N now), "cn_normal_db" (its normal, the median of
-  the last day), "ebn0_db", "ber", and "remux" (the last comparison of what
-  it sends with what comes down from the satellite).
+  the last day; a reading more than 1 dB below it is not learned, so a slow
+  fade does not become the normal), "cn_others_db" (the median C/N of the
+  other IRD tuners in use, now), "ebn0_db", "ber", and "remux" (the last
+  comparison of what it sends with what comes down from the satellite).
+- "IRD signal (C/N) below the other IRDs'": one tuner 2 dB or more below
+  the median of the other tuners in use, two readings running, while not
+  3 dB below its own normal (that is "C/N low"). One transponder or that
+  IRD's input: its cable, a splitter, its LNB leg, or that carrier weaker at
+  the uplink. Several tuners on one transponder all low: that transponder.
 - C/N well below its normal (3 dB or more), on one IRD: that IRD's dish,
   LNB, cable or that transponder. On several IRDs at once: rain, here or at
   the uplink, or the satellite. C/N at its normal while the content

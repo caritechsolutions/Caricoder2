@@ -52,6 +52,10 @@ int64_t history_bytes(void);
  * prefix ending in '*'). Resolution is chosen from the span. */
 bool history_query_chan(FILE *f, const char *chan, int64_t from, int64_t to);
 bool history_query_metrics(FILE *f, const char *metric, int64_t from, int64_t to);
+/* One metric's minute values from `from` to `to`, oldest first, at most
+ * `max`: how many (0 when there is no history). For a normal rebuilt after
+ * a restart (ird.c). */
+int history_metric_points(const char *name, int64_t from, int64_t to, int64_t *t, double *v, int max);
 bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, int limit);
 /* Incidents: a problem from its start to its end. Opening one returns its
  * id (0 when no record is kept); `parent` (0 none) is the source's

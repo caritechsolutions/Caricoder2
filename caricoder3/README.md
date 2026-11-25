@@ -717,7 +717,11 @@ hours the raw tuner output and the outputs are also probed at the same
 moment and compared: the same PIDs and codecs, nothing still scrambled, no
 stream without data that the satellite has. Incidents: `ird_down` (3 polls unanswered), `ird_unlocked`,
 `ird_cn_low` (the watchdog's `ird_cn_drop_db`, 3 dB below normal, two
-readings running), `remux_mismatch` (two comparisons running), and a
+readings running; a reading more than 1 dB below the normal is not learned
+into it, so a slow fade stays visible, and after a restart each normal is
+rebuilt from the last day of readings in the history),
+`ird_cn_below_others` (`ird_cn_others_db`, 2 dB below the median of the
+other IRD tuners in use, two readings running; 0 turns it off), `remux_mismatch` (two comparisons running), and a
 service leaving an output. A channel's incident carries the readings of
 the IRD it reads from ("ird" in what it reported), so the technician sees
 the signal at that moment. `GET/PUT /api/irds`, `POST /api/irds/check`.

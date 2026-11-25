@@ -6,7 +6,11 @@
  * Each IRD is asked for its tuner's state every minute (lock, C/N, Eb/N0,
  * BER, level, rates), from its own web interface; the readings are kept
  * in the history ("ird.NAME.cn", ...). The C/N it normally has is the
- * median of the last day's readings while locked.
+ * median of the last day's readings while locked; a reading more than
+ * 1 dB below the normal is not learned (a fade, however slow, stays a
+ * fade), and after a restart the normal is rebuilt from the history.
+ * Each tuner in use is also compared with the others in use (all IRDs):
+ * well below their median is low too, normal or not.
  *
  * Every few hours (3 by default), when the IRD's raw tuner output (the whole transponder
  * as received) and its outputs (the remux our channels read) are known,
@@ -76,6 +80,9 @@ struct ird_state {
         double cn_normal;       /* < 0: not known yet */
         int n_samples;
         int low;                /* readings in a row below the normal by the limit */
+        double cn_others;       /* the median C/N of the other tuners in use, locked (NAN: fewer than 2) */
+        int n_others;
+        int below_others;       /* readings in a row below cn_others by the limit */
     } t[IRD_TUNERS];
     /* how the box itself is, when it says (the "mcr" kind) */
     bool have_health;
@@ -111,8 +118,9 @@ void ird_check_now(void);
 
 /* The watchdog's observations, from the last readings (every couple of
  * seconds, from the supervisor's loop). `cn_drop_db`: how far below its
- * normal the C/N must be. */
-void ird_watch(int64_t t, int cn_drop_db);
+ * normal the C/N must be; `cn_others_db`: how far below the other tuners'
+ * (0: not judged). */
+void ird_watch(int64_t t, int cn_drop_db, int cn_others_db);
 
 /* The IRD whose outputs include `url` (the query ignored): its readings
  * as a JSON object; false when none. */

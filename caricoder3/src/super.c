@@ -3821,7 +3821,7 @@ static void tick(struct super *s)
                 struct wd_limits L;
 
                 wd_get_limits(&L);
-                ird_watch(t, L.ird_cn_drop_db);
+                ird_watch(t, L.ird_cn_drop_db, L.ird_cn_others_db);
             }
             wd_tick(t);
         }

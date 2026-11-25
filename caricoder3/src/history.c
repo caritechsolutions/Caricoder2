@@ -44,6 +44,11 @@ bool history_query_events(FILE *f, const char *chan, int64_t from, int64_t to, i
     (void)f; (void)chan; (void)from; (void)to; (void)limit;
     return false;
 }
+int history_metric_points(const char *name, int64_t from, int64_t to, int64_t *t, double *v, int max)
+{
+    (void)name; (void)from; (void)to; (void)t; (void)v; (void)max;
+    return 0;
+}
 void history_info(FILE *f) { fprintf(f, "null"); }
 void history_record(int64_t t, int64_t closed, const char *chan, const char *rule, const char *grp,
                     const char *summary, const char *cause)
@@ -1087,6 +1092,34 @@ bool history_query_chan(FILE *f, const char *chan, int64_t from, int64_t to)
     sqlite3_finalize(st);
     sqlite3_close(db);
     return true;
+}
+
+int history_metric_points(const char *name, int64_t from, int64_t to, int64_t *t, double *v, int max)
+{
+    sqlite3 *db = reader();
+    sqlite3_stmt *st;
+    int n = 0;
+
+    if (!db)
+        return 0;
+    if (sqlite3_prepare_v2(db, "SELECT x.t, x.v FROM m60 x JOIN metrics m ON m.id = x.mid"
+                               " WHERE m.name = ? AND x.t >= ? AND x.t < ? ORDER BY x.t LIMIT ?",
+                           -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, from);
+    sqlite3_bind_int64(st, 3, to);
+    sqlite3_bind_int(st, 4, max);
+    while (n < max && sqlite3_step(st) == SQLITE_ROW) {
+        t[n] = sqlite3_column_int64(st, 0);
+        v[n] = sqlite3_column_double(st, 1);
+        n++;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return n;
 }
 
 bool history_query_metrics(FILE *f, const char *metric, int64_t from, int64_t to)

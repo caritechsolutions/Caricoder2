@@ -32,6 +32,7 @@ enum wd_rule {
     WD_CPU, WD_GPU, WD_NIC_DROP, WD_DISK_LOW, WD_DISK_CRITICAL, WD_DISK_FILLING, WD_AV_SHIFT,
     WD_CARD_OWN, WD_CARD_ENDED, WD_MEM_GROWING,
     WD_IRD_DOWN, WD_IRD_UNLOCKED, WD_IRD_CN, WD_REMUX, WD_SAT_CHANGED, WD_LANGUAGE, WD_IRD_RESTART, WD_IRD_HOT,
+    WD_IRD_CN_OTHERS,
     WD_RULES
 };
 
@@ -58,6 +59,7 @@ struct wd_limits {
     int warmup_s;           /* a channel's first this long after it starts: dropped pictures,
                              * streams without data and CC errors are not judged */
     int ird_cn_drop_db;     /* an IRD's C/N this far below its normal: low */
+    int ird_cn_others_db;   /* a tuner's C/N this far below the other tuners' (their median): low (0: not judged) */
     int ird_temp_max_c;     /* an IRD hotter than this: too hot (0: judged by its normal instead) */
     int ird_temp_rise_c;    /* ... this much above its normal: too hot */
     int merge_s;            /* the same problem again on the same channel (or source) within this long of

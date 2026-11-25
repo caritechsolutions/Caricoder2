@@ -4199,7 +4199,18 @@ def supervisor_irds_mcr():
              x["tuners"][0]["cn_db"] in (12.2, 12.3), f"tuners: {x['tuners']}")
         need(x["uptime_s"] == 91881 and x["temperature_c"] == 67.1, f"health: {x.get('uptime_s')} {x.get('temperature_c')}")
         need(all(h == "Basic YWRtaW46YWRtaW4=" for h in seen["auth"]), "asked without the password")
-        # its second tuner's signal falls: said with the tuner
+        # its second tuner 2 dB down (ird15 tuner 2, 25 Nov: 9.8 dB, normally 11.8): not 3 dB below its own
+        # normal, but well below the other tuners: said as that; and not learned into its normal
+        tuners["tuner"][1]["status"]["c_n_100"] = "9.80 dB"
+        bo = wait_for(lambda: incidents("ird_cn_below_others"), 15, "tuner 2 below the others")[0]
+        import re
+        need(re.search(r"IRD ird15 tuner 2: C/N 9\.8 dB, the other tuners in use 12\.[23] dB \(the median of 2\)",
+                       bo["summary"]), f"below the others: {bo['summary']}")
+        need(not incidents("ird_cn_low"), f"said as low against its normal: {[i['summary'] for i in incidents('ird_cn_low')]}")
+        time.sleep(6)
+        t2 = [i for i in api("/api/irds")["irds"] if i["name"] == "ird15"][0]["tuners"][1]
+        need(t2["cn_normal_db"] >= 12.0 and t2["cn_others_db"] in (12.2, 12.3), f"the fade was learned: {t2}")
+        # its second tuner's signal falls further: said with the tuner, as below its own normal
         tuners["tuner"][1]["status"]["c_n_100"] = "6.10 dB"
         low = wait_for(lambda: incidents("ird_cn_low"), 15, "tuner 2 low")[0]
         need("IRD ird15 tuner 2: C/N 6.1 dB, normally 12.2 dB" in low["summary"] or
@@ -4231,7 +4242,110 @@ def supervisor_irds_mcr():
         except subprocess.TimeoutExpired:
             sup.kill()
         srv.shutdown()
-    return f"2 tuners, up {x['uptime_s']} s, {x['temperature_c']} °C; tuner 2 low, the restart and the output's change said"
+    return (f"2 tuners, up {x['uptime_s']} s, {x['temperature_c']} °C; tuner 2 2 dB down said as below the others "
+            f"(normal kept at {t2['cn_normal_db']}), then low; the restart and the output's change said")
+
+
+@test
+def supervisor_ird_normal_restored():
+    """After a restart each IRD tuner's normal C/N is rebuilt from the last day in the history (locked minutes
+    only, a fade not learned), instead of 30 minutes without one; and with no history it is learned as before."""
+    import base64
+    import http.server
+    import sqlite3
+    import urllib.request
+    root = w("super_ird_restore")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port, web = _port[0] + 1, _port[0] + 2
+    _port[0] += 4
+    tuners = json.load(open(os.path.join(HERE, "data", "mcr", "tuner.json")))
+    status = json.load(open(os.path.join(HERE, "data", "mcr", "runstatus.json")))
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = json.dumps(tuners if "proctype=tuner" in self.path else status).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", web), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hdb = os.path.join(root, "h.db")
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "history": hdb,
+               "ird_poll_s": 2, "ird_remux_s": 0, "ird_baseline_n": 30,
+               "irds": [{"name": "ird15", "address": f"mcr://127.0.0.1:{web}"}]}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path):
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth), timeout=10) as r:
+            return json.load(r)
+
+    def start():
+        p = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "a"))
+        wait_up(port)
+        return p
+
+    def stop(p):
+        p.send_signal(signal.SIGTERM)
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+    def tuners_now():
+        end = time.time() + 15
+        while time.time() < end:
+            x = [i for i in api("/api/irds")["irds"] if i["name"] == "ird15"]
+            if x and x[0].get("answering") and len(x[0].get("tuners") or []) == 2:
+                return x[0]["tuners"]
+            time.sleep(0.5)
+        raise Fail("ird15 not read")
+    try:
+        # first run: no history yet, so no normal after a few polls (30 readings needed)
+        sup = start()
+        t = tuners_now()
+        need(t[0]["cn_normal_db"] is None and t[1]["cn_normal_db"] is None, f"a normal from nothing: {t}")
+        stop(sup)
+        # 90 minutes in the history: tuner 1 at 11.8 dB; tuner 2 at 12.2 dB for 30 minutes (5 minutes unlocked
+        # at 0 dB among them), then 9.8 dB for 55 (a fade: most of its day, so learned it would be the median)
+        db = sqlite3.connect(hdb)
+        ids = {}
+        for name in ("ird.ird15.cn", "ird.ird15.lock", "ird.ird15.t2.cn", "ird.ird15.t2.lock"):
+            db.execute("INSERT OR IGNORE INTO metrics (name) VALUES (?)", (name,))
+            ids[name] = db.execute("SELECT id FROM metrics WHERE name = ?", (name,)).fetchone()[0]
+        now = int(time.time()) // 60 * 60
+        for k in range(90):
+            tt = now - (90 - k) * 60
+            unl = 10 <= k < 15
+            c2 = 0.0 if unl else 9.8 if k >= 35 else 12.2
+            for name, v in (("ird.ird15.cn", 11.8), ("ird.ird15.lock", 1.0),
+                            ("ird.ird15.t2.cn", c2), ("ird.ird15.t2.lock", 0.0 if unl else 1.0)):
+                db.execute("INSERT OR REPLACE INTO m60 (t, mid, v, vmin, vmax) VALUES (?, ?, ?, ?, ?)",
+                           (tt, ids[name], v, v, v))
+        db.commit()
+        db.close()
+        # the readings the IRD gives now: tuner 2 still faded
+        tuners["tuner"][1]["status"]["c_n_100"] = "9.80 dB"
+        sup = start()
+        t = tuners_now()
+        stop(sup)
+        log = open(os.path.join(root, "supervisor.log")).read()
+        need(t[0]["cn_normal_db"] == 11.8, f"tuner 1's normal not rebuilt: {t[0]}")
+        need(t[1]["cn_normal_db"] == 12.2, f"tuner 2's normal not 12.2 (the fade or the unlocked minutes learned?): {t[1]}")
+        # every locked minute offered (85 of tuner 2's 90: the unlocked ones not)
+        need("IRD ird15: normal C/N rebuilt from 90 readings" in log and
+             "IRD ird15 tuner 2: normal C/N rebuilt from 85 readings" in log, log[-800:])
+    finally:
+        srv.shutdown()
+    return f"rebuilt after a restart: tuner 1 {t[0]['cn_normal_db']} dB, tuner 2 {t[1]['cn_normal_db']} dB (its fade and unlocked minutes left out)"
 
 
 @test

@@ -49,6 +49,7 @@ static const struct {
     [WD_LANGUAGE]    = { "wrong_language", "audio in the wrong language", "error", true },
     [WD_IRD_RESTART] = { "ird_restarted", "IRD restarted", "error", false },
     [WD_IRD_HOT]     = { "ird_hot", "IRD running hot", "warn", false },
+    [WD_IRD_CN_OTHERS] = { "ird_cn_below_others", "IRD signal (C/N) below the other IRDs'", "warn", false },
 };
 
 #define ENTRIES_MAX 2048
@@ -139,6 +140,7 @@ void wd_defaults(struct wd_limits *l)
     l->mem_growth_pct = 30;
     l->warmup_s = 60;
     l->ird_cn_drop_db = 3;
+    l->ird_cn_others_db = 2;
     l->ird_temp_max_c = 0;
     l->ird_temp_rise_c = 10;
     l->short_s = 120;
@@ -165,7 +167,7 @@ int wd_rule_by_id(const char *id)
 
 #define LIMIT_FIELDS(X) X(min_s) X(content_s) X(clear_s) X(group_s) X(no_input_s) X(cc_per_min) X(dropped_per_min) \
     X(restarts) X(restart_window_s) X(cpu_pct) X(gpu_pct) X(load_s) X(disk_warn_pct) X(disk_crit_pct) X(disk_full_h) \
-    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_temp_max_c) X(ird_temp_rise_c) X(short_s) X(merge_s)
+    X(av_shift_ms) X(av_shift_s) X(mem_window_s) X(mem_growth_mb) X(mem_growth_pct) X(warmup_s) X(ird_cn_drop_db) X(ird_cn_others_db) X(ird_temp_max_c) X(ird_temp_rise_c) X(short_s) X(merge_s)
 
 void wd_limits_write(FILE *f, const struct wd_limits *l)
 {

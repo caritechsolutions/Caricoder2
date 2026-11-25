@@ -24,6 +24,10 @@
 #include "ird_upcom.h"
 
 #define SAMPLES 1440                    /* a day of minutes */
+/* A reading this far below the normal is not learned: a fade, however slow,
+ * would otherwise become the normal and never be said (ird15 tuner 2,
+ * 2026-11-25: 9.8 dB against 11.8, every reading going into the normal). */
+#define CN_LEARN_BELOW_DB 1.0
 #define PROGS_MAX 64
 
 struct series {                         /* a day of readings, for a normal (median) */
@@ -34,6 +38,7 @@ struct series {                         /* a day of readings, for a normal (medi
 struct ird {
     struct ird_state st;
     struct series cn[IRD_TUNERS];       /* each tuner's C/N while locked */
+    bool restored;                      /* the normals rebuilt from the history (or tried) */
     struct series temp;
     int out_progs[IRD_OUTS][PROGS_MAX]; /* the services in each output at the last comparison */
     int n_out_progs[IRD_OUTS];
@@ -247,6 +252,106 @@ static double series_add(struct series *s, double v)
     return s->n >= (I.o.baseline_n > 0 ? I.o.baseline_n : 30) ? median(s) : -1;
 }
 
+/* A tuner in use: every tuner, unless the address names the ones in use (?tuners=) */
+static bool tuner_used(const struct ird_conf *c, int i)
+{
+    return !c->tuners || (c->tuners >> i & 1);
+}
+
+/* A locked reading of tuner i of IRD d into its normal, unless it is well
+ * below the normal (see CN_LEARN_BELOW_DB). With the lock held. */
+static void learn(struct ird *d, int i, double cn)
+{
+    struct ird_tuner *tu = &d->st.t[i];
+    double nn;
+
+    if (tu->cn_normal >= 0 && cn < tu->cn_normal - CN_LEARN_BELOW_DB)
+        return;
+    nn = series_add(&d->cn[i], cn);
+    tu->n_samples = d->cn[i].n;
+    if (nn >= 0)
+        tu->cn_normal = nn;
+}
+
+/* Tuner i of IRD k against the other tuners in use and locked, on every IRD
+ * (they share the dish and, here, the satellite): their median C/N, and
+ * whether this one is `limit_db` below it. Their readings are the last ones,
+ * up to a poll old. With the lock held. */
+static void others(int k, int i, int limit_db)
+{
+    struct ird_tuner *tu = &I.ird[k].st.t[i];
+    float v[IRDS_MAX * IRD_TUNERS];
+    int n = 0;
+
+    for (int j = 0; j < I.n; j++) {
+        const struct ird_state *o = &I.ird[j].st;
+
+        if (!o->answering)
+            continue;
+        for (int m = 0; m < o->n_tuners && m < IRD_TUNERS; m++)
+            if ((j != k || m != i) && tuner_used(&o->c, m) && o->t[m].have && o->t[m].locked && !isnan(o->t[m].cn))
+                v[n++] = (float)o->t[m].cn;
+    }
+    tu->n_others = n;
+    if (n < 2 || !tu->have || !tu->locked || isnan(tu->cn)) {
+        tu->cn_others = NAN;
+        tu->below_others = 0;
+        return;
+    }
+    qsort(v, (size_t)n, sizeof(float), cmpf);
+    tu->cn_others = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    tu->below_others = limit_db > 0 && tu->cn < tu->cn_others - limit_db ? tu->below_others + 1 : 0;
+}
+
+/* After a restart: each tuner's normal rebuilt from the last day of its
+ * readings in the history (locked ones, learned as they would have been),
+ * instead of 30 minutes without one. Called without the lock. */
+#define RESTORE_MAX SAMPLES
+static void restore(int k)
+{
+    struct ird_conf c;
+    bool need;
+    int64_t now = time(NULL);
+    static int64_t tc[RESTORE_MAX], tl[RESTORE_MAX];
+    static double vc[RESTORE_MAX], vl[RESTORE_MAX];
+
+    pthread_mutex_lock(&I.lock);
+    need = !I.ird[k].restored;
+    I.ird[k].restored = true;
+    c = I.ird[k].st.c;
+    pthread_mutex_unlock(&I.lock);
+    if (!need || !history_enabled())
+        return;
+    for (int i = 0; i < IRD_TUNERS; i++) {
+        char m[96], ml[96], pre[64];
+        int nc, nl, used = 0, p = 0;
+
+        snprintf(pre, sizeof(pre), i ? "%.40s.t%d" : "%.40s", c.name, i + 1);
+        snprintf(m, sizeof(m), "ird.%s.cn", pre);
+        snprintf(ml, sizeof(ml), "ird.%s.lock", pre);
+        nc = history_metric_points(m, now - 86400, now + 60, tc, vc, RESTORE_MAX);
+        nl = history_metric_points(ml, now - 86400, now + 60, tl, vl, RESTORE_MAX);
+        if (nc <= 0)
+            continue;
+        pthread_mutex_lock(&I.lock);
+        if (!strcmp(I.ird[k].st.c.name, c.name) && I.ird[k].cn[i].n == 0) {
+            for (int q = 0; q < nc; q++) {
+                while (p < nl && tl[p] < tc[q])
+                    p++;
+                /* only minutes it was locked all through */
+                if (p < nl && tl[p] == tc[q] && vl[p] > 0.999) {
+                    learn(&I.ird[k], i, vc[q]);
+                    used++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&I.lock);
+        if (used)
+            log_info("IRD %s%s: normal C/N rebuilt from %d readings of the last day in the history",
+                     c.name, i ? (i == 1 ? " tuner 2" : i == 2 ? " tuner 3" : " tuner 4") : "", used);
+    }
+}
+
 /* One poll of IRD k; called without the lock (the requests take time). */
 static void poll_one(int k)
 {
@@ -259,6 +364,7 @@ static void poll_one(int k)
     struct wd_limits L;
     char restart[200] = "";
 
+    restore(k);
     pthread_mutex_lock(&I.lock);
     c = I.ird[k].st.c;
     pthread_mutex_unlock(&I.lock);
@@ -305,28 +411,24 @@ static void poll_one(int k)
             for (int i = 0; i < got.n_tuners; i++) {
                 struct ird_tuner *tu = &st->t[i];
                 double normal = tu->cn_normal;
-                int low = tu->low, ns = tu->n_samples;
+                int low = tu->low, ns = tu->n_samples, below = tu->below_others;
 
                 *tu = got.t[i];
                 tu->cn_normal = normal;
                 tu->low = low;
                 tu->n_samples = ns;
+                tu->below_others = below;
+                tu->cn_others = NAN;
                 if (tu->locked && !isnan(tu->cn)) {
                     /* below the normal: judged against the normal before this reading */
-                    double nn;
-
                     tu->low = tu->cn_normal >= 0 && tu->cn < tu->cn_normal - L.ird_cn_drop_db ? tu->low + 1 : 0;
-                    if (!tu->low) {
-                        /* a low reading is not let into the normal (a long fade would drag it down) */
-                        nn = series_add(&d->cn[i], tu->cn);
-                        tu->n_samples = d->cn[i].n;
-                        if (nn >= 0)
-                            tu->cn_normal = nn;
-                    }
+                    learn(d, i, tu->cn);
                 } else {
                     tu->low = 0;
                 }
             }
+            for (int i = 0; i < st->n_tuners; i++)
+                others(k, i, L.ird_cn_others_db);
             for (int i = 0; i < st->n_tuners; i++)
                 if ((!st->c.tuners || (st->c.tuners >> i & 1)) && st->t[i].have &&
                     (!st->t[i].locked || st->t[i].low > 0))
@@ -361,6 +463,8 @@ static void poll_one(int k)
             for (int i = 0; i < st->n_tuners; i++) {
                 st->t[i].have = false;
                 st->t[i].low = 0;
+                st->t[i].below_others = 0;
+                st->t[i].cn_others = NAN;
             }
             st->temp_high = 0;
             snprintf(st->error, sizeof(st->error), "%s",
@@ -1192,8 +1296,10 @@ void ird_set(const struct ird_conf *list, int n, const struct ird_opts *o)
                 *d = old[keep];         /* its readings and its normal stay */
             } else {
                 memset(d, 0, sizeof(*d));
-                for (int i = 0; i < IRD_TUNERS; i++)
+                for (int i = 0; i < IRD_TUNERS; i++) {
                     d->st.t[i].cn_normal = -1;
+                    d->st.t[i].cn_others = NAN;
+                }
                 d->st.temp_normal = -1;
                 d->st.temp_c = NAN;
                 d->st.uptime_s = -1;
@@ -1273,7 +1379,7 @@ static struct ird_state *states(int *n)
     return st;
 }
 
-void ird_watch(int64_t t, int cn_drop_db)
+void ird_watch(int64_t t, int cn_drop_db, int cn_others_db)
 {
     int n;
     struct ird_state *st = states(&n);
@@ -1307,6 +1413,12 @@ void ird_watch(int64_t t, int cn_drop_db)
                          s->c.name, tn, tu->cn, tu->cn_normal, tu->ebn0, tu->ber);
             wd_observe(t, subj, NULL, "", WD_IRD_CN,
                        used && i < s->n_tuners && s->answering && tu->locked && tu->low >= 2 && cn_drop_db > 0, what, 0);
+            /* well below the other tuners: said unless already said as below its own normal */
+            snprintf(what, sizeof(what), "IRD %.40s%s: C/N %.1f dB, the other tuners in use %.1f dB (the median of %d)",
+                     s->c.name, tn, tu->cn, tu->cn_others, tu->n_others);
+            wd_observe(t, subj, NULL, "", WD_IRD_CN_OTHERS,
+                       used && i < s->n_tuners && s->answering && tu->locked && tu->below_others >= 2 &&
+                       !(tu->low >= 2 && cn_drop_db > 0) && cn_others_db > 0 && !isnan(tu->cn_others), what, 0);
         }
         snprintf(subj, sizeof(subj), "ird/%.40s", s->c.name);
         snprintf(what, sizeof(what), "IRD %.40s: %.1f °C inside, normally %.1f °C", s->c.name, s->temp_c, s->temp_normal);
@@ -1351,6 +1463,7 @@ static void tuner_json(FILE *f, const struct ird_tuner *t)
         fprintf(f, ", \"cn_normal_db\": %.1f", t->cn_normal);
     else
         fprintf(f, ", \"cn_normal_db\": null");
+    jnum(f, "cn_others_db", t->cn_others, "%.1f");
 }
 
 static void one_json(FILE *f, const struct ird_state *s)
