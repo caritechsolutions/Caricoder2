@@ -3259,6 +3259,71 @@ def weather_reports():
 
 
 @test
+def supervisor_favicon():
+    """The GUI's icon: in the page itself (a browser shows it in the tab), and at /favicon.ico without signing in
+    (asked for by browsers and bookmarks): a picture, while everything else still needs the password."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super_icon")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "iconpass1", "card_process": "off"}, open(cfg, "w"))
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "sup.log"), "w"))
+    try:
+        wait_up(port)
+        for path in ("/favicon.ico", "/favicon.svg"):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as f:
+                body = f.read().decode()
+                need(f.status == 200 and f.headers.get("Content-Type", "").startswith("image/svg+xml") and
+                     body.startswith("<svg") and body.rstrip().endswith("</svg>"), f"{path}: {f.status} {body[:80]}")
+        for path in ("/", "/api/channels"):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10)
+                raise Fail(f"{path} answered without the password")
+            except urllib.error.HTTPError as e:
+                need(e.code == 401, f"{path}: {e.code}")
+        # the page's own icon, as a browser reads it: it must draw
+        auth = {"Authorization": "Basic " + base64.b64encode(b"admin:iconpass1").decode()}
+        page = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/", headers=auth), timeout=10).read().decode()
+        need('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' in page, "no icon in the page")
+        js = r"""
+const {chromium} = require('playwright');
+(async () => {
+  const b = await chromium.launch();
+  const ctx = await b.newContext({httpCredentials: {username: 'admin', password: 'iconpass1'}});
+  const p = await ctx.newPage();
+  await p.goto(process.argv[1]);
+  const r = await p.evaluate(() => new Promise(ok => {
+    const l = document.querySelector('link[rel="icon"]');
+    if (!l) return ok('no link');
+    const i = new Image(); i.onload = () => ok('drawn ' + i.naturalWidth); i.onerror = () => ok('does not draw'); i.src = l.href;
+  }));
+  console.log(r); await b.close();
+})();"""
+        try:
+            out = subprocess.run(["node", "-e", js, f"http://127.0.0.1:{port}/"], capture_output=True, text=True,
+                                 timeout=60, cwd=root)
+        except FileNotFoundError:
+            return "served without signing in and in the page (no browser here to draw it)"
+        if "Cannot find module" in out.stderr:
+            return "served without signing in and in the page (no browser here to draw it)"
+        need(out.stdout.strip().startswith("drawn"), f"the page's icon: {out.stdout} {out.stderr[-300:]}")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"served without signing in (everything else still 401); the page's icon {out.stdout.strip()} in a browser"
+
+
+@test
 def supervisor_password_change():
     """The GUI password changed from Settings: the current one is asked for, a short one refused;
     the new one works at once and the old one no longer does; the channels are not restarted;

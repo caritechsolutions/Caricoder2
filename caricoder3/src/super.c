@@ -4418,6 +4418,15 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
         handle_peer(s, req, resp, p);
         return;
     }
+    /* The icon (also in the page itself): without signing in, a picture only.
+     * Asked for by browsers and bookmarks whatever the page says. */
+    if (!strcmp(p, "/favicon.ico") || !strcmp(p, "/favicon.svg")) {
+        static const char icon[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#1d5bbf\"/><rect x=\"10\" y=\"20\" width=\"12\" height=\"5\" rx=\"2.5\" fill=\"#fff\" opacity=\".55\"/><rect x=\"10\" y=\"29.5\" width=\"16\" height=\"5\" rx=\"2.5\" fill=\"#fff\" opacity=\".8\"/><rect x=\"10\" y=\"39\" width=\"12\" height=\"5\" rx=\"2.5\" fill=\"#fff\" opacity=\".55\"/><path d=\"M30 16.5v31a2 2 0 0 0 3 1.7l22-15.5a2 2 0 0 0 0-3.4l-22-15.5a2 2 0 0 0-3 1.7z\" fill=\"#fff\"/></svg>";
+
+        http_resp_text(resp, 200, "image/svg+xml", icon);
+        snprintf(resp->extra, sizeof(resp->extra), "Cache-Control: max-age=86400\r\n");
+        return;
+    }
     if (!authorized(s, req)) {
         snprintf(resp->extra, sizeof(resp->extra), "WWW-Authenticate: Basic realm=\"caricoder3\"\r\n");
         http_resp_text(resp, 401, "text/plain", "sign in as admin with the password from the config\n");
