@@ -372,8 +372,11 @@ main() {
     mv -f "$PREFIX/bin/.caricoder3.new" "$PREFIX/bin/caricoder3"
     note "binary  $PREFIX/bin/caricoder3"
 
-    local running
-    running="$(pgrep -x caricoder3 2>/dev/null | wc -l || true)"
+    # Channels only (started with --name): not the supervisor, card processes or shared readers
+    local running=0 p
+    for p in $(pgrep -x caricoder3 2>/dev/null); do
+        tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | grep -qx -- '--name' && running=$((running + 1))
+    done
     if [ "${running:-0}" -gt 0 ]; then
         note "$running channel(s) are running on the previous binary until restarted"
     fi
