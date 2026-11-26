@@ -3324,6 +3324,85 @@ const {chromium} = require('playwright');
 
 
 @test
+def supervisor_gui_channel_tabs():
+    """The channel page in a browser: four tabs (Overview, Streams & outputs, Settings, Activity), one bit-rate
+    chart with Live as a range, the settings in six sections each saying what it holds, and one save for all:
+    a field changed in a section not shown is saved with the rest."""
+    import base64
+    import urllib.request
+    root = w("super_tabs")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "tabpass12", "card_process": "off",
+               "history": os.path.join(root, "h.db")}, open(cfg, "w"))
+    json.dump({"input": "udp://239.255.78.9:5000", "share_input": False, "enabled": False, "video": ["-1x720:hevc:1250k"],
+               "audio": ["aac:128k"]}, open(os.path.join(root, "channels", "c1.json"), "w"))
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "sup.log"), "w"))
+    js = r"""
+const {chromium} = require('playwright');
+(async () => {
+  const b = await chromium.launch();
+  const ctx = await b.newContext({httpCredentials: {username: 'admin', password: 'tabpass12'}, viewport: {width: 1280, height: 900}});
+  const p = await ctx.newPage(); const errs = []; p.on('pageerror', e => errs.push(e.message));
+  await p.goto(process.argv[1] + '#/channels/c1'); await p.waitForSelector('#ctabs button'); await p.waitForTimeout(1500);
+  const r = {};
+  r.tabs = await p.$$eval('#ctabs button', bs => bs.map(x => x.innerText.trim()));
+  r.ranges = await p.$$eval('#raterange button', bs => bs.map(x => x.innerText.trim()));
+  await p.click('#ctabs button:nth-child(3)');
+  r.shown = await p.evaluate(() => document.querySelector('#chanpane').dataset.tab);
+  r.sections = await p.$$eval('#setnav button', bs => bs.map(x => x.childNodes[0].textContent.trim()));
+  r.videoSum = await p.$$eval('#setnav button small', ss => ss[2].textContent);
+  r.visible = await p.$$eval('#settings .sec', ss => ss.filter(x => getComputedStyle(x).display !== 'none').map(x => x.dataset.sec));
+  await p.click('#setnav button:nth-child(6)');
+  await p.fill('#delay', '3300');
+  await p.click('#setnav button:nth-child(3)');
+  r.delayHidden = await p.$eval('#delay', x => x.offsetParent === null);
+  r.dot = !!(await p.$('#ctabs .dot'));
+  await p.click('#savebar button.primary'); await p.waitForTimeout(2500);
+  r.saved = await p.evaluate(async () => (await (await fetch('/api/channels/c1')).json()).channel.config);
+  r.errors = errs;
+  console.log(JSON.stringify(r)); await b.close();
+})();"""
+    try:
+        wait_up(port)
+        try:
+            out = subprocess.run(["node", "-e", js, f"http://127.0.0.1:{port}/"], capture_output=True, text=True, timeout=90, cwd=root)
+        except FileNotFoundError:
+            return "SKIPPED: no node here"
+        if "Cannot find module" in out.stderr:
+            return "SKIPPED: no browser here"
+        try:
+            r = json.loads(out.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise Fail(f"the page: {out.stdout[-400:]} {out.stderr[-600:]}")
+        need(not r["errors"], f"script errors: {r['errors']}")
+        need(r["tabs"] == ["Overview", "Streams & outputs", "Settings", "Activity"], f"tabs: {r['tabs']}")
+        need(r["ranges"][0] == "Live" and len(r["ranges"]) == 6, f"ranges: {r['ranges']}")
+        need(r["shown"] == "settings", f"tab shown: {r['shown']}")
+        need(r["sections"] == ["Source", "Program & streams", "Video", "Audio", "Card & picture quality", "Timing & service"],
+             f"sections: {r['sections']}")
+        need("hevc" in r["videoSum"] and "1250k" in r["videoSum"], f"video section says: {r['videoSum']}")
+        need(len(r["visible"]) == 1, f"sections shown at once: {r['visible']}")
+        need(r["dot"], "Settings tab does not show the unsaved change")
+        need(r["delayHidden"], "the Timing field was still shown after switching to Video")
+        k = r["saved"]
+        need(str(k.get("delay")) == "3300" and k.get("video") == ["-1x720:hevc:1250k"] and k.get("audio") == ["aac:128k"],
+             f"saved: {k}")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return f"4 tabs, ranges {', '.join(r['ranges'])}; 6 sections, one shown; a field in another section saved with the rest"
+
+
+@test
 def supervisor_password_change():
     """The GUI password changed from Settings: the current one is asked for, a short one refused;
     the new one works at once and the old one no longer does; the channels are not restarted;

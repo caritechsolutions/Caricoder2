@@ -5,7 +5,7 @@
 #   curl -fsSL .../scripts/flussonic-migrate.sh | sudo bash
 #
 # Then, one stream at a time: switch the stream off in Flussonic, and in
-# caricoder3 open the channel, "Change settings", Enabled: yes, Save. Each
+# caricoder3 open the channel, Settings › Timing & service, Enabled: yes, Save. Each
 # channel's output is already set to the address Flussonic sends to.
 #
 # Before anything is removed, what each Flussonic output carries now

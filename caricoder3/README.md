@@ -317,8 +317,15 @@ restarts one that dies (after 1, 2, 4 … 30 s), and serves on TCP port
   **Overview** (is all well: the channels, incidents, server, cards and
   disk in one row; a tile per channel with its picture, health and rates;
   the latest incidents; the technician), **Channels** (the list beside a
-  channel's page: live statistics, history, streams, outputs added and
-  removed while it runs, the settings behind "Change settings", the log),
+  channel's page, in four tabs: **Overview** (the picture, source,
+  processing and output, and one bit-rate chart: Live, the last 2 minutes
+  every 2 s, or the history over 1 hour to 30 days), **Streams & outputs**
+  (each stream in and out, and the outputs, added and removed while it
+  runs), **Settings** (six sections: Source, Program & streams, Video,
+  Audio, Card & picture quality, Timing & service, each saying what it
+  holds; the long explanations behind "Explain these"; one "Save and
+  restart" for all), **Activity** (incidents, events and the log; the tab
+  shows a count, and the Overview a banner, while an incident is open)),
   **Incidents** (the day's, what the watchdog is watching, the
   technician's answers and your verdicts), **Server** (CPU, memory, the
   NVIDIA cards, history, disks, network interfaces, shared inputs) and
@@ -461,8 +468,8 @@ line again within a minute is counted, not repeated), and changes made
 in the GUI. Detail is kept 3 days, minutes 30 days, hours and events a
 year. The file never grows past `"history_max_mb"` (default 2048; 120
 channels take about 42 MB a day): when it would, the oldest detail goes
-first and events last. The GUI shows it in a History card on each
-channel and on the Server page (1 h to 30 days). The on-server AI
+first and events last. The GUI shows it on each channel (its bit-rate
+chart, and its Activity tab) and on the Server page (1 h to 30 days). The on-server AI
 technician, when it comes, will read it too.
 
 ### The watchdog and incidents
@@ -532,7 +539,7 @@ Server page (Watchdog, "Change") or in the config's `"watchdog"` object
 (`min_s`, `clear_s`, `group_s`, `no_input_s`, `cc_per_min`,
 `dropped_per_min`, `restarts`, `restart_window_s`, `cpu_pct`, `gpu_pct`,
 `load_s`, `off`: rule ids). The Channels page lists the last 24 hours'
-incidents, each channel's History card its own; a click shows one in
+incidents, each channel's Activity tab its own; a click shows one in
 full. Nothing is sent anywhere yet.
 
 ### Disks
@@ -594,7 +601,7 @@ a source that can be read beside the channel without taking from it is
 read again: multicast and HTTP. For anything else (unicast UDP, SRT,
 RIST) the channel's output is recorded instead, through an output of
 its own for the time. The same tools are on each incident and in each
-channel's History card: "Record 20 s", "Keep the picture", "Probe the
+channel's Activity tab: "Record 20 s", "Keep the picture", "Probe the
 source", "Ping…" (an IRD's management address, say). Files go to the
 evidence folder (`"evidence"` in the config, default
 `/var/lib/caricoder3/evidence`; `"none"`: nothing kept), kept to

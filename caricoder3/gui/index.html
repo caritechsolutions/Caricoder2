@@ -132,6 +132,25 @@ table.rows tbody tr { cursor:pointer } table.rows tbody tr:hover td { background
 .choice button { border:none; border-radius:0; background:none; padding:7px 14px; min-height:34px; color:var(--fg2) } .choice button.on { background:var(--acc-soft); color:var(--acc-strong); font-weight:600 }
 .savebar { position:sticky; bottom:0; margin-top:14px; background:var(--panel); border:1px solid var(--line2); border-radius:8px; padding:10px 14px; display:flex; gap:10px; align-items:center; box-shadow:var(--shadow) }
 .savebar .sp { flex:1 } .savebar.hidden { display:none }
+/* the channel page: tabs, and the settings in sections */
+.ctabs { display:flex; flex-wrap:wrap; gap:2px; border-bottom:1px solid var(--line); margin:-4px 0 18px }
+.ctabs button { background:none; border:0; border-bottom:3px solid transparent; border-radius:0; margin-bottom:-1px; padding:10px 16px; min-height:44px; font-size:15px; color:var(--dim) }
+.ctabs button:hover { color:var(--fg) } .ctabs button.on { color:var(--fg); font-weight:600; border-bottom-color:var(--acc) }
+.ctabs .n { margin-left:8px; background:var(--bad); color:#fff; border-radius:10px; padding:0 7px; font-size:12px; font-weight:600 } .ctabs .dot { margin-left:6px; color:var(--warn) }
+#chanpane .ctp { display:none } #chanpane[data-tab="overview"] .ctp.overview, #chanpane[data-tab="streams"] .ctp.streams,
+#chanpane[data-tab="settings"] .ctp.settings, #chanpane[data-tab="activity"] .ctp.activity { display:block }
+.incbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; padding:11px 16px; margin-bottom:18px; background:var(--warn-soft); border:1px solid var(--warn); border-radius:var(--r) }
+.incbar.bad { background:var(--bad-soft); border-color:var(--bad) } .incbar b { color:var(--warn-ink) } .incbar.bad b { color:var(--bad-ink) } .incbar .sp { flex:1 }
+.setwrap { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start }
+.setnav { flex:1 1 220px; max-width:280px; background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:8px; display:flex; flex-direction:column; gap:2px }
+.setnav button { display:block; width:100%; text-align:left; background:none; border:0; border-radius:8px; padding:9px 12px; color:var(--fg2) }
+.setnav button.on { background:var(--acc-soft); color:var(--acc-strong); font-weight:600 } .setnav button small { display:block; font-weight:400; font-size:12px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.setmain { flex:999 1 560px; min-width:0 } @media (max-width:900px) { .setnav { max-width:none } } .setmain > section.card { margin-bottom:0 }
+#settings .sec { display:none } #settings .sec.on { display:block }
+#settings .help.long { display:none } #settings.explain .help.long { display:block }
+.more { position:relative } .more > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center; min-height:38px; padding:0 14px; border:1px solid var(--line2); border-radius:8px; background:var(--panel); color:var(--fg) } .more > summary::-webkit-details-marker { display:none }
+.more .menu { position:absolute; right:0; top:calc(100% + 6px); background:var(--panel); border:1px solid var(--line2); border-radius:8px; box-shadow:var(--shadow); padding:6px; z-index:20; min-width:180px }
+.more .menu button { display:block; width:100%; text-align:left; border:0; background:none; padding:8px 10px }
 pre.log { margin:0; padding:12px 14px; background:var(--code); border-radius:0 0 var(--r) var(--r); font:12.5px/1.55 "IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; max-height:380px; overflow:auto; white-space:pre-wrap; color:var(--fg2) }
 dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line2); border-radius:12px; padding:22px; width:600px; max-width:95vw; box-shadow:var(--shadow) } dialog::backdrop { background:rgba(10,14,20,.55) }
 dialog h3 { margin:0 0 14px; font-size:19px } dialog .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px }
@@ -222,7 +241,7 @@ const VBR = ["400k","600k","800k","1M","1.5M","2M","2.5M","3M","4M","5M","6M","8
 const ABR = ["64k","96k","128k","160k","192k","256k","320k","384k"];
 const MUX = [["", "Variable (no padding)"], ["2M","2 Mb/s"],["3M","3 Mb/s"],["4M","4 Mb/s"],["5M","5 Mb/s"],["6M","6 Mb/s"],["8M","8 Mb/s"],["10M","10 Mb/s"],["12M","12 Mb/s"],["15M","15 Mb/s"],["20M","20 Mb/s"],["custom","Custom…"]];
 
-let view = { name: null, page: "overview" }, timer = null, sys = null, channels = [], dirty = false, logOpen = false, setOpen = false, sysAt = 0, chAt = 0;
+let view = { name: null, page: "overview" }, timer = null, sys = null, channels = [], dirty = false, sysAt = 0, chAt = 0;
 let filt = { q: "", st: "" };
 try { filt = Object.assign(filt, JSON.parse(localStorage.getItem("cc3filter") || "{}")); } catch(e) {}
 function setFilter(from) { const q = $("#" + from + "_q"), st = $("#" + from + "_st");
@@ -607,7 +626,7 @@ const tipRow = (cls, label, value) => `<div><i class="${cls}"></i>${label}<b>${v
 
 function graphHtml(h) {
   const inn = (h && h.in) || [], out = (h && h.out) || [], step = (h && h.step_s) || 2;
-  const W = 600, H = 170, L = 58, R = 10, T = 10, B = 24, n = 60;
+  const W = 900, H = 190, L = 64, R = 10, T = 10, B = 24, n = 60;   /* the size of the history chart: the same place on the page */
   const max = niceMax(Math.max(1, ...inn, ...out) * 1.1);
   const x = i => L + (W - L - R) * (n - 1 - i) / (n - 1);   // i samples before now
   const y = v => T + (H - T - B) * (1 - v / max);
@@ -659,23 +678,65 @@ function eventRows(evs, withChan) {
   if (!evs || !evs.length) return `<div class="empty" style="padding:16px">Nothing recorded in this time.</div>`;
   return `<table class="evt"><tbody>${evs.map(e => `<tr class="lv-${esc(e.level)}"><td class="mono">${fmtWhen(e.t)}</td>${withChan ? `<td>${e.channel ? `<a onclick="openChannel('${esc(e.channel)}')">${esc(e.channel)}</a>` : `<span style="color:var(--dim)">server</span>`}</td>` : ""}<td><span class="tag">${esc(e.kind)}</span></td><td>${esc(e.text)}</td></tr>`).join("")}</tbody></table>`;
 }
+/* ---------- the channel page: tabs, the bit-rate chart, the activity ---------- */
+const lsGet = (k, d) => { try { return localStorage.getItem(k) || d; } catch(e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch(e) {} };
+let chanTab = lsGet("cc3ctab", "overview"), chanRange = lsGet("cc3crange", "24h"), actView = "incidents", actRange = lsGet("cc3arange", "24h"),
+    setSec = lsGet("cc3sec", "source"), explainOn = false;
+if (!["overview", "streams", "settings", "activity"].includes(chanTab)) chanTab = "overview";
+if (chanRange !== "live" && !RANGES.some(r => r[0] === chanRange)) chanRange = "24h";
+if (!RANGES.some(r => r[0] === actRange)) actRange = "24h";
+const spanOf = r => (RANGES.find(x => x[0] === r) || RANGES[2])[1];
+
+function setChanTab(t) {
+  chanTab = t; lsSet("cc3ctab", t);
+  const pane = $("#chanpane"); if (pane) pane.dataset.tab = t;
+  if (current) { renderTabs(current); if (t === "activity") renderActivity(); if (t === "overview") { renderRate(current); reapplyHover(); } }
+}
+function openIncidents() { return (histInc || []).filter(x => !x.closed && !x.parent); }
+function renderTabs(c) {
+  const open = openIncidents();
+  const tabs = [["overview", "Overview"], ["streams", "Streams &amp; outputs"], ["settings", "Settings"], ["activity", "Activity"]];
+  $("#ctabs").innerHTML = tabs.map(([id, label]) => `<button type="button" class="${chanTab === id ? "on" : ""}" onclick="setChanTab('${id}')">${label}${
+    id === "settings" && dirty ? `<span class="dot" title="Changed, not saved">●</span>` : ""}${id === "activity" && open.length ? `<span class="n" title="Open incidents">${open.length}</span>` : ""}</button>`).join("");
+  const bar = $("#incbar");
+  if (!open.length || chanTab === "activity") { bar.innerHTML = ""; return; }
+  const x = open[0], bad = x.level === "error";
+  bar.innerHTML = `<div class="incbar ${bad ? "bad" : ""}"><span class="lamp ${bad ? "bad" : "warn"}"></span><b>${open.length} open incident${open.length > 1 ? "s" : ""}</b>
+    <span>${esc(x.summary || x.rule || "")} · since ${fmtWhen(x.opened).slice(-8, -3)}</span><span class="sp"></span><a onclick="setChanTab('activity')">See it in Activity ›</a></div>`;
+}
+
 async function loadChanHistory(name, force) {
-  const span = RANGES.find(r => r[0] === histRange)[1], key = name + "/" + histRange;
+  const key = name + "/" + chanRange + "/" + actRange;
   if (!force && histFor === key && Date.now() - histAt < 60000) return;
   histFor = key; histAt = Date.now();
-  const to = Math.floor(Date.now() / 1000), from = to - span;
+  const to = Math.floor(Date.now() / 1000), from = to - spanOf(chanRange), afrom = to - spanOf(actRange);
   try {
-    const [h, e, i, v] = await Promise.all([api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`), api(`/api/events?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=200`),
-      api(`/api/incidents?channel=${encN(name)}&from=${from}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] })),
+    const [h, e, i, v] = await Promise.all([
+      chanRange === "live" ? Promise.resolve(null) : api(`/api/channels/${encN(name)}/history?from=${from}&to=${to + 1}`),
+      api(`/api/events?channel=${encN(name)}&from=${afrom}&to=${to + 1}&limit=200`),
+      api(`/api/incidents?channel=${encN(name)}&from=${afrom}&to=${to + 1}&limit=100`).catch(() => ({ incidents: [] })),
       api(`/api/evidence?channel=${encN(name)}&limit=20`).catch(() => ({ evidence: [] }))]);
-    histData = Object.assign(h, { from, to }); histEvents = e.events; histInc = i.incidents; histEv = v.evidence;
+    histData = h ? Object.assign(h, { from, to }) : null; histEvents = e.events; histInc = i.incidents; histEv = v.evidence;
   } catch(err) { histData = { error: err.message }; histEvents = null; }
-  if (current && current.name === name) { renderChanHistory(); reapplyHover(); }
+  if (current && current.name === name) { renderTabs(current); renderRate(current); renderActivity(); reapplyHover(); }
 }
 function setRange(r) { histRange = r; try { localStorage.setItem("cc3range", r); } catch(e) {} histFor = ""; if (view.page === "server" && !view.name) loadServerHistory(true); else if (current) loadChanHistory(current.name, true); }
-function renderChanHistory() {
-  const el = $("#histbody"); if (!el) return;
-  $("#histrange").innerHTML = rangeButtons("setRange");
+function setChanRange(r) { chanRange = r; lsSet("cc3crange", r); histFor = ""; if (current) { renderRate(current); loadChanHistory(current.name, true); } }
+function setActRange(r) { actRange = r; lsSet("cc3arange", r); histFor = ""; if (current) loadChanHistory(current.name, true); }
+function setActView(v) { actView = v; renderActivity(); }
+
+/* One chart of the channel's bit rate: Live (the last 2 minutes, every 2 s) or
+ * the record on disk over 1 hour to 30 days, with trouble and off-air marked. */
+function renderRate(c) {
+  const el = $("#ratebody"); if (!el || !c) return;
+  const opts = [["live", "Live"]].concat(RANGES.map(r => [r[0], r[2]]));
+  $("#raterange").innerHTML = `<span class="choice">${opts.map(([id, l]) => `<button type="button" class="${chanRange === id ? "on" : ""}" onclick="setChanRange('${id}')">${l}</button>`).join("")}</span>`;
+  if (chanRange === "live" || !(sys && sys.history)) {
+    $("#ratehint").textContent = "the last 2 minutes, a point every 2 s";
+    el.innerHTML = graphHtml(c.history); return;
+  }
+  $("#ratehint").textContent = "from the record on this server (detail 3 days, minutes 30 days, hours a year)";
   if (!histData) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
   if (histData.error) { el.innerHTML = `<div class="empty">${esc(histData.error)}</div>`; return; }
   const rows = histData.rows || [], ts = rows.map(r => r[0] + histData.step / 2);
@@ -691,11 +752,62 @@ function renderChanHistory() {
       const errs = [["CC errors", r[5]], ["socket overflows", r[6]], ["dropped", r[7]], ["late", r[8]], ["lost on the link", r[9]], ["source switches", r[10]], ["restarts", r[11]]].filter(e => e[1]);
       return `<div class="tt">${span}</div>${tipRow("gin", "In", fmtRate(r[1] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[2] * 1000)})</span>` : ""))}${tipRow("gout", "Out", fmtRate(r[3] * 1000) + (st > 10 ? ` <span class="dim">(top ${fmtRate(r[4] * 1000)})</span>` : ""))}
         ${r[13] < st ? `<div class="dim">running ${fmtDur(r[13])} of ${fmtDur(st)}</div>` : ""}${errs.length ? errs.map(e => `<div class="bad">${e[1].toLocaleString()} ${e[0]}</div>`).join("") : `<div class="dim">no errors</div>`}`; } })}
-    <h4 class="sub4">Incidents</h4>${histInc && histInc.length ? `<div class="evwrap" style="max-height:220px">${incTable(histInc, false)}</div>` : `<div class="empty" style="padding:6px">None in this time.</div>`}
-    <h4 class="sub4">Evidence <span style="font-weight:400">(the latest; kept in the evidence folder to its size)</span></h4><div class="evwrap" style="max-height:260px">${evidenceList(histEv)}</div>
-    <div style="margin-top:8px">${toolButtons(current && current.name, 0)}</div>
-    <h4 style="margin:14px 0 6px;font-size:12px;font-weight:500;color:var(--dim)">Events</h4><div class="evwrap">${eventRows(histEvents, false)}</div>`;
+`;
 }
+
+function renderActivity() {
+  const el = $("#actbody"); if (!el) return;
+  const views = [["incidents", "Incidents", "Problems that lasted long enough to matter: each has a start, an end, a cause and the technician's view."],
+                 ["events", "Events", "Everything the channel noted, a line each: short drops, source switches, restarts, clock moves. Incidents are opened from these."],
+                 ["log", "Log", "The last lines the channel itself wrote, for when the events are not enough."]];
+  const open = openIncidents().length;
+  $("#actviews").innerHTML = views.map(([id, l]) => `<button type="button" class="${actView === id ? "on" : ""}" onclick="setActView('${id}')">${l}${id === "incidents" && open ? ` (${open} open)` : ""}</button>`).join("");
+  $("#actlead").textContent = views.find(v => v[0] === actView)[2];
+  $("#actrange").innerHTML = actView === "log" ? "" : `<span class="choice">${RANGES.map(r => `<button type="button" class="${actRange === r[0] ? "on" : ""}" onclick="setActRange('${r[0]}')">${r[2]}</button>`).join("")}</span>`;
+  $("#logcard").style.display = actView === "log" ? "" : "none";
+  if (actView === "log") { el.innerHTML = ""; return; }
+  if (!(sys && sys.history)) { el.innerHTML = `<section class="card"><div class="body"><div class="empty">No history kept on this server.</div></div></section>`; return; }
+  if (actView === "events") {
+    el.innerHTML = `<section class="card"><div class="body" style="padding:0"><div class="evwrap" style="border:0;max-height:none">${eventRows(histEvents, false)}</div></div></section>`; return;
+  }
+  el.innerHTML = `<section class="card"><div class="body" style="padding:0">${histInc && histInc.length ? `<div class="evwrap" style="border:0;max-height:none">${incTable(histInc, false)}</div>` : `<div class="empty" style="padding:16px">None in this time.</div>`}</div></section>
+    <section class="card"><header><h2>Evidence</h2><span class="hint">gathered for incidents, or by hand with the tools here; the latest, kept in the evidence folder to its size</span></header>
+      <div class="body"><div class="evwrap" style="max-height:260px">${evidenceList(histEv)}</div><div style="margin-top:10px">${toolButtons(current && current.name, 0)}</div></div></section>`;
+}
+
+/* The settings, a section at a time; each section in the list says what it holds now. */
+const SECTIONS = [
+  ["source", "Source", "Where the channel reads from, and what it falls back on."],
+  ["program", "Program & streams", "Which program of the source, which of its streams, and the output rate."],
+  ["video", "Video", "Copied as it is, or transcoded into one or more renditions."],
+  ["audio", "Audio", "Every audio stream of the program is treated the same."],
+  ["card", "Card & picture quality", "Where the work is done, and how the card spends the bit rate."],
+  ["timing", "Timing & service", "Delay, key frames, how the service is named and numbered, and whether it runs."]];
+function secSummary(id, k) {
+  k = k || {};
+  const vids = k.video || [], auds = k.audio || [];
+  if (id === "source") return (k.input || "—") + ((k.backup_inputs || []).length ? ` +${k.backup_inputs.length} backup` : "");
+  if (id === "program") return `program ${k.program || "first"}` + ((k.pids || []).length ? `, ${k.pids.length} streams` : (k.drop || []).length ? `, ${k.drop.length} left out` : ", all streams");
+  if (id === "video") return vids.length ? vids.map(v => String(v).split(":").filter(x => x !== "fit").join(" ")).join(", ") : "copied";
+  if (id === "audio") return auds.length ? auds.join(", ").replace(/:/g, " ") : "copied";
+  if (id === "card") return [k.gpu != null && k.gpu !== "" ? `card ${k.gpu}` : "card 0", k.preset || "default speed", k.profile || ""].filter(Boolean).join(", ");
+  if (id === "timing") return [`delay ${k.delay || "auto"}`, k.service_name ? `“${k.service_name}”` : "", k.enabled === false ? "kept stopped" : ""].filter(Boolean).join(", ");
+  return "";
+}
+function renderSetNav() {
+  const nav = $("#setnav"); if (!nav) return;
+  const k = (current && current.config) || {};
+  nav.innerHTML = SECTIONS.map(([id, l]) => `<button type="button" class="${setSec === id ? "on" : ""}" onclick="showSec('${id}')">${esc(l)}<small>${esc(secSummary(id, k))}</small></button>`).join("");
+  const cur = SECTIONS.find(x => x[0] === setSec) || SECTIONS[0];
+  $("#sectitle").textContent = cur[1]; $("#seclead").textContent = cur[2];
+  document.querySelectorAll("#settings .sec").forEach(x => x.classList.toggle("on", x.dataset.sec === cur[0]));
+  const longs = document.querySelectorAll(`#settings .sec[data-sec="${cur[0]}"] .help.long`).length;
+  const ex = $("#explain"); ex.style.display = longs ? "" : "none"; ex.textContent = explainOn ? "Hide the explanations" : "Explain these";
+  $("#settings").classList.toggle("explain", explainOn);
+}
+function showSec(id) { setSec = id; lsSet("cc3sec", id); renderSetNav(); }
+function toggleExplain() { explainOn = !explainOn; renderSetNav(); }
+
 let srvHist = null, srvEvents = null, srvHistAt = 0;
 async function loadServerHistory(force) {
   if (!force && Date.now() - srvHistAt < 60000) return;
@@ -1303,37 +1415,57 @@ async function renderChan(name) {
   if (!pane.querySelector(".head") || pane.dataset.chan !== name) {
     pane.dataset.chan = name;
     thumbStamp = Date.now();
+    pane.dataset.tab = chanTab;
     pane.innerHTML = `
       <div class="head"><h1><span class="lamp" id="hlamp"></span>${esc(c.name)}</h1><span class="state" id="hstate"></span><div class="sp"></div>
         <span id="hbtns"></span></div>
+      <nav class="ctabs" id="ctabs" aria-label="Channel"></nav>
       <div id="msg"></div>
-      <div class="path" id="path">
-        <div class="node" id="n_src"><h3>Source</h3>
-          <div class="pvbox"><img id="pv_poster" src="${thumbUrl(c.name)}" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility=''"><video id="pv" playsinline controls style="display:none"></video>
-            <button id="pv_over" class="pvplay" onclick="pvPlay('preview')" title="Play the preview" aria-label="Play the preview"></button><div id="pv_msg" class="pvmsg" style="display:none"></div></div>
-          <div class="pvctl" id="pvctl"></div><div id="src_info"></div></div>
-        <div class="arrow">›</div><div class="node" id="n_proc"></div><div class="arrow">›</div><div class="node" id="n_out"></div></div>
-      <section class="card" id="histcard"><header><h2>History</h2><span class="hint">Kept on this server: detail 3 days, minutes 30 days, hours a year</span><div class="sp"></div><span id="histrange"></span></header><div class="body" id="histbody"></div></section>
-      <section class="card" id="streamscard"><header><h2>Streams</h2><span class="hint">What comes in and what goes out, with each stream's rate</span></header><div class="body"><div class="streams"><div id="mediainfo"></div><div id="bwgraph"></div></div></div></section>
-      <section class="card" id="outputs"></section>
-      <section class="card ${setOpen?"":"collapsed"}" id="settingscard"><header><h2>Settings</h2><span class="hint">Source, program, transcoding, hardware, service details. A running channel restarts when they are saved.</span><div class="sp"></div><button class="tog" onclick="setOpen=!setOpen;this.closest('section').classList.toggle('collapsed');this.textContent=setOpen?'Hide':'Change settings'">${setOpen?"Hide":"Change settings"}</button></header><div class="body" id="settings">${settingsHtml()}</div></section>
-      <section class="card ${logOpen?"":"collapsed"}" id="logcard"><header><h2>Log</h2><span class="hint">The last lines this channel wrote</span><div class="sp"></div><button class="quiet tog" onclick="logOpen=!logOpen;this.closest('section').classList.toggle('collapsed')">${logOpen?"Hide":"Show"}</button></header><div class="body" style="padding:0"><pre class="log" id="log"></pre></div></section>
-      <div class="savebar hidden" id="savebar"><span>Settings changed</span><div class="sp"></div><button class="quiet" onclick="fillForm(current.config||{});setDirty(false)">Discard</button><button class="primary" onclick="saveChannel()">Save changes</button></div>`;
+      <div id="incbar"></div>
+      <div class="ctp overview">
+        <div class="path" id="path">
+          <div class="node" id="n_src"><h3>Source</h3>
+            <div class="pvbox"><img id="pv_poster" src="${thumbUrl(c.name)}" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility=''"><video id="pv" playsinline controls style="display:none"></video>
+              <button id="pv_over" class="pvplay" onclick="pvPlay('preview')" title="Play the preview" aria-label="Play the preview"></button><div id="pv_msg" class="pvmsg" style="display:none"></div></div>
+            <div class="pvctl" id="pvctl"></div><div id="src_info"></div></div>
+          <div class="arrow">›</div><div class="node" id="n_proc"></div><div class="arrow">›</div><div class="node" id="n_out"></div></div>
+        <section class="card" id="ratecard"><header><h2>Bit rate</h2><span class="hint" id="ratehint"></span><div class="sp"></div><span id="raterange"></span></header><div class="body" id="ratebody"></div></section>
+      </div>
+      <div class="ctp streams">
+        <section class="card" id="streamscard"><header><h2>Streams</h2><span class="hint">Each stream of the source, what it becomes, and its rate now</span></header><div class="body"><div id="mediainfo"></div></div></section>
+        <section class="card" id="outputs"></section>
+      </div>
+      <div class="ctp settings">
+        <div class="setwrap"><nav class="setnav" id="setnav" aria-label="Settings sections"></nav>
+          <div class="setmain"><section class="card" id="settingscard"><header><h2 id="sectitle"></h2><span class="hint" id="seclead"></span><div class="sp"></div>
+            <button type="button" class="quiet" id="explain" onclick="toggleExplain()"></button></header>
+            <div class="body" id="settings">${settingsHtml()}</div></section>
+            <div class="savebar hidden" id="savebar"><span>Settings changed. Saving restarts the channel (a few seconds off air).</span><div class="sp"></div><button class="quiet" onclick="fillForm(current.config||{});setDirty(false)">Discard</button><button class="primary" onclick="saveChannel()">Save and restart</button></div></div></div>
+      </div>
+      <div class="ctp activity">
+        <div class="actbar" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:14px"><span class="choice" id="actviews"></span><span class="hint" id="actlead" style="flex:1 1 320px;color:var(--dim);font-size:13px"></span><span id="actrange"></span></div>
+        <div id="actbody"></div>
+        <section class="card" id="logcard" style="display:none"><div class="body" style="padding:0"><pre class="log" id="log"></pre></div></section>
+      </div>`;
     fillForm(c.config || {});
     pvCtlSig = "";
   }
   const [h, why] = health(c);
   $("#hlamp").className = "lamp " + h;
   $("#hstate").innerHTML = `${esc(c.state)}${running ? " · up " + fmtUp(c.uptime) : c.why ? ` · <span class="bad">${esc(c.why)}</span>` : ""}${running && h === "warn" ? ` · <span class="warn">${esc(why)}</span>` : ""}${c.restarts ? ` · ${c.restarts} restart${c.restarts>1?"s":""}` : ""}`;
-  $("#hbtns").innerHTML = `<button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button> <button class="danger quiet" onclick="delChannel()">Delete</button>`;
+  $("#hbtns").innerHTML = `<button onclick="act('start')" ${running?"disabled":""}>Start</button> <button onclick="act('stop')" ${!running?"disabled":""}>Stop</button> <button onclick="act('restart')">Restart</button>
+    <details class="more" style="display:inline-block"><summary aria-label="More actions">More ▾</summary><div class="menu"><button class="danger" onclick="this.closest('details').open=false;delChannel()">Delete this channel…</button></div></details>`;
+  renderTabs(c);
   const ph = pathParts(c);
   $("#n_src").classList.toggle("bad", ph.srcBad); $("#src_info").innerHTML = ph.src; $("#n_proc").innerHTML = ph.proc; $("#n_out").innerHTML = ph.out;
   $("#pv_over").disabled = !running; $("#pv_over").title = running ? "Play the preview" : "Start the channel to preview it";
   if (!running && pv) pvStop(false);
   renderPvCtl(c);
-  $("#mediainfo").innerHTML = mediaHtml(c); $("#bwgraph").innerHTML = graphHtml(c.history);
-  if (sys && sys.history) { if (!$("#histbody").innerHTML) renderChanHistory(); loadChanHistory(c.name); }
-  else { $("#histcard").style.display = "none"; }
+  $("#mediainfo").innerHTML = mediaHtml(c);
+  renderRate(c);
+  if (sys && sys.history) loadChanHistory(c.name);
+  renderActivity();
+  renderSetNav();
   $("#outputs").innerHTML = outputsHtml(c);
   if (!pv && running && ((c.outputs && c.outputs.outputs) || []).some(o => o.id === "preview") && !c._pvclean) { c._pvclean = true; api(`/api/channels/${encodeURIComponent(c.name)}/outputs/preview`, {method:"DELETE"}).catch(() => {}); }
   $("#log").textContent = (c.log||[]).join("\n") || "(nothing yet)";
@@ -1465,56 +1597,55 @@ async function delOutput(id) {
 function sel(id, opts, extra="") { return `<select id="${id}" ${extra}>${opts.map(o => Array.isArray(o) ? `<option value="${esc(o[0])}">${esc(o[1])}</option>` : `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>`; }
 function settingsHtml() {
   return `<form onsubmit="saveChannel();return false" oninput="setDirty(true)" onchange="setDirty(true)">
-    <div class="f">
+    <div class="sec" data-sec="source"><div class="f">
       <label>Source</label><div class="row"><select id="in_kind" class="n" style="flex:0 0 240px" onchange="syncInput()">${IN_KINDS.map(k=>`<option value="${k[0]}">${k[1]}</option>`).join("")}</select><input id="in_host" placeholder="239.5.5.5 (address)" oninput="syncInput()"><input id="in_port" class="n" placeholder="port" oninput="syncInput()"></div>
       <div class="help" id="in_udp">Interface: <input id="in_iface" style="width:120px;display:inline-block;padding:3px 7px" placeholder="any" oninput="syncInput()"> &nbsp; Source address for SSM: <input id="in_src" style="width:140px;display:inline-block;padding:3px 7px" placeholder="none" oninput="syncInput()"></div>
       <div class="help" id="in_srt">Latency: <input id="in_latency" style="width:70px;display:inline-block;padding:3px 7px" placeholder="120" oninput="syncInput()"> ms &nbsp; Passphrase: <input id="in_pass" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (10+ characters)" oninput="syncInput()"></div>
       <div class="help" id="in_rist">Secret: <input id="in_secret" style="width:200px;display:inline-block;padding:3px 7px" placeholder="none (AES-128 when set)" oninput="syncInput()"> &nbsp; Buffer: <input id="in_buffer" style="width:70px;display:inline-block;padding:3px 7px" placeholder="1000" oninput="syncInput()"> ms</div>
       <div class="help"><input type="hidden" id="in_extra"><input type="hidden" id="in_aes"><span class="mono" id="in_url"></span></div>
       <label>Backup sources</label><div><div id="backups"></div><button type="button" class="quiet" onclick="addBackup()">+ Add a backup source</button> <span style="color:var(--dim);font-size:12px">Tried in turn when the source above delivers nothing for <input id="switch_after" class="n" style="width:60px;display:inline-block;padding:3px 7px" placeholder="3000"> ms; the main source is tried again every <input id="retry_primary" class="n" style="width:50px;display:inline-block;padding:3px 7px" placeholder="60"> s and taken back when it delivers.</span></div>
+    </div></div>
+    <div class="sec" data-sec="program"><div class="f">
       <label>Program</label><div class="row"><input id="program" class="n" placeholder="first"><button type="button" class="quiet" onclick="scanSource()" style="flex:0 0 auto">Scan source…</button><span style="color:var(--dim);flex:3">Service number to take from a multi-program source; empty takes the first. Scan lists what the source carries, to pick the program and the streams.</span></div>
       <label>Streams</label><div class="row"><input type="hidden" id="drop"><span id="drop_text" style="color:var(--dim)">All streams of the program.</span><button type="button" class="quiet" onclick="$('#drop').value='';showDrop();setDirty(true)" id="drop_clear" style="flex:0 0 auto;display:none">Keep all</button></div>
       <label>Output rate</label><div class="row"><select id="muxsel" onchange="$('#muxcustom').style.display=this.value==='custom'?'':'none'">${MUX.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("")}</select><input id="muxcustom" class="n" placeholder="e.g. 4500k" style="display:none"><label style="flex:0 0 auto;display:flex;gap:6px;align-items:center"><input type="checkbox" id="vbr" style="width:auto"> peak only (VBR)</label></div>
       <div class="help">Constant rate pads with null packets to exactly this rate (for satellite and cable). Variable sends only what there is.</div>
-    </div>
-    <h4 style="margin:22px 0 10px;font-size:14px">Video</h4>
-    <div class="f">
+    </div></div>
+    <div class="sec" data-sec="video"><div class="f">
       <label>Treatment</label><div><span class="choice"><button type="button" id="v_copy" onclick="setVideo(false)">Copy as is</button><button type="button" id="v_xc" onclick="setVideo(true)">Transcode</button></span></div>
       <div id="v_rows" style="grid-column:1 / -1"></div>
-    </div>
-    <h4 style="margin:22px 0 10px;font-size:14px">Audio</h4>
-    <div class="f">
+      <label>Deinterlace</label>${sel("deinterlace", [["","Blend the two fields (the default)"],["off","Off: fields kept together (film, e.g. HBO)"],["card","The card's motion-adaptive deinterlacer"]])}
+      <div class="help long">Only for an interlaced source that is resized. <b>Off</b> for film carried as interlaced video (movie channels: sharp, smooth, as Flussonic's <code>deinterlace=false</code>); fine lines on moving edges mean the source really is interlaced. <b>Card</b> for live and sports channels that really are interlaced (Flussonic's <code>deinterlace=true</code> or <code>yadif</code>). <b>Blend</b> is safe for both but softer.</div>
+      <div class="help">Film (HBO and the like) is found by its repeated fields and never deinterlaced, whatever this says.</div>
+    </div></div>
+    <div class="sec" data-sec="audio"><div class="f">
       <label>Treatment</label><div class="row"><select id="a_codec" style="flex:0 0 220px" onchange="$('#a_rate').disabled=!this.value"><option value="">Copy as is</option><option value="aac">AAC</option><option value="mp2">MPEG-1 layer II (MP2)</option><option value="mp3">MP3</option></select><select id="a_rate" style="flex:0 0 140px">${ABR.map(r=>`<option>${r}</option>`).join("")}</select><span style="color:var(--dim)">Every audio stream of the program is treated the same.</span></div>
-    </div>
-    <h4 style="margin:22px 0 10px;font-size:14px">Hardware and encoding</h4>
-    <div class="f">
+    </div></div>
+    <div class="sec" data-sec="card"><div class="f">
       <label>Decode on</label>${sel("decoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Encode on</label>${sel("encoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
       <label>Card</label>${sel("gpu", [["","Card 0"],["1","Card 1"],["2","Card 2"],["3","Card 3"]])}
-      <label>Deinterlace</label>${sel("deinterlace", [["","Blend the two fields (the default)"],["off","Off: fields kept together (film, e.g. HBO)"],["card","The card's motion-adaptive deinterlacer"]])}
-      <div class="help">Only for an interlaced source that is resized. <b>Off</b> for film carried as interlaced video (movie channels: sharp, smooth, as Flussonic's <code>deinterlace=false</code>); fine lines on moving edges mean the source really is interlaced. <b>Card</b> for live and sports channels that really are interlaced (Flussonic's <code>deinterlace=true</code> or <code>yadif</code>). <b>Blend</b> is safe for both but softer.</div>
       <label>Speed / quality</label>${sel("preset", [["","Default (veryfast on CPU, p2 on NVIDIA)"],["ultrafast","Fastest"],["superfast","Faster"],["veryfast","Fast"],["faster","Balanced"],["medium","Better quality (CPU)"],["p1","NVIDIA p1 (fastest)"],["p2","NVIDIA p2 (the default)"],["p3","NVIDIA p3"],["p4","NVIDIA p4 (more of the card's encoder)"],["p5","NVIDIA p5"],["p6","NVIDIA p6"],["p7","NVIDIA p7 (best, most of the encoder)"]])}
       <label>B-frames</label><div class="row">${sel("bframes", [["","Encoder's choice"],["0","None (for receivers that cannot take them)"],["1","1"],["2","2"],["3","3"],["4","4"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">The NVIDIA card does as many as it can (Pascal: none in H.265).</span></div>
       <label>Profile</label><div class="row">${sel("profile", [["","Encoder's choice (H.264 high, H.265 as the source)"],["high","H.264 High"],["main","Main (H.264 Main; H.265 Main, 8 bits)"],["baseline","H.264 Baseline (no B-frames)"],["main10","H.265 Main 10 (10 bits, also from an 8-bit source)"]], 'style="flex:0 0 320px"')}<span style="color:var(--dim)">Older set-top boxes may need Main, or Baseline.</span></div>
-      <div class="help"><b>Main 10</b>: 10 bits per colour, made from 8 when the source has 8. Much less banding in skies, gradients and dark scenes at low bit rates. Every receiver of the channel must decode H.265 Main 10 (set-top boxes, hotel TVs, apps): check that first, on one channel. A little more card memory.</div>
+      <div class="help long"><b>Main 10</b>: 10 bits per colour, made from 8 when the source has 8. Much less banding in skies, gradients and dark scenes at low bit rates. Every receiver of the channel must decode H.265 Main 10 (set-top boxes, hotel TVs, apps): check that first, on one channel. A little more card memory.</div>
     </div>
-    <details style="margin-top:22px" id="q_box"><summary style="cursor:pointer;color:var(--fg2)">Picture quality on the NVIDIA card <span id="q_sum" style="color:var(--dim)"></span></summary>
-    <div class="help" style="margin:12px 0 0;max-width:900px">These change how the card spends the same bit rate. "Server default" takes what Settings → Picture quality says for this channel's kind (H.265, or H.264 only). Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
+    <div id="q_box"><h4 style="margin:22px 0 4px;font-size:14px">Picture quality on the NVIDIA card <span id="q_sum" style="color:var(--dim);font-weight:400"></span></h4>
+    <div class="help long" style="margin:6px 0 0;max-width:900px">These change how the card spends the same bit rate. "Server default" takes what Settings → Picture quality says for this channel's kind (H.265, or H.264 only). Try one at a time on one channel, and compare it with a channel left as it was, on a dark or flat scene, by eye. Measures like PSNR can go down when the picture looks better. <code>caricoder3 --gpu-test</code> on the server shows which the card has and what each costs. The CPU encoders ignore them.</div>
     <div class="f" style="margin-top:12px">
       <label>Spatial AQ</label>${sel("aq", [["","Server default (Settings)"], ...Q_OPTS.aq])}
-      <div class="help">More bits to flat and dark parts of each picture (sky, faces, studio walls), where blocks and banding show first; fewer to busy texture. <b>When:</b> channels at low bit rates (HD under about 2.5 Mb/s) that show banding or blocks in dark or flat scenes. <b>Cost:</b> fine texture (grass, crowds) a little softer; very little card time.</div>
+      <div class="help long">More bits to flat and dark parts of each picture (sky, faces, studio walls), where blocks and banding show first; fewer to busy texture. <b>When:</b> channels at low bit rates (HD under about 2.5 Mb/s) that show banding or blocks in dark or flat scenes. <b>Cost:</b> fine texture (grass, crowds) a little softer; very little card time.</div>
       <label>Temporal AQ</label>${sel("temporal_aq", [["","Server default (Settings)"], ...Q_OPTS.temporal_aq])}
-      <div class="help">More bits to detail that stays still (logos, news sets, slow pans), which later pictures then reuse. <b>When:</b> talk, news and studio channels. <b>Cost:</b> picture sizes swing more within each key-frame interval; some card time. On the Tesla P40 it is expected for H.264 only (<code>--gpu-test</code> says); where the card lacks it, it is left off and the channel log says so.</div>
+      <div class="help long">More bits to detail that stays still (logos, news sets, slow pans), which later pictures then reuse. <b>When:</b> talk, news and studio channels. <b>Cost:</b> picture sizes swing more within each key-frame interval; some card time. On the Tesla P40 it is expected for H.264 only (<code>--gpu-test</code> says); where the card lacks it, it is left off and the channel log says so.</div>
       <label>Look-ahead</label>${sel("lookahead", [["","Server default (Settings)"], ...Q_OPTS.lookahead])}
-      <div class="help">The card studies the coming pictures before coding them: bits go where scenes are hard, and key pictures land on scene cuts. <b>When:</b> sport, action, frequent scene changes. <b>Cost:</b> that much more delay (the channel's buffer grows by itself), more card memory, and fewer pictures a second from the card.</div>
+      <div class="help long">The card studies the coming pictures before coding them: bits go where scenes are hard, and key pictures land on scene cuts. <b>When:</b> sport, action, frequent scene changes. <b>Cost:</b> that much more delay (the channel's buffer grows by itself), more card memory, and fewer pictures a second from the card.</div>
       <label>Weighted prediction</label>${sel("weighted_pred", [["","Server default (Settings)"], ...Q_OPTS.weighted_pred])}
-      <div class="help">Fades to and from black, flashes and lighting changes are coded as a change of brightness instead of as new detail. <b>When:</b> films, adverts, anything with many fades. <b>Cost:</b> only works without B-frames. H.265 on this card has none anyway; for H.264, set B-frames to None, which costs about a tenth more bit rate, so it rarely pays there. A little card time.</div>
+      <div class="help long">Fades to and from black, flashes and lighting changes are coded as a change of brightness instead of as new detail. <b>When:</b> films, adverts, anything with many fades. <b>Cost:</b> only works without B-frames. H.265 on this card has none anyway; for H.264, set B-frames to None, which costs about a tenth more bit rate, so it rarely pays there. A little card time.</div>
       <label>Passes</label>${sel("multipass", [["","Server default (Settings)"], ...Q_OPTS.multipass])}
-      <div class="help">A quick first look at each picture before the real encode: bits spread better within the picture and the rate stays closer to its target. <b>When:</b> the card has room to spare. <b>Cost:</b> fewer channels per card; quarter size gives most of the gain for less. Check <code>--gpu-test</code> before turning it on for many channels.</div>
+      <div class="help long">A quick first look at each picture before the real encode: bits spread better within the picture and the rate stays closer to its target. <b>When:</b> the card has room to spare. <b>Cost:</b> fewer channels per card; quarter size gives most of the gain for less. Check <code>--gpu-test</code> before turning it on for many channels.</div>
+    </div></div>
     </div>
-    </details>
-    <details style="margin-top:22px"><summary style="cursor:pointer;color:var(--fg2)">Timing and service details</summary>
-    <div class="f" style="margin-top:12px">
+    <div class="sec" data-sec="timing"><div class="f">
       <label>Delay</label><div class="row"><input id="delay" class="n" placeholder="auto"><span style="color:var(--dim)">ms of buffer between input and output. Empty: 500, or 800 / 3000 when audio / video is transcoded.</span></div>
       <label>Key frame every</label><div class="row"><input id="gop" class="n" placeholder="2000"><span style="color:var(--dim)">ms. Sets the shortest HLS segment and how fast a player can join.</span></div>
       <label>Video buffer</label><div class="row"><input id="vbv" class="n" placeholder="1000"><span style="color:var(--dim)">ms (VBV). Larger smooths quality, adds delay.</span></div>
@@ -1525,7 +1656,7 @@ function settingsHtml() {
       <label>PCR</label><div class="row"><select id="pcr_mode" style="flex:0 0 220px" onchange="$('#pcr_pid').style.display=this.value==='pid'?'':'none'"><option value="">As in the source</option><option value="video">On the video PID</option><option value="pid">On this PID…</option></select><input id="pcr_pid" class="n" placeholder="e.g. 600" style="display:none"><span style="color:var(--dim)">A stream's output PID puts it on that stream; any other PID carries the PCR alone.</span></div>
       <label>Output streams</label><div><div id="pidrows"></div><div class="help" style="margin-top:6px">The order is the order of the PMT: a receiver plays the first audio it finds. Output PID empty keeps the input's. Extra renditions keep automatic PIDs.</div></div>
       <label>Enabled</label><div class="row"><select id="enabled" style="flex:0 0 160px"><option value="true">Yes, run it</option><option value="false">No, keep it stopped</option></select></div>
-    </div></details>
+    </div></div>
   </form>`;
 }
 const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["http","HTTP — pull a TS stream"],["file","File (test)"]];
@@ -1767,7 +1898,7 @@ function readForm() {
   cfg.enabled = v("enabled") === "true";
   return cfg;
 }
-function setDirty(d) { dirty = d; $("#savebar").classList.toggle("hidden", !d); }
+function setDirty(d) { dirty = d; $("#savebar").classList.toggle("hidden", !d); if (current && $("#ctabs")) renderTabs(current); }
 async function saveChannel() {
   const cfg = readForm();
   if (!cfg.input || cfg.input.endsWith("://")) { showMsg("A source address is needed.", "err"); return; }
