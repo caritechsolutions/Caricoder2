@@ -35,6 +35,16 @@
 
 #ifdef HAVE_AVCODEC
 #include <libavcodec/avcodec.h>
+/* Older FFmpeg (4.4 on Ubuntu 22.04): the profile constant had another name,
+ * and the channel count was a plain field before the channel layout API (5.1). */
+#ifndef AV_PROFILE_UNKNOWN
+#define AV_PROFILE_UNKNOWN FF_PROFILE_UNKNOWN
+#endif
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 24, 100)
+#define ACTX_CHANNELS(c) ((c)->ch_layout.nb_channels)
+#else
+#define ACTX_CHANNELS(c) ((c)->channels)
+#endif
 #endif
 
 #define MAX_PROBE_PROGRAMS 64
@@ -369,7 +379,7 @@ static void parser_feed(struct pid_stat *s, const uint8_t *d, int n)
             }
             if (s->actx->sample_rate > 0) {
                 s->sample_rate = s->actx->sample_rate;
-                s->channels = s->actx->ch_layout.nb_channels;
+                s->channels = ACTX_CHANNELS(s->actx);
             }
             if (s->actx->profile != AV_PROFILE_UNKNOWN && !s->profile && s->actx->codec)
                 s->profile = avcodec_profile_name(s->actx->codec_id, s->actx->profile);

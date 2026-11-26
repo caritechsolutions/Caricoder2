@@ -209,9 +209,15 @@ static int avd_pull(void *ctx, struct vframe *f)
         }
         f->pts = a->best_effort_timestamp == AV_NOPTS_VALUE
                      ? NOPTS : a->best_effort_timestamp * STC_PER_90K;
+#ifdef AV_FRAME_FLAG_INTERLACED         /* FFmpeg 6.1 and later (Ubuntu 24.04) */
         f->key = (a->flags & AV_FRAME_FLAG_KEY) != 0;
         f->interlaced = (a->flags & AV_FRAME_FLAG_INTERLACED) != 0;
         f->tff = (a->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) != 0;
+#else                                   /* before (FFmpeg 4.4 on Ubuntu 22.04, 5.x, 6.0) */
+        f->key = a->key_frame != 0;
+        f->interlaced = a->interlaced_frame != 0;
+        f->tff = a->top_field_first != 0;
+#endif
         f->sar_num = a->sample_aspect_ratio.num;
         f->sar_den = a->sample_aspect_ratio.den;
         f->fps_num = d->ctx->framerate.num;
