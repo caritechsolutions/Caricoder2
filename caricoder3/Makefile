@@ -20,12 +20,14 @@ LDLIBS   = -lpthread -lm
 # got. `make CODECS=none` builds the plain remultiplexer whatever is
 # installed.
 #
-#   Ubuntu: apt install libtwolame-dev libmp3lame-dev (fdk-aac: see install.sh) \
-#           libmpg123-dev liba52-0.7.4-dev libx264-dev libx265-dev \
-#           libavcodec-dev libavutil-dev libsrt-openssl-dev librist-dev pkg-config
+#   Ubuntu: apt install libtwolame-dev libmp3lame-dev libmpg123-dev \
+#           liba52-0.7.4-dev libx264-dev libx265-dev libavcodec-dev \
+#           libavutil-dev libssl-dev pkg-config
 #
-# Libraries built from source by install.sh (the full fdk-aac, with HE-AAC)
-# live under LIBS_PREFIX and take precedence over the distribution's.
+# fdk-aac (the full one, with HE-AAC), SRT and RIST are built from the
+# source kept in third_party/src (scripts/build-libs.sh, which install.sh
+# runs) into LIBS_PREFIX, as static libraries: the binary carries them.
+# They take precedence over the distribution's.
 LIBS_PREFIX ?= /opt/caricoder3-libs
 PKG_CONFIG ?= pkg-config
 ifneq ($(wildcard $(LIBS_PREFIX)/lib/pkgconfig),)
@@ -78,11 +80,11 @@ CODEC_DEFS += -DHAVE_NVIDIA
 CODEC_LIBS += -ldl
 endif
 endif
-# Output transports (apt install libsrt-openssl-dev librist-dev). Absent,
-# the srt:// and rist:// output types are left out and say so.
+# SRT and RIST (scripts/build-libs.sh, or the distribution's packages).
+# Absent, the srt:// and rist:// types are left out and say so.
 ifeq ($(call have_pkg,srt),yes)
 CODEC_DEFS += -DHAVE_SRT $(shell $(PKG_CONFIG) --cflags srt)
-CODEC_LIBS += $(shell $(PKG_CONFIG) --libs srt)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs $(if $(wildcard $(LIBS_PREFIX)/lib/libsrt.a),--static) srt)
 SINK_SRC += src/sink_srt.c src/input_srt.c
 else
 # pkg-config can refuse an SRT that is there: Ubuntu 22.04's srt.pc requires
@@ -98,7 +100,7 @@ endif
 endif
 ifeq ($(call have_pkg,librist),yes)
 CODEC_DEFS += -DHAVE_RIST $(shell $(PKG_CONFIG) --cflags librist)
-CODEC_LIBS += $(shell $(PKG_CONFIG) --libs librist)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs $(if $(wildcard $(LIBS_PREFIX)/lib/librist.a),--static) librist)
 SINK_SRC += src/sink_rist.c src/input_rist.c
 endif
 # The supervisor's history (apt install libsqlite3-dev). Absent, none is kept.

@@ -20,7 +20,9 @@
 #   2. installs the codec libraries that transcoding needs (apt). One that
 #      cannot be installed is reported and left out: the program is built
 #      with the others
-#   3. downloads the source (no git needed) and builds it in a scratch copy
+#   3. downloads the source (no git needed), builds fdk-aac, SRT and RIST
+#      from the copies kept in it (nothing else is downloaded for them),
+#      and builds the program in a scratch copy
 #   4. only if the build succeeded: puts the source in /opt/caricoder3 and
 #      the binary in /usr/local/bin/caricoder3
 #
@@ -39,10 +41,6 @@ SRC_DIR="${CARICODER3_SRC:-/opt/caricoder3}"
 PREFIX="${PREFIX:-/usr/local}"
 # Libraries built from source go here (the Makefile looks for them).
 LIBS_DIR="${CARICODER3_LIBS:-/opt/caricoder3-libs}"
-# The original fdk-aac. Ubuntu's package is "fdk-aac-free", with the
-# HE-AAC parts removed, and the feeds this is for carry HE-AAC.
-FDK_VERSION="2.0.3"
-FDK_URL="${CARICODER3_FDK_URL:-https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v$FDK_VERSION}"
 RUN_TESTS=0
 WITH_CODECS=1
 WITH_TECHNICIAN=1
@@ -59,9 +57,7 @@ libavcodec-dev:H.264 / H.265 decode on the CPU
 libavutil-dev:(needed by libavcodec)
 libx264-dev:H.264 encode on the CPU
 libx265-dev:H.265 encode on the CPU
-libsrt-openssl-dev:SRT output
-libssl-dev:(needed to find SRT on Ubuntu 22.04)
-librist-dev:RIST output
+libssl-dev:SRT's encryption
 libsqlite3-dev:the supervisor's history and event log
 iputils-ping:the evidence tools' ping
 "
@@ -154,49 +150,31 @@ install_codec_libs() {
     fi
 }
 
-# Builds the original fdk-aac into $LIBS_DIR (static, so the binary
-# carries it). Done once; again only when the version here changes.
-install_fdk_aac() {
-    local stamp="$LIBS_DIR/fdk-aac.version" tarball="$WORK/fdk.tar.gz"
+# fdk-aac (the original: Ubuntu's "fdk-aac-free" has the HE-AAC parts
+# removed, and the feeds this is for carry HE-AAC), SRT and RIST are built
+# from the source kept in the repository (third_party/src) into $LIBS_DIR,
+# as static libraries: the binary carries them, and every server runs the
+# same versions whatever its Ubuntu offers. Each is built once, and again
+# only when its version in scripts/build-libs.sh changes.
+install_own_libs() {
+    local need=() tools=()
 
-    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$FDK_VERSION" ] &&
-       [ -f "$LIBS_DIR/lib/pkgconfig/fdk-aac.pc" ]; then
-        note "fdk-aac $FDK_VERSION (with HE-AAC) is already built in $LIBS_DIR"
-        return 0
+    command -v cmake >/dev/null 2>&1 || { need+=(cmake); tools+=(cmake); }
+    command -v c++   >/dev/null 2>&1 || { need+=(g++); tools+=(g++); }
+    command -v meson >/dev/null 2>&1 || { need+=(meson); tools+=(meson); }
+    command -v ninja >/dev/null 2>&1 || { need+=(ninja-build); tools+=(ninja); }
+    if [ "${#need[@]}" -gt 0 ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            note "installing ${tools[*]} (to build the libraries)"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                "${need[@]}" </dev/null >/dev/null 2>&1 ||
+                note "could not install ${tools[*]}: what needs them is left out"
+        else
+            note "${tools[*]} are missing and this is not an apt system: what needs them is left out"
+        fi
     fi
-    if ! command -v cmake >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
-        command -v apt-get >/dev/null 2>&1 ||
-            die "cmake and a C++ compiler are needed to build fdk-aac; install them and run again"
-        note "installing cmake and g++"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            cmake g++ </dev/null >/dev/null || die "could not install cmake and g++"
-    fi
-    note "building fdk-aac $FDK_VERSION from source (the Ubuntu package has no HE-AAC)"
-    curl -fsSL --retry 3 -o "$tarball" "$FDK_URL" </dev/null ||
-        die "could not download fdk-aac $FDK_VERSION"
-    mkdir -p "$WORK/fdk"
-    tar -xzf "$tarball" -C "$WORK/fdk" --strip-components=1 --no-same-owner ||
-        die "the fdk-aac download is not a tar archive"
-    if ! (cd "$WORK/fdk" &&
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-                -DBUILD_PROGRAMS=OFF -DCMAKE_INSTALL_PREFIX="$WORK/fdkinst" \
-                -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON &&
-          cmake --build build -j "$(nproc)" &&
-          cmake --install build) >"$WORK/fdk-build.log" 2>&1 </dev/null; then
-        tail -n 20 "$WORK/fdk-build.log" >&2
-        die "fdk-aac did not build; nothing on this machine was changed"
-    fi
-    [ -f "$WORK/fdkinst/lib/pkgconfig/fdk-aac.pc" ] || die "fdk-aac built but left no library"
-    # The library is moved to its final place below: its pkg-config file
-    # must name that place, not the scratch folder.
-    sed -i "s|^prefix=.*|prefix=$LIBS_DIR|" "$WORK/fdkinst/lib/pkgconfig/fdk-aac.pc"
-    printf '%s\n' "$FDK_VERSION" > "$WORK/fdkinst/fdk-aac.version"
-    rm -rf "$LIBS_DIR.old"
-    [ -e "$LIBS_DIR" ] && mv "$LIBS_DIR" "$LIBS_DIR.old"
-    mkdir -p "$(dirname "$LIBS_DIR")"
-    mv "$WORK/fdkinst" "$LIBS_DIR"
-    rm -rf "$LIBS_DIR.old"
-    note "fdk-aac $FDK_VERSION built into $LIBS_DIR"
+    bash "$WORK/tree/scripts/build-libs.sh" "$LIBS_DIR" "$WORK/libs" </dev/null ||
+        note "a library above was left out: the program is built without it"
 }
 
 # The technician's notes (shipped: replaced on each install; the site's
@@ -299,14 +277,19 @@ main() {
     if [ "$WITH_CODECS" -eq 1 ]; then
         say "Codec libraries"
         install_codec_libs
-        install_fdk_aac
     fi
 
     say "Downloading the source"
     local tarball="$WORK/src.tar.gz"
-    curl -fsSL --retry 3 -o "$tarball" \
-        "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" </dev/null ||
-        die "download failed (is the branch name '$BRANCH' right?)"
+    if [ -n "${CARICODER3_TARBALL:-}" ]; then
+        # a copy of the branch already on this machine (a server with no way out)
+        cp "$CARICODER3_TARBALL" "$tarball" || die "cannot read $CARICODER3_TARBALL"
+        note "from $CARICODER3_TARBALL"
+    else
+        curl -fsSL --retry 3 -o "$tarball" \
+            "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" </dev/null ||
+            die "download failed (is the branch name '$BRANCH' right?)"
+    fi
 
     # GitHub writes the commit id into the archive header.
     local commit
@@ -322,6 +305,11 @@ main() {
     [ -f "$WORK/tree/Makefile" ] && [ -f "$WORK/tree/src/main.c" ] ||
         die "the download does not look like caricoder3"
     printf '%s\n' "${commit:-unknown}" > "$WORK/tree/COMMIT"
+
+    if [ "$WITH_CODECS" -eq 1 ]; then
+        say "Our own libraries (fdk-aac, SRT, RIST: from the source in the repository)"
+        install_own_libs
+    fi
 
     say "Building"
     local make_args=("LIBS_PREFIX=$LIBS_DIR")

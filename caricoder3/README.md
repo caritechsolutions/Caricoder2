@@ -63,7 +63,9 @@ installed and left out if it is not:
 
 | For | Library | Ubuntu package |
 |---|---|---|
-| AAC decode and encode | fdk-aac 2.0.3 | built from source by the installer (see "HE-AAC") |
+| AAC decode and encode | fdk-aac 2.0.3 | built from the source in this repository (see "HE-AAC") |
+| SRT in and out | libsrt 1.5.4 | built from the source in this repository (its encryption: `libssl-dev`) |
+| RIST in and out | librist 0.2.11 | built from the source in this repository |
 | MP2 / MP3 decode | mpg123 | `libmpg123-dev` |
 | AC-3 decode | liba52 | `liba52-0.7.4-dev` |
 | MP2 encode | twolame | `libtwolame-dev` |
@@ -75,6 +77,19 @@ installed and left out if it is not:
 
 plus `pkg-config` to find them. `make CODECS=none` builds without any,
 `make NVIDIA=0` without the NVIDIA part.
+
+**Our own libraries.** fdk-aac, SRT and RIST are not taken from Ubuntu:
+their source is kept here, in `third_party/src` (one archive each, with
+`SHA256SUMS`; where each came from is in `third_party/src/README.md`),
+and `scripts/build-libs.sh PREFIX` builds them as static libraries into
+`/opt/caricoder3-libs`, which the Makefile prefers. The binary carries
+them, so every server runs the same versions whatever its Ubuntu has
+(22.04 has no RIST package at all), and an install fetches nothing for
+them from anyone else's site. The installer runs the script; each
+library is built once, and again only when its version in the script
+changes (needs cmake, g++, meson and ninja, which the installer adds).
+A new version: put its archive in `third_party/src`, update `SHA256SUMS`
+and the version in the script.
 
 ## Use
 
@@ -894,7 +909,7 @@ The feeds this is built for carry HE-AAC, and Ubuntu's `libfdk-aac`
 package is a build with the HE-AAC parts removed ("fdk-aac-free"): with it
 an HE-AAC input is decoded from its half-rate core only, nothing above
 12 kHz comes through, and HE-AAC v2 comes out mono. So the installer
-builds the original fdk-aac (2.0.3) from source into
+builds the original fdk-aac (2.0.3) from the source kept here into
 `/opt/caricoder3-libs`, statically, and the Makefile prefers it. With it
 HE-AAC v1 and v2 come out full band and in sync (tested to 0.02 ms).
 `caricoder3 --backends` says which it got: "incl. HE-AAC" or "NO HE-AAC",
