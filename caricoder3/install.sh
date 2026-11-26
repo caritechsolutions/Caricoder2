@@ -60,6 +60,7 @@ libavutil-dev:(needed by libavcodec)
 libx264-dev:H.264 encode on the CPU
 libx265-dev:H.265 encode on the CPU
 libsrt-openssl-dev:SRT output
+libssl-dev:(needed to find SRT on Ubuntu 22.04)
 librist-dev:RIST output
 libsqlite3-dev:the supervisor's history and event log
 iputils-ping:the evidence tools' ping

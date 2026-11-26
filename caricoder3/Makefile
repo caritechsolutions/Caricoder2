@@ -84,6 +84,17 @@ ifeq ($(call have_pkg,srt),yes)
 CODEC_DEFS += -DHAVE_SRT $(shell $(PKG_CONFIG) --cflags srt)
 CODEC_LIBS += $(shell $(PKG_CONFIG) --libs srt)
 SINK_SRC += src/sink_srt.c src/input_srt.c
+else
+# pkg-config can refuse an SRT that is there: Ubuntu 22.04's srt.pc requires
+# openssl.pc, which only libssl-dev brings. Then: its header, and a program
+# that links with it.
+SRT_DIRECT := $(shell printf '\043include <srt/srt.h>\nint main(void) { return srt_startup(); }\n' | \
+    $(CC) -x c - -lsrt -o /dev/null 2>/dev/null && echo yes)
+ifeq ($(SRT_DIRECT),yes)
+CODEC_DEFS += -DHAVE_SRT
+CODEC_LIBS += -lsrt
+SINK_SRC += src/sink_srt.c src/input_srt.c
+endif
 endif
 ifeq ($(call have_pkg,librist),yes)
 CODEC_DEFS += -DHAVE_RIST $(shell $(PKG_CONFIG) --cflags librist)
