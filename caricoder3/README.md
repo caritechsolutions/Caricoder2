@@ -251,7 +251,7 @@ lists what the build has):
 | `udp://host:port[?ttl=&iface=&pkt=&buf=&loop=0]`, `rtp://...` | plain UDP or RTP, unicast or multicast; `loop=0` keeps a multicast output off this machine (Flussonic's `multicast_loop=false`): a receiver here does not get it |
 | a file path | written as fast as it comes |
 | `srt://host:port[?latency=120&passphrase=...&pbkeylen=16&streamid=...]` | SRT caller: connects, and connects again by itself when the link breaks (`reconnects` in the stats; datagrams dropped meanwhile count as `errors`) |
-| `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 8 receivers may call in; each gets every datagram, a slow one loses its own |
+| `srt://:port` or `srt://host:port?mode=listener` | SRT listener: up to 32 receivers may call in on the one port; each gets every datagram, a slow one loses its own |
 | `rist://host:port[?profile=main&buffer=1000&secret=...&aes-type=128&bandwidth=...]` | RIST caller (librist; main profile by default, `simple` or `advanced` on request). The parameters after `profile` are librist's own |
 | `rist://@:port[?...]` | RIST listener (librist's notation) |
 | `hls://[:port][/name][?segment=4&window=6&dir=PATH&keep=20]` | HLS: TS segments cut at key frames (every `segment` seconds, the last `window` kept), one variant per program of the output (a master playlist for a channel with renditions), served by this process on `port` and through the supervisor; `dir=` also writes segments and playlists there for nginx or a CDN origin. See "HLS" |
@@ -260,6 +260,15 @@ lists what the build has):
 SRT and RIST outputs report what their libraries measure: `rtt_ms`,
 `retransmitted`, and for SRT `lost`. For an RTMP output `packets` counts
 FLV tags.
+
+**Who is receiving.** An SRT or RIST output also lists each receiver
+connected to it (`clients` in `list-outputs`, and a table under the output
+on the channel's Streams & outputs tab): for SRT its address and port,
+the stream id it gave, how long it has been connected, the rate being
+sent to it, its round trip time, and packets sent, resent and lost; for
+RIST the receiver's name (its cname: librist does not give the address
+of a receiver that called in), connected for, rate, round trip, packets
+sent and resent. A receiver that leaves goes from the list.
 
 ### HLS
 

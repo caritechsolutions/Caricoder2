@@ -323,6 +323,30 @@ int sinks_json(struct sinks *s, FILE *f, int indent)
             fprintf(f, ", \"retransmitted\": %lld", (long long)st.retransmitted);
         if (st.lost >= 0)
             fprintf(f, ", \"lost\": %lld", (long long)st.lost);
+        if (st.has_clients) {
+            fprintf(f, ",\n%*s \"clients\": [", indent, "");
+            for (int c = 0; c < st.n_clients; c++) {
+                const struct sink_client *cl = &st.clients[c];
+
+                fprintf(f, "%s\n%*s  {\"addr\": ", c ? "," : "", indent, "");
+                json_str(f, cl->addr);
+                fprintf(f, ", \"port\": %d, \"name\": ", cl->port);
+                json_str(f, cl->name);
+                fprintf(f, ", \"since\": %lld", (long long)cl->since);
+                if (cl->rtt_ms >= 0)
+                    fprintf(f, ", \"rtt_ms\": %.1f", cl->rtt_ms);
+                if (cl->mbps >= 0)
+                    fprintf(f, ", \"mbps\": %.3f", cl->mbps);
+                if (cl->sent >= 0)
+                    fprintf(f, ", \"sent\": %lld", (long long)cl->sent);
+                if (cl->retransmitted >= 0)
+                    fprintf(f, ", \"retransmitted\": %lld", (long long)cl->retransmitted);
+                if (cl->lost >= 0)
+                    fprintf(f, ", \"lost\": %lld", (long long)cl->lost);
+                fprintf(f, "}");
+            }
+            fprintf(f, "]");
+        }
         fprintf(f, "}");
     }
     fprintf(f, "\n%*s]", indent > 2 ? indent - 2 : 0, "");

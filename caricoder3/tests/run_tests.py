@@ -2118,8 +2118,60 @@ def live_srt_listener():
     need(o["type"] == "srt" and o["state"].startswith("listening: 1 receiver"), f"state: {o}")
     need(o["errors"] == 0 and o["overruns"] == 0, f"errors: {o}")
     pes, orig = _stream_ok(w("srt_listener.ts"), src, "SRT listener")
+    cl = o.get("clients")
+    need(isinstance(cl, list) and len(cl) == 1, f"the receiver is not listed: {o}")
+    c = cl[0]
+    need(c["addr"] == "127.0.0.1" and c["port"] > 0, f"its address: {c}")
+    need(0 <= time.time() - c["since"] < 60, f"connected since: {c}")
+    need(c["sent"] > 500 and c["rtt_ms"] >= 0 and c["retransmitted"] >= 0 and c["lost"] >= 0, f"its figures: {c}")
     return f"1 receiver joined, {pes}/{orig} PES received, RTT {o.get('rtt_ms')} ms, " \
-           f"{o['retransmitted']} retransmitted"
+           f"{o['retransmitted']} retransmitted; listed as {c['addr']}:{c['port']}, {c['sent']} packets"
+
+
+@test
+def live_srt_receivers_listed():
+    """Three receivers on one SRT listening port: each gets the stream and is listed
+    with its own address, stream id and figures; one that leaves goes from the list."""
+    if "srt://" not in subprocess.run([BIN, "--backends"], capture_output=True, text=True).stdout:
+        return "SKIPPED: built without libsrt"
+    if not shutil.which("srt-live-transmit"):
+        return "SKIPPED: srt-tools not installed"
+    extra, seen = [], {}
+
+    def start(port, out):
+        for i, q in enumerate(("&streamid=hotel-7", "")):
+            extra.append(subprocess.Popen(
+                ["srt-live-transmit", "-q", f"srt://127.0.0.1:{port}?mode=caller{q}", "file://con"],
+                stdout=open(w(f"srt_many_{i}.ts"), "wb"), stderr=subprocess.DEVNULL))
+        return _srt_receiver("caller")(port, out)
+
+    def mid(proc, sock):
+        seen["three"] = ctl(sock, "list-outputs")[1]["outputs"][0]
+        extra[1].send_signal(signal.SIGINT)
+        extra[1].wait(timeout=5)
+
+    try:
+        o, log, got, src = _transport_run("srt://:{port}", start, "srt_many", mid=mid)
+    finally:
+        for e in extra:
+            if e.poll() is None:
+                e.send_signal(signal.SIGINT)
+                try:
+                    e.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    e.kill()
+    three = seen["three"]
+    need(three["state"] == "listening: 3 receivers" and len(three["clients"]) == 3, f"at 3 s: {three}")
+    need(len({c["port"] for c in three["clients"]}) == 3, f"three different receivers: {three['clients']}")
+    need(sorted(c["name"] for c in three["clients"]) == ["", "", "hotel-7"], f"stream ids: {three['clients']}")
+    need(all(c["sent"] > 100 for c in three["clients"]), f"each is sent to: {three['clients']}")
+    need(o["state"] == "listening: 2 receivers" and len(o["clients"]) == 2, f"after one left: {o}")
+    need("hotel-7" in [c["name"] for c in o["clients"]], f"the wrong one went: {o['clients']}")
+    pes, orig = _stream_ok(w("srt_many.ts"), src, "SRT, first of three")
+    a, b = os.path.getsize(w("srt_many.ts")), os.path.getsize(w("srt_many_0.ts"))
+    need(abs(a - b) < a * 0.05, f"the receivers got different amounts: {a} and {b} bytes")
+    need(0 < os.path.getsize(w("srt_many_1.ts")) < a * 0.7, "the one that left early")
+    return f"3 listed (one with its stream id), all receiving; one left: 2 listed; {pes}/{orig} PES at the first"
 
 
 @test
@@ -2211,7 +2263,10 @@ def live_rist_listener_encrypted():
                                       start, "rist_listener")
     need(o["state"].startswith("listening: 1 receiver"), f"state: {o}")
     pes, orig = _stream_ok(w("rist_listener.ts"), src, "RIST listener")
-    return f"1 receiver, AES-128, {pes}/{orig} PES received"
+    cl = o.get("clients")
+    need(isinstance(cl, list) and len(cl) == 1, f"the receiver is not listed: {o}")
+    need(cl[0]["name"] and cl[0]["sent"] > 500 and cl[0]["mbps"] > 1, f"its figures: {cl[0]}")
+    return f"1 receiver, AES-128, {pes}/{orig} PES received; listed as '{cl[0]['name']}', {cl[0]['sent']} packets"
 
 
 # ---- link inputs: an outside sender pushes into caricoder3 over SRT or RIST ----

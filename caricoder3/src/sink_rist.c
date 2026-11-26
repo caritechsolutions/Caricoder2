@@ -17,11 +17,14 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <librist/librist.h>
 
 #include "log.h"
 #include "sink.h"
+
+#define RX_GONE_S 4
 
 struct rist_sink {
     struct rist_ctx *ctx;
@@ -35,6 +38,14 @@ struct rist_sink {
     int connected;                          /* peers up (a caller: 0 or 1) */
     double rtt_ms;
     uint64_t retransmitted;
+    struct {                                /* each receiver, from librist's own statistics */
+        uint32_t id;
+        char cname[64];
+        time_t since, seen;
+        double rtt_ms, mbps;
+        uint64_t sent, retransmitted;
+    } rx[SINK_CLIENTS];
+    int n_rx;
 
     struct packer pk;
     _Atomic uint64_t packets, bytes, errors, reconnects;
@@ -96,9 +107,37 @@ static int on_stats(void *arg, const struct rist_stats *st)
          * librist writes alongside has it to the microsecond. */
         const char *r = st->stats_json ? strstr(st->stats_json, "\"rtt\":") : NULL;
 
+        const struct rist_stats_sender_peer *p = &st->stats.sender_peer;
+        time_t now = time(NULL);
+        int at = -1;
+
         pthread_mutex_lock(&s->lock);
-        s->rtt_ms = r ? atof(r + 6) : (double)st->stats.sender_peer.rtt;
-        s->retransmitted = st->stats.sender_peer.retransmitted;
+        s->rtt_ms = r ? atof(r + 6) : (double)p->rtt;
+        s->retransmitted += p->retransmitted;       /* librist counts each report's own second */
+        /* one report a second for each receiver: one not heard of for a few has gone */
+        for (int i = 0; i < s->n_rx; ) {
+            if (now - s->rx[i].seen > RX_GONE_S)
+                s->rx[i] = s->rx[--s->n_rx];
+            else
+                i++;
+        }
+        for (int i = 0; i < s->n_rx; i++)
+            if (s->rx[i].id == p->peer_id)
+                at = i;
+        if (at < 0 && s->n_rx < SINK_CLIENTS) {
+            at = s->n_rx++;
+            memset(&s->rx[at], 0, sizeof(s->rx[at]));
+            s->rx[at].id = p->peer_id;
+            s->rx[at].since = now;
+        }
+        if (at >= 0) {
+            snprintf(s->rx[at].cname, sizeof(s->rx[at].cname), "%.63s", p->cname);
+            s->rx[at].seen = now;
+            s->rx[at].rtt_ms = s->rtt_ms;
+            s->rx[at].mbps = (double)p->bandwidth / 1e6;
+            s->rx[at].sent += p->sent;
+            s->rx[at].retransmitted += p->retransmitted;
+        }
         pthread_mutex_unlock(&s->lock);
     }
     rist_stats_free(st);
@@ -231,6 +270,26 @@ static void rist_stats_fn(void *ctx, struct sink_stats *st)
     if (s->connected) {
         st->rtt_ms = s->rtt_ms;
         st->retransmitted = (int64_t)s->retransmitted;
+    }
+    st->has_clients = true;
+    for (int i = 0; i < s->n_rx && s->connected; i++) {
+        struct sink_client *c;
+
+        if (time(NULL) - s->rx[i].seen > RX_GONE_S || st->n_clients >= SINK_CLIENTS)
+            continue;
+        c = &st->clients[st->n_clients++];
+        memset(c, 0, sizeof(*c));
+        /* librist names a receiver (its cname) but not its address; a
+         * caller knows where it called */
+        if (!s->listener)
+            snprintf(c->addr, sizeof(c->addr), "%.63s", s->where);
+        snprintf(c->name, sizeof(c->name), "%s", s->rx[i].cname);
+        c->since = (int64_t)s->rx[i].since;
+        c->rtt_ms = s->rx[i].rtt_ms;
+        c->mbps = s->rx[i].mbps;
+        c->sent = (int64_t)s->rx[i].sent;
+        c->retransmitted = (int64_t)s->rx[i].retransmitted;
+        c->lost = -1;
     }
     pthread_mutex_unlock(&s->lock);
     st->packets = atomic_load(&s->packets);

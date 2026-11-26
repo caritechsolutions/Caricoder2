@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <srt/srt.h>
@@ -33,7 +34,7 @@
 #include "log.h"
 #include "sink.h"
 
-#define SRT_PEERS       8
+#define SRT_PEERS       SINK_CLIENTS
 #define RECONNECT_US    1000000
 #define POLL_MS         200
 
@@ -50,6 +51,12 @@ struct srt_sink {
     pthread_mutex_t lock;                   /* peers, state */
     SRTSOCKET sock;                         /* the listening socket, or the caller's */
     SRTSOCKET peers[SRT_PEERS];             /* connected: where datagrams go */
+    struct {                                /* who each is, alongside */
+        char addr[64];
+        int port;
+        char streamid[64];
+        time_t since;
+    } who[SRT_PEERS];
     int n_peers;
     char state[48];
 
@@ -176,7 +183,9 @@ static int prune(struct srt_sink *s)
 
         if (st == SRTS_BROKEN || st == SRTS_CLOSING || st == SRTS_CLOSED || st == SRTS_NONEXIST) {
             srt_close(s->peers[i]);
-            s->peers[i] = s->peers[--s->n_peers];
+            s->n_peers--;
+            s->peers[i] = s->peers[s->n_peers];
+            s->who[i] = s->who[s->n_peers];
             dropped++;
         } else {
             i++;
@@ -215,6 +224,11 @@ static void caller_loop(struct srt_sink *s)
         }
         pthread_mutex_lock(&s->lock);
         s->peers[0] = u;
+        memset(&s->who[0], 0, sizeof(s->who[0]));
+        getnameinfo((struct sockaddr *)&sa, (socklen_t)salen, s->who[0].addr, sizeof(s->who[0].addr),
+                    NULL, 0, NI_NUMERICHOST);
+        s->who[0].port = s->port;
+        s->who[0].since = time(NULL);
         s->n_peers = 1;
         snprintf(s->state, sizeof(s->state), "connected");
         pthread_mutex_unlock(&s->lock);
@@ -254,14 +268,23 @@ static void listener_loop(struct srt_sink *s)
             SRTSOCKET u = srt_accept(s->sock, (struct sockaddr *)&sa, &salen);
 
             if (u != SRT_INVALID_SOCK) {
-                int no = 0;
-                char who[64] = "?";
+                int no = 0, idlen = 0;
+                char who[64] = "?", port[8] = "", id[512] = "";
 
                 srt_setsockflag(u, SRTO_SNDSYN, &no, sizeof(no));
                 getnameinfo((struct sockaddr *)&sa, (socklen_t)salen, who, sizeof(who),
-                            NULL, 0, NI_NUMERICHOST);
+                            port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+                idlen = sizeof(id) - 1;
+                if (srt_getsockflag(u, SRTO_STREAMID, id, &idlen) < 0 || idlen < 0)
+                    idlen = 0;
+                id[idlen] = 0;
                 pthread_mutex_lock(&s->lock);
                 if (s->n_peers < SRT_PEERS) {
+                    memset(&s->who[s->n_peers], 0, sizeof(s->who[0]));
+                    snprintf(s->who[s->n_peers].addr, sizeof(s->who[0].addr), "%s", who);
+                    s->who[s->n_peers].port = atoi(port);
+                    snprintf(s->who[s->n_peers].streamid, sizeof(s->who[0].streamid), "%.63s", id);
+                    s->who[s->n_peers].since = time(NULL);
                     s->peers[s->n_peers++] = u;
                     log_info("srt :%d: receiver %s joined (%d now)", s->port, who, s->n_peers);
                 } else {
@@ -423,16 +446,34 @@ static void srt_stats(void *ctx, struct sink_stats *st)
 
     pthread_mutex_lock(&s->lock);
     snprintf(st->state, sizeof(st->state), "%s", s->state);
+    st->has_clients = true;
     if (s->n_peers) {
         st->retransmitted = st->lost = 0;
         for (int i = 0; i < s->n_peers; i++) {
             SRT_TRACEBSTATS b;
+            struct sink_client *c = i < SINK_CLIENTS ? &st->clients[st->n_clients++] : NULL;
 
+            if (c) {
+                memset(c, 0, sizeof(*c));
+                snprintf(c->addr, sizeof(c->addr), "%s", s->who[i].addr);
+                c->port = s->who[i].port;
+                snprintf(c->name, sizeof(c->name), "%s", s->who[i].streamid);
+                c->since = (int64_t)s->who[i].since;
+                c->rtt_ms = c->mbps = -1;
+                c->sent = c->retransmitted = c->lost = -1;
+            }
             if (srt_bstats(s->peers[i], &b, 0) == 0) {
                 if (i == 0)
                     st->rtt_ms = b.msRTT;
                 st->retransmitted += b.pktRetransTotal;
                 st->lost += b.pktSndLossTotal;
+                if (c) {
+                    c->rtt_ms = b.msRTT;
+                    c->mbps = b.mbpsSendRate;
+                    c->sent = b.pktSentTotal;
+                    c->retransmitted = b.pktRetransTotal;
+                    c->lost = b.pktSndLossTotal;
+                }
             }
         }
     }

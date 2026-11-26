@@ -28,6 +28,18 @@
 #define SINKS_MAX       16
 #define SINK_BATCH      448                 /* packets read from the ring at a time (64 datagrams) */
 
+/* Who is receiving an output, where the transport knows: an SRT or RIST
+ * link's other end. */
+#define SINK_CLIENTS 32
+struct sink_client {
+    char     addr[64];                      /* "" when the transport does not say */
+    int      port;
+    char     name[64];                      /* SRT stream id, RIST cname; "" when none */
+    int64_t  since;                         /* connected at (Unix time), 0 when not known */
+    double   rtt_ms, mbps;                  /* -1 when not known */
+    int64_t  sent, retransmitted, lost;     /* packets; -1 when not known */
+};
+
 struct sink_stats {
     char     state[48];                     /* "sending", "connecting", "listening: 2 receivers" ... */
     uint64_t packets, bytes;                /* handed to the transport */
@@ -36,6 +48,10 @@ struct sink_stats {
     /* what the transport offers, -1 when it does not */
     double   rtt_ms;
     int64_t  retransmitted, lost;
+    /* a transport with receivers of its own lists them (and says so even with none) */
+    bool     has_clients;
+    int      n_clients;
+    struct sink_client clients[SINK_CLIENTS];
 };
 
 struct sink_ops {
