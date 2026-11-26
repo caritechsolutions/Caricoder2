@@ -411,6 +411,23 @@ a channel set to Main 10 shows no picture on some receivers, those
 receivers do not decode Main 10. These options never cause CC errors or
 dropouts; more card load from them can, if the card is near its limit.
 
+## Audio loudness
+
+Where a channel transcodes its audio it is levelled, unless set otherwise:
+measured as broadcasters measure loudness (ITU-R BS.1770, the last minute)
+and brought slowly to the server's target (-24 LKFS by default), by at most
+12 dB either way, with a limiter under -2 dBFS. A stream's "loudness" in
+the statistics says what comes in ("in_lufs"), what goes out ("out_lufs"),
+the gain in use ("gain_db") and how long the limiter has worked
+("limited_ms"). A channel that sounds too quiet with gain at +12: its
+source is more than 12 dB under the target (the source's fault; a fixed
+gain on the channel can go further). A channel whose level differs from
+the others: look for "loudness": "off" or a fixed gain in its settings, or
+audio that is copied (never levelled). Nothing is changed in the first
+10 s of sound after a start, and the gain moves slowly: a channel just
+restarted takes up to half a minute to settle. Much "limited_ms" with a
+fixed gain: the gain is too high for that source.
+
 ## Interlaced sources and film
 
 A channel's "deinterlace" setting decides what happens to an interlaced

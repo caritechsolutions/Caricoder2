@@ -17,6 +17,7 @@
 
 #include "cc3.h"
 #include "codec.h"
+#include "loud.h"
 
 struct xcode;
 
@@ -48,6 +49,8 @@ struct xcode_cfg {
     const char *profile;        /* NULL: the encoder's own choice */
     struct venc_tune tune;      /* NVIDIA picture-quality options; all 0: as before */
     int deint;                  /* enum deint */
+    /* audio only */
+    struct loud_cfg loud;       /* loudness levelling (loud.h); mode 0: none */
 };
 
 struct xcode_stats {
@@ -62,6 +65,7 @@ struct xcode_stats {
     uint64_t skipped_bytes;             /* input that was part of no frame */
     uint64_t silence_ms, cut_ms;        /* audio: holes filled, overlaps removed */
     uint64_t restarts;                  /* time line taken up afresh */
+    struct loud_stats loud;             /* audio: the levelling, when on */
     unsigned queued;                    /* input units waiting right now */
     int64_t  slack_min;                 /* least time to spare on reaching the mux
                                          * since last read, ticks; INT64_MAX: none */

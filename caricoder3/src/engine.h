@@ -31,6 +31,7 @@ struct engine_cfg {
     const char *profile;                /* baseline, main, high, main10; NULL: the encoder's own */
     struct venc_tune tune;              /* NVIDIA picture-quality options (codec.h) */
     int deint;                          /* enum deint (codec.h) */
+    struct loud_cfg loud;               /* audio levelling where audio is transcoded (loud.h) */
 
     /* Streams of the service left out of the output (by input PID). */
     uint16_t drop[MAX_ES];

@@ -379,6 +379,8 @@ static int plan_stream(struct engine *e, const struct program *p, int idx,
             c->profile = e->cfg.profile;
             c->tune = e->cfg.tune;
             c->deint = e->cfg.deint;
+        } else {
+            c->loud = e->cfg.loud;
         }
         out++;
     }

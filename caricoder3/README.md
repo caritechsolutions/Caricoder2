@@ -945,6 +945,28 @@ video as fields, it encodes the fields together as frames, with a
 warning. `--decoder cpu --encoder nvidia` works (pictures are uploaded);
 `--decoder nvidia --encoder cpu` is not built yet.
 
+**Audio loudness** (channel key `"loudness"`, `--loudness`, `--loudness-target`;
+src/loud.c). Channels arrive at very different levels. Where a channel
+transcodes its audio, the samples pass, between decoder and encoder,
+through a meter (ITU-R BS.1770 K-weighting and gating, as EBU R128 and
+ATSC A/85 use it, over the last 60 s), a slow gain and a limiter. `auto`
+brings the channel to the target (-24 LKFS unless changed): nothing in the
+first 10 s of sound, then up 0.5 dB a second at most and down 2, within
++/- 12 dB, a difference under 1 dB left alone, and held while what comes
+in is under the gate, so a pause is not turned up. It puts channels at one
+level and leaves a programme's own quiet and loud scenes alone. A number
+(`"+3"`, `"-4.5"`) is a fixed gain in dB (Flussonic's `avol`); `off` is
+none. Either way a look-ahead limiter keeps every sample under -2 dBFS
+(the codec after it can overshoot by about 1 dB); its 5 ms are taken off
+the time stamps, so the audio stays where it was against the video.
+Copied audio is never touched. The server's default (`"loudness":
+{"mode": "auto", "target": -24}` in the config, on unless set to off;
+Settings, "Audio loudness"; `/api/quality` carries it) applies to every
+channel without a setting of its own, and a change is pending for the
+channels it concerns like a picture-quality default. Each stream's
+statistics carry `"loudness": {"in_lufs", "out_lufs", "gain_db",
+"limited_ms"}`, shown on the channel's Streams tab.
+
 **Interlaced sources** (channel key `"deinterlace"`, `--deinterlace`), when
 resized: `blend` (default; the two fields averaged), `off` (the fields kept
 together: film carried as interlaced video, as Flussonic's

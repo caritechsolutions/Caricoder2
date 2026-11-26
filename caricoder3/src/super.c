@@ -69,6 +69,7 @@
 #include "sysstat.h"
 #include "history.h"
 #include "watchdog.h"
+#include "loud.h"
 #include "memwatch.h"
 #include "disk.h"
 #include "peer.h"
@@ -271,6 +272,10 @@ struct super {
         char aq[8], taq[8], wp[8], mp[12];
         int la;
     } qdef, qdef264;                        /* for H.265 channels; for H.264-only ones */
+    /* loudness levelling of transcoded audio (loud.h): the server's default, which a
+     * channel's own "loudness" ("auto", "off", or a gain in dB) overrides */
+    char loud_mode[8];                      /* "auto" or "off" */
+    double loud_target;                     /* LKFS */
     int64_t q_next_ns;                      /* the next queued restart */
     int q_gap_s;                            /* between restarts (20 s; tests shorter) */
     struct cardp cards[CARDS_MAX];
@@ -640,6 +645,13 @@ static void save_system_config(struct super *s)
                      "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}\n}\n",
                      k ? "quality_h264" : "quality", qs->aq, qs->taq, qs->la, qs->wp, qs->mp);
     }
+    {
+        size_t n = strlen(text);
+
+        if (n > 3)
+            snprintf(text + n - 3, sizeof(text) - (n - 3), ",\n  \"loudness\": {\"mode\": \"%s\", \"target\": %.1f}\n}\n",
+                     s->loud_mode, s->loud_target);
+    }
     if (s->wx_set) {
         /* the weather places, when they were set (otherwise the defaults stay defaults) */
         size_t n = strlen(text);
@@ -782,7 +794,14 @@ static bool load_system_config(struct super *s, char *err, size_t errlen)
         s->ird_o.settle_s = (int)json_get_num(&doc, root, "ird_settle_s", 300);
     }
     {
-        int q = json_get(&doc, root, "quality");
+        int q = json_get(&doc, root, "quality"), lo = json_get(&doc, root, "loudness");
+
+        /* levelling: on, to -24 LKFS, unless the config says otherwise */
+        snprintf(s->loud_mode, sizeof(s->loud_mode), "%s",
+                 lo >= 0 && !strcmp(json_get_str(&doc, lo, "mode", "auto"), "off") ? "off" : "auto");
+        s->loud_target = lo >= 0 ? json_get_num(&doc, lo, "target", LOUD_TARGET_DEFAULT) : LOUD_TARGET_DEFAULT;
+        if (s->loud_target > -5 || s->loud_target < -40)
+            s->loud_target = LOUD_TARGET_DEFAULT;
 
         s->q_gap_s = (int)json_get_num(&doc, root, "quality_restart_gap_s", 20);
         for (int k = 0; k < 2; k++) {
@@ -1100,13 +1119,26 @@ static bool chan_makes(const struct json_doc *doc, int root, bool h264)
     return false;
 }
 
+#define QA_MAX 7
+
+/* Whether the channel transcodes its audio ("audio": ["aac:128k", ...]). */
+static bool chan_audio_xc(const struct json_doc *doc, int root)
+{
+    int a = json_get(doc, root, "audio");
+
+    for (int j = a >= 0 && doc->node[a].type == JSON_ARRAY ? doc->node[a].first_child : -1; j >= 0; j = doc->node[j].next)
+        if (doc->node[j].type == JSON_STRING && doc->node[j].str[0] && !strstr(doc->node[j].str, "copy"))
+            return true;
+    return false;
+}
+
 /*
  * The picture-quality options of a channel: its own where it has them,
  * otherwise the server's default: s->qdef when it makes H.265 (any
  * rendition), s->qdef264 when it makes H.264 only. Into out[] as
  * command-line arguments; returns how many.
  */
-static int quality_args(const struct super *s, const struct json_doc *doc, int root, char out[5][40])
+static int quality_args(const struct super *s, const struct json_doc *doc, int root, char out[QA_MAX][40])
 {
     static const struct { const char *key, *opt; size_t off; } strs[] = {
         { "aq", "--aq", offsetof(struct qset, aq) },
@@ -1130,12 +1162,25 @@ static int quality_args(const struct super *s, const struct json_doc *doc, int r
        : d ? d->la : 0;
     if (la > 0 && la <= 32)
         snprintf(out[n++], 40, "--lookahead=%d", la);
+    /* the audio's levelling, with them: a changed default restarts the same way */
+    if (chan_audio_xc(doc, root)) {
+        const char *v = json_get_str(doc, root, "loudness", "");
+        struct loud_cfg lc;
+
+        if (!*v)
+            v = s->loud_mode;
+        if (*v && strcmp(v, "off") && loud_parse(v, &lc)) {
+            snprintf(out[n++], 40, "--loudness=%s", v);
+            if (lc.mode == LOUD_AUTO)
+                snprintf(out[n++], 40, "--loudness-target=%.1f", s->loud_target);
+        }
+    }
     return n;
 }
 
 static uint32_t text_hash(const char *t);
 
-static uint32_t quality_hash(char q[5][40], int n)
+static uint32_t quality_hash(char q[QA_MAX][40], int n)
 {
     uint32_t h = 1;
 
@@ -1148,7 +1193,7 @@ static uint32_t quality_hash(char q[5][40], int n)
 static uint32_t chan_quality_now(const struct super *s, const struct chan *c)
 {
     struct json_doc *doc = malloc(sizeof(*doc));
-    char e[200], qa[5][40];
+    char e[200], qa[QA_MAX][40];
     int root = doc && c->cfg ? json_parse(doc, c->cfg, e, sizeof(e)) : -1;
     uint32_t h = root >= 0 ? quality_hash(qa, quality_args(s, doc, root, qa)) : c->q_hash;
 
@@ -1256,7 +1301,7 @@ static int chan_argv(struct super *s, struct chan *c, char **argv, int max, char
         if (v >= 0)
             ARG("--bframes=%d", (int)v);
         {
-            char qa[5][40];
+            char qa[QA_MAX][40];
             int nq = quality_args(s, &doc, root, qa);
 
             for (int j = 0; j < nq; j++)
@@ -5120,6 +5165,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
             struct qset sets[2];
             bool have[2];
             int h = root >= 0 ? json_get(doc, root, "h264") : -1;
+            int lo = root >= 0 ? json_get(doc, root, "loudness") : -1;
+            char lmode[8] = "";
+            double ltarget = 0;
 
             if (root < 0) {
                 free(doc);
@@ -5137,14 +5185,31 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
                     api_error(resp, 400, err);
                     return;
                 }
+            if (lo >= 0 && doc->node[lo].type == JSON_OBJECT) {
+                const char *m = json_get_str(doc, lo, "mode", "");
+
+                ltarget = json_get_num(doc, lo, "target", LOUD_TARGET_DEFAULT);
+                if ((strcmp(m, "auto") && strcmp(m, "off")) || ltarget > -5 || ltarget < -40) {
+                    free(doc);
+                    api_error(resp, 400, "loudness: mode auto or off, target -40 to -5 (LKFS)");
+                    return;
+                }
+                snprintf(lmode, sizeof(lmode), "%s", m);
+            }
             free(doc);
             pthread_mutex_lock(&s->lock);
+            if (lmode[0]) {
+                snprintf(s->loud_mode, sizeof(s->loud_mode), "%s", lmode);
+                s->loud_target = ltarget;
+            }
             if (have[0])
                 s->qdef = sets[0];
             if (have[1])
                 s->qdef264 = sets[1];
             save_system_config(s);
             pthread_mutex_unlock(&s->lock);
+            if (lmode[0])
+                ev(NULL, "info", "user", "loudness default changed: %s, target %.1f LKFS", lmode, ltarget);
             for (int k = 0; k < 2; k++)
                 if (have[k])
                     ev(NULL, "info", "user", "picture-quality defaults for %s changed: aq %s, temporal AQ %s, "
@@ -5166,8 +5231,9 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
 
             fprintf(f, "{\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, \"weighted_pred\": \"%s\", "
                     "\"multipass\": \"%s\", \"h264\": {\"aq\": \"%s\", \"temporal_aq\": \"%s\", \"lookahead\": %d, "
-                    "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}, \"pending\": [",
-                    a->aq, a->taq, a->la, a->wp, a->mp, b->aq, b->taq, b->la, b->wp, b->mp);
+                    "\"weighted_pred\": \"%s\", \"multipass\": \"%s\"}, "
+                    "\"loudness\": {\"mode\": \"%s\", \"target\": %.1f}, \"pending\": [",
+                    a->aq, a->taq, a->la, a->wp, a->mp, b->aq, b->taq, b->la, b->wp, b->mp, s->loud_mode, s->loud_target);
             for (int i = 0; i < s->n; i++) {
                 struct chan *c = &s->ch[i];
                 char nq_[160];

@@ -577,7 +577,9 @@ function mediaLine(s, input, sync) {
   const what = `<b class="k-${esc(s.kind || "data")}">${esc(s.kind || "data")}</b> ${esc(bits.join(" "))}`;
   const quiet = input && s.idle_ms >= 5000 && (s.kind === "video" || s.kind === "audio");
   const pid = input && s.src_pid ? `<span title="The source moved this stream from PID ${s.in_pid}; settings and output stay on ${s.in_pid}">pid ${s.src_pid} <span class="warn">(was ${s.in_pid})</span></span>` : `pid ${input ? s.in_pid : s.pid}`;
-  const syncTxt = "";
+  /* the levelling of transcoded audio: what is measured in and out, and the gain in use */
+  const lo = !input && s.loudness, lu = v => v == null ? "…" : v.toFixed(1);
+  const syncTxt = lo ? `<span title="Loudness (ITU-R BS.1770, the last minute): what comes in, what goes out, and the gain in use${lo.limited_ms ? `; the limiter has held peaks down for ${(lo.limited_ms / 1000).toFixed(1)} s in all` : ""}">loudness ${lu(lo.in_lufs)} → ${lu(lo.out_lufs)} LKFS · gain ${lo.gain_db > 0 ? "+" : ""}${lo.gain_db.toFixed(1)} dB</span>` : "";
   return `<div class="sline">${what}<span>${quiet ? `<span class="bad">no data ${Math.round(s.idle_ms / 1000)} s</span>` : rate >= 0 ? fmtRate(rate) : ""}</span><span class="pid">${pid}</span>${syncTxt ? `<span class="pid">${syncTxt}</span>` : ""}</div>`;
 }
 function mediaHtml(c) {
@@ -789,7 +791,7 @@ function secSummary(id, k) {
   if (id === "source") return (k.input || "—") + ((k.backup_inputs || []).length ? ` +${k.backup_inputs.length} backup` : "");
   if (id === "program") return `program ${k.program || "first"}` + ((k.pids || []).length ? `, ${k.pids.length} streams` : (k.drop || []).length ? `, ${k.drop.length} left out` : ", all streams");
   if (id === "video") return vids.length ? vids.map(v => String(v).split(":").filter(x => x !== "fit").join(" ")).join(", ") : "copied";
-  if (id === "audio") return auds.length ? auds.join(", ").replace(/:/g, " ") : "copied";
+  if (id === "audio") return auds.length ? auds.join(", ").replace(/:/g, " ") + (k.loudness ? `, loudness ${k.loudness}` : "") : "copied";
   if (id === "card") return [k.gpu != null && k.gpu !== "" ? `card ${k.gpu}` : "card 0", k.preset || "default speed", k.profile || ""].filter(Boolean).join(", ");
   if (id === "timing") return [`delay ${k.delay || "auto"}`, k.service_name ? `“${k.service_name}”` : "", k.enabled === false ? "kept stopped" : ""].filter(Boolean).join(", ");
   return "";
@@ -1056,6 +1058,24 @@ function qualityCard() {
     <div class="body">${queued.length ? `<div class="msg">Restarting one at a time, ${Q.gap_s} s apart: ${queued.length} to go (${esc(queued.join(", "))}).</div>`
       : pend.length ? `<div class="row" style="align-items:center"><span>${pend.length} running channel${pend.length > 1 ? "s" : ""} would start with different options: ${esc(pend.join(", "))}.</span><div class="sp"></div><button class="primary" onclick="restartQuality(${pend.length})" style="flex:0 0 auto">Restart them one at a time</button></div><div class="help" style="margin-top:6px">A changed default reaches a channel when it next starts. Restarted ${Q.gap_s} s apart, each is away for a few seconds and never two at once.</div>`
       : `<div class="dim">Every running channel has these.</div>`}</div></section>`;
+}
+function loudnessCard() {
+  if (!qualInfo || qualInfo.error) return "";
+  const L = qualInfo.loudness || { mode: "auto", target: -24 };
+  return `<section class="card"><header><h2>Audio loudness</h2><span class="hint">${L.mode === "off" ? "Off: channels keep the level their source has" : `Every channel that transcodes its audio is levelled to ${L.target} LKFS`}; a channel's own setting wins. A change reaches a channel when it restarts (the picture-quality card above lists them)</span><div class="sp"></div><button onclick="editLoudness()">Change</button></header></section>`;
+}
+function editLoudness() {
+  const d = $("#dlg"), L = (qualInfo || {}).loudness || { mode: "auto", target: -24 };
+  d.innerHTML = `<h3>Audio loudness: the default</h3><div class="help" style="margin:0 0 12px">For channels that transcode their audio and say nothing else. Measured as ITU-R BS.1770 and brought slowly to the target, by at most 12 dB, with a limiter under −2 dBFS. −24 LKFS is the US broadcast level (ATSC A/85), −23 the European (EBU R128).</div>
+    <div class="f"><label>Levelling</label><select id="ld_mode"><option value="auto">On: level every channel to the target</option><option value="off">Off</option></select>
+    <label>Target</label><div class="row"><input id="ld_target" class="n" type="number" step="0.5" min="-40" max="-5"><span style="color:var(--dim)">LKFS</span></div></div>
+    <div id="ld_msg" style="margin-top:10px"></div><div class="actions"><button onclick="document.getElementById('dlg').close()">Cancel</button><button class="primary" id="ld_go">Save</button></div>`;
+  $("#ld_mode").value = L.mode === "off" ? "off" : "auto"; $("#ld_target").value = L.target;
+  $("#ld_go").onclick = async () => {
+    try { qualInfo = await api("/api/quality", { method: "PUT", body: JSON.stringify({ loudness: { mode: $("#ld_mode").value, target: Number($("#ld_target").value) } }) }); d.close(); rerender(); }
+    catch(e) { $("#ld_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  d.showModal();
 }
 function editQuality() {
   const d = $("#dlg"), Q = qualInfo || {};
@@ -1620,6 +1640,8 @@ function settingsHtml() {
     </div></div>
     <div class="sec" data-sec="audio"><div class="f">
       <label>Treatment</label><div class="row"><select id="a_codec" style="flex:0 0 220px" onchange="$('#a_rate').disabled=!this.value"><option value="">Copy as is</option><option value="aac">AAC</option><option value="mp2">MPEG-1 layer II (MP2)</option><option value="mp3">MP3</option></select><select id="a_rate" style="flex:0 0 140px">${ABR.map(r=>`<option>${r}</option>`).join("")}</select><span style="color:var(--dim)">Every audio stream of the program is treated the same.</span></div>
+      <label>Loudness</label><div class="row"><select id="loud_mode" style="flex:0 0 320px" onchange="$('#loud_db').style.display=this.value==='fixed'?'':'none'"><option value="">Server default (Settings)</option><option value="auto">Level automatically to the server's target</option><option value="fixed">A fixed gain</option><option value="off">Off: as the source has it</option></select><input id="loud_db" class="n" placeholder="+3" style="display:none"><span style="color:var(--dim)">Only where the audio is transcoded; copied audio is never touched.</span></div>
+      <div class="help long">Channels arrive at very different levels. <b>Automatic</b> measures each channel's loudness the broadcast way (ITU-R BS.1770, over the last minute) and brings it slowly to the server's target (−24 LKFS unless changed), by at most 12 dB either way: up 0.5 dB a second, down 2. It matches channels to each other and leaves a programme's own quiet and loud scenes as they are; pauses are not turned up. <b>A fixed gain</b> is that many dB, always (Flussonic's <code>avol</code>). Either way a limiter keeps peaks under −2 dBFS, so a channel turned up never clips. The Streams tab shows what is measured coming in and going out, and the gain in use.</div>
     </div></div>
     <div class="sec" data-sec="card"><div class="f">
       <label>Decode on</label>${sel("decoder", [["","Card if present, else CPU"],["nvidia","NVIDIA card"],["cpu","CPU"]])}
@@ -1755,6 +1777,8 @@ function fillForm(cfg) {
   $("#bframes").value = cfg.bframes != null ? String(cfg.bframes) : ""; $("#profile").value = cfg.profile || "";
   for (const k of ["aq","temporal_aq","weighted_pred","multipass"]) $("#"+k).value = cfg[k] || "";
   $("#deinterlace").value = cfg.deinterlace || "";
+  { const lv = cfg.loudness || "", fixed = lv && lv !== "auto" && lv !== "off";
+    $("#loud_mode").value = fixed ? "fixed" : lv; $("#loud_db").value = fixed ? lv : ""; $("#loud_db").style.display = fixed ? "" : "none"; }
   $("#lookahead").value = cfg.lookahead != null ? String(cfg.lookahead) : "";
   { const on = ["aq","temporal_aq","lookahead","weighted_pred","multipass"].filter(k => cfg[k] != null && cfg[k] !== "").length;
     $("#q_sum").textContent = on ? `(${on} set here; the rest from Settings)` : "(all from Settings)"; $("#q_box").open = !!on; }
@@ -1884,6 +1908,8 @@ function readForm() {
   if (v("a_codec")) cfg.audio = [`${v("a_codec")}:${$("#a_rate").value}`];
   for (const k of ["decoder","encoder","preset","profile","service_name","service_provider",
                    "aq","temporal_aq","weighted_pred","multipass","deinterlace"]) if (v(k)) cfg[k] = v(k);
+  if (v("loud_mode") === "fixed") { const db = Number(v("loud_db")); cfg.loudness = v("loud_db") === "" || isNaN(db) || db < -40 || db > 40 ? "bad" : (db > 0 ? "+" : "") + db; }
+  else if (v("loud_mode")) cfg.loudness = v("loud_mode");
   if (v("lookahead") !== "") cfg.lookahead = Number(v("lookahead"));
   if (v("bframes") !== "") cfg.bframes = Number(v("bframes"));
   if (v("gpu")) cfg.gpu = Number(v("gpu"));
@@ -1904,6 +1930,7 @@ async function saveChannel() {
   if (!cfg.input || cfg.input.endsWith("://")) { showMsg("A source address is needed.", "err"); return; }
   if (/^(srt|rist):\/\/[^?]*:(\?|$)/.test(cfg.input)) { showMsg("The SRT or RIST port is needed.", "err"); return; }
   if (/passphrase=[^&]{1,9}(&|$)/.test(cfg.input)) { showMsg("An SRT passphrase is 10 characters or more.", "err"); return; }
+  if (cfg.loudness === "bad") { showMsg("Loudness: the fixed gain is a number of dB between -40 and +40, e.g. +3 or -4.5.", "err"); return; }
   for (const r of cfg.video || []) if (!/^((\d+|-1)x(\d+|-1)(:fit)?:)?(h264|hevc)(:\S+)?$/.test(r) || /^-1x-1/.test(r) || /-1[^:]*:fit/.test(r)) { showMsg("A custom size needs a width and a height (one of them -1 to follow the source's shape; fit needs both), and a bit rate like 2500k.", "err"); return; }
   {
     const bad = (k, lo, hi) => cfg[k] !== undefined && cfg[k] !== "video" && !(Number.isInteger(cfg[k]) && cfg[k] >= lo && cfg[k] <= hi);
@@ -2041,7 +2068,7 @@ function renderSettingsPage() {
   const main = $("#main");
   if (main.dataset.page !== "settings") { main.dataset.page = "settings"; main.innerHTML = `<div class="head"><h1>Settings</h1><span class="state">for this server; each channel's own are on its page</span></div><div id="set_body"></div>`; }
   loadWatchdog(); loadTech(); loadPeers(); loadQuality();
-  $("#set_body").innerHTML = watchdogCard("settings") + qualityCard() + techCard("settings") + peersCard() + passwordCard()
+  $("#set_body").innerHTML = watchdogCard("settings") + qualityCard() + loudnessCard() + techCard("settings") + peersCard() + passwordCard()
     + (sys ? `<section class="card"><header><h2>This build</h2><span class="hint">caricoder3 ${esc(sys.version)}: the codecs and transports compiled in</span></header><div class="body"><pre class="log" style="border-radius:8px;max-height:none">${esc(sys.backends || "")}</pre></div></section>` : "");
 }
 

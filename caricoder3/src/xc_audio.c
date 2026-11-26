@@ -74,6 +74,7 @@ struct axc {
     const struct aenc_ops *enc;
     void *ectx;
     int rate, ch, frame, delay;
+    struct loud *loud;          /* levelling, between decoder and encoder (NULL: none) */
     int16_t *fifo;              /* less than one frame of samples */
     int fifo_n;
     int64_t fed;                /* samples given to the fifo since the encoder opened */
@@ -204,6 +205,8 @@ static void fifo_add(struct axc *a, const int16_t *pcm, int n)
             memset(a->fifo + (size_t)a->fifo_n * a->ch, 0,
                    (size_t)take * a->ch * sizeof(int16_t));
         }
+        if (a->loud)
+            loud_process(a->loud, a->fifo + (size_t)a->fifo_n * a->ch, take);
         a->fifo_n += take;
         a->fed += take;
         n -= take;
@@ -212,6 +215,8 @@ static void fifo_add(struct axc *a, const int16_t *pcm, int n)
             a->fifo_n = 0;
         }
     }
+    if (a->loud)
+        loud_get(a->loud, &a->st->loud);
 }
 
 /* Completes the frame in hand with silence, so that what follows starts
@@ -233,6 +238,8 @@ static void encoder_close(struct axc *a)
     a->ectx = NULL;
     free(a->fifo);
     a->fifo = NULL;
+    loud_free(a->loud);
+    a->loud = NULL;
     aframer_reset(a->ofr);
 }
 
@@ -279,6 +286,16 @@ static bool encoder_open(struct axc *a, int rate, int ch)
     snprintf(a->st->encoder, sizeof(a->st->encoder), "%s", b->name);
     a->rate = rate;
     a->ch = ch;
+    /* levelling: its limiter looks ahead, so what it gives out is that much
+     * later than what went in; taken off the stamps with the codec's own delay */
+    a->loud = loud_new(&a->cfg.loud, rate, ch);
+    a->delay += loud_delay(a->loud);
+    if (a->loud && a->cfg.loud.mode == LOUD_AUTO)
+        log_info("PID 0x%04X: loudness levelled to %.0f LKFS (within +/- %.0f dB, limited at %.0f dBFS)",
+                 a->cfg.pid, a->cfg.loud.target, LOUD_RANGE_DB, LOUD_CEILING_DB);
+    else if (a->loud)
+        log_info("PID 0x%04X: audio gain %+.1f dB, limited at %.0f dBFS", a->cfg.pid, a->cfg.loud.gain_db,
+                 LOUD_CEILING_DB);
     {
         stc_t frame_dur = samples_to_stc(a->frame, rate);
         stc_t total = (stc_t)TSTD_BUDGET * 8 * STC_HZ / (bitrate > 0 ? bitrate : 1);
@@ -456,6 +473,7 @@ void axc_free(struct axc *a)
         a->dec->close(a->dctx);
     aframer_free(a->fr);
     aframer_free(a->ofr);
+    loud_free(a->loud);
     free(a->fifo);
     free(a->pes);
     free(a);

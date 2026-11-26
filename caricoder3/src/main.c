@@ -508,6 +508,15 @@ static void stats_json(struct ctx *c, const struct engine_stats *st,
                 (unsigned long long)x->skipped_bytes, (unsigned long long)x->silence_ms,
                 (unsigned long long)x->cut_ms, (unsigned long long)x->restarts,
                 x->queued, x->failed ? "true" : "false");
+        if (x->loud.on) {
+            fprintf(f, ", \"loudness\": {\"gain_db\": %.1f, \"limited_ms\": %llu", x->loud.gain_db,
+                    (unsigned long long)x->loud.limited_ms);
+            if (!isnan(x->loud.in_lufs))
+                fprintf(f, ", \"in_lufs\": %.1f", x->loud.in_lufs);
+            if (!isnan(x->loud.out_lufs))
+                fprintf(f, ", \"out_lufs\": %.1f", x->loud.out_lufs);
+            fprintf(f, "}");
+        }
         if (x->card != XC_CARD_NONE)
             fprintf(f, ", \"card_process\": \"%s\", \"card_process_lost\": %u",
                     x->card == XC_CARD_SHARED ? "shared" : x->card == XC_CARD_WAITING ? "waiting" : "own",
@@ -1165,6 +1174,13 @@ static void usage(FILE *f)
 "      --audio SPEC         transcode audio: aac, mp2 or mp3, with an optional\n"
 "                           bit rate (aac:128k). PID=SPEC for one stream only\n"
 "                           (1653=aac:96k); may be repeated. Default: copy\n"
+"      --loudness MODE      transcoded audio: auto (measured as ITU-R BS.1770 and\n"
+"                           brought slowly to the target, within 12 dB; pauses are\n"
+"                           not turned up; a limiter keeps peaks under -2 dBFS),\n"
+"                           a fixed gain in dB (+3, -4.5; limited too), or off\n"
+"                           (default). Copied audio is never touched\n"
+"      --loudness-target N  the level auto brings channels to, in LKFS (default\n"
+"                           -24, the US broadcast level; -23 is the European)\n"
 "      --video SPEC         transcode video: h264 or hevc with a bit rate\n"
 "                           (h264:3M); WxH in front makes a rendition at that\n"
 "                           size (1280x720:h264:2M); -1x720 takes the width from\n"
@@ -1271,7 +1287,7 @@ enum {
     OPT_GOP, OPT_VBV, OPT_GPU_TEST, OPT_CONTROL, OPT_NAME_SOCK, OPT_CONFIG, OPT_RUN_DIR,
     OPT_BFRAMES, OPT_PROFILE, OPT_INPUT_LABEL, OPT_STREAMS_FILE, OPT_REMAP, OPT_ORDER, OPT_PMT_PID, OPT_PCR_PID, OPT_SERVICE_ID, OPT_TS_ID, OPT_ONID,
     OPT_CARD_PROCESS, OPT_CARD_ALL, OPT_KEEP_INPUT,
-    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS, OPT_PIDS, OPT_DEINT,
+    OPT_AQ, OPT_TAQ, OPT_LOOKAHEAD, OPT_WP, OPT_MULTIPASS, OPT_PIDS, OPT_DEINT, OPT_LOUD, OPT_LOUD_TARGET,
 };
 
 /* A PID for the output, decimal or 0x hex: 0x20..0x1FFE. */
@@ -1352,6 +1368,8 @@ int main(int argc, char **argv)
         { "profile", required_argument, 0, OPT_PROFILE },
         { "pids", required_argument, 0, OPT_PIDS },
         { "deinterlace", required_argument, 0, OPT_DEINT },
+        { "loudness", required_argument, 0, OPT_LOUD },
+        { "loudness-target", required_argument, 0, OPT_LOUD_TARGET },
         { "aq", required_argument, 0, OPT_AQ },
         { "temporal-aq", required_argument, 0, OPT_TAQ },
         { "lookahead", required_argument, 0, OPT_LOOKAHEAD },
@@ -1662,6 +1680,24 @@ int main(int argc, char **argv)
                 o.eng.deint = DEINT_CARD;
             else {
                 fprintf(stderr, "--deinterlace: blend, off or card\n");
+                return 2;
+            }
+            break;
+        case OPT_LOUD: {
+            double target = o.eng.loud.target;
+
+            if (!loud_parse(optarg, &o.eng.loud)) {
+                fprintf(stderr, "--loudness: auto, off, or a gain in dB (+3, -4.5)\n");
+                return 2;
+            }
+            if (target != 0)
+                o.eng.loud.target = target;
+            break;
+        }
+        case OPT_LOUD_TARGET:
+            o.eng.loud.target = atof(optarg);
+            if (o.eng.loud.target > -5 || o.eng.loud.target < -40) {
+                fprintf(stderr, "--loudness-target: -40 to -5 (LKFS; -24 is the US broadcast level, -23 the European)\n");
                 return 2;
             }
             break;

@@ -3403,6 +3403,90 @@ const {chromium} = require('playwright');
 
 
 @test
+def supervisor_loudness_default():
+    """Audio levelling from Settings: on at -24 LKFS unless the config says otherwise; it reaches every channel that
+    transcodes its audio and has no setting of its own; a channel's own (off, a fixed gain) wins; a channel that
+    copies its audio gets nothing; a changed default is pending for the channels it concerns, and saved."""
+    import base64
+    import urllib.request
+    import urllib.error
+    root = w("super_loud")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    _port[0] += 4
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "testpass1", "card_process": "off"}, open(cfg, "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:testpass1").decode()}
+
+    def api(path, method="GET", body=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=auth,
+                                   data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return json.load(resp)
+    chans = {"plain": {"audio": ["mp2:64k"]}, "own_off": {"audio": ["aac:128k"], "loudness": "off"},
+             "own_gain": {"audio": ["mp2:64k"], "loudness": "+3"}, "copy": {}}
+    for i, (name, extra) in enumerate(chans.items()):
+        json.dump(dict({"input": f"udp://239.255.79.{i + 1}:5000", "share_input": False}, **extra),
+                  open(os.path.join(root, "channels", name + ".json"), "w"))
+
+    def args():
+        out = {}
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                a = open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="replace").split("\0")
+            except OSError:
+                continue
+            if "--name" in a and a[0] == BIN and root in " ".join(a):
+                out[a[a.index("--name") + 1]] = sorted(x for x in a if x.startswith("--loudness"))
+        return out
+
+    def wait_for(fn, secs, what):
+        end = time.time() + secs
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.2)
+        raise Fail(what)
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "supervisor.log"), "w"))
+    try:
+        wait_up(port)
+        a = wait_for(lambda: (lambda x: x if len(x) == 4 else None)(args()), 15, "the four channels did not start")
+        need(a["plain"] == ["--loudness-target=-24.0", "--loudness=auto"], f"plain: {a['plain']}")
+        need(a["own_off"] == [], f"a channel set to off: {a['own_off']}")
+        need(a["own_gain"] == ["--loudness=+3"], f"a channel with its own gain: {a['own_gain']}")
+        need(a["copy"] == [], f"a channel that copies its audio: {a['copy']}")
+        q = api("/api/quality")
+        need(q["loudness"] == {"mode": "auto", "target": -24.0} and q["pending"] == [], str(q))
+        # another target: only the channel that takes the default would start differently
+        q = api("/api/quality", "PUT", {"loudness": {"mode": "auto", "target": -23}})
+        need(q["pending"] == ["plain"] and q["loudness"]["target"] == -23.0, str(q))
+        need(json.load(open(cfg))["loudness"] == {"mode": "auto", "target": -23.0}, "not saved")
+        q = api("/api/quality", "PUT", {"loudness": {"mode": "off", "target": -23}})
+        need(q["pending"] == ["plain"] and q["loudness"]["mode"] == "off", str(q))
+        try:
+            api("/api/quality", "PUT", {"loudness": {"mode": "loud", "target": 3}})
+            raise Fail("nonsense accepted")
+        except urllib.error.HTTPError as e:
+            need(e.code == 400, f"nonsense: {e.code}")
+        # restarted: the default is off now
+        api("/api/quality/restart", "POST")
+        wait_for(lambda: args().get("plain") == [], 15, "plain did not come back without levelling")
+    finally:
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return "default auto at -24; own off and own gain win; copied audio untouched; a change is pending, saved, and applied on the restart"
+
+
+@test
 def supervisor_password_change():
     """The GUI password changed from Settings: the current one is asked for, a short one refused;
     the new one works at once and the old one no longer does; the channels are not restarted;
@@ -5201,6 +5285,94 @@ def xc_audio_every_pairing():
              f"to {name}: late or dropped units")
     return f"9 pairings conformant, decode clean, video untouched, worst sync error " \
            f"{worst:.3f} ms"
+
+
+def _r128(path, skip_s=0):
+    """Integrated loudness (LUFS) and the highest sample (dBFS) of a file's first audio stream, by ffmpeg's EBU R128
+    meter: a measure that is not ours."""
+    import re
+    # (trimmed in the filter itself: an output -ss would drop the frames after the meter had heard them)
+    p = subprocess.run(["ffmpeg", "-nostats", "-hide_banner", "-i", path, "-map", "0:a:0",
+                        "-af", f"atrim=start={skip_s},ebur128=peak=sample", "-f", "null", "-"], capture_output=True, text=True)
+    tail = p.stderr[p.stderr.rfind("Summary"):]
+    i = re.search(r"I:\s+(-?[0-9.]+) LUFS", tail)
+    pk = re.search(r"Peak:\s+(-?[0-9.]+) dBFS", tail)
+    if not i or not pk:
+        raise Fail(f"ffmpeg did not measure {os.path.basename(path)}: {p.stderr[-300:]}")
+    return float(i.group(1)), float(pk.group(1))
+
+
+@test
+def xc_audio_loudness():
+    """Transcoded audio levelled: channels that come in quiet and loud go out at the target (-24 LKFS), measured by
+    ffmpeg's own R128 meter; one too quiet is turned up by 12 dB and no more; a fixed gain is that gain; no sample
+    passes the limiter's ceiling; the audio stays in place against the video; off, nothing is touched."""
+    skip = xc_ready("mpg123", "twolame")
+    if skip:
+        return skip
+    if not shutil.which("ffmpeg"):
+        return "SKIPPED: no ffmpeg here to measure with"
+
+    def source(name, amp, secs=50):
+        path = w(f"xc_loud2_{name}.ts")
+        if not os.path.exists(path):
+            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                            "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration={secs}",
+                            "-f", "lavfi", "-i", f"anoisesrc=color=pink:amplitude={amp}:sample_rate=48000:duration={secs}",
+                            "-map", "0:v", "-map", "1:a", "-pix_fmt", "yuv420p", *V_SMALL,
+                            "-c:a", "mp2", "-b:a", "192k", "-ac", "2", "-f", "mpegts", "-muxrate", "2500k", path], check=True)
+        return path
+    res = []
+    levels = {}
+    for name, amp in (("quiet", 0.14), ("loud", 0.9), ("faint", 0.02)):
+        src = source(name, amp)
+        was, _ = _r128(src)
+        out = w(f"xc_loud_{name}_out.ts")
+        st = run_file(src, out, "--audio", "mp2:192k", "--loudness", "auto")
+        must_pass(out)
+        now, peak = _r128(out, 38)          # (12 dB up takes 24 s, from 10 s in)
+        lo = xstats(st, 0x101).get("loudness")
+        need(lo, f"{name}: no loudness in the statistics")
+        need(abs(lo["in_lufs"] - was) < 1.0, f"{name}: we measure {lo['in_lufs']} coming in, ffmpeg {was}")
+        levels[name] = (was, now, lo["gain_db"])
+        need(peak <= -1.0, f"{name}: a sample at {peak} dBFS")
+    for name in ("quiet", "loud"):
+        was, now, gain = levels[name]
+        need(abs(was + 24) > 5, f"{name}: the test source is at {was}, too near the target to show anything")
+        need(abs(now + 24) <= 1.5, f"{name}: came in at {was} LUFS, went out at {now} (target -24), gain {gain}")
+    was, now, gain = levels["faint"]
+    need(was < -38 and gain == 12.0 and abs(now - (was + 12)) < 1.0, f"faint: {was} -> {now}, gain {gain} (12 dB at most)")
+    res.append("; ".join(f"{n} {levels[n][0]:.1f} -> {levels[n][1]:.1f} LUFS ({levels[n][2]:+.1f} dB)" for n in levels))
+
+    # a fixed gain: that many dB; pushed past the ceiling, limited, not clipped
+    src = source("quiet", 0.14)
+    was, _ = _r128(src)
+    out = w("xc_loud_fixed.ts")
+    st = run_file(src, out, "--audio", "mp2:192k", "--loudness", "+6")
+    now, _ = _r128(out, 5)
+    need(abs(now - (was + 6)) < 0.5, f"+6 dB: {was} -> {now}")
+    src = source("loud", 0.9)
+    out = w("xc_loud_limit.ts")
+    st = run_file(src, out, "--audio", "mp2:192k", "--loudness", "+20")
+    _, peak = _r128(out, 2)
+    lim = xstats(st, 0x101)["loudness"]["limited_ms"]
+    need(peak <= -1.0 and lim > 1000, f"+20 dB on a loud source: highest sample {peak} dBFS, limited for {lim} ms")
+    res.append(f"+6 dB is +{now - was:.1f}; +20 dB limited to {peak:.1f} dBFS")
+
+    # in place: the limiter's look-ahead is taken off the time stamps
+    src = av_source("xc_mp2", [A_MP2])
+    out = w("xc_loud_sync.ts")
+    run_file(src, out, "--audio", "mp2:192k", "--loudness", "+3")
+    ms, _ = sync_ms(src, out, 0)
+    need(abs(ms) < 1.0, f"with levelling the audio is {ms:+.2f} ms off")
+    res.append(f"in place to {abs(ms):.2f} ms")
+
+    # off (the default of the program itself): nothing of it
+    out = w("xc_loud_off.ts")
+    st = run_file(source("loud", 0.9), out, "--audio", "mp2:192k")
+    need("loudness" not in xstats(st, 0x101), "levelling though not asked for")
+    need(abs(_r128(out)[0] - levels["loud"][0]) < 0.5, "off, but the level changed")
+    return "; ".join(res)
 
 
 @test

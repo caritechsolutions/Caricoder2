@@ -110,7 +110,7 @@ CPPFLAGS += $(CODEC_DEFS)
 LDLIBS   += $(CODEC_LIBS)
 
 CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
-       src/engine.c src/codec.c src/xcode.c src/xc_audio.c src/xc_video.c src/xc_remote.c \
+       src/engine.c src/codec.c src/xcode.c src/xc_audio.c src/loud.c src/xc_video.c src/xc_remote.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
        src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
        src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_scale.c src/nv_selftest.c src/follow.c src/watch.c src/thumb.c
