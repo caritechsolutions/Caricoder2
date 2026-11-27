@@ -23,8 +23,8 @@ set -uo pipefail
 
 LLAMA_TAG="${LLAMA_TAG:-b11200}"            # 2026-09-26
 LIBS="${CARICODER3_LIBS:-/opt/caricoder3-libs}"
-BIN=/usr/local/bin/caricoder3-llama-server
-MODEL_DIR=/var/lib/caricoder3/models
+BIN="${CARICODER3_LLAMA_BIN:-/usr/local/bin/caricoder3-llama-server}"
+MODEL_DIR="${CARICODER3_MODEL_DIR:-/var/lib/caricoder3/models}"
 MODEL=Qwen2.5-7B-Instruct-Q4_K_M.gguf
 MODEL_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/$MODEL"
 MODEL_SHA=65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
@@ -83,6 +83,17 @@ for c in nvcc /usr/local/cuda/bin/nvcc; do
 done
 KIND=cpu
 [ -n "$NVCC" ] && KIND=cuda
+# A card build that failed is not tried again at every install: only when
+# llama.cpp's version or the CUDA compiler changes (or this file is removed).
+CUDA_FAILED="$LIBS/llama-cuda.failed"
+CUDA_IS=""
+if [ "$KIND" = cuda ]; then
+    CUDA_IS="$LLAMA_TAG $("$NVCC" --version 2>/dev/null | grep -o 'release [0-9.]*' | head -n 1)"
+    if [ "$(cat "$CUDA_FAILED" 2>/dev/null)" = "$CUDA_IS" ]; then
+        log "the build for the cards failed before with this compiler ($CUDA_IS): staying on the CPU (remove $CUDA_FAILED to try again)"
+        KIND=cpu
+    fi
+fi
 WANT="$LLAMA_TAG $KIND"
 
 if [ -x "$BIN" ] && [ "$(cat "$LIBS/llama-server.version" 2>/dev/null)" = "$WANT" ]; then
@@ -111,6 +122,21 @@ else
            -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_UI=OFF)
     if [ "$KIND" = cuda ]; then
         FLAGS+=(-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61 "-DCMAKE_CUDA_COMPILER=$NVCC")
+        # CUDA 11 cannot compile with GCC 11's C++ library (Ubuntu 22.04 has both:
+        # "parameter packs not expanded" in std_function.h): it is given g++-10.
+        case "$CUDA_IS" in
+        *"release 11."*)
+            if [ "$(g++ -dumpversion 2>/dev/null | cut -d. -f1)" -ge 11 ] 2>/dev/null; then
+                command -v g++-10 >/dev/null 2>&1 ||
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends g++-10 </dev/null >/dev/null 2>&1
+                if command -v g++-10 >/dev/null 2>&1; then
+                    FLAGS+=("-DCMAKE_CUDA_HOST_COMPILER=$(command -v g++-10)")
+                    log "CUDA 11 with GCC $(g++ -dumpversion): the card's code is compiled with g++-10"
+                else
+                    log "CUDA 11 with GCC $(g++ -dumpversion) and no g++-10 to be had: the card build will probably fail"
+                fi
+            fi ;;
+        esac
         log "building for CUDA ($NVCC) and the CPU"
     else
         log "building for the CPU (no CUDA compiler here: the cards are not used; see the README)"
@@ -121,8 +147,15 @@ else
        ! nice -n 19 cmake --build "$SRC/build" --target llama-server -j "$JOBS" >>"$LIBS/llama-build.log" 2>&1; then
         tail -n 20 "$LIBS/llama-build.log"
         if [ "$KIND" = cuda ]; then
-            log "the CUDA build failed; building for the CPU instead"
+            printf '%s\n' "$CUDA_IS" > "$CUDA_FAILED"
+            cp -f "$LIBS/llama-build.log" "$LIBS/llama-build-cuda.log" 2>/dev/null
             KIND=cpu; WANT="$LLAMA_TAG cpu"
+            if [ -x "$BIN" ] && [ "$(cat "$LIBS/llama-server.version" 2>/dev/null)" = "$WANT" ]; then
+                log "the CUDA build failed (kept: $LIBS/llama-build-cuda.log); the CPU build already installed stays"
+                rm -rf "$SRC/build"
+                SKIP_INSTALL=1
+            else
+            log "the CUDA build failed (kept: $LIBS/llama-build-cuda.log); building for the CPU instead"
             FLAGS=(-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
                    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
            -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_UI=OFF)
@@ -130,13 +163,17 @@ else
             nice -n 19 cmake -S "$SRC" -B "$SRC/build" "${FLAGS[@]}" >"$LIBS/llama-build.log" 2>&1 &&
                 nice -n 19 cmake --build "$SRC/build" --target llama-server -j "$JOBS" >>"$LIBS/llama-build.log" 2>&1 ||
                 { log "ERROR: llama-server did not build (see $LIBS/llama-build.log)"; exit 1; }
+            fi
         else
             log "ERROR: llama-server did not build (see $LIBS/llama-build.log)"; exit 1
         fi
     fi
-    install -m 755 "$SRC/build/bin/llama-server" "$BIN.new" && mv -f "$BIN.new" "$BIN"
-    echo "$WANT" > "$LIBS/llama-server.version"
-    log "installed $BIN ($WANT)"
+    if [ -z "${SKIP_INSTALL:-}" ]; then
+        install -m 755 "$SRC/build/bin/llama-server" "$BIN.new" && mv -f "$BIN.new" "$BIN"
+        echo "$WANT" > "$LIBS/llama-server.version"
+        log "installed $BIN ($WANT)"
+        [ "$KIND" = cuda ] && rm -f "$CUDA_FAILED"
+    fi
     rm -rf "$SRC/build"             # the build's objects: no use once installed (hundreds of MB)
 fi
 

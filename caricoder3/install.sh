@@ -221,7 +221,7 @@ NOTES
     fi
     if [ -x "$PREFIX/bin/caricoder3-llama-server" ] && [ -f /var/lib/caricoder3/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ] &&
        grep -q "^b11200 " "$LIBS_DIR/llama-server.version" 2>/dev/null; then
-        if grep -q " cpu$" "$LIBS_DIR/llama-server.version" &&
+        if grep -q " cpu$" "$LIBS_DIR/llama-server.version" && [ ! -f "$LIBS_DIR/llama-cuda.failed" ] &&
            { command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ] ||
              { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 &&
                [ ! -f /var/lib/caricoder3/cuda-toolkit.refused ]; }; }; then
