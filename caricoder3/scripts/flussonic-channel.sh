@@ -3,7 +3,7 @@
 # same server: its settings are read from Flussonic's own config file, the
 # channel is created switched OFF with the same source, program, treatment
 # and outputs, and it is given the identifiers Flussonic's output has
-# (scripts/flussonic-pids.sh). Flussonic is only read, never changed.
+# (scripts/flussonic-pids.sh). Flussonic is only read, never changed (except by --move).
 #
 #   curl -fsSL .../scripts/flussonic-channel.sh | sudo bash -s -- --list
 #       every stream in Flussonic's config: can it be moved by this
@@ -14,6 +14,16 @@
 #   curl -fsSL .../scripts/flussonic-channel.sh | sudo bash -s -- NAME --start
 #       switch the channel on (refused while Flussonic still sends it)
 #   ... | sudo DRY=1 bash -s -- NAME        show, change nothing
+#   curl -fsSL .../scripts/flussonic-channel.sh | sudo bash -s -- NAME [NAME..] --move
+#       the whole move, one channel at a time: the channel is created (or
+#       is there already), then the stream is switched off in Flussonic's
+#       config file ("disabled;", Flussonic told to reload), the channel
+#       switched on, and what it sends is listened to: the program number,
+#       PMT PID, every PID, kind and codec must be what Flussonic sent,
+#       with data on every video and audio stream and no CC errors. Only
+#       then the next channel. One that fails is put back (channel off,
+#       stream on again in Flussonic) and the run stops there. The config
+#       file is copied first (the copy's name is printed).
 #
 # What it moves: a stream that takes its source from the network (udp://,
 # mpts-udp://, rtp://, srt://, http(s):// TS), copies or re-encodes to at
@@ -29,14 +39,18 @@ CFG=${CC3_CONFIG:-/etc/caricoder3/caricoder3.json}
 FCONF=${FLUSSONIC_CONF:-/etc/flussonic/flussonic.conf}
 PIDS=${CC3_PIDS_SCRIPT:-/opt/caricoder3/scripts/flussonic-pids.sh}
 DRY=${DRY:-0}
+BIN=${CC3_BIN:-/usr/local/bin/caricoder3}
+STATE=${CC3_STATE:-/var/lib/caricoder3}
+RELOAD=${FLUSSONIC_RELOAD:-service flussonic reload}
 [ -r "$CFG" ] || { echo "no caricoder3 config at $CFG" >&2; exit 1; }
 [ -r "$FCONF" ] || { echo "no Flussonic config at $FCONF" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is needed" >&2; exit 1; }
-exec python3 - "$CFG" "$FCONF" "$PIDS" "$DRY" "$@" <<'PY'
-import base64, json, os, re, subprocess, sys, urllib.error, urllib.request
+exec python3 - "$CFG" "$FCONF" "$PIDS" "$DRY" "$BIN" "$STATE" "$RELOAD" "$@" <<'PY'
+import base64, json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request
 
-cfg_path, fconf, pids_script, dry = sys.argv[1:5]
-args = sys.argv[5:]
+cfg_path, fconf, pids_script, dry, binary, state_dir, reload_cmd = sys.argv[1:8]
+args = sys.argv[8:]
+move = "--move" in args
 start = "--start" in args
 listing = "--list" in args
 names = [a for a in args if not a.startswith("--")]
@@ -53,6 +67,11 @@ def say(m):
 
 def note(m):
     print(f"    {m}", flush=True)
+
+def chan(name):
+    """the channel as the supervisor has it: state, enabled, config, ..."""
+    j = api(f"/api/channels/{name}")
+    return j.get("channel") or j
 
 def api(path, method="GET", body=None):
     r = urllib.request.Request(base + path, method=method, headers=dict(auth, **{"Content-Type": "application/json"}),
@@ -180,7 +199,19 @@ def plan(name, lines, streams):
         if not codec:
             why.append(f"a video codec this script does not know ({t.get('vcodec')})")
         else:
-            conf["video"] = [":".join(x for x in (t.get("size"), codec, t["vb"]) if x)]
+            # Flussonic's size: WxH[:fit|:scale|:crop][:#background]. With one side
+            # -1 the picture keeps its shape anyway; a full box with "fit" is ours too.
+            size = None
+            if t.get("size"):
+                parts = t["size"].split(":")
+                size = parts[0]
+                mode = [x for x in parts[1:] if not x.startswith("#")]
+                if "fit" in mode and "-1" not in size.split("x"):
+                    size += ":fit"
+                for x in mode:
+                    if x != "fit":
+                        notes.append(f"size option not carried over: {x}")
+            conf["video"] = [":".join(x for x in (size, codec, t["vb"]) if x)]
         if glob.get("hw") == "nvenc":
             conf["gpu"] = int(glob.get("deviceid", "0")) if glob.get("deviceid", "0").isdigit() else 0
         elif glob.get("hw") in (None, "cpu"):
@@ -238,7 +269,25 @@ for name in names:
         note(f"Flussonic's config has no stream of that name ({fconf}). Nothing done.")
         continue
     if name in have:
-        note("caricoder3 already has this channel: its settings are left as they are")
+        # switched off: brought up to what this script would make now (its identifiers
+        # kept); running: left alone
+        full = chan(name)
+        old = full.get("config") or {}
+        conf, outs, notes = plan(name, streams[name], streams)
+        changed = []
+        if conf and not old.get("enabled", True):
+            new = dict(old)
+            for k in ("input", "backup_inputs", "program", "pids", "video", "audio", "gpu", "encoder", "decoder"):
+                if conf.get(k) != old.get(k):
+                    changed.append(f"{k} {old.get(k)!r} -> {conf.get(k)!r}")
+                    if k in conf:
+                        new[k] = conf[k]
+                    else:
+                        new.pop(k, None)
+            if changed and not dry:
+                api(f"/api/channels/{name}", "PUT", new)
+        note("caricoder3 already has this channel" + (": settings corrected: " + "; ".join(changed) if changed
+             else ": its settings are left as they are"))
         done.append(name)
         continue
     conf, outs, notes = plan(name, streams[name], streams)
@@ -266,6 +315,185 @@ for name in names:
 
 if not done:
     raise SystemExit(0 if dry else 1)
+
+# ---- --move: one channel at a time, Flussonic's stream off, ours on, checked ----
+def run_pids(which, extra=()):
+    env = dict(os.environ, CC3_CONFIG=cfg_path, CC3_BIN=binary, CC3_STATE=state_dir, DRY="1" if dry else "0")
+    env.setdefault("FLUSSONIC_HTTP", f"http://127.0.0.1:{http_port or 80}")
+    sys.stdout.flush()
+    return subprocess.run(["bash", pids_script, *which, *extra], env=env).returncode
+
+def set_disabled(name, line):
+    """Writes the stream's "disabled" line in Flussonic's config (None: no such line).
+    Returns the line that was there (None: there was none)."""
+    text = open(fconf, errors="surrogateescape").read().split("\n")
+    at = next((i for i, l in enumerate(text) if re.match(r"\s*stream\s+" + re.escape(name) + r"\s*\{\s*$", l)), None)
+    if at is None:
+        raise SystemExit(f"ERROR: stream {name} is not in {fconf} any more")
+    end = next(i for i in range(at + 1, len(text)) if text[i].strip() == "}")
+    was = next((i for i in range(at + 1, end) if re.match(r"\s*disabled(\s+\w+)?\s*;\s*$", text[i])), None)
+    old = text[was].strip() if was is not None else None
+    if was is not None and line is None:
+        del text[was]
+    elif was is not None:
+        text[was] = "  " + line
+    elif line is not None:
+        text.insert(at + 1, "  " + line)
+    tmp = fconf + ".cc3-new"
+    with open(tmp, "w", errors="surrogateescape") as f:
+        f.write("\n".join(text))
+    st = os.stat(fconf)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    try:
+        os.chown(tmp, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+    os.replace(tmp, fconf)
+    return old
+
+def reload_flussonic():
+    p = subprocess.run(reload_cmd, shell=True, capture_output=True, text=True)
+    if p.returncode != 0:
+        note(f"'{reload_cmd}' answered {p.returncode}: {(p.stderr or p.stdout).strip()[-200:]}")
+    return p.returncode == 0
+
+def flussonic_sends(name):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{http_port or 80}/{name}/mpegts", timeout=3) as f:
+            return len(f.read(188 * 7)) > 0
+    except Exception:
+        return False
+
+def probe(url, seconds=4):
+    p = subprocess.run([binary, "probe", url, "--seconds", str(seconds)], capture_output=True, text=True, timeout=60)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return {"ok": False, "error": (p.stderr or p.stdout).strip()[-160:] or "no answer"}
+
+def check(name, conf, out_url):
+    """None when what the channel sends is right, else what is wrong."""
+    st = chan(name)
+    if st.get("state") != "running":
+        return f"the channel is {st.get('state')}" + (f" ({st['why']})" if st.get("why") else "")
+    j = probe(out_url)
+    progs = [g for g in j.get("programs", []) if g.get("streams")]
+    if not j.get("ok") or not progs:
+        return f"nothing usable at {out_url} ({j.get('error') or 'no programme'})"
+    want_n = conf.get("service_id") or conf.get("program")
+    pg = next((g for g in progs if g.get("number") == want_n), None)
+    if not pg:
+        return f"program {want_n} is not there (found {[g.get('number') for g in progs]})"
+    if conf.get("pmt_pid") and pg.get("pmt_pid") != conf["pmt_pid"]:
+        return f"PMT on PID {pg.get('pmt_pid')}, Flussonic had {conf['pmt_pid']}"
+    try:
+        ref = json.load(open(os.path.join(state_dir, "flussonic-outputs", name + ".http.json")))
+        ref = [g for g in ref.get("programs", []) if g.get("streams")][0]["streams"]
+    except (OSError, ValueError, IndexError):
+        return "the copy of Flussonic's identifiers is missing"
+    got = {x["pid"]: x for x in pg["streams"]}
+    for r in ref:
+        g = got.get(r["pid"])
+        if not g:
+            return f"PID {r['pid']} ({r.get('kind')}) is missing"
+        if g.get("kind") != r.get("kind"):
+            return f"PID {r['pid']} is {g.get('kind')}, Flussonic had {r.get('kind')}"
+        if r.get("codec") and g.get("codec") and g["codec"] != r["codec"]:
+            return f"PID {r['pid']} is {g['codec']}, Flussonic had {r['codec']}"
+    extra = sorted(set(got) - {r["pid"] for r in ref})
+    if extra:
+        return f"PIDs Flussonic did not send: {extra}"
+    for x in pg["streams"]:
+        if x.get("kind") in ("video", "audio") and not x.get("bitrate"):
+            return f"no data on PID {x['pid']} ({x['kind']})"
+        if x.get("cc_errors"):
+            return f"{x['cc_errors']} CC errors on PID {x['pid']} in {j.get('seconds')} s"
+    check.last = "program %s, PMT %s: %s; %.2f Mb/s" % (
+        pg.get("number"), pg.get("pmt_pid"),
+        ", ".join(f"{x['pid']} {x.get('codec') or x.get('kind')} {x.get('bitrate', 0) / 1000:.0f} kb/s" for x in pg["streams"]),
+        (pg.get("bitrate") or 0) / 1e6)
+    return None
+
+if move:
+    if not os.path.exists(pids_script):
+        raise SystemExit(f"ERROR: {pids_script} is not there. Run the caricoder3 installer, then this again.")
+    backup = None
+    moved, skipped = [], []
+    for name in done:
+        say(f"{name}: moving")
+        full = chan(name)
+        conf = full.get("config") or {}
+        if not conf.get("pmt_pid"):
+            run_pids([name])
+            full = chan(name)
+            conf = full.get("config") or {}
+        if not conf.get("pmt_pid"):
+            note("its identifiers could not be copied (the reason is above): NOT moved, Flussonic left as it is")
+            skipped.append(name)
+            continue
+        try:
+            out_url = json.load(open(os.path.join(chdir, name + ".outputs.json")))["outputs"][0]["url"]
+        except (OSError, ValueError, LookupError):
+            note("the channel has no output: NOT moved")
+            skipped.append(name)
+            continue
+        if dry:
+            note(f"DRY RUN: would switch {name} off in Flussonic, switch the channel on and listen to {out_url}")
+            continue
+        already = conf.get("enabled", True) and full.get("state") == "running"
+        old = "unchanged"
+        if already:
+            note("the channel is running already: only checked")
+        else:
+            if flussonic_sends(name):
+                if backup is None:
+                    backup = fconf + time.strftime(".cc3-%Y%m%d-%H%M%S")
+                    shutil.copy2(fconf, backup)
+                    note(f"Flussonic's config copied to {backup}")
+                old = set_disabled(name, "disabled;")
+                reload_flussonic()
+                t0 = time.time()
+                while flussonic_sends(name) and time.time() - t0 < 20:
+                    time.sleep(1)
+                if flussonic_sends(name):
+                    set_disabled(name, old)
+                    reload_flussonic()
+                    raise SystemExit(f"ERROR: Flussonic still sends {name} 20 s after its config was changed and reloaded: "
+                                     "the line is put back, nothing was switched. Stopped here.")
+                note(f"Flussonic's stream is off ({time.time() - t0:.0f} s)")
+            else:
+                note("Flussonic does not send it (already off there)")
+            api(f"/api/channels/{name}", "PUT", dict(conf, enabled=True))
+            note("channel switched on")
+        # what it sends: right within 45 s, on two listens in a row
+        bad, good, t0 = "not checked", 0, time.time()
+        time.sleep(3)
+        while time.time() - t0 < 45 and good < 2:
+            bad = check(name, conf, out_url)
+            good = 0 if bad else good + 1
+            if bad:
+                time.sleep(2)
+        if good >= 2:
+            note(f"checked at {out_url}: {check.last}")
+            moved.append(name)
+            continue
+        note(f"WRONG: {bad}")
+        if not already:
+            api(f"/api/channels/{name}", "PUT", dict(conf, enabled=False))
+            if old != "unchanged":
+                set_disabled(name, old)
+                reload_flussonic()
+                note("put back: the channel is off, the stream is on again in Flussonic")
+            else:
+                note("the channel is switched off again (Flussonic's stream was off before this and still is)")
+        say(f"stopped at {name}. Moved and checked: {', '.join(moved) or 'none'}" +
+            (f"; not tried: {', '.join(done[done.index(name) + 1:])}" if done.index(name) + 1 < len(done) else ""))
+        raise SystemExit(1)
+    say(f"moved and checked: {', '.join(moved) or 'none'}" + (f"; NOT moved: {', '.join(skipped)}" if skipped else ""))
+    if backup:
+        say(f"Flussonic's config before this: {backup}")
+    raise SystemExit(1 if skipped else 0)
+
 if not os.path.exists(pids_script):
     raise SystemExit(f"ERROR: {pids_script} is not there: the identifiers were not copied. Run the caricoder3 installer, then this again.")
 env = dict(os.environ, CC3_CONFIG=cfg_path, DRY="1" if dry else "0")
