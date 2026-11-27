@@ -103,8 +103,12 @@ else
         git clone -q -c advice.detachedHead=false --depth 1 --branch "$LLAMA_TAG" \
             https://github.com/ggml-org/llama.cpp "$SRC" || { log "ERROR: could not fetch llama.cpp"; exit 1; }
     fi
+    # No web UI: llama.cpp would download one at build time (it is not in its
+    # source), the build fails when that download comes back incomplete, and
+    # the technician only uses the API.
     FLAGS=(-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
-           -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF)
+           -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+           -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_UI=OFF)
     if [ "$KIND" = cuda ]; then
         FLAGS+=(-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61 "-DCMAKE_CUDA_COMPILER=$NVCC")
         log "building for CUDA ($NVCC) and the CPU"
@@ -120,7 +124,8 @@ else
             log "the CUDA build failed; building for the CPU instead"
             KIND=cpu; WANT="$LLAMA_TAG cpu"
             FLAGS=(-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
-                   -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF)
+                   -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+           -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_UI=OFF)
             rm -rf "$SRC/build"
             nice -n 19 cmake -S "$SRC" -B "$SRC/build" "${FLAGS[@]}" >"$LIBS/llama-build.log" 2>&1 &&
                 nice -n 19 cmake --build "$SRC/build" --target llama-server -j "$JOBS" >>"$LIBS/llama-build.log" 2>&1 ||
