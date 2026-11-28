@@ -35,7 +35,11 @@
 # What it moves: a stream that takes its source from the network (udp://,
 # mpts-udp://, rtp://, srt://, http:// TS, an HLS playlist), copies or re-encodes to at
 # most one video rendition, and sends to udp:// addresses. Anything else
-# (an input from another Flussonic stream, a playlist of files, DASH, a
+# A stream whose source is another Flussonic stream that only hands its own
+# source on (no re-encoding, no push, nothing else reading it: dw and
+# dw264_hotel) is one channel here, named after the stream that sends, and
+# both are switched off in Flussonic.
+# (an input from a Flussonic stream that does more than that, a playlist of files, DASH, a
 # ladder of renditions, RTMP/SRT/HLS pushes, a stream another Flussonic
 # stream reads) is refused with the reason and left for a later step.
 #
@@ -119,7 +123,44 @@ def read_conf(path):
     return streams, http_port
 
 NET = ("udp://", "mpts-udp://", "rtp://", "srt://", "http://", "https://", "hls://", "hlss://", "hls2://", "hlss2://")
-LOCAL = re.compile(r"^(?:tshttp|http|https|m4f|m4s|hls|rtmp|rtsp)://(?:127\.0\.0\.1|localhost)(?::\d+)?/([^/\s?]+)")
+# an address on this server itself (Flussonic reading one of its own streams): by loopback or by any of its own addresses
+try:
+    OWN = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
+except OSError:
+    OWN = []
+LOCAL = re.compile(r"^(?:tshttp|http|https|m4f|m4s|hls|hlss|hls2|hlss2|rtmp|rtsp)://(?:" +
+                   "|".join(["127\\.0\\.0\\.1", "localhost"] + [re.escape(a) for a in OWN if ":" not in a]) +
+                   r")(?::\d+)?/([^/\s?]+)")
+COLLAPSE = {}       # a stream whose source is a Flussonic stream that only passes its own source on: that stream's name
+
+def enabled_readers(base, streams):
+    return sorted(n for n, ls in streams.items() if n != base and
+                  not any(l.split()[:1] == ["disabled"] and l.strip() != "disabled false" for l in ls) and
+                  any(l.startswith(("input ", "url ")) and (m := LOCAL.match(l.split()[1])) and m.group(1) == base for l in ls))
+
+def relay_inputs(base, name, streams):
+    """The inputs of `base` when it does nothing but hand its source to `name` (so the two can be one
+    channel), else (None, why)."""
+    ins = []
+    for ln in streams[base]:
+        key, _, rest = ln.partition(" ")
+        rest = rest.strip()
+        if key == "disabled" and rest != "false":
+            return None, f"its source, Flussonic's {base}, is switched off"
+        if key == "push":
+            return None, f"its source, Flussonic's {base}, also sends somewhere itself ({rest.split()[0].split('://')[0]}): the two are moved one after the other"
+        if key == "transcoder" and any(t.partition("=")[0] in ("vb", "ab") and t.partition("=")[2] != "copy" for t in rest.split()):
+            return None, f"its source, Flussonic's {base}, re-encodes too: the two are moved one after the other"
+        if key in ("input", "url"):
+            if LOCAL.match(rest.split()[0]):
+                return None, f"its source, Flussonic's {base}, reads yet another Flussonic stream"
+            ins.append(rest.split())
+    others = [r for r in enabled_readers(base, streams) if r != name]
+    if others:
+        return None, f"its source, Flussonic's {base}, is also read by {', '.join(others)}"
+    if not ins:
+        return None, f"its source, Flussonic's {base}, has no input"
+    return ins, None
 
 def plan(name, lines, streams):
     """(channel config, outputs, notes) or (None, None, [why not])"""
@@ -154,12 +195,26 @@ def plan(name, lines, streams):
         why.append("it is switched off in Flussonic")
     if not inputs:
         why.append("it has no input")
+    # Its source is another Flussonic stream that only hands its own source on (no re-encoding, no push,
+    # no other reader): the two are one channel here, reading that source directly.
+    COLLAPSE.pop(name, None)
+    m = LOCAL.match(inputs[0][0]) if len(inputs) == 1 else None
+    if m and m.group(1) in streams:
+        ins, no = relay_inputs(m.group(1), name, streams)
+        if ins:
+            COLLAPSE[name] = m.group(1)
+            inputs = ins
+            notes.append(f"its source in Flussonic is {m.group(1)}, which only hands its own source on: that source is read "
+                         f"directly, and {m.group(1)} is switched off with it")
+        else:
+            why.append(no)
     urls = []
     for toks in inputs:
         url, opts = toks[0], dict(t.partition("=")[::2] for t in toks[1:])
         m = LOCAL.match(url)
         if m and m.group(1) in streams:
-            why.append(f"its input is another Flussonic stream ({m.group(1)}): the two move together, as one channel")
+            if not any(m.group(1) in w for w in why):
+                why.append(f"its input is another Flussonic stream ({m.group(1)})")
             continue
         if not url.startswith(NET):
             why.append(f"an input of a kind this script does not move ({url.split('?')[0][:60]})")
@@ -185,9 +240,7 @@ def plan(name, lines, streams):
         if urls[1:]:
             conf["backup_inputs"] = urls[1:]
     # who reads this stream inside Flussonic
-    readers = sorted(n for n, ls in streams.items() if n != name and
-                     not any(l.split()[:1] == ["disabled"] and l.strip() != "disabled false" for l in ls) and
-                     any(l.startswith(("input ", "url ")) and (m := LOCAL.match(l.split()[1])) and m.group(1) == name for l in ls))
+    readers = enabled_readers(name, streams)
     if readers:
         why.append(f"Flussonic's {', '.join(readers)} read{'s' if len(readers) == 1 else ''} it from Flussonic: "
                    "switching it off there would stop " + ("it" if len(readers) == 1 else "them"))
@@ -196,7 +249,8 @@ def plan(name, lines, streams):
     if bad:
         why.append("it pushes to something other than UDP (" + ", ".join(o.split("://")[0] for o in bad) + ")")
     if not outs:
-        why.append("it pushes nowhere: whatever uses it pulls it from Flussonic, which caricoder3 does not offer yet")
+        why.append("it pushes nowhere: whatever uses it pulls it from Flussonic" +
+                   (f" (move {readers[0]}, which reads it: the two become one channel)" if len(readers) == 1 else ""))
     # video
     real = [t for t in tracks if t["vb"] != "copy"]
     if len(real) > 1:
@@ -507,7 +561,7 @@ if move:
             note(f"DRY RUN: would switch {name} off in Flussonic, switch the channel on and listen to {out_url}")
             continue
         already = conf.get("enabled", True) and full.get("state") == "running"
-        old = "unchanged"
+        old, old_base = "unchanged", None
         if already:
             note("the channel is running already: only checked")
         else:
@@ -517,12 +571,17 @@ if move:
                     shutil.copy2(fconf, backup)
                     note(f"Flussonic's config copied to {backup}")
                 old = set_disabled(name, "disabled;")
+                if COLLAPSE.get(name):
+                    old_base = set_disabled(COLLAPSE[name], "disabled;")
+                    note(f"{COLLAPSE[name]} (its source in Flussonic) is switched off with it")
                 reload_flussonic()
                 t0 = time.time()
                 while flussonic_sends(name) and time.time() - t0 < 20:
                     time.sleep(1)
                 if flussonic_sends(name):
                     set_disabled(name, old)
+                    if COLLAPSE.get(name):
+                        set_disabled(COLLAPSE[name], old_base)
                     reload_flussonic()
                     raise SystemExit(f"ERROR: Flussonic still sends {name} 20 s after its config was changed and reloaded: "
                                      "the line is put back, nothing was switched. Stopped here.")
@@ -548,6 +607,8 @@ if move:
             api(f"/api/channels/{name}", "PUT", dict(conf, enabled=False))
             if old != "unchanged":
                 set_disabled(name, old)
+                if COLLAPSE.get(name):
+                    set_disabled(COLLAPSE[name], old_base)
                 reload_flussonic()
                 note("put back: the channel is off, the stream is on again in Flussonic")
             else:
