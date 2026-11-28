@@ -416,6 +416,24 @@ static bool conn_write(struct conn *c, const char *d, size_t len)
     return true;
 }
 
+/* The value of a header in a response's head ("" when absent): whatever
+ * the case of its name and however many spaces follow the colon. */
+static void header(const char *head, const char *name, char *out, size_t len)
+{
+    char want[64];
+    const char *p;
+
+    out[0] = 0;
+    snprintf(want, sizeof(want), "\r\n%s:", name);
+    p = strcasestr(head, want);
+    if (!p)
+        return;
+    p += strlen(want);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    snprintf(out, len, "%.*s", (int)strcspn(p, "\r\n"), p);
+}
+
 /* The body of `url` (redirects followed) in *out, malloc'd; `final` gets
  * the address it was at last (what relative addresses in it are relative to). */
 static bool http_get(struct hls_in *h, const char *url, size_t cap, uint8_t **out, size_t *out_len,
@@ -427,8 +445,9 @@ static bool http_get(struct hls_in *h, const char *url, size_t cap, uint8_t **ou
     for (int hop = 0; hop < 6; hop++) {
         struct hurl u;
         struct conn c;
-        char req[URL_MAX + 512], head[16384], *loc, *cl, *body_at;
-        size_t hl = 0, len = 0, room = 0;
+        char req[URL_MAX + 512], head[16384], hv[URL_MAX], *body_at;
+        size_t hl = 0, len = 0, room = 0, ck_at = 0;
+        bool ck_done = false;
         uint8_t *body = NULL;
         long want = -1;
         int status;
@@ -460,15 +479,11 @@ static bool http_get(struct hls_in *h, const char *url, size_t cap, uint8_t **ou
         *body_at = 0;
         body_at += 4;
         status = strncmp(head, "HTTP/1.", 7) ? 0 : atoi(head + 9);
-        loc = strcasestr(head, "\r\nLocation:");
-        if (status >= 301 && status <= 308 && loc) {
-            char ref[URL_MAX], next[URL_MAX];
+        header(head, "Location", hv, sizeof(hv));
+        if (status >= 301 && status <= 308 && hv[0]) {
+            char next[URL_MAX];
 
-            loc += 11;
-            while (*loc == ' ')
-                loc++;
-            snprintf(ref, sizeof(ref), "%.*s", (int)strcspn(loc, "\r\n"), loc);
-            resolve(cur, ref, next, sizeof(next));
+            resolve(cur, hv, next, sizeof(next));
             snprintf(cur, sizeof(cur), "%s", next);
             conn_close(&c);
             continue;
@@ -478,10 +493,11 @@ static bool http_get(struct hls_in *h, const char *url, size_t cap, uint8_t **ou
             conn_close(&c);
             return false;
         }
-        chunked = strcasestr(head, "\r\nTransfer-Encoding: chunked") != NULL;
-        cl = strcasestr(head, "\r\nContent-Length:");
-        if (cl && !chunked)
-            want = atol(cl + 17);
+        header(head, "Transfer-Encoding", hv, sizeof(hv));
+        chunked = strcasestr(hv, "chunked") != NULL;
+        header(head, "Content-Length", hv, sizeof(hv));
+        if (hv[0] && !chunked)
+            want = atol(hv);
         if (want > (long)cap) {
             snprintf(err, errlen, "%.60s is %ld bytes: more than is taken", u.path, want);
             conn_close(&c);
@@ -494,6 +510,24 @@ static bool http_get(struct hls_in *h, const char *url, size_t cap, uint8_t **ou
             memcpy(body, body_at, len);
         while (body && (want < 0 || len < (size_t)want)) {
             ssize_t r;
+
+            /* chunked: the last chunk (of size 0) ends the body; the server need not close after it */
+            while (chunked && !ck_done) {
+                const uint8_t *nl = ck_at < len ? memchr(body + ck_at, '\n', len - ck_at) : NULL;
+                unsigned long n;
+
+                if (!nl)
+                    break;
+                n = strtoul((const char *)body + ck_at, NULL, 16);
+                if (n == 0)
+                    ck_done = true;
+                else if ((size_t)(nl - body) + 1 + n + 2 <= len)
+                    ck_at = (size_t)(nl - body) + 1 + n + 2;
+                else
+                    break;
+            }
+            if (ck_done)
+                break;
 
             if (len + 32768 > room) {
                 uint8_t *nb = room * 2 <= cap + 65536 ? realloc(body, room * 2) : NULL;

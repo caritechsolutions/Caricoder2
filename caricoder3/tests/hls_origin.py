@@ -25,10 +25,12 @@ class H(http.server.BaseHTTPRequestHandler):
     def send(self, body, ctype, chunked=False):
         self.send_response(200); self.send_header("Content-Type", ctype)
         if chunked:
-            self.send_header("Transfer-Encoding", "chunked"); self.send_header("Connection", "close"); self.end_headers()
+            # as one CDN sends it: two spaces after the colon, and the connection left open after the last chunk
+            self.send_header("Transfer-Encoding", " chunked"); self.send_header("Connection", "Transfer-Encoding"); self.end_headers()
             for i in range(0, len(body), 50000):
                 c = body[i:i + 50000]; self.wfile.write(b"%x\r\n" % len(c) + c + b"\r\n")
-            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.write(b"0\r\n\r\n"); self.wfile.flush()
+            return
         else:
             self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close"); self.end_headers()
             self.wfile.write(body)
@@ -45,7 +47,7 @@ class H(http.server.BaseHTTPRequestHandler):
                              b'#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=640x360,AUDIO="aud"\nvid.m3u8\n', "application/vnd.apple.mpegurl")
         if p == "/vid.m3u8": return self.send(media("v").encode(), "application/vnd.apple.mpegurl")
         if p == "/aud.m3u8": return self.send(media("a", base=1000).encode(), "application/vnd.apple.mpegurl")
-        if p in ("/hi.m3u8", "/lo.m3u8"): return self.send(media("s").encode(), "application/vnd.apple.mpegurl")
+        if p in ("/hi.m3u8", "/lo.m3u8"): return self.send(media("s").encode(), "application/vnd.apple.mpegurl", chunked=True)
         if p == "/enc.m3u8": return self.send(media("e", enc=True).encode(), "application/vnd.apple.mpegurl")
         if p == "/fmp4.m3u8": return self.send(media("s", fmp4=True).encode(), "application/vnd.apple.mpegurl")
         f = os.path.join(D, os.path.basename(p))
