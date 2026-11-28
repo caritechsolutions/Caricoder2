@@ -2319,7 +2319,8 @@ def live_rist_listener_encrypted():
 def live_input_hls():
     """An HLS playlist as the source: a master playlist's best quality is followed, its segments fetched and
     played out at the stream's own speed across a discontinuity; AES-128 segments; a redirect; https with
-    the certificate checked (and "#insecure"); "#max=" picks a lower quality; fragmented MP4 says it cannot be read."""
+    the certificate checked (and "#insecure"); "#max=" picks a lower quality; fragmented MP4 says it cannot be read;
+    sound kept in a playlist of its own is put together with the picture."""
     if not shutil.which("ffmpeg"):
         return "SKIPPED: ffmpeg is needed to make the segments"
     d = w("hls_src")
@@ -2332,6 +2333,13 @@ def live_input_hls():
                         "-hls_segment_filename", os.path.join(d, "s%d.ts"), os.path.join(d, "vod.m3u8")], capture_output=True, text=True)
     if r.returncode or not os.path.exists(os.path.join(d, "s4.ts")):
         return "SKIPPED: this ffmpeg cannot make the segments"
+    # the same again with the picture and the sound in segments of their own (both on PID 256)
+    lav = ["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:d=10", "-f", "lavfi", "-i", "sine=f=800:sample_rate=48000:d=10"]
+    hls = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_segment_filename"]
+    for args in (["-map", "0:v", "-pix_fmt", "yuv420p", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0", "-c:v", "libx264",
+                  "-preset", "veryfast", "-b:v", "1200k", *hls, os.path.join(d, "v%d.ts"), os.path.join(d, "vv.m3u8")],
+                 ["-map", "1:a", "-c:a", "aac", "-b:a", "128k", "-ac", "2", *hls, os.path.join(d, "a%d.ts"), os.path.join(d, "aa.m3u8")]):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *lav, *args], capture_output=True, check=True)
     have_ssl = bool(shutil.which("openssl"))
     if have_ssl:
         key = bytes(range(16))
@@ -2398,6 +2406,24 @@ def live_input_hls():
         p2.send_signal(signal.SIGTERM)
         _, log2 = p2.communicate(timeout=10)
         need("taking 320x180" in log2, f"#max=700k: {log2[-300:]}")
+        # the sound in a playlist of its own (numbered differently, on the picture's PID): one stream of the two
+        sock2 = w("in_hls_av.sock")
+        p3 = subprocess.Popen([BIN, "-q", "-i", f"http://127.0.0.1:{port}/av.m3u8", "-o", f"udp://127.0.0.1:{pcap}",
+                               "--control", sock2], stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(8.0)
+            rc3, st3 = ctl(sock2, "stats")
+        finally:
+            p3.send_signal(signal.SIGTERM)
+            _, log3 = p3.communicate(timeout=10)
+        need(rc3 == 0 and st3.get("ok"), f"picture and sound apart: {str(st3)[:200]}\n{log3[-400:]}")
+        ss = st3["stats"]["service"]["streams"]
+        kinds = sorted(x["kind"] for x in ss)
+        need(kinds == ["audio", "video"] and all(x.get("bitrate_in", 0) > 50000 for x in ss), f"picture and sound apart: {ss}")
+        need(len({x["in_pid"] for x in ss}) == 2, f"the two share a PID: {ss}")
+        aud = next(x for x in ss if x["kind"] == "audio")
+        need(aud.get("language") == "fra", f"the playlist's language is not on the sound: {aud}")
+        need(st3["stats"]["input"]["link"]["errors"] == 0, f"segments without their sound: {st3['stats']['input']['link']}\n{log3[-400:]}")
         j = probe(f"http://127.0.0.1:{port}/fmp4.m3u8", 2)
         need(not j.get("ok") and "fragmented MP4" in j.get("error", ""), f"fragmented MP4: {j}")
         j = probe(f"http://127.0.0.1:{port}/nothing.m3u8", 2)
@@ -2418,7 +2444,7 @@ def live_input_hls():
         for o in origin:
             o.kill()
             o.wait()
-    return f"best quality followed, {played}; redirect; #max; fragmented MP4 refused in words; {extra}"
+    return f"best quality followed, {played}; sound from its own playlist put with the picture; redirect; #max; fragmented MP4 refused in words; {extra}"
 
 
 # ---- link inputs: an outside sender pushes into caricoder3 over SRT or RIST ----

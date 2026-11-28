@@ -190,10 +190,14 @@ highest is taken; `#max=3000k` after the address takes the best one not
 above that, `#lowest` the smallest. It starts three segments from the
 end, keeps two to three in hand, and trims its speed by up to 200 ppm to
 stay there. AES-128 segments are decrypted with the playlist's key.
-Segments must be MPEG transport stream: fragmented MP4 (CMAF) and
-sample encryption are not read, and audio kept in a playlist of its own
-is not merged (both are said in words: in the log, in `caricoder3 probe`
-and on the Source card). `https` checks the server's certificate;
+Audio kept in a playlist of its own (the quality names an `AUDIO` group,
+as tv5monde's does) is followed too: each segment of picture and the
+same stretch of sound are put together into one stream, the sound on a
+PID the picture does not use, with the playlist's language on it, placed
+by its time stamps against the picture's clock. Segments must be MPEG
+transport stream: fragmented MP4 (CMAF) and sample encryption are not
+read (said in words: in the log, in `caricoder3 probe` and on the Source
+card). `https` checks the server's certificate;
 `#insecure` skips that. What comes after the `#` is never sent to the
 server. A break in the playlist (`EXT-X-DISCONTINUITY`: an advert, a
 restart at the far end) is a break in the stream's clock and counters,

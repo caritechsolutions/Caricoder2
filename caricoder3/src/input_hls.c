@@ -20,8 +20,10 @@
  *   (the far end's clock and this machine's are not the same).
  * - AES-128 segments are decrypted (the key is fetched from the playlist's
  *   URI). Segments must be MPEG transport stream: fragmented MP4 (CMAF)
- *   is not read, and says so. Audio kept in a playlist of its own is not
- *   merged: the log says so and the variant is taken as it is.
+ *   is not read, and says so.
+ * - Audio kept in a playlist of its own (the variant names an AUDIO group):
+ *   that playlist is followed too, and each segment of picture and the
+ *   same stretch of sound are put together into one stream (merge_av).
  * - https needs OpenSSL in the build; the server's certificate is checked
  *   ("#insecure" after the URL: not checked).
  *
@@ -57,6 +59,7 @@
 #include "cc3.h"
 #include "input.h"
 #include "log.h"
+#include "psi.h"
 
 #define URL_MAX         2048
 #define PLAYLIST_MAX    (8 << 20)
@@ -115,6 +118,13 @@ struct hls_in {
     /* the worker's */
     char media_url[URL_MAX];
     char variant[64];
+    char audio_url[URL_MAX];                /* the audio's own playlist, when the variant has one */
+    char audio_lang[4];
+    int64_t audio_off;                      /* its segment numbers against the video's */
+    bool audio_off_known;
+    uint8_t pmt_cc;                         /* of the PMT made for the two together */
+    bool said_no_merge;
+    _Atomic int program_pcr_pid;            /* from the PMT, when one was read (-1: not) */
     int64_t next_seq;
     bool started;
     char key_url[URL_MAX];
@@ -576,21 +586,37 @@ static bool attr(const char *list, const char *name, char *out, size_t len)
 static bool pick_variant(struct hls_in *h, const char *base, char *text)
 {
     long best_bw = -1, low_bw = -1;
-    char best[URL_MAX] = "", best_what[64] = "", low[URL_MAX] = "", low_what[64] = "";
-    bool separate_audio = strstr(text, "TYPE=AUDIO") && strstr(text, "URI=");
+    char best[URL_MAX] = "", best_what[64] = "", best_grp[64] = "";
+    char low[URL_MAX] = "", low_what[64] = "", low_grp[64] = "";
+    struct { char grp[64], uri[URL_MAX], lang[8]; bool def; } aud[8];
+    int n_aud = 0;
     char *save = NULL;
     long pending = -1;
-    char pending_what[64] = "";
+    char pending_what[64] = "", pending_grp[64] = "", audio[URL_MAX] = "", lang[8] = "";
 
     if (!strstr(text, "#EXT-X-STREAM-INF"))
         return false;
     for (char *ln = strtok_r(text, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) {
         ln[strcspn(ln, "\r")] = 0;
-        if (!strncmp(ln, "#EXT-X-STREAM-INF:", 18)) {
+        if (!strncmp(ln, "#EXT-X-MEDIA:", 13)) {
+            char type[16] = "", v[URL_MAX];
+
+            attr(ln + 13, "TYPE", type, sizeof(type));
+            if (!strcmp(type, "AUDIO") && n_aud < 8 && attr(ln + 13, "URI", v, sizeof(v))) {
+                memset(&aud[n_aud], 0, sizeof(aud[0]));
+                resolve(base, v, aud[n_aud].uri, sizeof(aud[0].uri));
+                attr(ln + 13, "GROUP-ID", aud[n_aud].grp, sizeof(aud[0].grp));
+                attr(ln + 13, "LANGUAGE", aud[n_aud].lang, sizeof(aud[0].lang));
+                aud[n_aud].def = attr(ln + 13, "DEFAULT", v, sizeof(v)) && !strcmp(v, "YES");
+                n_aud++;
+            }
+        } else if (!strncmp(ln, "#EXT-X-STREAM-INF:", 18)) {
             char v[64], res[32] = "";
 
             pending = attr(ln + 18, "BANDWIDTH", v, sizeof(v)) ? atol(v) : 0;
             attr(ln + 18, "RESOLUTION", res, sizeof(res));
+            pending_grp[0] = 0;
+            attr(ln + 18, "AUDIO", pending_grp, sizeof(pending_grp));
             snprintf(pending_what, sizeof(pending_what), "%s%s%.1f Mb/s", res, res[0] ? ", " : "", (double)pending / 1e6);
         } else if (ln[0] && ln[0] != '#' && pending >= 0) {
             /* the highest (not above "max" when one is given), and the lowest of all */
@@ -598,11 +624,13 @@ static bool pick_variant(struct hls_in *h, const char *base, char *text)
                 best_bw = pending;
                 resolve(base, ln, best, sizeof(best));
                 snprintf(best_what, sizeof(best_what), "%s", pending_what);
+                snprintf(best_grp, sizeof(best_grp), "%s", pending_grp);
             }
             if (low_bw < 0 || pending < low_bw) {
                 low_bw = pending;
                 resolve(base, ln, low, sizeof(low));
                 snprintf(low_what, sizeof(low_what), "%s", pending_what);
+                snprintf(low_grp, sizeof(low_grp), "%s", pending_grp);
             }
             pending = -1;
         }
@@ -610,19 +638,28 @@ static bool pick_variant(struct hls_in *h, const char *base, char *text)
     if (h->lowest || !best[0]) {            /* asked for, or every one is above "max" */
         snprintf(best, sizeof(best), "%s", low);
         snprintf(best_what, sizeof(best_what), "%s", low_what);
+        snprintf(best_grp, sizeof(best_grp), "%s", low_grp);
     }
     if (!best[0])
         return false;
-    if (strcmp(best, h->media_url)) {
-        log_info("hls: of the qualities offered, taking %s", best_what);
-        if (separate_audio && !h->said_audio) {
-            h->said_audio = true;
-            log_warn("hls: this stream keeps its audio in a playlist of its own, which is not merged here: "
-                     "the channel may have no sound from it");
+    /* the variant's audio, when that is a playlist of its own: the group's
+     * default one, else its first */
+    for (int i = 0; i < n_aud && best_grp[0]; i++)
+        if (!strcmp(aud[i].grp, best_grp) && (!audio[0] || aud[i].def)) {
+            snprintf(audio, sizeof(audio), "%s", aud[i].uri);
+            snprintf(lang, sizeof(lang), "%s", aud[i].lang);
         }
+    if (strcmp(best, h->media_url)) {
+        log_info("hls: of the qualities offered, taking %s%s", best_what,
+                 audio[0] ? "; its audio is a playlist of its own, put together with the picture here" : "");
+        h->audio_off_known = false;
     }
     snprintf(h->media_url, sizeof(h->media_url), "%s", best);
     snprintf(h->variant, sizeof(h->variant), "%s", best_what);
+    snprintf(h->audio_url, sizeof(h->audio_url), "%s", audio);
+    for (int i = 0; i < 3; i++)
+        h->audio_lang[i] = (char)tolower((unsigned char)lang[i]);
+    h->audio_lang[3] = 0;
     return true;
 }
 
@@ -701,6 +738,261 @@ static void parse_media(const char *base, char *text, struct media *m)
             dur = 0;
         }
     }
+}
+
+/* ---- picture and sound from two playlists, made one stream ------------------ */
+
+struct sec_out { uint8_t sec[PSI_MAX]; int len; };
+
+static void sec_take(void *opaque, const uint8_t *sec, int len)
+{
+    struct sec_out *o = opaque;
+
+    if (!o->len && len <= PSI_MAX) {
+        memcpy(o->sec, sec, (size_t)len);
+        o->len = len;
+    }
+}
+
+/* The first whole section on `pid` in a run of packets. */
+static bool first_section(const uint8_t *ts, size_t len, int pid, struct sec_out *o)
+{
+    struct section_asm *a = calloc(1, sizeof(*a));
+
+    o->len = 0;
+    if (!a)
+        return false;
+    for (size_t at = 0; at + TS_SIZE <= len && !o->len; at += TS_SIZE) {
+        const uint8_t *p = ts + at;
+        int off = (p[3] & 0x20) ? 5 + p[4] : 4;
+
+        if (p[0] != TS_SYNC || ((p[1] & 0x1F) << 8 | p[2]) != pid || !(p[3] & 0x10) || off >= TS_SIZE)
+            continue;
+        section_asm_push(a, p + off, TS_SIZE - off, (p[1] & 0x40) != 0, sec_take, o);
+    }
+    free(a);
+    return o->len > 0;
+}
+
+static bool read_program(const uint8_t *ts, size_t len, struct program *pg)
+{
+    struct sec_out *o = malloc(sizeof(*o));
+    uint16_t ts_id, number, pmt_pid;
+    uint8_t version;
+    bool ok;
+
+    memset(pg, 0, sizeof(*pg));
+    ok = o && first_section(ts, len, 0, o) && psi_pat_find(o->sec, o->len, 0, &ts_id, &version, &number, &pmt_pid) &&
+         first_section(ts, len, pmt_pid, o) && psi_parse_pmt(o->sec, o->len, pg);
+    if (ok) {
+        pg->ts_id = ts_id;
+        pg->pmt_pid = pmt_pid;
+    }
+    free(o);
+    return ok;
+}
+
+static int64_t pcr_diff(int64_t a, int64_t b)       /* a - b on the 33-bit clock, in 27 MHz units */
+{
+    const int64_t wrap = ((int64_t)1 << 33) * 300;
+    int64_t d = (a - b) % wrap;
+
+    return d > wrap / 2 ? d - wrap : d < -wrap / 2 ? d + wrap : d;
+}
+
+#define AUDIO_LEAD      (27000000 * 3 / 10)         /* sound goes into the stream 0.3 s before it is due */
+
+/*
+ * One segment of picture (`v`) and the same stretch of sound (`a`), each a
+ * transport stream of its own, as one: the picture's packets as they are,
+ * with its PMT replaced by one that lists the sound too, and the sound's
+ * packets (on a PID that is free) put in where the picture's clock is a
+ * little before each one's time stamp. NULL when either cannot be read.
+ */
+static uint8_t *merge_av(struct hls_in *h, const uint8_t *v, size_t vl, const uint8_t *a, size_t al, size_t *out_len)
+{
+    struct program *pv = malloc(sizeof(*pv)), *pa = malloc(sizeof(*pa));
+    uint8_t *out = NULL, pmt[PSI_MAX + TS_SIZE], *pmt_pk = NULL;
+    uint16_t map_in[MAX_ES], map_out[MAX_ES];
+    int n_map = 0, sec_len, n_pmt_pk = 0;
+    size_t nv = vl / TS_SIZE, na = al / TS_SIZE, o = 0, ai = 0, n_pcr = 0;
+    struct { size_t idx; int64_t pcr; } *pc = NULL;
+    int64_t *due = NULL;                    /* for each of the sound's packets: the picture clock it goes in at */
+    bool related = true, have_due = false;
+    int64_t cur = 0;
+
+    if (!pv || !pa || !read_program(v, vl, pv) || !read_program(a, al, pa))
+        goto done;
+    /* the sound's streams into the picture's program, each on a PID nothing there uses */
+    for (int i = 0; i < pa->n_es && pv->n_es < MAX_ES; i++) {
+        uint16_t pid = pa->es[i].pid;
+        const uint8_t *d = pa->blob + pa->es[i].desc_off;
+        int dl = pa->es[i].desc_len;
+        bool has_lang = false, clash;
+        struct es_info *e;
+
+        do {
+            clash = pid == pv->pmt_pid || pid == pv->pcr_pid || pid < 0x20;
+            for (int k = 0; k < pv->n_es; k++)
+                clash |= pv->es[k].pid == pid;
+            if (clash)
+                pid = pid < 0x1100 ? 0x1100 : (uint16_t)(pid + 1);
+        } while (clash && pid < 0x1FF0);
+        for (int pos = 0; pos + 2 <= dl; pos += 2 + d[pos + 1])
+            has_lang |= d[pos] == 0x0A;
+        if (pv->blob_len + dl + 6 > (int)sizeof(pv->blob))
+            break;
+        e = &pv->es[pv->n_es++];
+        *e = pa->es[i];
+        e->pid = pid;
+        e->desc_off = pv->blob_len;
+        memcpy(pv->blob + pv->blob_len, d, (size_t)dl);
+        pv->blob_len = (uint16_t)(pv->blob_len + dl);
+        if (!has_lang && h->audio_lang[0]) {            /* the playlist names the language; the stream did not */
+            const uint8_t l[6] = { 0x0A, 4, (uint8_t)h->audio_lang[0], (uint8_t)h->audio_lang[1], (uint8_t)h->audio_lang[2], 0 };
+
+            memcpy(pv->blob + pv->blob_len, l, 6);
+            pv->blob_len = (uint16_t)(pv->blob_len + 6);
+            dl += 6;
+        }
+        e->desc_len = (uint16_t)dl;
+        map_in[n_map] = pa->es[i].pid;
+        map_out[n_map++] = pid;
+    }
+    if (!n_map)
+        goto done;
+    sec_len = psi_build_pmt(pv, pv->pmt_version, pmt + 1);
+    if (sec_len <= 0)
+        goto done;
+    pmt[0] = 0;                             /* pointer field */
+    n_pmt_pk = (sec_len + 1 + 183) / 184;
+    pmt_pk = malloc((size_t)n_pmt_pk * TS_SIZE);
+    out = malloc(vl + al + (size_t)(nv / 4 + 2) * (size_t)n_pmt_pk * TS_SIZE);
+    pc = malloc(sizeof(*pc) * (nv + 1));
+    due = malloc(sizeof(*due) * (na + 1));
+    if (!pmt_pk || !out || !pc || !due) {
+        free(out);
+        out = NULL;
+        goto done;
+    }
+    /* the picture's clock, packet by packet */
+    for (size_t i = 0; i < nv; i++) {
+        const uint8_t *p = v + i * TS_SIZE;
+
+        if (p[0] == TS_SYNC && ((p[1] & 0x1F) << 8 | p[2]) == pv->pcr_pid && (p[3] & 0x20) && p[4] >= 7 && (p[5] & 0x10)) {
+            pc[n_pcr].idx = i;
+            pc[n_pcr++].pcr = ((int64_t)p[6] << 25 | (int64_t)p[7] << 17 | (int64_t)p[8] << 9 | (int64_t)p[9] << 1 | p[10] >> 7) * 300 +
+                              (((p[10] & 1) << 8) | p[11]);
+        }
+    }
+    /* when each of the sound's packets is due: from the time stamp of the PES it belongs to */
+    for (size_t i = 0; i < na; i++) {
+        const uint8_t *p = a + i * TS_SIZE;
+        int pid = (p[1] & 0x1F) << 8 | p[2], off = (p[3] & 0x20) ? 5 + p[4] : 4;
+        bool ours = false;
+
+        for (int k = 0; k < n_map; k++)
+            ours |= map_in[k] == pid;
+        due[i] = INT64_MIN;                 /* not one of ours: left out */
+        if (p[0] != TS_SYNC || !ours)
+            continue;
+        if ((p[1] & 0x40) && (p[3] & 0x10) && off + 14 <= TS_SIZE && p[off] == 0 && p[off + 1] == 0 && p[off + 2] == 1 &&
+            (p[off + 7] & 0x80)) {
+            const uint8_t *t = p + off + 9;
+            int64_t pts = ((int64_t)(t[0] >> 1) & 7) << 30 | (int64_t)t[1] << 22 | (int64_t)(t[2] >> 1) << 15 |
+                          (int64_t)t[3] << 7 | t[4] >> 1;
+
+            cur = pts * 300 - AUDIO_LEAD;
+            if (!have_due && n_pcr && llabs(pcr_diff(cur, pc[0].pcr)) > (int64_t)27000000 * 30)
+                related = false;            /* the two do not keep the same time: placed by share, below */
+            have_due = true;
+        }
+        due[i] = have_due ? cur : INT64_MIN + 1;        /* before the first time stamp: at the very start */
+    }
+    if (n_pcr < 2)
+        related = false;
+    if (!related && !h->said_no_merge) {
+        h->said_no_merge = true;
+        log_warn("hls: the picture's and the sound's segments do not keep the same clock: the sound is put in evenly, "
+                 "which may leave it out of step with the picture");
+    }
+    /* the PMT for the two, as packets */
+    for (int k = 0; k < n_pmt_pk; k++) {
+        uint8_t *q = pmt_pk + k * TS_SIZE;
+        int take = sec_len + 1 - k * 184 > 184 ? 184 : sec_len + 1 - k * 184;
+
+        memset(q, 0xFF, TS_SIZE);
+        q[0] = TS_SYNC;
+        q[1] = (uint8_t)((k == 0 ? 0x40 : 0) | (pv->pmt_pid >> 8));
+        q[2] = (uint8_t)pv->pmt_pid;
+        q[3] = 0x10;
+        memcpy(q + 4, pmt + k * 184, (size_t)take);
+    }
+    {
+        size_t k = 0;                       /* the stretch of the picture's clock packet i is in */
+
+        for (size_t i = 0; i <= nv; i++) {
+            int64_t here = INT64_MAX;       /* (after the last packet: everything left goes) */
+
+            if (i < nv && related) {
+                while (k + 2 < n_pcr && pc[k + 1].idx <= i)
+                    k++;
+                here = pc[k].pcr + (int64_t)((double)pcr_diff(pc[k + 1].pcr, pc[k].pcr) *
+                                             ((double)i - (double)pc[k].idx) / (double)(pc[k + 1].idx - pc[k].idx));
+            }
+            while (ai < na) {
+                bool now = due[ai] == INT64_MIN;        /* not ours: passed by */
+
+                if (!now && i < nv) {
+                    if (related)
+                        now = due[ai] == INT64_MIN + 1 || pcr_diff(due[ai], here) <= 0;
+                    else
+                        now = ai * nv <= i * na;
+                } else if (!now) {
+                    now = true;
+                }
+                if (!now)
+                    break;
+                if (due[ai] != INT64_MIN) {
+                    uint8_t *q = out + o;
+                    int pid = (a[ai * TS_SIZE + 1] & 0x1F) << 8 | a[ai * TS_SIZE + 2];
+
+                    memcpy(q, a + ai * TS_SIZE, TS_SIZE);
+                    for (int m = 0; m < n_map; m++)
+                        if (map_in[m] == pid) {
+                            q[1] = (uint8_t)((q[1] & 0xE0) | (map_out[m] >> 8));
+                            q[2] = (uint8_t)map_out[m];
+                        }
+                    o += TS_SIZE;
+                }
+                ai++;
+            }
+            if (i < nv) {
+                const uint8_t *p = v + i * TS_SIZE;
+
+                if (((p[1] & 0x1F) << 8 | p[2]) == pv->pmt_pid && p[0] == TS_SYNC) {
+                    if (p[1] & 0x40)        /* where the picture's PMT began: ours, whole */
+                        for (int m = 0; m < n_pmt_pk; m++) {
+                            memcpy(out + o, pmt_pk + m * TS_SIZE, TS_SIZE);
+                            out[o + 3] = (uint8_t)(0x10 | (h->pmt_cc++ & 0x0F));
+                            o += TS_SIZE;
+                        }
+                } else {
+                    memcpy(out + o, p, TS_SIZE);
+                    o += TS_SIZE;
+                }
+            }
+        }
+    }
+    atomic_store(&h->program_pcr_pid, pv->pcr_pid);
+    *out_len = o;
+done:
+    free(pv);
+    free(pa);
+    free(pmt_pk);
+    free(pc);
+    free(due);
+    return out;
 }
 
 /* ---- the worker: playlist, segments, the queue ------------------------------ */
@@ -805,6 +1097,45 @@ static void enqueue(struct hls_in *h, uint8_t *data, size_t len, double dur, boo
     pthread_mutex_unlock(&h->lock);
 }
 
+/* One segment, fetched (three tries) and decrypted. */
+static bool fetch_segment(struct hls_in *h, const struct entry *e, uint8_t **data, size_t *len, char *err, size_t errlen)
+{
+    for (int attempt = 0; attempt < 3 && !atomic_load(&h->stop); attempt++) {
+        *data = NULL;
+        if (http_get(h, e->url, SEGMENT_MAX, data, len, NULL, 0, err, errlen)) {
+            if (!e->enc || decrypt(h, e, *data, len, err, errlen))
+                return true;
+            free(*data);
+            *data = NULL;
+        }
+        nap(h, 0.5);
+    }
+    return false;
+}
+
+/* The sound's playlist, read (again). NULL when it does not come. */
+static struct media *audio_playlist(struct hls_in *h, char *err, size_t errlen)
+{
+    uint8_t *text = NULL, *t2;
+    size_t tl = 0;
+    char base[URL_MAX];
+    struct media *m;
+
+    if (!http_get(h, h->audio_url, PLAYLIST_MAX, &text, &tl, base, sizeof(base), err, errlen))
+        return NULL;
+    t2 = realloc(text, tl + 1);
+    m = t2 ? malloc(sizeof(*m)) : NULL;
+    if (!m) {
+        free(t2 ? t2 : text);
+        snprintf(err, errlen, "out of memory");
+        return NULL;
+    }
+    t2[tl] = 0;
+    parse_media(base, (char *)t2, m);
+    free(t2);
+    return m;
+}
+
 static void *worker(void *arg)
 {
     struct hls_in *h = arg;
@@ -817,7 +1148,7 @@ static void *worker(void *arg)
     while (!atomic_load(&h->stop)) {
         uint8_t *text = NULL;
         size_t tl = 0;
-        struct media *m;
+        struct media *m, *ma = NULL;
         int got = 0;
         double queued;
 
@@ -896,20 +1227,11 @@ static void *worker(void *arg)
             const struct entry *e = &m->e[i];
             uint8_t *data = NULL;
             size_t len = 0;
-            bool ok = false;
+            bool ok;
 
             if (e->seq < h->next_seq)
                 continue;
-            for (int attempt = 0; attempt < 3 && !ok && !atomic_load(&h->stop); attempt++) {
-                ok = http_get(h, e->url, SEGMENT_MAX, &data, &len, NULL, 0, err, sizeof(err));
-                if (ok && e->enc && !decrypt(h, e, data, &len, err, sizeof(err))) {
-                    free(data);
-                    data = NULL;
-                    ok = false;
-                }
-                if (!ok)
-                    nap(h, 0.5);
-            }
+            ok = fetch_segment(h, e, &data, &len, err, sizeof(err));
             h->next_seq = e->seq + 1;
             if (!ok) {
                 log_warn("hls: segment %lld: %s: passed over", (long long)e->seq, err);
@@ -918,9 +1240,52 @@ static void *worker(void *arg)
                 continue;
             }
             atomic_fetch_add(&h->bytes, (int64_t)len);
+            if (h->audio_url[0]) {
+                /* the same stretch of the sound: its playlist read (again, when it is not in
+                 * it yet: the two are written at the far end a moment apart) */
+                const struct entry *ae = NULL;
+                uint8_t *ad = NULL, *both = NULL;
+                size_t al = 0, bl = 0;
+                char aerr[256] = "the sound's playlist does not list it";
+
+                for (int attempt = 0; attempt < 4 && !ae && !atomic_load(&h->stop); attempt++) {
+                    if (!ma)
+                        ma = audio_playlist(h, aerr, sizeof(aerr));
+                    if (ma && ma->n && !h->audio_off_known) {
+                        /* the two are numbered alike or not: taken from where each one ends */
+                        h->audio_off = ma->e[ma->n - 1].seq - m->e[m->n - 1].seq;
+                        h->audio_off_known = true;
+                    }
+                    for (int k = 0; ma && k < ma->n; k++)
+                        if (ma->e[k].seq == e->seq + h->audio_off)
+                            ae = &ma->e[k];
+                    if (!ae) {
+                        free(ma);
+                        ma = NULL;
+                        nap(h, 0.5);
+                    }
+                }
+                if (ae && fetch_segment(h, ae, &ad, &al, aerr, sizeof(aerr))) {
+                    atomic_fetch_add(&h->bytes, (int64_t)al);
+                    both = merge_av(h, data, len, ad, al, &bl);
+                    if (!both)
+                        snprintf(aerr, sizeof(aerr), "the two could not be put together (no program table in one of them)");
+                }
+                free(ad);
+                if (both) {
+                    free(data);
+                    data = both;
+                    len = bl;
+                } else {
+                    log_warn("hls: segment %lld goes without its sound: %s", (long long)e->seq, aerr);
+                    set_error(h, aerr);
+                    atomic_fetch_add(&h->errors, 1);
+                }
+            }
             enqueue(h, data, len, e->dur, e->disc);
             got++;
         }
+        free(ma);
         pthread_mutex_lock(&h->lock);
         queued = h->queued_s;
         h->playing = h->head != NULL;
@@ -946,7 +1311,8 @@ static bool pcr_of(const struct hls_in *h, const uint8_t *p, int64_t *pcr, int *
     if (p[0] != TS_SYNC || !(p[3] & 0x20) || p[4] < 7 || !(p[5] & 0x10))
         return false;
     *pid = (p[1] & 0x1F) << 8 | p[2];
-    if (h->pcr_pid >= 0 && *pid != h->pcr_pid)
+    if (atomic_load(&h->program_pcr_pid) >= 0 ? *pid != atomic_load(&h->program_pcr_pid)
+                                              : h->pcr_pid >= 0 && *pid != h->pcr_pid)
         return false;
     *pcr = ((int64_t)p[6] << 25 | (int64_t)p[7] << 17 | (int64_t)p[8] << 9 | (int64_t)p[9] << 1 | p[10] >> 7) * 300 +
            (((p[10] & 1) << 8) | p[11]);
@@ -1012,6 +1378,7 @@ static void *hls_open(const char *url, char *err, size_t errlen)
     h->target_s = 6;
     h->pcr_pid = -1;
     h->last_pcr = -1;
+    atomic_store(&h->program_pcr_pid, -1);
     snprintf(h->state, sizeof(h->state), "reading the playlist");
     if (pthread_create(&h->th, NULL, worker, h) != 0) {
         snprintf(err, errlen, "no thread for the HLS source");
