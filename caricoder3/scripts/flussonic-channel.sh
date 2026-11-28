@@ -24,6 +24,13 @@
 #       then the next channel. One that fails is put back (channel off,
 #       stream on again in Flussonic) and the run stops there. The config
 #       file is copied first (the copy's name is printed).
+#   curl -fsSL .../scripts/flussonic-channel.sh | sudo bash -s -- NAME [NAME..] --udp-ids
+#       for channels moved before --move read Flussonic's identifiers from
+#       the output address: Flussonic sends every stream it builds to UDP as
+#       program 1000 with its PMT on PID 1000 and TS id 1, whatever its HTTP
+#       port shows (UDP_IDS=PROGRAM:PMT:TSID to say otherwise). Each channel
+#       is given those, restarts, and what it sends is listened to; one that
+#       then sends something wrong gets its previous settings back.
 #
 # What it moves: a stream that takes its source from the network (udp://,
 # mpts-udp://, rtp://, srt://, http(s):// TS), copies or re-encodes to at
@@ -51,6 +58,7 @@ import base64, json, os, re, shutil, subprocess, sys, time, urllib.error, urllib
 cfg_path, fconf, pids_script, dry, binary, state_dir, reload_cmd = sys.argv[1:8]
 args = sys.argv[8:]
 move = "--move" in args
+udp_ids = "--udp-ids" in args
 start = "--start" in args
 listing = "--list" in args
 names = [a for a in args if not a.startswith("--")]
@@ -388,6 +396,8 @@ def check(name, conf, out_url):
         return f"program {want_n} is not there (found {[g.get('number') for g in progs]})"
     if conf.get("pmt_pid") and pg.get("pmt_pid") != conf["pmt_pid"]:
         return f"PMT on PID {pg.get('pmt_pid')}, Flussonic had {conf['pmt_pid']}"
+    if conf.get("ts_id") and j.get("ts_id") != conf["ts_id"]:
+        return f"TS id {j.get('ts_id')}, Flussonic had {conf['ts_id']}"
     try:
         ref = json.load(open(os.path.join(state_dir, "flussonic-outputs", name + ".http.json")))
         ref = [g for g in ref.get("programs", []) if g.get("streams")][0]["streams"]
@@ -410,11 +420,59 @@ def check(name, conf, out_url):
             return f"no data on PID {x['pid']} ({x['kind']})"
         if x.get("cc_errors"):
             return f"{x['cc_errors']} CC errors on PID {x['pid']} in {j.get('seconds')} s"
-    check.last = "program %s, PMT %s: %s; %.2f Mb/s" % (
-        pg.get("number"), pg.get("pmt_pid"),
+    check.last = "program %s, PMT %s, TS id %s: %s; %.2f Mb/s" % (
+        pg.get("number"), pg.get("pmt_pid"), j.get("ts_id"),
         ", ".join(f"{x['pid']} {x.get('codec') or x.get('kind')} {x.get('bitrate', 0) / 1000:.0f} kb/s" for x in pg["streams"]),
         (pg.get("bitrate") or 0) / 1e6)
     return None
+
+if udp_ids:
+    try:
+        u_prog, u_pmt, u_ts = (int(x) for x in os.environ.get("UDP_IDS", "1000:1000:1").split(":"))
+    except ValueError:
+        raise SystemExit("ERROR: UDP_IDS is PROGRAM:PMT:TSID, three numbers")
+    fixed, failed = [], []
+    for name in done:
+        say(f"{name}: program {u_prog}, PMT PID {u_pmt}, TS id {u_ts}")
+        full = chan(name)
+        conf = full.get("config") or {}
+        try:
+            out_url = json.load(open(os.path.join(chdir, name + ".outputs.json")))["outputs"][0]["url"]
+        except (OSError, ValueError, LookupError):
+            note("the channel has no output: left as it is")
+            failed.append(name)
+            continue
+        if not (conf.get("enabled", True) and full.get("state") == "running"):
+            note("the channel is not running: left as it is (--move gives it the right ones when it is moved)")
+            continue
+        new = dict(conf, service_id=u_prog, pmt_pid=u_pmt, ts_id=u_ts)
+        if new == conf:
+            note("it has them already: only checked")
+        elif dry:
+            note(f"DRY RUN: would change program {conf.get('service_id')} -> {u_prog}, PMT PID {conf.get('pmt_pid')} -> {u_pmt}, "
+                 f"TS id {conf.get('ts_id')} -> {u_ts}, and listen to {out_url}")
+            continue
+        else:
+            note(f"was program {conf.get('service_id')}, PMT PID {conf.get('pmt_pid')}, TS id {conf.get('ts_id')}")
+            api(f"/api/channels/{name}", "PUT", new)
+        bad, good, t0 = "not checked", 0, time.time()
+        time.sleep(3)
+        while time.time() - t0 < 45 and good < 2:
+            bad = check(name, new, out_url)
+            good = 0 if bad else good + 1
+            if bad:
+                time.sleep(2)
+        if good >= 2:
+            note(f"checked at {out_url}: {check.last}")
+            fixed.append(name)
+            continue
+        note(f"WRONG: {bad}")
+        if new != conf:
+            api(f"/api/channels/{name}", "PUT", conf)
+            note("its previous settings are back")
+        failed.append(name)
+    say(f"right and checked: {', '.join(fixed) or 'none'}" + (f"; NOT right: {', '.join(failed)}" if failed else ""))
+    raise SystemExit(1 if failed else 0)
 
 if move:
     if not os.path.exists(pids_script):
