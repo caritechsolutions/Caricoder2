@@ -26,6 +26,7 @@ struct input_stats {
     uint64_t reconnects;
     uint64_t errors;
     int64_t bytes;                      /* received so far */
+    char error[200];                    /* the last thing that went wrong, in words; "" when nothing */
 };
 
 struct input_ops {

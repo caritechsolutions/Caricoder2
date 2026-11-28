@@ -411,6 +411,20 @@ a channel set to Main 10 shows no picture on some receivers, those
 receivers do not decode Main 10. These options never cause CC errors or
 dropouts; more card load from them can, if the card is near its limit.
 
+## A source that is an HLS playlist
+
+A source whose address ends in .m3u8 (or begins hls://) is fetched from a
+web server in pieces of a few seconds and played out at the stream's own
+speed. Its link state reads "playing ..., N s in hand".
+- "the playlist does not come" or segments "passed over": the far server
+  or the internet link, not this server. The channel carries on from the
+  playlist's end when it comes back.
+- CC errors and "input time base moved" at the same moment are a break
+  the far end put in its playlist (an advert, a restart): normal for these
+  sources, not a fault here.
+- "segments are not transport stream": that stream cannot be read at all
+  (fragmented MP4); it needs another address or another source.
+
 ## Audio loudness
 
 Where a channel transcodes its audio it is levelled, unless set otherwise:

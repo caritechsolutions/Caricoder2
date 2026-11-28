@@ -1697,14 +1697,15 @@ function settingsHtml() {
     </div></div>
   </form>`;
 }
-const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["http","HTTP — pull a TS stream"],["file","File (test)"]];
-const OWN_PARAMS = { http: [], file: [], udp: ["iface"], rtp: ["iface"], srtl: ["latency","passphrase","mode"], srtc: ["latency","passphrase","mode"], ristl: ["secret","aes-type","buffer"], ristc: ["secret","aes-type","buffer"] };
+const IN_KINDS = [["udp","UDP multicast / unicast"],["rtp","RTP"],["srtl","SRT — a sender calls us"],["srtc","SRT — we call the sender"],["ristl","RIST — a sender calls us"],["ristc","RIST — we call the sender"],["http","HTTP — pull a TS stream"],["hls","HLS — follow a playlist (.m3u8)"],["file","File (test)"]];
+const OWN_PARAMS = { http: [], hls: [], file: [], udp: ["iface"], rtp: ["iface"], srtl: ["latency","passphrase","mode"], srtc: ["latency","passphrase","mode"], ristl: ["secret","aes-type","buffer"], ristc: ["secret","aes-type","buffer"] };
 function inputUrl(v) {
   const q = [];
   const rest = () => { const r = v.extra ? v.extra.split("&").filter(Boolean) : []; return q.concat(r); };   // parameters the form does not own are kept
   switch (v.kind) {
   case "file": return v.host;
   case "http": return v.host ? "http://" + v.host.replace(/^http:\/\//, "") : "";
+  case "hls": return v.host ? (/^[a-z0-9]+:\/\//i.test(v.host) ? v.host : "https://" + v.host) : "";      // the whole address, https unless it says
   case "udp": case "rtp":
     if (v.iface) q.push("iface=" + v.iface);
     return `${v.kind}://${v.src?v.src+"@":""}${v.host}${v.port?":"+v.port:""}${rest().length?"?"+rest().join("&"):""}`;
@@ -1731,12 +1732,13 @@ function syncInput() {
   $("#in_udp").style.display = (k === "udp" || k === "rtp") ? "" : "none";
   $("#in_srt").style.display = (k === "srtl" || k === "srtc") ? "" : "none";
   $("#in_rist").style.display = (k === "ristl" || k === "ristc") ? "" : "none";
-  $("#in_port").style.display = k === "http" || k === "file" ? "none" : "";
-  $("#in_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : k === "file" ? "/path/to/file.ts" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "ristl" || k === "srtl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
+  $("#in_port").style.display = k === "http" || k === "hls" || k === "file" ? "none" : "";
+  $("#in_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : k === "hls" ? "https://server/path/index.m3u8 (the whole address)" : k === "file" ? "/path/to/file.ts" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "ristl" || k === "srtl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
   $("#in_url").textContent = inputUrl(v);
 }
 function parseInput(url) {
   const r = { kind: "file", host: url || "", port: "", iface: "", src: "", latency: "", pass: "", secret: "", buffer: "", extra: "" };
+  if (/^hlss?2?:\/\//.test(url || "") || /^https?:\/\/[^?#]*\.m3u8?([?#]|$)/i.test(url || "")) { r.kind = "hls"; r.host = url; return r; }
   if (/^http:\/\//.test(url || "")) { r.kind = "http"; r.host = url.slice(7); return r; }
   const m = /^(udp|rtp|srt|rist):\/\/(@?)(?:([^@\/?:]+)@)?([^:?]*)(?::(\d+))?(?:\?(.*))?$/.exec(url || "");
   if (!m) return r;
@@ -1979,14 +1981,14 @@ function newChannel() {
   const nUrl = () => inputUrl({ kind: $("#n_kind").value, host: $("#n_host").value.trim(), port: $("#n_port").value.trim(), iface: "", src: "", latency: "", pass: "", secret: "", buffer: "", aes: "", extra: "" });
   const nSync = () => {
     const k = $("#n_kind").value;
-    $("#n_port").style.display = k === "http" ? "none" : "";
-    $("#n_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "srtl" || k === "ristl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
+    $("#n_port").style.display = k === "http" || k === "hls" ? "none" : "";
+    $("#n_host").placeholder = k === "http" ? "192.168.110.41/bet/mpegts (host[:port]/path)" : k === "hls" ? "https://server/path/index.m3u8 (the whole address)" : (k === "srtc" || k === "ristc") ? "sender's address" : (k === "srtl" || k === "ristl") ? "address to listen on, or blank for all" : "239.5.5.5 (address)";
     $("#n_prev").textContent = nUrl();
   };
   d.querySelectorAll("#n_kind,#n_host,#n_port").forEach(i => { i.oninput = nSync; i.onchange = nSync; }); nSync();
   $("#n_go").onclick = async () => {
     const name = $("#n_name").value.trim(), k = $("#n_kind").value, url = nUrl();
-    if (k === "http" ? !$("#n_host").value.trim() : !$("#n_port").value.trim() || (!$("#n_host").value.trim() && !["srtl","ristl"].includes(k))) { $("#n_msg").innerHTML = `<div class="msg err">${k === "http" ? "The address is needed." : "Address and port are needed."}</div>`; return; }
+    if (k === "http" || k === "hls" ? !$("#n_host").value.trim() : !$("#n_port").value.trim() || (!$("#n_host").value.trim() && !["srtl","ristl"].includes(k))) { $("#n_msg").innerHTML = `<div class="msg err">${k === "http" || k === "hls" ? "The address is needed." : "Address and port are needed."}</div>`; return; }
     try { await api(`/api/channels/${encodeURIComponent(name)}`, {method:"PUT", body: JSON.stringify({input: url, enabled: false}, null, 2)}); d.close(); dirty = false; chAt = 0; go("channels", name); }
     catch(e) { $("#n_msg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
   };

@@ -103,6 +103,12 @@ CODEC_DEFS += -DHAVE_RIST $(shell $(PKG_CONFIG) --cflags librist)
 CODEC_LIBS += $(shell $(PKG_CONFIG) --libs $(if $(wildcard $(LIBS_PREFIX)/lib/librist.a),--static) librist)
 SINK_SRC += src/sink_rist.c src/input_rist.c
 endif
+# OpenSSL (apt install libssl-dev): https for an HLS source, and its AES-128
+# segments. Absent, an HLS source is read over plain http only.
+ifeq ($(call have_pkg,openssl),yes)
+CODEC_DEFS += -DHAVE_OPENSSL $(shell $(PKG_CONFIG) --cflags openssl)
+CODEC_LIBS += $(shell $(PKG_CONFIG) --libs openssl)
+endif
 # The supervisor's history (apt install libsqlite3-dev). Absent, none is kept.
 ifeq ($(call have_pkg,sqlite3),yes)
 CODEC_DEFS += -DHAVE_SQLITE $(shell $(PKG_CONFIG) --cflags sqlite3)
@@ -116,7 +122,7 @@ CORE = src/crc32.c src/log.c src/psi.c src/demux.c src/mux.c src/clock.c \
        src/aframe.c src/a_fdk.c src/a_mpg123.c src/a_twolame.c src/a_lame.c \
        src/a_a52.c src/v_avcodec.c src/v_x264.c src/v_x265.c \
        src/nv_common.c src/v_nvdec.c src/v_nvenc.c src/nv_scale.c src/nv_selftest.c src/follow.c src/watch.c src/thumb.c
-SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/input_http.c src/source.c src/probe.c src/listen.c src/share.c src/card.c src/keep.c src/memwatch.c src/history.c src/watchdog.c src/disk.c src/peer.c src/ird.c src/ird_upcom.c src/weather.c src/tech.c src/sysstat.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c src/sink_http.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
+SRC  = $(CORE) src/udp.c src/ring.c src/sink.c src/input.c src/input_http.c src/input_hls.c src/source.c src/probe.c src/listen.c src/share.c src/card.c src/keep.c src/memwatch.c src/history.c src/watchdog.c src/disk.c src/peer.c src/ird.c src/ird_upcom.c src/weather.c src/tech.c src/sysstat.c src/sink_udp.c src/h264.c src/sink_rtmp.c src/sink_hls.c src/sink_http.c $(SINK_SRC) src/json.c src/control.c src/http.c src/super.c src/main.c
 
 # The first rule below is the GUI's, so the default goal is named here.
 .DEFAULT_GOAL := all

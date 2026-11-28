@@ -2315,6 +2315,112 @@ def live_rist_listener_encrypted():
     return f"1 receiver, AES-128, {pes}/{orig} PES received; listed as '{cl[0]['name']}', {cl[0]['sent']} packets"
 
 
+@test
+def live_input_hls():
+    """An HLS playlist as the source: a master playlist's best quality is followed, its segments fetched and
+    played out at the stream's own speed across a discontinuity; AES-128 segments; a redirect; https with
+    the certificate checked (and "#insecure"); "#max=" picks a lower quality; fragmented MP4 says it cannot be read."""
+    if not shutil.which("ffmpeg"):
+        return "SKIPPED: ffmpeg is needed to make the segments"
+    d = w("hls_src")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:d=10",
+                        "-f", "lavfi", "-i", "sine=f=800:sample_rate=48000:d=10", "-pix_fmt", "yuv420p", "-g", "50", "-keyint_min", "50",
+                        "-sc_threshold", "0", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "1200k", "-c:a", "aac", "-b:a", "128k",
+                        "-ac", "2", "-f", "hls", "-hls_time", "2", "-hls_list_size", "0",
+                        "-hls_segment_filename", os.path.join(d, "s%d.ts"), os.path.join(d, "vod.m3u8")], capture_output=True, text=True)
+    if r.returncode or not os.path.exists(os.path.join(d, "s4.ts")):
+        return "SKIPPED: this ffmpeg cannot make the segments"
+    have_ssl = bool(shutil.which("openssl"))
+    if have_ssl:
+        key = bytes(range(16))
+        open(os.path.join(d, "key.bin"), "wb").write(key)
+        for i in range(5):
+            subprocess.run(["openssl", "enc", "-aes-128-cbc", "-K", key.hex(), "-iv", "%032x" % (i + 16),
+                            "-in", os.path.join(d, f"s{i}.ts"), "-out", os.path.join(d, f"e{i}.ts")], check=True)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", os.path.join(d, "key.pem"),
+                        "-out", os.path.join(d, "cert.pem"), "-days", "2", "-subj", "/CN=localhost"], capture_output=True, check=True)
+    port = _port[0]
+    pcap = _port[0] + 2
+    _port[0] += 4
+    origin = [subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "hls_origin.py"), d, str(port)])]
+    if have_ssl:
+        origin.append(subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "hls_origin.py"), d, str(port + 1), "tls"]))
+
+    def probe(url, secs=6):
+        p = subprocess.run([BIN, "probe", url, "--seconds", str(secs)], capture_output=True, text=True, timeout=90)
+        return json.loads(p.stdout)
+
+    def streams(j):
+        return [x for g in j.get("programs", []) for x in g.get("streams", [])]
+
+    sock = w("in_hls.sock")
+    out = w("in_hls.ts")
+    try:
+        wait_up(port)
+        # the channel, 17 s: at least one lap of the five segments, so a discontinuity is crossed
+        cap = Capture(pcap)
+        proc = subprocess.Popen([BIN, "-i", f"http://127.0.0.1:{port}/master.m3u8", "-o", f"udp://127.0.0.1:{pcap}",
+                                 "--control", sock], stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(17.0)
+            rc, st = ctl(sock, "stats")
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            _, log = proc.communicate(timeout=10)
+            cap.stop(out)
+        need(rc == 0 and proc.returncode == 0 and st.get("ok"), f"exit {proc.returncode}, stats {str(st)[:200]}\n{log[-600:]}")
+        st = st["stats"]
+        link = st["input"]["link"]
+        need(link["transport"] == "hls" and link["connected"] and link["state"].startswith("playing 640x360"), f"link: {link}")
+        need(link["errors"] == 0, f"segments passed over: {link}\n{log[-600:]}")
+        need("taking 640x360" in log, "the log does not say which quality was taken")
+        a = Analysis(out)
+        vid = [p for p in a.pes if a.pes[p] and len(a.pes[p]) > 200]
+        need(vid, f"no video came out: {dict((p, len(a.pes[p])) for p in a.pes)}")
+        nv = len(a.pes[vid[0]])
+        # 25 pictures a second for about 15 s of playing: not the 10 s of a rush through what was in hand,
+        # and not a stall
+        need(300 <= nv <= 420, f"{nv} pictures in 17 s: not played at the stream's own speed")
+        # the test's five segments go round: each lap ends in a real break (counters and clock start again),
+        # where the engine drops the few units cut in two; nothing else may go
+        need(st["output"]["dropped_units"] <= 12, f"dropped: {st['output']}")
+        need(st["clock"].get("jitter_us", 0) < 6000, f"PCR jitter {st['clock'].get('jitter_us')} us: the pacing is rough")
+        played = f"{nv} pictures in 17 s, PCR jitter {st['clock'].get('jitter_us', 0) / 1000:.1f} ms"
+        # a redirect, with a path to tidy
+        j = probe(f"hls://127.0.0.1:{port}/go", 4)
+        need(j.get("ok") and len(streams(j)) == 2, f"through a redirect: {j.get('error')}")
+        # a lower quality asked for
+        p2 = subprocess.Popen([BIN, "-i", f"http://127.0.0.1:{port}/master.m3u8#max=700k", "-o", f"udp://127.0.0.1:{pcap}"],
+                              stderr=subprocess.PIPE, text=True)
+        time.sleep(3.0)
+        p2.send_signal(signal.SIGTERM)
+        _, log2 = p2.communicate(timeout=10)
+        need("taking 320x180" in log2, f"#max=700k: {log2[-300:]}")
+        j = probe(f"http://127.0.0.1:{port}/fmp4.m3u8", 2)
+        need(not j.get("ok") and "fragmented MP4" in j.get("error", ""), f"fragmented MP4: {j}")
+        j = probe(f"http://127.0.0.1:{port}/nothing.m3u8", 2)
+        need(not j.get("ok") and "404" in j.get("error", ""), f"a playlist that is not there: {j}")
+        extra = "TLS and AES not tried (no openssl here)"
+        if have_ssl:
+            j = probe(f"http://127.0.0.1:{port}/enc.m3u8", 6)
+            need(j.get("ok") and len(streams(j)) == 2 and all(x["bitrate"] > 50000 for x in streams(j)), f"AES-128: {j.get('error')}")
+            j = probe(f"https://localhost:{port + 1}/master.m3u8", 2)
+            if "not in this build" in j.get("error", ""):
+                extra = "AES-128 decrypted; https not in this build"
+            else:
+                need(not j.get("ok") and "certificate is not accepted" in j.get("error", ""), f"a self-signed certificate: {j}")
+                j = probe(f"https://localhost:{port + 1}/master.m3u8#insecure", 6)
+                need(j.get("ok") and len(streams(j)) == 2, f"https with #insecure: {j.get('error')}")
+                extra = "AES-128 decrypted; https: self-signed refused, read with #insecure"
+    finally:
+        for o in origin:
+            o.kill()
+            o.wait()
+    return f"best quality followed, {played}; redirect; #max; fragmented MP4 refused in words; {extra}"
+
+
 # ---- link inputs: an outside sender pushes into caricoder3 over SRT or RIST ----
 
 def _input_run(in_url, sender, name, duration=8.0, mid=None):

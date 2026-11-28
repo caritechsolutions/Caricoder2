@@ -906,11 +906,24 @@ int probe_main(int argc, char **argv)
             if (!started && elapsed > seconds + 10)
                 break;              /* nothing ever came */
         }
-        if (ops)
-            ops->close(ctx);
-        if (fd >= 0)
-            close(fd);
-        free(buf);
+        {
+            struct input_stats is;
+
+            memset(&is, 0, sizeof(is));
+            if (ops) {
+                ops->stats(ctx, &is);
+                ops->close(ctx);
+            }
+            if (fd >= 0)
+                close(fd);
+            free(buf);
+            if (p->packets == 0 && is.error[0]) {
+                char why[280];
+
+                snprintf(why, sizeof(why), "%.70s: %.200s", url, is.error);
+                return fail("nothing received from %s", why);
+            }
+        }
         if (p->packets == 0)
             return fail("nothing received from %s", url);
     }

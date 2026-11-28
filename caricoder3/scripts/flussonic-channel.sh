@@ -33,9 +33,9 @@
 #       then sends something wrong gets its previous settings back.
 #
 # What it moves: a stream that takes its source from the network (udp://,
-# mpts-udp://, rtp://, srt://, http(s):// TS), copies or re-encodes to at
+# mpts-udp://, rtp://, srt://, http:// TS, an HLS playlist), copies or re-encodes to at
 # most one video rendition, and sends to udp:// addresses. Anything else
-# (an input from another Flussonic stream, HLS or playlist inputs, a
+# (an input from another Flussonic stream, a playlist of files, DASH, a
 # ladder of renditions, RTMP/SRT/HLS pushes, a stream another Flussonic
 # stream reads) is refused with the reason and left for a later step.
 #
@@ -118,7 +118,7 @@ def read_conf(path):
         cur["lines"].append(line.rstrip(";").strip())
     return streams, http_port
 
-NET = ("udp://", "mpts-udp://", "rtp://", "srt://", "http://", "https://")
+NET = ("udp://", "mpts-udp://", "rtp://", "srt://", "http://", "https://", "hls://", "hlss://", "hls2://", "hlss2://")
 LOCAL = re.compile(r"^(?:tshttp|http|https|m4f|m4s|hls|rtmp|rtsp)://(?:127\.0\.0\.1|localhost)(?::\d+)?/([^/\s?]+)")
 
 def plan(name, lines, streams):
@@ -164,8 +164,8 @@ def plan(name, lines, streams):
         if not url.startswith(NET):
             why.append(f"an input of a kind this script does not move ({url.split('?')[0][:60]})")
             continue
-        if url.endswith((".m3u8", ".mpd")) or "/index.m3u8" in url or "playlist" in url:
-            why.append(f"an HLS or playlist input ({url.split('?')[0][:60]})")
+        if url.split("?")[0].endswith(".mpd"):
+            why.append(f"a DASH input ({url.split('?')[0][:60]})")
             continue
         url = url.replace("mpts-udp://", "udp://", 1)
         if not urls:

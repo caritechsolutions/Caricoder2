@@ -180,6 +180,27 @@ and pushes again gets in without waiting for a timeout). The link's
 state, RTT, recovered and lost packets and reconnects are in the
 statistics (`input.link`) and on the channel's Source card.
 
+An HLS source is the address of a playlist, `https://host/path/index.m3u8`
+(or `http://`; any http(s) address ending in `.m3u8`, and Flussonic's
+`hls://`, `hlss://`, `hls2://`, `hlss2://`). The playlist is read again
+and again, each new segment fetched, and the stream played out at the
+speed its own clock (PCR) says: a segment arrives all at once, the
+channel gets it as a live source. Of a master playlist's qualities the
+highest is taken; `#max=3000k` after the address takes the best one not
+above that, `#lowest` the smallest. It starts three segments from the
+end, keeps two to three in hand, and trims its speed by up to 200 ppm to
+stay there. AES-128 segments are decrypted with the playlist's key.
+Segments must be MPEG transport stream: fragmented MP4 (CMAF) and
+sample encryption are not read, and audio kept in a playlist of its own
+is not merged (both are said in words: in the log, in `caricoder3 probe`
+and on the Source card). `https` checks the server's certificate;
+`#insecure` skips that. What comes after the `#` is never sent to the
+server. A break in the playlist (`EXT-X-DISCONTINUITY`: an advert, a
+restart at the far end) is a break in the stream's clock and counters,
+taken like any source's: the output's time line stays continuous. The
+state on the Source card reads e.g. "playing 1280x720, 5.1 Mb/s, 7 s in
+hand".
+
 An HTTP source, `http://host[:port]/path` (`http://user:pass@host/...`
 for basic authentication), pulls a TS stream from a server such as
 Flussonic's `http://SERVER/NAME/mpegts`: plain or chunked, redirects
