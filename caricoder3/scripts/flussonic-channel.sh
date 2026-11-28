@@ -379,10 +379,16 @@ if not done:
     raise SystemExit(0 if dry else 1)
 
 # ---- --move: one channel at a time, Flussonic's stream off, ours on, checked ----
-def run_pids(which, extra=(), ref_url=None):
+def is_hls(url):
+    return bool(re.match(r"hlss?2?://", url or "") or re.match(r"https?://[^?#]*\.m3u8?([?#]|$)", url or "", re.I))
+
+def run_pids(which, extra=(), ref_url=None, slow=False):
     env = dict(os.environ, CC3_CONFIG=cfg_path, CC3_BIN=binary, CC3_STATE=state_dir, DRY="1" if dry else "0")
     if ref_url:
         env["FLUSSONIC_REF_URL"] = ref_url
+    if slow:
+        # a playlist source gives nothing until its first segment is in: listened to for longer
+        env.setdefault("PROBE_S", "25")
     env.setdefault("FLUSSONIC_HTTP", f"http://127.0.0.1:{http_port or 80}")
     sys.stdout.flush()
     return subprocess.run(["bash", pids_script, *which, *extra], env=env).returncode
@@ -546,7 +552,7 @@ if move:
         # While Flussonic still sends it and the channel is off: its identifiers are
         # taken (again) from what Flussonic puts on the output address itself.
         if not dry and not (conf.get("enabled", True) and full.get("state") == "running") and flussonic_sends(name):
-            run_pids([name], ref_url=out_url)
+            run_pids([name], ref_url=out_url, slow=is_hls(conf.get("input")))
             full = chan(name)
             conf = full.get("config") or {}
         elif not conf.get("pmt_pid"):
@@ -590,10 +596,10 @@ if move:
                 note("Flussonic does not send it (already off there)")
             api(f"/api/channels/{name}", "PUT", dict(conf, enabled=True))
             note("channel switched on")
-        # what it sends: right within 45 s, on two listens in a row
+        # what it sends: right within 45 s (a playlist source: 100 s, its first segment has to come), on two listens in a row
         bad, good, t0 = "not checked", 0, time.time()
         time.sleep(3)
-        while time.time() - t0 < 45 and good < 2:
+        while time.time() - t0 < (100 if is_hls(conf.get("input")) else 45) and good < 2:
             bad = check(name, conf, out_url)
             good = 0 if bad else good + 1
             if bad:
