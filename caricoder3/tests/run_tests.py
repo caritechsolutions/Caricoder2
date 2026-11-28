@@ -263,6 +263,45 @@ def file_output_ids():
 
 
 @test
+def file_tables_on_one_counter():
+    """A source that sends its PAT, PMT and SDT again and again without advancing their continuity counter
+    (identical packets, many times a second): no CC errors are counted for it and the output is whole;
+    a table packet that really changed on the same counter still counts."""
+    src = synth("syn")
+    data = bytearray(open(src, "rb").read())
+    a = Analysis(src)
+    tables = {0, a.pmt_pid, 17}
+    n = {p: 0 for p in tables}
+    for i in range(0, len(data) - 187, 188):
+        pid = (data[i + 1] & 0x1F) << 8 | data[i + 2]
+        if pid in tables and data[i + 3] & 0x10:
+            data[i + 3] = (data[i + 3] & 0xF0) | 5
+            n[pid] += 1
+    need(n[0] > 20 and n[a.pmt_pid] > 20, f"the test stream has too few tables: {n}")
+    stuck = w("stuck_tables.ts")
+    open(stuck, "wb").write(data)
+    out = w("stuck_tables_out.ts")
+    st = run_file(stuck, out, "-r", "4M")
+    must_pass(out, cbr=True)
+    need(st["input"]["cc_errors"] == 0, f"{st['input']['cc_errors']} CC errors counted for repeated tables ({n})")
+    b = Analysis(out)
+    for pid in a.pes:
+        need(len(b.pes.get(pid, [])) == len(a.pes[pid]), f"PID {pid}: {len(b.pes.get(pid, []))} of {len(a.pes[pid])} PES")
+    # one PAT packet with a byte changed, still on that counter: that is not a repeat
+    seen = 0
+    for i in range(0, len(data) - 187, 188):
+        if ((data[i + 1] & 0x1F) << 8 | data[i + 2]) == 0 and data[i + 3] & 0x10:
+            seen += 1
+            if seen == 10:
+                data[i + 187] ^= 0xFF
+                break
+    open(stuck, "wb").write(data)
+    st2 = run_file(stuck, w("stuck_tables_out2.ts"), "-r", "4M")
+    need(st2["input"]["cc_errors"] >= 1, "a changed table packet on the same counter was taken for a repeat")
+    return f"{sum(n.values())} table packets on one counter: 0 CC errors, every PES through; a changed one still counted ({st2['input']['cc_errors']})"
+
+
+@test
 def probe_file_and_live():
     """caricoder3 probe: programs, streams, formats and rates, from a file and from UDP."""
     src = synth("syn_mpts", mpts=True)

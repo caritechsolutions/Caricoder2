@@ -69,6 +69,8 @@ struct demux {
     uint8_t role[PID_COUNT];
     int8_t  last_cc[PID_COUNT];
     uint8_t dup_seen[PID_COUNT];
+    uint8_t psi_last[ROLE_ES][TS_SIZE];     /* the last packet of each table (by role), to know a repeat */
+    bool psi_have[ROLE_ES];
     uint8_t es_idx[PID_COUNT];
 
     struct section_asm pat_asm, pmt_asm, sdt_asm;
@@ -949,6 +951,16 @@ static void process_packet(struct demux *d, const uint8_t *pkt)
          * is the same one. Otherwise 15 packets went missing in between. */
         if (memcmp(pkt, d->es[d->es_idx[pid]].last_pkt, TS_SIZE) != 0)
             cc = CC_LOST;
+    }
+    if (role == ROLE_PAT || role == ROLE_PMT || role == ROLE_SDT) {
+        /* A table sent again in a packet that is the last one byte for byte,
+         * counter included: some multiplexers never advance the counter of
+         * their tables, and send each many times a second. Nothing is missing
+         * and nothing in it is new: a repeat, however many times over. */
+        if (cc == CC_LOST && d->psi_have[role] && !memcmp(pkt, d->psi_last[role], TS_SIZE))
+            cc = CC_DUP;
+        memcpy(d->psi_last[role], pkt, TS_SIZE);
+        d->psi_have[role] = true;
     }
     if (cc == CC_DUP) {
         d->stats.duplicates++;
