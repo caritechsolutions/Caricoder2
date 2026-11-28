@@ -2912,7 +2912,7 @@ def supervisor_api():
         code, j = api("/api/channels/t1/preview", "DELETE")
         time.sleep(1.5)
         code, j = api("/api/channels/t1")
-        need(not j["channel"]["preview"]["running"] and [o["id"] for o in j["channel"]["outputs"]["outputs"]] == ["hls"],
+        need(not j["channel"]["preview"]["running"] and [o["id"] for o in j["channel"]["outputs"]["outputs"]] == ["http", "hls"],
              f"after the preview stopped: {j['channel']['preview']}, outputs {j['channel']['outputs']}")
         # an output changed in place; a URL that will not open leaves the old one
         code, j = api("/api/channels/t1/outputs/hls", "PUT", {"url": "hls://?segment=3"})
@@ -2920,7 +2920,7 @@ def supervisor_api():
         code, j = api("/api/channels/t1/outputs/hls", "PUT", {"url": "bogus://x"})
         need(code == 400, f"a bad URL was taken: {code} {j}")
         code, j = api("/api/channels/t1")
-        need([(o["id"], o["url"]) for o in j["channel"]["outputs"]["outputs"]] == [("hls", "hls://?segment=3")],
+        need([(o["id"], o["url"]) for o in j["channel"]["outputs"]["outputs"] if o["id"] != "http"] == [("hls", "hls://?segment=3")],
              f"after the changes: {j['channel']['outputs']}")
         # stop, start, config change -> restart, delete
         code, j = api("/api/channels/t1/stop", "POST")
@@ -2932,7 +2932,7 @@ def supervisor_api():
         code, j = api("/api/channels/t1/start", "POST")
         time.sleep(1.5)
         code, j = api("/api/channels/t1")
-        need(j["channel"]["state"] == "running" and [o["id"] for o in j["channel"]["outputs"]["outputs"]] == ["hls"],
+        need(j["channel"]["state"] == "running" and [o["id"] for o in j["channel"]["outputs"]["outputs"] if o["id"] != "http"] == ["hls"],
              f"after start: {j['channel']['state']}")
         pid = j["channel"]["pid"]
         code, j = api("/api/channels/t1", "PUT", {"input": f"udp://127.0.0.1:{pin}", "muxrate": "5M", "enabled": True})
