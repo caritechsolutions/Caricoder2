@@ -594,7 +594,35 @@ static struct {
     enum codec_id codec;
     bool waiting;                       /* a thumbnail is due: the next key unit is taken */
     bool failed;
-} tap = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, CODEC_NONE, false, false };
+    /* A key unit that gave no picture by itself is one field of two (an
+     * interlaced stream coded field by field): it is kept, and decoded
+     * again together with the unit after it, the other field. */
+    uint8_t *held;
+    size_t held_len;
+    int64_t held_pts, held_dts;
+} tap = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, CODEC_NONE, false, false, NULL, 0, 0, 0 };
+
+static bool tap_open(enum codec_id codec)
+{
+    struct vdec_cfg dc = { .codec = codec };
+    char err[160];
+
+    if (tap.dec && tap.codec != codec) {
+        tap.backend->vdec->close(tap.dec);
+        tap.dec = NULL;
+    }
+    if (tap.dec)
+        return true;
+    tap.backend = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_CPU, 0);
+    tap.dec = tap.backend ? tap.backend->vdec->open(&dc, err, sizeof(err)) : NULL;
+    if (!tap.dec) {
+        log_warn("thumbnails: no CPU decoder for %s; none will be made", codec_name(codec));
+        tap.failed = true;
+        return false;
+    }
+    tap.codec = codec;
+    return true;
+}
 
 void thumb_tap_unit(const struct es_unit *u, enum codec_id codec)
 {
@@ -612,37 +640,55 @@ void thumb_tap_unit(const struct es_unit *u, enum codec_id codec)
         tap.waiting = true;
     }
     off = pes_payload_offset(u->data, u->len);
+    if (tap.held) {
+        /* the unit after a key unit that was one field: the two together */
+        bool got = false;
+
+        if (off >= 0 && tap_open(codec)) {
+            tap.backend->vdec->push(tap.dec, tap.held, tap.held_len, tap.held_pts, tap.held_dts);
+            tap.backend->vdec->push(tap.dec, u->data + off, u->len - (size_t)off, u->pts, u->dts);
+            tap.backend->vdec->drain(tap.dec);
+            got = tap.backend->vdec->pull(tap.dec, &f) == 1 && f.mem == VMEM_CPU;
+            if (got)
+                make_from_cpu(&f);
+        }
+        free(tap.held);
+        tap.held = NULL;
+        if (tap.dec) {
+            tap.backend->vdec->close(tap.dec);
+            tap.dec = NULL;
+        }
+        if (got)
+            tap.waiting = false;        /* (if not: the next key unit is tried, as before) */
+        pthread_mutex_unlock(&tap.lock);
+        return;
+    }
     if (off < 0 || !codec_es_has_key(codec, u->data + off, u->len - (size_t)off, true)) {
         pthread_mutex_unlock(&tap.lock);
         return;                         /* not a key frame: wait for one */
     }
-    if (tap.dec && tap.codec != codec) {
-        tap.backend->vdec->close(tap.dec);
-        tap.dec = NULL;
-    }
-    if (!tap.dec) {
-        struct vdec_cfg dc = { .codec = codec };
-        char err[160];
-
-        tap.backend = codec_find(CODEC_VIDEO, CODEC_DECODER, codec, WHERE_CPU, 0);
-        tap.dec = tap.backend ? tap.backend->vdec->open(&dc, err, sizeof(err)) : NULL;
-        if (!tap.dec) {
-            log_warn("thumbnails: no CPU decoder for %s; none will be made", codec_name(codec));
-            tap.failed = true;
-            pthread_mutex_unlock(&tap.lock);
-            return;
-        }
-        tap.codec = codec;
+    if (!tap_open(codec)) {
+        pthread_mutex_unlock(&tap.lock);
+        return;
     }
     /* the key unit alone: pushed, drained, one picture out */
     tap.backend->vdec->push(tap.dec, u->data + off, u->len - (size_t)off, u->pts, u->dts);
     tap.backend->vdec->drain(tap.dec);
-    if (tap.backend->vdec->pull(tap.dec, &f) == 1 && f.mem == VMEM_CPU)
+    if (tap.backend->vdec->pull(tap.dec, &f) == 1 && f.mem == VMEM_CPU) {
         make_from_cpu(&f);
+        tap.waiting = false;
+    } else {
+        /* nothing from it alone: one field of a frame, most likely. Kept for the next unit. */
+        tap.held_len = u->len - (size_t)off;
+        tap.held = malloc(tap.held_len);
+        if (tap.held)
+            memcpy(tap.held, u->data + off, tap.held_len);
+        tap.held_pts = u->pts;
+        tap.held_dts = u->dts;
+    }
     /* A drained decoder that is only reset gives nothing for every other
      * picture after it (libavcodec): a fresh one each time, a few ms. */
     tap.backend->vdec->close(tap.dec);
     tap.dec = NULL;
-    tap.waiting = false;
     pthread_mutex_unlock(&tap.lock);
 }
