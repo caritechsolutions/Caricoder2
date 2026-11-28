@@ -3321,6 +3321,141 @@ def weather_reports():
 
 
 @test
+def supervisor_http_pull():
+    """Every channel's stream can be pulled over HTTP at /NAME/mpegts (as Flussonic names it), without
+    signing in: a clean transport stream for as long as the client stays, to several clients at once,
+    each listed with its address; a client that does not read is dropped without touching the others;
+    another channel can take it as its source; the output is not among the channel's saved ones."""
+    import base64
+    import socket
+    import threading
+    import urllib.request
+    import urllib.error
+    root = w("super_pull")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "channels"))
+    os.makedirs(os.path.join(root, "run"))
+    port = _port[0] + 1
+    pin = _port[0] + 2
+    pcap = _port[0] + 3
+    _port[0] += 6
+    src = synth("live_src", duration=8.0)
+    cfg = os.path.join(root, "caricoder3.json")
+    json.dump({"listen": "127.0.0.1", "port": port, "channels_dir": os.path.join(root, "channels"),
+               "run_dir": os.path.join(root, "run"), "password": "pullpass1", "card_process": "off"}, open(cfg, "w"))
+    json.dump({"input": f"udp://127.0.0.1:{pin}", "share_input": False, "enabled": True},
+              open(os.path.join(root, "channels", "a.json"), "w"))
+    json.dump({"input": f"http://127.0.0.1:{port}/a/mpegts", "share_input": False, "enabled": True},
+              open(os.path.join(root, "channels", "b.json"), "w"))
+    json.dump({"outputs": [{"id": "out1", "url": f"udp://127.0.0.1:{pcap}"}]},
+              open(os.path.join(root, "channels", "b.outputs.json"), "w"))
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:pullpass1").decode()}
+    stop = threading.Event()
+
+    def play():
+        p = Player("127.0.0.1", pin)
+        while not stop.is_set():
+            p.play(src)
+        p.close()
+
+    def api(path):
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=auth), timeout=10) as f:
+            return json.load(f)
+
+    def pull(name, seconds, out):
+        got = 0
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{name}/mpegts", timeout=10) as f, open(out, "wb") as o:
+            t_end = time.time() + seconds
+            box.setdefault("type", f.headers.get("Content-Type"))
+            while time.time() < t_end:
+                d = f.read(188 * 64)
+                if not d:
+                    break
+                o.write(d)
+                got += len(d)
+        box[out] = got
+
+    def http_out():
+        outs = (api("/api/channels/a")["channel"].get("outputs") or {}).get("outputs") or []
+        return next((o for o in outs if o["id"] == "http"), None)
+
+    box = {}
+    # every other request must finish in 6 s here (120 normally): the 14 s pull below shows a stream has no such limit
+    sup = subprocess.Popen([BIN, "serve", "--config", cfg], stderr=open(os.path.join(root, "sup.log"), "w"),
+                           env=dict(os.environ, CC3_HTTP_REQUEST_DEADLINE_S="6"))
+    threading.Thread(target=play, daemon=True).start()
+    try:
+        wait_up(port)
+        time.sleep(4.0)
+        o = http_out()
+        need(o and o["type"] == "http" and isinstance(o.get("clients"), list), f"the HTTP output is not listed: {o}")
+        # two clients at once, and one that asks and never reads
+        f1, f2 = os.path.join(root, "p1.ts"), os.path.join(root, "p2.ts")
+        t1 = threading.Thread(target=pull, args=("a", 14.0, f1))
+        t2 = threading.Thread(target=pull, args=("a", 5.0, f2))
+        t1.start()
+        t2.start()
+        lazy = socket.create_connection(("127.0.0.1", port))
+        lazy.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        lazy.sendall(b"GET /a/mpegts HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(3.0)
+        o = http_out()
+        names = [c["addr"] for c in o["clients"]]
+        # b (the other channel) is the third reader, the lazy one the fourth
+        need(len(o["clients"]) == 4 and set(names) == {"127.0.0.1"}, f"clients while four pull: {o}")
+        # (the one that does not read has been sent only what its socket would take)
+        need(sum(c["sent"] > 500 for c in o["clients"]) >= 3 and
+             all(-2 <= time.time() - c["since"] < 30 for c in o["clients"]), f"their figures: {o['clients']}")
+        t2.join()
+        t1.join()
+        lazy_gone = None
+        for _ in range(40):
+            o = http_out()
+            if len(o["clients"]) == 1:
+                lazy_gone = True
+                break
+            time.sleep(0.5)
+        try:
+            lazy.close()
+        except OSError:
+            pass
+        need(lazy_gone, f"the client that never read is still listed: {o}")
+        need(o["errors"] == 0 and o["overruns"] == 0, f"the output counts a slow client as its own error: {o}")
+        need((box.get("type") or "").lower().startswith("video/mp2t"), f"content type {box.get('type')}")
+        for f, secs in ((f1, 14.0), (f2, 5.0)):
+            data = open(f, "rb").read()
+            need(len(data) % 188 == 0 or len(data) > 188 * 1000, f"{f}: {len(data)} bytes")
+            n = len(data) // 188
+            need(n > 1000 and all(data[i * 188] == 0x47 for i in range(0, n, 97)), f"{os.path.basename(f)}: not a transport stream")
+            pr = json.loads(subprocess.run([BIN, "probe", f, "--seconds", "1"], capture_output=True, text=True).stdout)
+            st = [x for g in pr.get("programs", []) for x in g.get("streams", [])]
+            need(pr.get("ok") and st and sum(x.get("cc_errors", 0) for x in st) == 0, f"{os.path.basename(f)}: {pr.get('error')} / CC errors {[x.get('cc_errors') for x in st]}")
+            need(abs(pr["seconds"] - secs) < secs * 0.35, f"{os.path.basename(f)}: {pr['seconds']} s of stream in {secs} s")
+        # the other channel has had it as its source all along
+        b = api("/api/channels/b")["channel"]
+        need(b["state"] == "running" and (b["stats"] or {}).get("input", {}).get("bitrate", 0) > 500000 and
+             (b["stats"]["input"].get("cc_errors") or 0) == 0, f"channel b on a's stream: {b['state']} {(b.get('stats') or {}).get('input')}")
+        # nobody signed in for any of it; a name that is not a running channel
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/nosuch/mpegts", timeout=10)
+            raise Fail("/nosuch/mpegts answered")
+        except urllib.error.HTTPError as e:
+            need(e.code == 404, f"/nosuch/mpegts: {e.code}")
+        need(not os.path.exists(os.path.join(root, "channels", "a.outputs.json")), "the HTTP output was saved with the channel")
+        saved = (api("/api/channels/a")["channel"].get("saved_outputs") or {}).get("outputs") or []
+        need(not any(x.get("id") == "http" for x in saved), f"saved outputs: {saved}")
+    finally:
+        stop.set()
+        sup.send_signal(signal.SIGTERM)
+        try:
+            sup.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            sup.kill()
+    return (f"two clients pulled {box[f1] // 1000} and {box[f2] // 1000} kB with no CC errors; four listed by address; "
+            "the one that never read was dropped; another channel ran on it; not saved")
+
+
+@test
 def supervisor_favicon():
     """The GUI's icon: in the page itself (a browser shows it in the tab), and at /favicon.ico without signing in
     (asked for by browsers and bookmarks): a picture, while everything else still needs the password."""

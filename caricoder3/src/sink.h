@@ -136,6 +136,8 @@ void sink_list(FILE *f);
 /* The Unix socket an HLS output serves HTTP on (next to the control
  * socket; the supervisor proxies it). Set before outputs are added. */
 void sink_hls_set_socket(const char *path);
+/* ... and the one the stream over HTTP is asked for on (sink_http.c). */
+void sink_http_set_socket(const char *path);
 
 /* ---- helpers for the sink types ---------------------------------------- */
 

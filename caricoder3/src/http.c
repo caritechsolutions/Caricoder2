@@ -20,7 +20,7 @@
 
 #include "log.h"
 
-#define MAX_CLIENTS     64
+#define MAX_CLIENTS     512                 /* most are streams being pulled (/NAME/mpegts), one thread each */
 #define IO_TIMEOUT_MS   15000
 #define HEADER_DEADLINE_S 10                /* the whole request header */
 #define REQUEST_DEADLINE_S 120              /* header to last byte sent */
@@ -46,6 +46,11 @@ static int ms_left(void)
     if (!t_deadline)
         return IO_TIMEOUT_MS;
     return t_deadline > now ? (int)((t_deadline - now) * 1000) : 0;
+}
+
+void http_no_deadline(void)
+{
+    t_deadline = 0;
 }
 
 bool http_send(int fd, const void *d, size_t len)
@@ -274,7 +279,12 @@ static void *conn_thread(void *arg)
     req.fd = c->fd;
     resp.status = 404;
     resp.type = "text/plain";
-    t_deadline = time(NULL) + REQUEST_DEADLINE_S;
+    {
+        /* (the test suite shortens it, to see that a stream outlives it) */
+        const char *e = getenv("CC3_HTTP_REQUEST_DEADLINE_S");
+
+        t_deadline = time(NULL) + (e && atoi(e) > 0 ? atoi(e) : REQUEST_DEADLINE_S);
+    }
     s->fn(s->opaque, &req, &resp);
 reply:
     if (!resp.handled) {

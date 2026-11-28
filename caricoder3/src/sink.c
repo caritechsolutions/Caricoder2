@@ -13,6 +13,7 @@
 extern const struct sink_ops sink_udp_ops;
 extern const struct sink_ops sink_rtmp_ops;
 extern const struct sink_ops sink_hls_ops;
+extern const struct sink_ops sink_http_ops;
 #ifdef HAVE_SRT
 extern const struct sink_ops sink_srt_ops;
 #endif
@@ -24,6 +25,7 @@ static const struct sink_ops *const types[] = {
     &sink_udp_ops,
     &sink_rtmp_ops,
     &sink_hls_ops,
+    &sink_http_ops,
 #ifdef HAVE_SRT
     &sink_srt_ops,
 #endif

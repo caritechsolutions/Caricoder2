@@ -47,6 +47,9 @@ void http_stop(struct http_server *s);
 void http_resp_text(struct http_resp *r, int status, const char *type, const char *text);
 void http_resp_printf(struct http_resp *r, int status, const char *type, const char *fmt, ...)
     __attribute__((format(printf, 4, 5)));
+/* For a handler that streams for as long as the client stays: this request
+ * has no time limit from here on (each send still has its own). */
+void http_no_deadline(void);
 /* Sends a whole response on a connection (for streaming/proxy handlers). */
 bool http_send(int fd, const void *d, size_t len);
 /* Percent-decodes in place. */

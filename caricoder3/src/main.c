@@ -1826,11 +1826,13 @@ int main(int argc, char **argv)
     if (o.thumb)
         thumb_init(o.thumb, o.thumb_interval);
     if (o.name) {
-        static char http_sock[256];
+        static char http_sock[256], ts_sock[256];
 
         mkdir(o.run_dir ? o.run_dir : SOCK_DIR, 0775);
         snprintf(http_sock, sizeof(http_sock), "%s/%s.http", o.run_dir ? o.run_dir : SOCK_DIR, o.name);
         sink_hls_set_socket(http_sock);     /* an hls:// output serves on it */
+        snprintf(ts_sock, sizeof(ts_sock), "%s/%s.ts", o.run_dir ? o.run_dir : SOCK_DIR, o.name);
+        sink_http_set_socket(ts_sock);      /* GET /NAME/mpegts, through the supervisor */
     }
 
     /* Outputs first: nothing is read until there is somewhere to put it. */
@@ -1845,6 +1847,9 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    /* a channel with a name can be pulled over HTTP by whoever asks (sink_http.c) */
+    if (o.name && o.eng.live && !sinks_add(&c.sinks, "http", "http-pull://", false, err, sizeof(err)))
+        log_warn("the stream over HTTP is not offered: %s", err);
     if (o.config && !config_load(&c, err, sizeof(err)))
         log_err("config: %s", err);
     if (o.keep_input && o.eng.live)

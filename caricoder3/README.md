@@ -261,6 +261,26 @@ SRT and RIST outputs report what their libraries measure: `rtt_ms`,
 `retransmitted`, and for SRT `lost`. For an RTMP output `packets` counts
 FLV tags.
 
+**Pulled over HTTP.** Every channel the supervisor runs also offers its
+output as one endless HTTP response, with nothing to set up:
+
+```
+http://server:8550/NAME/mpegts
+```
+
+the transport stream from that moment on, at the rate it is made, for as
+long as the client stays. It is what Flussonic calls `tshttp` and has the
+same path, so a stage that pulled a stream from Flussonic can pull it from
+here with only the port changed; another caricoder3 channel takes it as
+`"input": "http://server:8550/NAME/mpegts"`, and VLC plays it. Nothing is
+sent to anyone who does not ask. Up to 32 clients a channel, each listed
+under the output (address, connected for, rate, packets). A client that
+reads too slowly (4 MB behind) is dropped and can ask again; it does not
+hold up the others or the channel. Like `/hls/`, it is given without
+signing in: whoever can reach the supervisor's port can pull a channel
+(as with Flussonic's own port). It shows among the outputs as `http`,
+"always on", and is not one of the channel's saved outputs.
+
 **Who is receiving.** An SRT or RIST output also lists each receiver
 connected to it (`clients` in `list-outputs`, and a table under the output
 on the channel's Streams & outputs tab): for SRT its address and port,

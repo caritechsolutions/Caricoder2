@@ -49,6 +49,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -4339,11 +4340,13 @@ static void api_error(struct http_resp *resp, int status, const char *msg)
                      json_quote(msg, q, sizeof(q)));
 }
 
-/* /hls/NAME/... straight through to the channel's HTTP socket. */
-static void proxy_hls(struct super *s, const struct http_req *req, struct http_resp *resp)
+/* /hls/NAME/... straight through to the channel's HTTP socket, and
+ * /NAME/mpegts (ts: the channel's stream for as long as the client stays,
+ * sink_http.c) to its other one. */
+static void proxy_chan(struct super *s, const struct http_req *req, struct http_resp *resp, bool ts)
 {
-    char name[64], path[600], line[2048];
-    const char *p = req->path + 5, *slash = strchr(p, '/');
+    char name[64], path[600], line[2300], who[64] = "";
+    const char *p = req->path + (ts ? 1 : 5), *slash = strchr(p, '/');
     struct sockaddr_un sa;
     int fd;
     size_t nl = slash ? (size_t)(slash - p) : strlen(p);
@@ -4357,7 +4360,7 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
     {
         /* NAME.preview: the preview process's own HLS; the request keeps it alive */
         size_t l = strlen(name);
-        bool preview = l > 8 && !strcmp(name + l - 8, ".preview");
+        bool preview = !ts && l > 8 && !strcmp(name + l - 8, ".preview");
 
         if (preview)
             name[l - 8] = 0;
@@ -4375,8 +4378,16 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
             pthread_mutex_unlock(&s->lock);
             snprintf(path, sizeof(path), "%.400s/%s.preview.http", s->run_dir, name);
         } else {
-            snprintf(path, sizeof(path), "%.400s/%s.http", s->run_dir, name);
+            snprintf(path, sizeof(path), "%.400s/%s.%s", s->run_dir, name, ts ? "ts" : "http");
         }
+    }
+    if (ts) {
+        struct sockaddr_storage peer;
+        socklen_t pl = sizeof(peer);
+
+        if (getpeername(req->fd, (struct sockaddr *)&peer, &pl) == 0)
+            getnameinfo((struct sockaddr *)&peer, pl, who, sizeof(who), NULL, 0, NI_NUMERICHOST);
+        http_no_deadline();                 /* a stream: it ends when the client leaves */
     }
     fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     memset(&sa, 0, sizeof(sa));
@@ -4385,14 +4396,14 @@ static void proxy_hls(struct super *s, const struct http_req *req, struct http_r
     if (fd < 0 || connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         if (fd >= 0)
             close(fd);
-        api_error(resp, 503, "that channel has no HLS output running");
+        api_error(resp, ts ? 404 : 503, ts ? "no channel of that name is running" : "that channel has no HLS output running");
         return;
     }
     /* one request per connection: without "close" the channel keeps the
      * connection for the next request, and this copy loop would wait for
      * its idle timeout before the player got the end of the response */
-    snprintf(line, sizeof(line), "GET %.900s%s%.900s HTTP/1.1\r\nHost: caricoder3\r\nConnection: close\r\n\r\n",
-             req->path, req->query[0] ? "?" : "", req->query);
+    snprintf(line, sizeof(line), "GET %.900s%s%.900s HTTP/1.1\r\nHost: caricoder3\r\nConnection: close\r\n"
+             "X-Forwarded-For: %s\r\n\r\n", req->path, req->query[0] ? "?" : "", req->query, who[0] ? who : "unknown");
     if (http_send(fd, line, strlen(line))) {
         char buf[65536];
         ssize_t r;
@@ -4451,8 +4462,17 @@ static void handle(void *opaque, const struct http_req *req, struct http_resp *r
     char q[600];
 
     if (!strncmp(p, "/hls/", 5)) {
-        proxy_hls(s, req, resp);
+        proxy_chan(s, req, resp, false);
         return;
+    }
+    {
+        /* /NAME/mpegts: the channel's stream, as Flussonic names it */
+        const char *sl = p[0] == '/' ? strchr(p + 1, '/') : NULL;
+
+        if (sl && sl > p + 1 && !strcmp(sl, "/mpegts") && !strcmp(req->method, "GET")) {
+            proxy_chan(s, req, resp, true);
+            return;
+        }
     }
     if (!strncmp(p, "/api/peer/", 10)) {
         /* another transcoder, with the shared key (or a person signed in) */
