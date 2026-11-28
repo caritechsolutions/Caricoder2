@@ -2896,7 +2896,7 @@ def supervisor_api():
              any(x["kind"] == "audio" and x.get("sample_rate") == 48000 for x in pj["programs"][0]["streams"]),
              f"/api/probe: {code} {pj}")
         c = box["running"]
-        need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["hls", "pvtap"],
+        need(c["stats"]["input"]["bitrate"] > 1e6 and [o["id"] for o in c["outputs"]["outputs"]] == ["http", "hls", "pvtap"],
              f"running channel: in {c['stats']['input']['bitrate']}, outputs {c['outputs']}")
         ss = c["stats"]["service"]["streams"]
         need(all(x.get("bitrate", 0) > 0 and x.get("bitrate_in", 0) > 0 for x in ss) and
