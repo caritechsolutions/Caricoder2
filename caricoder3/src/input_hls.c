@@ -15,8 +15,9 @@
  * - A master playlist (several qualities): the one with the highest
  *   BANDWIDTH is taken; "#max=3000k" after the URL takes the best one not
  *   above that, "#lowest" the smallest.
- * - It starts three segments from the end, so two to three segments are
- *   always in hand; the speed is trimmed by up to 200 ppm to keep it so
+ * - It starts three segments from the end (the standard's rule: nearer, a
+ *   slow server leaves nothing to play), so three to four are in hand, and reads the playlist again one segment's length after
+ *   the last time (half that when nothing new was in it); the speed is trimmed by up to 200 ppm to keep it so
  *   (the far end's clock and this machine's are not the same).
  * - AES-128 segments are decrypted (the key is fetched from the playlist's
  *   URI). Segments must be MPEG transport stream: fragmented MP4 (CMAF)
@@ -65,7 +66,7 @@
 #define PLAYLIST_MAX    (8 << 20)
 #define SEGMENT_MAX     (96 << 20)
 #define TAIL            64                  /* segments of the playlist's end that are kept */
-#define START_BACK      3                   /* start this many segments from the end */
+#define START_BACK      3                   /* start this many segments from the end, as the HLS standard asks (RFC 8216, 6.3.3) */
 #define IO_TIMEOUT_S    10
 #define DGRAM_PKTS      7
 #define MAX_TRIM        200e-6
@@ -1185,6 +1186,7 @@ static void *worker(void *arg)
         struct media *m, *ma = NULL;
         int got = 0;
         double queued;
+        int64_t asked_us = now_us();
 
         if (!http_get(h, h->media_url, PLAYLIST_MAX, &text, &tl, base, sizeof(base), err, sizeof(err))) {
             if (fails++ == 0 || fails % 20 == 0)
@@ -1332,7 +1334,13 @@ static void *worker(void *arg)
             h->started = false;             /* a new one may begin under the same address */
             continue;
         }
-        nap(h, got ? m->target / 2 : (m->target / 4 > 0.5 ? m->target / 4 : 0.5));
+        {
+            /* the playlist again one segment's length after it was last asked for (a long one,
+             * hours of segments, is not a small thing to fetch); half that when it had nothing new */
+            double wait = (got ? m->target : m->target / 2) - (double)(now_us() - asked_us) / 1e6;
+
+            nap(h, wait > 0.3 ? wait : 0.3);
+        }
         free(m);
     }
     return NULL;
@@ -1474,7 +1482,7 @@ static int hls_recv(void *ctx, uint8_t *buf, int size)
                 h->ahead_off = o;
                 if (d > 0 && d < 27000000) {
                     /* a little faster with too much in hand, a little slower with too little */
-                    double trim = (queued - 2.5 * target) / (target > 0 ? target : 6) * 100e-6;
+                    double trim = (queued - 3.5 * target) / (target > 0 ? target : 6) * 100e-6;
 
                     h->trim = trim > MAX_TRIM ? MAX_TRIM : trim < -MAX_TRIM ? -MAX_TRIM : trim;
                     h->us_per_byte = (double)d / 27.0 * (1.0 - h->trim) /

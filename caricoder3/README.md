@@ -188,8 +188,9 @@ speed its own clock (PCR) says: a segment arrives all at once, the
 channel gets it as a live source. Of a master playlist's qualities the
 highest is taken; `#max=3000k` after the address takes the best one not
 above that, `#lowest` the smallest. It starts three segments from the
-end, keeps two to three in hand, and trims its speed by up to 200 ppm to
-stay there. AES-128 segments are decrypted with the playlist's key.
+end (the HLS standard's rule), keeps three to four in hand, trims its
+speed by up to 200 ppm to stay there, and reads the playlist again one
+segment's length after the last time. AES-128 segments are decrypted with the playlist's key.
 Audio kept in a playlist of its own (the quality names an `AUDIO` group,
 as tv5monde's does) is followed too: each segment of picture and the
 same stretch of sound are put together into one stream, the sound on a
@@ -202,7 +203,7 @@ card). `https` checks the server's certificate;
 server. A break in the playlist (`EXT-X-DISCONTINUITY`: an advert, a
 restart at the far end) is a break in the stream's clock and counters,
 taken like any source's: the output's time line stays continuous. The
-state on the Source card reads e.g. "playing 1280x720, 5.1 Mb/s, 7 s in
+state on the Source card reads e.g. "playing 1280x720, 5.1 Mb/s, 20 s in
 hand".
 
 An HTTP source, `http://host[:port]/path` (`http://user:pass@host/...`
