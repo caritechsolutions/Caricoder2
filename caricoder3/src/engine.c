@@ -652,8 +652,17 @@ static void output_ids(const struct engine *e, struct program *np, int n_prog,
             }
     if (cfg->pmt_pid > 0)
         asked[cfg->pmt_pid] = true;
-    if (cfg->pcr_pid > 0)
-        asked[cfg->pcr_pid] = true;
+    if (cfg->pcr_pid > 0) {
+        /* the PCR's PID is kept free only when it is a PID of its own: when a
+         * stream goes out on it (moved there, or there already), that stream
+         * carries the PCR and is not in its way */
+        bool a_stream = false;
+
+        for (int i = 0; i < n; i++)
+            a_stream |= map[np[0].es[i].pid] == cfg->pcr_pid;
+        if (!a_stream)
+            asked[cfg->pcr_pid] = true;
+    }
     for (int i = 0; i < 0x20; i++)
         used[i] = true;
     used[PID_NULL] = true;

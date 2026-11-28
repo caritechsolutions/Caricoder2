@@ -126,7 +126,13 @@ for ch in chans:
     full = api(f"/api/channels/{name}")
     conf = (full.get("channel") or full).get("config") or {}
     say(name)
-    fr, err = probe(f"{fhttp}/{name}/mpegts")
+    # FLUSSONIC_REF_URL (one channel): what Flussonic sends is read there instead,
+    # e.g. the multicast it pushes to. That is what the receivers get, and for a
+    # stream Flussonic passes through untouched it is not what its HTTP port gives.
+    ref_url = os.environ.get("FLUSSONIC_REF_URL") if len(chans) == 1 else None
+    fr, err = probe(ref_url or f"{fhttp}/{name}/mpegts")
+    if ref_url and fr:
+        note(f"Flussonic's identifiers read from what it sends to {ref_url}")
     cpath = os.path.join(cache, name + ".http.json")
     flussonic_live = bool(fr)
     if fr:

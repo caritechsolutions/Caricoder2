@@ -252,7 +252,14 @@ def file_output_ids():
     a2 = Analysis(out2)
     pids = [e["pid"] for e in a2.pmt["streams"]]
     need(pids[0] == 1652 and a2.pmt["pcr_pid"] == 1652 and len(set(pids)) == len(pids), f"collision: {pids}, PCR {a2.pmt['pcr_pid']}")
-    return "PIDs, order, PMT PID, PCR-only PID, service/TS/network ids as asked; a clashing PID moved"
+    # the PCR asked for on the PID a stream already has, nothing moved (a source Flussonic
+    # passed through as it was): that stream stays where it is and carries the PCR
+    out3 = w("ids3.ts")
+    run_file(src, out3, "-r", "4M", "--pcr-pid", "1651", "--order", "1651,1652")
+    a3 = Analysis(out3)
+    pids = [e["pid"] for e in a3.pmt["streams"]]
+    need(pids[:2] == [1651, 1652] and a3.pmt["pcr_pid"] == 1651, f"PCR on a stream's own PID: PIDs {pids}, PCR {a3.pmt['pcr_pid']}")
+    return "PIDs, order, PMT PID, PCR-only PID, service/TS/network ids as asked; a clashing PID moved; the PCR on a stream's own PID"
 
 
 @test

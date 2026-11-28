@@ -317,8 +317,10 @@ if not done:
     raise SystemExit(0 if dry else 1)
 
 # ---- --move: one channel at a time, Flussonic's stream off, ours on, checked ----
-def run_pids(which, extra=()):
+def run_pids(which, extra=(), ref_url=None):
     env = dict(os.environ, CC3_CONFIG=cfg_path, CC3_BIN=binary, CC3_STATE=state_dir, DRY="1" if dry else "0")
+    if ref_url:
+        env["FLUSSONIC_REF_URL"] = ref_url
     env.setdefault("FLUSSONIC_HTTP", f"http://127.0.0.1:{http_port or 80}")
     sys.stdout.flush()
     return subprocess.run(["bash", pids_script, *which, *extra], env=env).returncode
@@ -423,18 +425,24 @@ if move:
         say(f"{name}: moving")
         full = chan(name)
         conf = full.get("config") or {}
-        if not conf.get("pmt_pid"):
+        try:
+            out_url = json.load(open(os.path.join(chdir, name + ".outputs.json")))["outputs"][0]["url"]
+        except (OSError, ValueError, LookupError):
+            note("the channel has no output: NOT moved")
+            skipped.append(name)
+            continue
+        # While Flussonic still sends it and the channel is off: its identifiers are
+        # taken (again) from what Flussonic puts on the output address itself.
+        if not dry and not (conf.get("enabled", True) and full.get("state") == "running") and flussonic_sends(name):
+            run_pids([name], ref_url=out_url)
+            full = chan(name)
+            conf = full.get("config") or {}
+        elif not conf.get("pmt_pid"):
             run_pids([name])
             full = chan(name)
             conf = full.get("config") or {}
         if not conf.get("pmt_pid"):
             note("its identifiers could not be copied (the reason is above): NOT moved, Flussonic left as it is")
-            skipped.append(name)
-            continue
-        try:
-            out_url = json.load(open(os.path.join(chdir, name + ".outputs.json")))["outputs"][0]["url"]
-        except (OSError, ValueError, LookupError):
-            note("the channel has no output: NOT moved")
             skipped.append(name)
             continue
         if dry:
